@@ -1,0 +1,26 @@
+# Go build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Generated sqlc code is produced by `make sqlc-gen`
+/internal/store/sqlc/
+
+# Dependencies
+vendor/
+
+# Local env / runtime
+.env
+.env.*
+*.local
+
+# Private design notes — not part of the public project. Kept locally for
+# author/agent reference; must never be committed.
+/reference/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
