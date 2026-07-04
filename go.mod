@@ -4,7 +4,9 @@ go 1.25.7
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/lib/pq v1.12.3
 	github.com/pressly/goose/v3 v3.27.2
+	github.com/sqlc-dev/pqtype v0.3.0
 )
 
 require (

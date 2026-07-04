@@ -5,8 +5,8 @@
 *.test
 *.out
 
-# Generated sqlc code is produced by `make sqlc-gen`
-/internal/store/sqlc/
+# sqlc-generated code is committed so a fresh clone builds without requiring
+# sqlc to be installed. Regenerate after changing queries: `make sqlc-gen`.
 
 # Dependencies
 vendor/

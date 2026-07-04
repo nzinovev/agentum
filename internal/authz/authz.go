@@ -20,6 +20,22 @@ type Principal struct {
 	// Roles []string // arrives with RBAC; absent now on purpose
 }
 
+type ctxKey struct{}
+
+// WithPrincipal stores the resolved Principal in the context. The HTTP boundary
+// calls this; downstream callers retrieve it via PrincipalFrom.
+func WithPrincipal(ctx context.Context, p Principal) context.Context {
+	return context.WithValue(ctx, ctxKey{}, p)
+}
+
+// PrincipalFrom retrieves the Principal from the context. The boolean is false
+// when no Principal was injected (a programming error — every inbound path must
+// resolve one).
+func PrincipalFrom(ctx context.Context) (Principal, bool) {
+	p, ok := ctx.Value(ctxKey{}).(Principal)
+	return p, ok
+}
+
 // Decision is the result of an authorization check.
 type Decision struct {
 	Allowed bool
