@@ -1,0 +1,32 @@
+# BYO-models configuration.
+#
+# Copy to models.yaml (gitignored) and edit. The committed example uses env-var
+# references only — never put real API keys in a committed file. See
+# docs/byo-models.md for the contract.
+
+# Providers: how to authenticate with each model provider you bring.
+# `api_key_env` is REQUIRED — it names the canonical env var the provider's SDK
+# reads (and that the orchestrator sets on the agent subprocess). `api_key` is
+# an optional inline value for local dev (warned on; masked in logs); prefer
+# exporting the env var instead.
+providers:
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+  zai:
+    api_key_env: ZAI_API_KEY
+  openai:
+    api_key_env: OPENAI_API_KEY
+  # Example with a custom endpoint:
+  # self-hosted:
+  #   api_key_env: SELF_HOSTED_KEY
+  #   base_url: https://models.internal.example.com/v
+
+# Tiers: a named policy mapping to a concrete "provider/model" id. Packs
+# reference tiers by name; the runner resolves them here.
+tiers:
+  fast: anthropic/claude-haiku
+  strong: anthropic/claude-sonnet
+  reasoning: zai/glm-5.2
+
+# Default tier used when a pack/stage doesn't name one.
+default: strong

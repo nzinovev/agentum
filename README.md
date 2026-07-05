@@ -29,6 +29,8 @@ audit.
   agents must write, and the event-stream model.
 - [`docs/api.md`](docs/api.md) — the HTTP API: endpoint table, error model, SSE
   event types + replay.
+- [`docs/byo-models.md`](docs/byo-models.md) — provider credentials + tier→model
+  config (`models.yaml`).
 - [`CHANGELOG.md`](CHANGELOG.md) — what's landed, under `[Unreleased]`.
 - [`AGENTS.md`](AGENTS.md) — build agreement and architecture seams.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.

@@ -16,6 +16,10 @@ vendor/
 .env.*
 *.local
 
+# BYO-models config holds provider references and may carry inline dev keys —
+# never commit the real file. Copy from models.example.yaml.
+models.yaml
+
 # Private design notes — not part of the public project. Kept locally for
 # author/agent reference; must never be committed.
 /reference/

@@ -47,6 +47,14 @@ Once tagged releases begin, this project adheres to
   `/events` + per-task `/tasks/{id}/events`), both with replay + live tail +
   heartbeats. Every contract endpoint is declared; unimplemented ones return
   `501 not_implemented` so the surface is real for the UI today. Completes F.3.
+- **BYO-models config** (#8): operator-facing config for provider credentials +
+  tier→model-id mapping, documented at `docs/byo-models.md`. `models.yaml`
+  (gitignored) declares `providers` (with required `api_key_env`, optional inline
+  `api_key` and `base_url`) and `tiers` (name → `provider/model`). `Resolve(tier)`
+  and `EnvForProvider(provider)` drive the runner; credentials are read from the
+  process env at invocation time, never committed or logged. `Provider`
+  implements `slog.LogValuer` so inline keys are masked. Completes F.4 — and with
+  it, Epic F (foundation & contracts) is done.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
