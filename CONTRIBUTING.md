@@ -52,6 +52,22 @@ See `AGENTS.md` for the architecture seams that must not be violated.
 
   The last command should print nothing.
 
+## Changelog
+
+Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for every PR that changes
+behavior a user or operator would notice — a new endpoint, a schema change, a
+format, a fix. Pure refactors and CI-only changes can skip it. Keep the bullet
+to one line and reference the PR number (`(#42)`); group under `Added`,
+`Changed`, `Fixed`, or `Removed` per [Keep a Changelog]. The bullet is the input
+to release notes when a version is cut, so write what changed and why it
+matters, not the implementation detail.
+
+[Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
+
+When documenting a stable public contract (an extension surface like the pack
+format), add or update the matching page under `docs/` in the same PR. Internal
+packages do not need `docs/` pages.
+
 ## Code conventions
 
 - Follow the existing style in the package you're editing.
