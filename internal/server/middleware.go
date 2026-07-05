@@ -101,3 +101,15 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Flush forwards to the wrapped writer when it supports flushing, so SSE and
+// other streaming handlers work through the status-recording wrapper.
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the inner writer so interface checks (http.ResponseController,
+// future Hijacker/OnceCloser) can reach it.
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
