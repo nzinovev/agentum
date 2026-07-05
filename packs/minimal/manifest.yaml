@@ -1,0 +1,31 @@
+api: agentum/v1
+pack:
+  name: minimal
+  version: 0.1.0
+  persona: engineering
+  description: |
+    Minimal reference pack — two stages and a terminal. Exercises the loader
+    and validator end to end. Not intended for real runs; the tuned packs
+    (java-spring, nextjs) ship separately.
+memory:
+  reads: [project]
+  writes: true
+capabilities: [fs.read]
+budgets:
+  fix_cycles: 1
+  ask_to_edit: 1
+tiers:
+  default: fast
+entry: spec
+stages:
+  spec:
+    gate: human_approval
+    prompt: prompts/spec.md
+    transitions:
+      - to: implement
+  implement:
+    gate: auto_if_clean
+    prompt: prompts/implement.md
+    transitions:
+      - to: done
+  done: {}
