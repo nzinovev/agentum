@@ -25,6 +25,10 @@ audit.
 - [`docs/pack-format.md`](docs/pack-format.md) — the pipeline-pack format, the
   primary extension surface (manifest schema, gates, override layers,
   validation rules).
+- [`docs/agent-contract.md`](docs/agent-contract.md) — the result.json contract
+  agents must write, and the event-stream model.
+- [`docs/api.md`](docs/api.md) — the HTTP API: endpoint table, error model, SSE
+  event types + replay.
 - [`CHANGELOG.md`](CHANGELOG.md) — what's landed, under `[Unreleased]`.
 - [`AGENTS.md`](AGENTS.md) — build agreement and architecture seams.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.

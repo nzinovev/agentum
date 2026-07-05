@@ -39,10 +39,22 @@ Once tagged releases begin, this project adheres to
   streams NDJSON events (session-id, telemetry, activity), reads + strict-parses
   result.json, and honors context cancellation by killing the process group.
   Session-id resume (`--session`) is non-destructive. Completes F.2.
+- **HTTP API contract + SSE event streams** (#7): the full single-front-door
+  surface is documented at `docs/api.md` — endpoint table for tasks, stage
+  invocations, the six gate actions, artifacts, memory, packs; structured error
+  model `{error:{code,message}}`; and an SSE event taxonomy with Last-Event-ID
+  replay over the durable `events` table. SSE ships two streams (tenant-global
+  `/events` + per-task `/tasks/{id}/events`), both with replay + live tail +
+  heartbeats. Every contract endpoint is declared; unimplemented ones return
+  `501 not_implemented` so the surface is real for the UI today. Completes F.3.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
   migrations run) instead of the default `public` schema (#1).
+- **Error responses are now structured**: `{"error":{"code":"...","message":"..."}}`
+  replaces the previous flat `{"error":"..."}` (#7). Codes are stable machine
+  identifiers the UI branches on (`not_found`, `illegal_transition`, `bad_input`,
+  `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
 - `store.Close` and SSE write errors are no longer silently dropped (#1).

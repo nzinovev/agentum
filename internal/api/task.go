@@ -43,17 +43,27 @@ func toTaskResponse(t sqlc.Task) taskResponse {
 	}
 }
 
+// requirePrincipal extracts the Principal, writing a structured error on failure.
+// Returns false when the caller should return.
+func requirePrincipal(w http.ResponseWriter, r *http.Request) (authz.Principal, bool) {
+	p, ok := authz.PrincipalFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unresolved principal")
+		return authz.Principal{}, false
+	}
+	return p, true
+}
+
 // handleCreateTask POST /api/v1/tasks
 // Body: {project_id, pipeline_pack, title, input?}. tenant/user come from the
 // Principal, never the body.
 func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := authz.PrincipalFrom(r.Context())
+	p, ok := requirePrincipal(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unresolved principal")
 		return
 	}
 	if d := authz.Can(r.Context(), p, "task:create", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, d.Reason)
+		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
 		return
 	}
 
@@ -64,11 +74,11 @@ func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Input        json.RawMessage `json:"input"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, codeBadInput, "invalid JSON body")
 		return
 	}
 	if req.ProjectID == "" || req.PipelinePack == "" || req.Title == "" {
-		writeError(w, http.StatusBadRequest, "project_id, pipeline_pack, and title are required")
+		writeError(w, http.StatusBadRequest, codeBadInput, "project_id, pipeline_pack, and title are required")
 		return
 	}
 	if len(req.Input) == 0 {
@@ -84,10 +94,8 @@ func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Input:        req.Input,
 	})
 	if err != nil {
-		// Most CreateTask failures are bad input (invalid uuid, shape); the rest
-		// are unexpected and logged. Treat as 400 for the single-owner MVP.
 		logUnexpected(a.log, err, "CreateTask")
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, toTaskResponse(task))
@@ -95,24 +103,23 @@ func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 // handleGetTask GET /api/v1/tasks/{id}
 func (a *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := authz.PrincipalFrom(r.Context())
+	p, ok := requirePrincipal(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unresolved principal")
 		return
 	}
 	if d := authz.Can(r.Context(), p, "task:read", r.PathValue("id")); !d.Allowed {
-		writeError(w, http.StatusForbidden, d.Reason)
+		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
 		return
 	}
 
 	task, err := a.q.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: p.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "task not found")
+			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
 			return
 		}
 		logUnexpected(a.log, err, "GetTask")
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
@@ -120,19 +127,18 @@ func (a *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 // handleListTasks GET /api/v1/tasks?project_id=...&limit=...&offset=...
 func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	p, ok := authz.PrincipalFrom(r.Context())
+	p, ok := requirePrincipal(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unresolved principal")
 		return
 	}
 	if d := authz.Can(r.Context(), p, "task:list", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, d.Reason)
+		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
 		return
 	}
 
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+		writeError(w, http.StatusBadRequest, codeBadInput, "project_id query parameter is required")
 		return
 	}
 	limit := clampInt(queryInt(r, "limit", 50), 1, 200)
@@ -146,7 +152,7 @@ func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		logUnexpected(a.log, err, "ListTasksByProject")
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	resp := make([]taskResponse, 0, len(tasks))
@@ -161,13 +167,12 @@ func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 // that the FSM gates every state change: an illegal transition is a 409, never
 // a silent write.
 func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := authz.PrincipalFrom(r.Context())
+	p, ok := requirePrincipal(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unresolved principal")
 		return
 	}
 	if d := authz.Can(r.Context(), p, "task:start", r.PathValue("id")); !d.Allowed {
-		writeError(w, http.StatusForbidden, d.Reason)
+		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
 		return
 	}
 
@@ -175,17 +180,17 @@ func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	task, err := a.q.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: p.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "task not found")
+			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
 			return
 		}
 		logUnexpected(a.log, err, "GetTask")
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 
 	next, err := engine.Next(engine.TaskState(task.State), engine.EventStart)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
 	}
 
@@ -196,7 +201,7 @@ func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		logUnexpected(a.log, err, "UpdateTaskState")
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
