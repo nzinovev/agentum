@@ -25,6 +25,11 @@ Once tagged releases begin, this project adheres to
   per-pack fix-loop and ask-to-edit budgets, tier policy, semver versioning.
   Loader, validator, and a minimal reference pack. Keystone for the gate,
   fix-loops/tier, conditional-linear, and MCP epics.
+- **Pack override resolver** (#4): all four override layers — lock-major base
+  resolution via a filesystem `Source`, fork metadata, prompt swaps, and
+  stage/budget param patches. `Resolve` deep-copies the base, applies the
+  layers, and re-validates the result; an override that breaks the contract is
+  rejected. Completes the pack format work (F.5).
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
