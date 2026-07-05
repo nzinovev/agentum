@@ -57,6 +57,15 @@ type Pack struct {
 	// Dir is the absolute path the pack was loaded from. Empty for packs built
 	// in memory by the override resolver.
 	Dir string `yaml:"-"`
+
+	// BaseRef records the base reference this pack was resolved from, when
+	// produced by Resolve (e.g. "java-spring@^1"). Empty for a directly-loaded
+	// pack.
+	BaseRef string `yaml:"-"`
+
+	// Forked records layer 2 (detach from upstream). It is metadata only at
+	// resolve time — a forked pack is a detached copy, not a different shape.
+	Forked bool `yaml:"-"`
 }
 
 // Meta is the pack identity block.
