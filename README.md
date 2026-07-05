@@ -20,6 +20,15 @@ audit.
 4. Check health: `curl http://localhost:8080/healthz`.
 5. (Optional) Generate the data layer: install `sqlc`, then `make sqlc-gen`.
 
+## Documentation
+
+- [`docs/pack-format.md`](docs/pack-format.md) — the pipeline-pack format, the
+  primary extension surface (manifest schema, gates, override layers,
+  validation rules).
+- [`CHANGELOG.md`](CHANGELOG.md) — what's landed, under `[Unreleased]`.
+- [`AGENTS.md`](AGENTS.md) — build agreement and architecture seams.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
