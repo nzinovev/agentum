@@ -5,8 +5,7 @@ pack:
   persona: engineering
   description: |
     Minimal reference pack — two stages and a terminal. Exercises the loader
-    and validator end to end. Not intended for real runs; the tuned packs
-    (java-spring, nextjs) ship separately.
+    and validator end to end. Not intended for real runs; the tuned packs ship separately.
 memory:
   reads: [project]
   writes: true
