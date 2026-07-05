@@ -7,18 +7,22 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/api"
 	"github.com/nzinovev/agentum/internal/config"
 	"github.com/nzinovev/agentum/internal/store"
+	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
 type Server struct {
 	cfg   config.Config
 	log   *slog.Logger
 	store *store.Store
+	api   *api.API
 }
 
 func New(cfg config.Config, log *slog.Logger, st *store.Store) *Server {
-	return &Server{cfg: cfg, log: log, store: st}
+	a := api.New(sqlc.New(st.DB), log)
+	return &Server{cfg: cfg, log: log, store: st, api: a}
 }
 
 // Handler returns the HTTP handler with the full middleware boundary applied.

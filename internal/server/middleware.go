@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -10,10 +9,6 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/config"
 )
-
-type ctxKey string
-
-const ctxPrincipal ctxKey = "principal"
 
 // applyBoundary wraps the router in the single front-door middleware chain.
 // The slots are stubs today; SSO/RBAC/audit/rate-limit and MCP capability
@@ -72,7 +67,7 @@ func tenantResolver(cfg config.Config) func(http.Handler) http.Handler {
 				TenantID: cfg.TenantID,
 				UserID:   cfg.TenantOwnerUserID,
 			}
-			ctx := context.WithValue(r.Context(), ctxPrincipal, p)
+			ctx := authz.WithPrincipal(r.Context(), p)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -83,7 +78,7 @@ func tenantResolver(cfg config.Config) func(http.Handler) http.Handler {
 func authzGate() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p, ok := r.Context().Value(ctxPrincipal).(authz.Principal)
+			p, ok := authz.PrincipalFrom(r.Context())
 			if !ok {
 				http.Error(w, "unresolved principal", http.StatusUnauthorized)
 				return
@@ -92,14 +87,9 @@ func authzGate() func(http.Handler) http.Handler {
 				http.Error(w, d.Reason, http.StatusForbidden)
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(authz.WithPrincipal(r.Context(), p)))
 		})
 	}
-}
-
-func principalFrom(r *http.Request) authz.Principal {
-	p, _ := r.Context().Value(ctxPrincipal).(authz.Principal)
-	return p
 }
 
 type statusWriter struct {
