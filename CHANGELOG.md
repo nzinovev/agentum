@@ -30,6 +30,15 @@ Once tagged releases begin, this project adheres to
   stage/budget param patches. `Resolve` deep-copies the base, applies the
   layers, and re-validates the result; an override that breaks the contract is
   rejected. Completes the pack format work (F.5).
+- **Agent adapter contract + opencode reference adapter** (#6): the
+  orchestrator↔agent seam. Defines a strict `result.json` v1 contract (the file
+  agents must write: `schema_version`, `status`, `summary`, `open_questions`,
+  `artifacts`, `memory_writes`, `edit_targets`, `notes`) at
+  `.agentum/<worktree>/.ag-artifacts/<stage>/result.json`, documented publicly.
+  The opencode adapter runs `opencode run --format json` as a subprocess,
+  streams NDJSON events (session-id, telemetry, activity), reads + strict-parses
+  result.json, and honors context cancellation by killing the process group.
+  Session-id resume (`--session`) is non-destructive. Completes F.2.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
