@@ -1,0 +1,25 @@
+# Tier → model mapping (optional override).
+#
+# Agentum does NOT manage credentials or provider configuration. You install and
+# configure opencode / claude-code / etc. yourself — its providers, base URLs,
+# and API keys live in the agent binary's own config. Agentum only maps a tier
+# name to the model string it passes via --model.
+#
+# This file is OPTIONAL. Without it, Agentum uses the built-in defaults:
+#   opencode:    fast→anthropic/claude-haiku, strong→anthropic/claude-sonnet,
+#                reasoning→anthropic/claude-opus
+#   claude-code: fast→haiku, strong→sonnet, reasoning→opus
+#
+# Copy to models.yaml (gitignored) ONLY to override those defaults — e.g. when
+# your agent is configured for a different provider and you want tier names to
+# resolve to your models. See docs/models.md.
+
+tiers:
+  # Use any model string your agent binary understands. With z.ai configured in
+  # your agent, "reasoning" can point at a GLM model; the agent resolves it.
+  fast: anthropic/claude-haiku
+  strong: anthropic/claude-sonnet
+  reasoning: zai/glm-5.2
+
+# Default tier when a pack/stage doesn't name one.
+default: strong

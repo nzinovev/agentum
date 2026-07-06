@@ -47,6 +47,15 @@ Once tagged releases begin, this project adheres to
   `/events` + per-task `/tasks/{id}/events`), both with replay + live tail +
   heartbeats. Every contract endpoint is declared; unimplemented ones return
   `501 not_implemented` so the surface is real for the UI today. Completes F.3.
+- **Tier→model resolver with per-agent defaults** (#8): Agentum maps a pack's
+  tier name (`fast`/`strong`/`reasoning`) to the model string passed to the
+  agent binary's `--model` flag. Built-in defaults for `opencode`
+  (`anthropic/claude-*`) and `claude-code` (`haiku`/`sonnet`/`opus`) so the
+  common case needs no configuration — clone, `make run`, works if the agent is
+  already configured. Optional `models.yaml` overrides. Agentum deliberately
+  does NOT manage credentials, provider endpoints, or agent config files; the
+  operator configures opencode/claude-code directly. Completes F.4 — and with
+  it, Epic F (foundation & contracts) is done.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before

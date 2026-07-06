@@ -4,9 +4,9 @@ Self-hostable orchestrator for AI engineering pipelines, built in Go.
 
 Agentum coordinates AI coding-agent stages against a target codebase —
 assembling prompts, running agents, gating output for humans, accumulating
-memory across tasks, and enforcing tool-capability boundaries. You bring your
-own model credentials; Agentum handles coordination, governance, memory, and
-audit.
+memory across tasks, and enforcing tool-capability boundaries. You install and
+configure your coding agent (opencode, claude-code, …) yourself; Agentum
+coordinates runs, governance, memory, and audit.
 
 > **Status:** early. The engine foundation, multi-tenant schema, explicit task
 > FSM, single-front-door HTTP API, and the project-memory schema are scaffolded.
@@ -29,6 +29,8 @@ audit.
   agents must write, and the event-stream model.
 - [`docs/api.md`](docs/api.md) — the HTTP API: endpoint table, error model, SSE
   event types + replay.
+- [`docs/models.md`](docs/models.md) — how Agentum resolves a tier to a model
+  string and passes `--model`; built-in defaults for opencode + claude-code.
 - [`CHANGELOG.md`](CHANGELOG.md) — what's landed, under `[Unreleased]`.
 - [`AGENTS.md`](AGENTS.md) — build agreement and architecture seams.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
