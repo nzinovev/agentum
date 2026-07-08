@@ -63,6 +63,17 @@ Once tagged releases begin, this project adheres to
   validation at registration. Carries an inert `related_projects` seam for the
   deferred cross-project / sibling-folder access (stored now, enforced in a
   later epic). First piece of F.6 (execution model); the runner lands next.
+- **Worktree service + routing-block renderer** (F.6 PR2): `internal/worktree`
+  creates per-task git worktrees off a project's repo at
+  `<repo>/.agentum/worktrees/<task-id>/` on branch `agentum/<task-id>` (C5),
+  idempotent on re-create (resume/retry safe), and removes them at terminal
+  state. Ensures the repo ignores its own `.agentum/` dir so worktrees and
+  artifacts never pollute the user's working tree. `internal/routing` renders
+  the orchestrator-owned routing block (C2): role/stage/gate context, the
+  result.json contract preamble (identical for every pack/agent), prior-stage
+  artifact references, plus inert memory and capabilities sections that their
+  epics fill in. Both pure, unit-tested with temp git repos; no runner wiring
+  yet — that is PR3.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
