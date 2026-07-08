@@ -1,0 +1,27 @@
+# Tier → model mapping (optional override).
+#
+# Agentum does NOT manage credentials or provider configuration. You install and
+# configure opencode / claude-code / etc. yourself — its providers, base URLs,
+# and API keys live in the agent binary's own config. Agentum only maps a tier
+# name to the model string it passes via --model.
+#
+# This file is OPTIONAL. Without it, Agentum uses the built-in defaults:
+#   opencode (free, via opencode Zen once connected):
+#     fast      → opencode/deepseek-v4-flash-free
+#     strong    → opencode/north-mini-code-free
+#     reasoning → opencode/nemotron-3-ultra-free
+#   claude-code:
+#     fast → haiku, strong → sonnet, reasoning → opus
+#
+# Copy to models.yaml (gitignored) ONLY to override those defaults. Example
+# below: a z.ai / GLM setup using the coding-plan subscription. See
+# docs/models.md.
+
+# Example: GLM via the z.ai coding plan (swap tiers to taste).
+tiers:
+  fast: zai-coding-plan/glm-5-turbo
+  strong: zai-coding-plan/glm-5.1
+  reasoning: zai-coding-plan/glm-5.2
+
+# Default tier when a pack/stage doesn't name one.
+default: strong
