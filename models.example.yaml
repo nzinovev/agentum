@@ -6,20 +6,22 @@
 # name to the model string it passes via --model.
 #
 # This file is OPTIONAL. Without it, Agentum uses the built-in defaults:
-#   opencode:    fast→anthropic/claude-haiku, strong→anthropic/claude-sonnet,
-#                reasoning→anthropic/claude-opus
-#   claude-code: fast→haiku, strong→sonnet, reasoning→opus
+#   opencode (free, via opencode Zen once connected):
+#     fast      → opencode/deepseek-v4-flash-free
+#     strong    → opencode/north-mini-code-free
+#     reasoning → opencode/nemotron-3-ultra-free
+#   claude-code:
+#     fast → haiku, strong → sonnet, reasoning → opus
 #
-# Copy to models.yaml (gitignored) ONLY to override those defaults — e.g. when
-# your agent is configured for a different provider and you want tier names to
-# resolve to your models. See docs/models.md.
+# Copy to models.yaml (gitignored) ONLY to override those defaults. Example
+# below: a z.ai / GLM setup using the coding-plan subscription. See
+# docs/models.md.
 
+# Example: GLM via the z.ai coding plan (swap tiers to taste).
 tiers:
-  # Use any model string your agent binary understands. With z.ai configured in
-  # your agent, "reasoning" can point at a GLM model; the agent resolves it.
-  fast: anthropic/claude-haiku
-  strong: anthropic/claude-sonnet
-  reasoning: zai/glm-5.2
+  fast: zai-coding-plan/glm-5-turbo
+  strong: zai-coding-plan/glm-5.1
+  reasoning: zai-coding-plan/glm-5.2
 
 # Default tier when a pack/stage doesn't name one.
 default: strong

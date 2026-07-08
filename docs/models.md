@@ -29,10 +29,12 @@ Agentum ships per-agent defaults so the common case needs no `models.yaml`:
 
 | Agent | `fast` | `strong` | `reasoning` | default |
 |---|---|---|---|---|
-| `opencode` | `anthropic/claude-haiku` | `anthropic/claude-sonnet` | `anthropic/claude-opus` | `strong` |
+| `opencode` | `opencode/deepseek-v4-flash-free` | `opencode/north-mini-code-free` | `opencode/nemotron-3-ultra-free` | `strong` |
 | `claude-code` | `haiku` | `sonnet` | `opus` | `strong` |
 
-If your agent has Anthropic configured, this works out of the box. The
+The `opencode` defaults use the **free models on opencode Zen** (the `-free`
+suffix is explicit), so a fresh install works without a paid provider once you
+connect Zen (`/connect opencode` in the TUI, or `opencode auth login`). The
 `claude-code` short aliases (`haiku`/`sonnet`/`opus`) are intentionally
 remappable — your `~/.claude/settings.json` can point them at any compatible
 provider.
@@ -40,14 +42,16 @@ provider.
 ## Override (optional)
 
 Drop a `models.yaml` next to the binary (or at `$XDG_CONFIG_HOME/agentum/`, or
-point `AGENTUM_MODELS_CONFIG` at it) to override the defaults:
+point `AGENTUM_MODELS_CONFIG` at it) to override the defaults. A common case is
+routing tiers to a different provider you've configured in your agent — for
+example, GLM via the z.ai coding plan:
 
 ```yaml
 # models.yaml (gitignored — copy from models.example.yaml)
 tiers:
-  fast: anthropic/claude-haiku
-  strong: anthropic/claude-sonnet
-  reasoning: zai/glm-5.2     # any string your agent understands
+  fast: zai-coding-plan/glm-5-turbo
+  strong: zai-coding-plan/glm-5.1
+  reasoning: zai-coding-plan/glm-5.2
 default: strong
 ```
 

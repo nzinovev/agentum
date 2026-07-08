@@ -11,7 +11,7 @@ import (
 func TestDefault_KnownAgent(t *testing.T) {
 	t.Parallel()
 	c := Default("opencode")
-	if c.Default != "strong" || c.Tiers["strong"] != "anthropic/claude-sonnet" {
+	if c.Default != "strong" || c.Tiers["strong"] != "opencode/north-mini-code-free" {
 		t.Errorf("opencode default wrong: %+v", c)
 	}
 	c = Default("claude-code")
@@ -33,7 +33,7 @@ func TestDefault_ReturnedMapIsACopy(t *testing.T) {
 	c := Default("opencode")
 	c.Tiers["strong"] = "mutated"
 	again := Default("opencode")
-	if again.Tiers["strong"] != "anthropic/claude-sonnet" {
+	if again.Tiers["strong"] != "opencode/north-mini-code-free" {
 		t.Error("Default must return a fresh map; mutating the result leaked into the built-in")
 	}
 }
@@ -41,7 +41,7 @@ func TestDefault_ReturnedMapIsACopy(t *testing.T) {
 func TestResolve_BuiltInDefault(t *testing.T) {
 	t.Parallel()
 	got, err := Resolve(nil, "opencode", "fast")
-	if err != nil || got != "anthropic/claude-haiku" {
+	if err != nil || got != "opencode/deepseek-v4-flash-free" {
 		t.Errorf("Resolve(opencode, fast) = %q, %v", got, err)
 	}
 	// empty tier falls back to default

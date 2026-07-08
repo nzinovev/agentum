@@ -35,17 +35,17 @@ type Config struct {
 	Default string            `yaml:"default"`
 }
 
-// builtIn holds the per-agent defaults. These are the model strings each agent
-// binary understands out of the box when the operator has Anthropic configured.
-// Operators using other providers (z.ai, etc.) override via models.yaml OR
-// configure their agent binary to alias these tier names to their provider.
+// builtIn holds the per-agent defaults. opencode's defaults use the free models
+// on opencode Zen (the `-free` suffix is explicit) so a fresh install works
+// without a paid provider once Zen is connected. claude-code uses its short
+// aliases, which the operator's settings can remap to any compatible provider.
+// Operators using other providers override via models.yaml.
 var builtIn = map[string]Config{
-	// opencode uses provider/model identifiers.
 	"opencode": {
 		Tiers: map[string]string{
-			"fast":      "anthropic/claude-haiku",
-			"strong":    "anthropic/claude-sonnet",
-			"reasoning": "anthropic/claude-opus",
+			"fast":      "opencode/deepseek-v4-flash-free",
+			"strong":    "opencode/north-mini-code-free",
+			"reasoning": "opencode/nemotron-3-ultra-free",
 		},
 		Default: "strong",
 	},
