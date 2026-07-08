@@ -29,7 +29,7 @@ type CommitMemoryEntryParams struct {
 	Title        string         `json:"title"`
 	Body         string         `json:"body"`
 	Keywords     []string       `json:"keywords"`
-	SourceTaskID string         `json:"source_task_id"`
+	SourceTaskID sql.NullString `json:"source_task_id"`
 	SourceStage  sql.NullString `json:"source_stage"`
 }
 

@@ -1,7 +1,8 @@
 -- name: CreateProject :one
 -- Idempotent registration: one repo_path = one project per tenant. Re-registering
 -- the same repo touches updated_at and applies the new fields (name, related set)
--- rather than failing, so onboarding scripts are restart-safe.
+-- rather than failing, so onboarding scripts are restart-safe. Callers must pass
+-- a non-nil related_projects slice (the column is NOT NULL; pq.Array(nil) is NULL).
 INSERT INTO projects (tenant_id, user_id, repo_path, name, related_projects)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (tenant_id, repo_path) DO UPDATE SET

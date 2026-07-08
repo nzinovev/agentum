@@ -163,9 +163,9 @@ func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStartTask POST /api/v1/tasks/{id}/start
-// Transitions created -> running through engine.Next. This is the proof point
-// that the FSM gates every state change: an illegal transition is a 409, never
-// a silent write.
+// Transitions created -> running through engine.Next and enqueues a run job.
+// The worker (not this request) drives the stages; the handler returns as soon
+// as the job is queued. An illegal transition is a 409, never a silent write.
 func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	p, ok := requirePrincipal(w, r)
 	if !ok {
@@ -202,6 +202,18 @@ func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logUnexpected(a.log, err, "UpdateTaskState")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+
+	// Enqueue the run job; the worker picks it up and drives the stages. A
+	// failure here leaves the task running with no driver — the recovery pass
+	// surfaces it as an interrupted pause on the next boot.
+	if _, err := a.q.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+		TenantID: p.TenantID, UserID: p.UserID, TaskID: task.ID, Kind: "run",
+		Payload: []byte("{}"),
+	}); err != nil {
+		logUnexpected(a.log, err, "EnqueueJob")
+		writeError(w, http.StatusInternalServerError, codeInternal, "task started but run job could not be enqueued")
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))

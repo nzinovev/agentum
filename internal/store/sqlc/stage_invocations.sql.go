@@ -8,6 +8,8 @@ package sqlc
 import (
 	"context"
 	"database/sql"
+
+	"github.com/sqlc-dev/pqtype"
 )
 
 const createStageInvocation = `-- name: CreateStageInvocation :one
@@ -23,7 +25,7 @@ type CreateStageInvocationParams struct {
 	Stage      string         `json:"stage"`
 	Sequence   int32          `json:"sequence"`
 	SessionID  sql.NullString `json:"session_id"`
-	ResumeOf   string         `json:"resume_of"`
+	ResumeOf   sql.NullString `json:"resume_of"`
 	StopReason sql.NullString `json:"stop_reason"`
 }
 
@@ -55,6 +57,34 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const finishStageInvocation = `-- name: FinishStageInvocation :exec
+UPDATE stage_invocations
+SET session_id = $3, stop_reason = $4, result = $5, finished_at = now()
+WHERE id = $1 AND tenant_id = $2
+`
+
+type FinishStageInvocationParams struct {
+	ID         string                `json:"id"`
+	TenantID   string                `json:"tenant_id"`
+	SessionID  sql.NullString        `json:"session_id"`
+	StopReason sql.NullString        `json:"stop_reason"`
+	Result     pqtype.NullRawMessage `json:"result"`
+}
+
+// Record the parsed result.json + session_id + stop_reason on close. The runner
+// calls this after the adapter returns. result is the parsed result.json (the
+// file-derived fields); telemetry/session are stream-derived.
+func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvocationParams) error {
+	_, err := q.db.ExecContext(ctx, finishStageInvocation,
+		arg.ID,
+		arg.TenantID,
+		arg.SessionID,
+		arg.StopReason,
+		arg.Result,
+	)
+	return err
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one

@@ -20,3 +20,11 @@ WHERE id = $1 AND tenant_id = $2;
 UPDATE stage_invocations
 SET stop_reason = $3, finished_at = now()
 WHERE id = $1 AND tenant_id = $2;
+
+-- name: FinishStageInvocation :exec
+-- Record the parsed result.json + session_id + stop_reason on close. The runner
+-- calls this after the adapter returns. result is the parsed result.json (the
+-- file-derived fields); telemetry/session are stream-derived.
+UPDATE stage_invocations
+SET session_id = $3, stop_reason = $4, result = $5, finished_at = now()
+WHERE id = $1 AND tenant_id = $2;

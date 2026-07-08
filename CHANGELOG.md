@@ -63,6 +63,20 @@ Once tagged releases begin, this project adheres to
   validation at registration. Carries an inert `related_projects` seam for the
   deferred cross-project / sibling-folder access (stored now, enforced in a
   later epic). First piece of F.6 (execution model); the runner lands next.
+- **Runner + job queue + worker** (F.6 PR3): the loop that makes a task actually
+  run. A Postgres-backed job queue (`FOR UPDATE SKIP LOCKED`, no Redis) decouples
+  HTTP from execution — handlers enqueue and return; a worker claims and drives.
+  `internal/runner` composes the adapter, pack loader, worktree service, routing
+  block, models resolver, and engine FSM: it walks a pack's stages, invokes the
+  adapter per stage, persists `stage_invocations`, evaluates stop conditions
+  (`open_questions`/`gate`/`adapter_error`/`parse_error`) into the FSM via a pure,
+  table-tested evaluator, and emits meaningful events into the durable log.
+  `start`/`continue`/`advance`/`cancel` handlers enqueue the driving jobs; cancel
+  aborts the in-flight run via a per-task cancel registry (the §5.1 seam). A
+  heartbeat + boot recovery re-queue jobs a dead worker left behind, bounded by
+  `AGENTUM_JOB_MAX_ATTEMPTS` (default 3). Terminal stages fire `reach_final_gate`
+  without invoking the adapter. Nullable-uuid columns are now `sql.NullString`
+  (was a broken plain-string override that couldn't represent NULL).
 - **Worktree service + routing-block renderer** (F.6 PR2): `internal/worktree`
   creates per-task git worktrees off a project's repo at
   `<repo>/.agentum/worktrees/<task-id>/` on branch `agentum/<task-id>` (C5),

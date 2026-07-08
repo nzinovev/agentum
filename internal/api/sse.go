@@ -123,7 +123,7 @@ func (a *API) drainBatch(ctx context.Context, w http.ResponseWriter, f http.Flus
 		})
 	} else {
 		rows, err = a.q.ListEventsAfterTask(ctx, sqlc.ListEventsAfterTaskParams{
-			TenantID: tenantID, TaskID: taskID, ID: afterID, Limit: sseReplayBatch,
+			TenantID: tenantID, TaskID: nullStr(taskID), ID: afterID, Limit: sseReplayBatch,
 		})
 	}
 	if err != nil {

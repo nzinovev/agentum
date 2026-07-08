@@ -7,15 +7,24 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
+// TaskCanceler aborts an in-flight run by task id. Implemented by the runner's
+// CancelRegistry; declared here so the API does not import the runner package.
+type TaskCanceler interface {
+	Cancel(taskID string) bool
+}
+
 // API wires the sqlc querier behind the HTTP handlers. It is constructed once
 // per process and mounts the v1 surface on the server's mux via Register.
 type API struct {
-	q   *sqlc.Queries
-	log *slog.Logger
+	q       *sqlc.Queries
+	log     *slog.Logger
+	cancels TaskCanceler
 }
 
-func New(q *sqlc.Queries, log *slog.Logger) *API {
-	return &API{q: q, log: log}
+// New builds the API. cancels lets the cancel handler abort an in-flight run;
+// nil leaves cancel as a no-op (the FSM transition still applies).
+func New(q *sqlc.Queries, log *slog.Logger, cancels TaskCanceler) *API {
+	return &API{q: q, log: log, cancels: cancels}
 }
 
 // Register attaches the full v1 surface to the mux. Implemented endpoints live

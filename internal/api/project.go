@@ -92,6 +92,11 @@ func (a *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "repo_path and name are required")
 		return
 	}
+	// related_projects is NOT NULL DEFAULT '{}' in Postgres, but pq.Array(nil)
+	// sends NULL; coerce nil to an empty slice so an omitted field inserts cleanly.
+	if req.RelatedProjects == nil {
+		req.RelatedProjects = []string{}
+	}
 
 	if err := validateGitRepo(req.RepoPath); err != nil {
 		writeError(w, http.StatusBadRequest, codeBadInput, "repo_path: "+err.Error())

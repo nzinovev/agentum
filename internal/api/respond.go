@@ -6,6 +6,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -13,6 +14,12 @@ import (
 
 	"github.com/nzinovev/agentum/internal/engine"
 )
+
+// nullStr builds a sql.NullString; empty → invalid (NULL). Used for nullable
+// columns surfaced as NullString by sqlc (e.g. the per-task event filter).
+func nullStr(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
 
 // writeJSON encodes v as JSON with the given status. Errors are intentionally
 // surfaced to the caller (it is the handler's last write).

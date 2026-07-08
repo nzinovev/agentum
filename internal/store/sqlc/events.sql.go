@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 )
 
@@ -19,7 +20,7 @@ RETURNING id, tenant_id, user_id, task_id, type, payload, created_at
 type AppendEventParams struct {
 	TenantID string          `json:"tenant_id"`
 	UserID   string          `json:"user_id"`
-	TaskID   string          `json:"task_id"`
+	TaskID   sql.NullString  `json:"task_id"`
 	Type     string          `json:"type"`
 	Payload  json.RawMessage `json:"payload"`
 }
@@ -102,10 +103,10 @@ LIMIT $4
 `
 
 type ListEventsAfterTaskParams struct {
-	TenantID string `json:"tenant_id"`
-	TaskID   string `json:"task_id"`
-	ID       int64  `json:"id"`
-	Limit    int32  `json:"limit"`
+	TenantID string         `json:"tenant_id"`
+	TaskID   sql.NullString `json:"task_id"`
+	ID       int64          `json:"id"`
+	Limit    int32          `json:"limit"`
 }
 
 // Per-task tail: same shape, scoped to one task. Used by GET /tasks/{id}/events.

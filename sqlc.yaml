@@ -16,6 +16,15 @@ sql:
           # throughout the Go layer (config, authz, engine).
           - db_type: "uuid"
             go_type: "string"
+          # Nullable uuid columns (resume_of, source_task_id, events.task_id) are
+          # genuinely nullable, so they map to sql.NullString (Valid=false → NULL).
+          # A plain string here can't represent NULL and breaks inserts on the
+          # common empty case (e.g. a fresh invocation has no resume_of).
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullString"
           - db_type: "uuid"
             nullable: true
             go_type: "string"

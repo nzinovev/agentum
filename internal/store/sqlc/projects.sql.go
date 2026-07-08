@@ -31,7 +31,8 @@ type CreateProjectParams struct {
 
 // Idempotent registration: one repo_path = one project per tenant. Re-registering
 // the same repo touches updated_at and applies the new fields (name, related set)
-// rather than failing, so onboarding scripts are restart-safe.
+// rather than failing, so onboarding scripts are restart-safe. Callers must pass
+// a non-nil related_projects slice (the column is NOT NULL; pq.Array(nil) is NULL).
 func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (Project, error) {
 	row := q.db.QueryRowContext(ctx, createProject,
 		arg.TenantID,
