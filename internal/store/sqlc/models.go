@@ -38,6 +38,17 @@ type MemoryEntry struct {
 	CreatedAt    time.Time      `json:"created_at"`
 }
 
+type Project struct {
+	ID              string    `json:"id"`
+	TenantID        string    `json:"tenant_id"`
+	UserID          string    `json:"user_id"`
+	RepoPath        string    `json:"repo_path"`
+	Name            string    `json:"name"`
+	RelatedProjects []string  `json:"related_projects"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
 type StageInvocation struct {
 	ID           string                `json:"id"`
 	TenantID     string                `json:"tenant_id"`

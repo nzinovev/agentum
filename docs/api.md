@@ -27,6 +27,37 @@ and land with the epic named in the table.
 - **State transitions** route through `engine.Next`. An illegal transition is
   `409 illegal_transition`, never a silent write.
 
+## Projects
+
+A project binds a local git repository to an Agentum project id (one repo = one
+project per tenant). Tasks reference a project; the runner creates a per-task
+worktree off the project's repo. Registration is idempotent: re-`POST`ing the
+same `repo_path` updates `name` / `related_projects` rather than failing.
+
+| Method | Path | Status | Body / Query → Response |
+|---|---|---|---|
+| `POST` | `/projects` | ✅ | `{repo_path, name, related_projects?}` → `201 Project` / `400 bad_input` (if `repo_path` is not a git work tree) |
+| `GET` | `/projects` | ✅ | `?limit=&offset=` → `200 Project[]` |
+| `GET` | `/projects/{id}` | ✅ | → `200 Project` / `404 not_found` |
+
+`repo_path` must point inside a real git work tree (validated at registration).
+`related_projects` is an **inert seam**: stored now, it will grant cross-project
+read access (a path-scoped `fs.read` capability) in a later epic — never
+auto-discovered, the configured set is the security boundary.
+
+### Project
+
+```json
+{
+  "id": "uuid",
+  "repo_path": "/home/me/repos/my-app",
+  "name": "My App",
+  "related_projects": [],
+  "created_at": "2026-07-09T...",
+  "updated_at": "2026-07-09T..."
+}
+```
+
 ## Tasks
 
 | Method | Path | Status | Body / Query → Response |

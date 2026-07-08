@@ -56,6 +56,13 @@ Once tagged releases begin, this project adheres to
   does NOT manage credentials, provider endpoints, or agent config files; the
   operator configures opencode/claude-code directly. Completes F.4 — and with
   it, Epic F (foundation & contracts) is done.
+- **Projects** (F.6 PR1): a `projects` entity binds a local git repo to a
+  project id (one repo = one project per tenant); `tasks.project_id` is now a
+  real foreign key (was a dangling column). `POST/GET /api/v1/projects` with
+  idempotent registration on `(tenant_id, repo_path)` and real-git-repo
+  validation at registration. Carries an inert `related_projects` seam for the
+  deferred cross-project / sibling-folder access (stored now, enforced in a
+  later epic). First piece of F.6 (execution model); the runner lands next.
 
 ### Changed
 - Postgres tables live in a dedicated `agentum` schema (created on boot before

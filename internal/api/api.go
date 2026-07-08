@@ -23,6 +23,11 @@ func New(q *sqlc.Queries, log *slog.Logger) *API {
 // has already applied the boundary middleware, so every call below carries a
 // Principal.
 func (a *API) Register(mux *http.ServeMux) {
+	// Projects (registration: one repo = one project).
+	mux.HandleFunc("GET /api/v1/projects", a.handleListProjects)
+	mux.HandleFunc("POST /api/v1/projects", a.handleCreateProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}", a.handleGetProject)
+
 	// Tasks (lifecycle).
 	mux.HandleFunc("GET /api/v1/tasks", a.handleListTasks)
 	mux.HandleFunc("POST /api/v1/tasks", a.handleCreateTask)
