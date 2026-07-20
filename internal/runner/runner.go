@@ -31,6 +31,7 @@ type Store interface {
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
+	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
 }
 
 // Sink forwards a live stream chunk to subscribers (e.g. an in-memory SSE broker).
@@ -102,11 +103,34 @@ func (r *Runner) Handle(ctx context.Context, job sqlc.Job) error {
 	switch job.Kind {
 	case "run", "continue", "advance":
 		return r.drive(ctx, job)
+	case "teardown":
+		return r.teardown(ctx, job)
 	case "cancel":
 		return nil
 	default:
 		return fmt.Errorf("runner: unknown job kind %q", job.Kind)
 	}
+}
+
+// teardown removes the task's worktree once it has reached a terminal state
+// (done/cancelled/failed). Idempotent: a missing worktree is a no-op. Enqueued
+// by the cancel/approve handlers and by failTask; the worker claims it after the
+// driving run job is done, so it never races the runner (04 §7.1.3).
+func (r *Runner) teardown(ctx context.Context, job sqlc.Job) error {
+	task, err := r.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
+	if err != nil {
+		return fmt.Errorf("teardown: load task: %w", err)
+	}
+	project, err := r.store.GetProject(ctx, sqlc.GetProjectParams{ID: task.ProjectID, TenantID: task.TenantID})
+	if err != nil {
+		return fmt.Errorf("teardown: load project: %w", err)
+	}
+	if err := r.wt.Remove(ctx, project.RepoPath, task.ID); err != nil {
+		r.log.Error("teardown worktree", "task", task.ID, "error", err)
+		return err
+	}
+	r.emit(ctx, task, EvWorktreeRemoved, map[string]any{"stage": task.CurrentStage.String})
+	return nil
 }
 
 // drive performs the shared setup (load task + project + pack, create worktree)
@@ -408,6 +432,14 @@ func (r *Runner) failTask(ctx context.Context, task sqlc.Task, cause error) erro
 		return fmt.Errorf("%w (and failed to mark task failed: %v)", cause, err)
 	}
 	r.emit(ctx, task, EvTaskStateChanged, map[string]any{"from": task.State, "to": string(engine.StateFailed), "error": cause.Error()})
+	// Best-effort: schedule worktree teardown. A failed task's worktree is not
+	// needed for recovery (the session, if any, is gone); remove it. Enqueuing
+	// (not removing inline) serializes with the still-running driving job.
+	if _, terr := r.store.EnqueueJob(ctx, sqlc.EnqueueJobParams{
+		TenantID: task.TenantID, UserID: task.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+	}); terr != nil {
+		r.log.Warn("enqueue teardown for failed task", "task", task.ID, "error", terr)
+	}
 	return cause
 }
 
@@ -447,6 +479,7 @@ const (
 	EvStageStarted     = "stage.started"
 	EvStageStopped     = "stage.stopped"
 	EvWorktreeCreated  = "task.worktree_created"
+	EvWorktreeRemoved  = "task.worktree_removed"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

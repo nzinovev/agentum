@@ -22,14 +22,8 @@ func (a *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
 
 // --- Gate actions (§3.2 stop conditions → continue semantics) ---
 //
-// continue / advance / cancel are implemented in lifecycle.go (the runner's
-// flow controls). The remaining gate actions land with Epic 2.
-
-// POST /api/v1/tasks/{id}/invocations/{iid}/approve
-// Final approval → task done + memory commits.
-func (a *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "Epic 2", "POST /tasks/{id}/invocations/{iid}/approve")
-}
+// continue / advance / cancel / approve are implemented in lifecycle.go (the
+// runner's flow controls). The remaining gate actions land with Epic 2.
 
 // POST /api/v1/tasks/{id}/invocations/{iid}/edit
 // Edit-and-approve: the human edits the artifact directly; the edit IS the

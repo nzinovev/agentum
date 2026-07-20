@@ -63,6 +63,54 @@ func (a *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
+// handleInvocationApprove POST /api/v1/tasks/{id}/invocations/{iid}/approve
+// Final approval → task done. Memory commit (Epic 1) is deferred; for now this
+// completes the task and schedules worktree teardown.
+func (a *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) {
+	p, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if d := authz.Can(r.Context(), p, "task:approve", r.PathValue("id")); !d.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+		return
+	}
+	task, err := a.q.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: p.TenantID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
+		return
+	}
+	if engine.TaskState(task.State) != engine.StateAwaitingMemoryCommit {
+		writeError(w, http.StatusConflict, codeIllegalTransition,
+			"approve requires awaiting_memory_commit; task is "+task.State)
+		return
+	}
+	next, err := engine.Next(engine.TaskState(task.State), engine.EventApprove)
+	if err != nil {
+		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
+		return
+	}
+	updated, err := a.q.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+		ID: task.ID, TenantID: p.TenantID, State: string(next),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+	// Schedule teardown; the worker removes the worktree once the task is done.
+	if _, err := a.q.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+		TenantID: p.TenantID, UserID: p.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+	}); err != nil {
+		logUnexpected(a.log, err, "EnqueueJob(teardown)")
+		// Non-fatal: the task is done; teardown can be retried/forced manually.
+	}
+	writeJSON(w, http.StatusOK, toTaskResponse(updated))
+}
+
 // handleCancelTask POST /api/v1/tasks/{id}/cancel
 // Cancel any non-terminal task: abort the in-flight run (if any) via the cancel
 // registry, then transition to cancelled. Non-destructive — session-id resume
@@ -110,6 +158,12 @@ func (a *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		logUnexpected(a.log, err, "UpdateTaskState")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
+	}
+	// Schedule teardown; the worker removes the worktree once the run has aborted.
+	if _, err := a.q.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+		TenantID: p.TenantID, UserID: p.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+	}); err != nil {
+		logUnexpected(a.log, err, "EnqueueJob(teardown)")
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }

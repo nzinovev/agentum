@@ -20,11 +20,12 @@ import (
 // fakeStore is an in-memory runner.Store. It holds one task, one project, and a
 // log of stage invocations + events. The task/project are seeded at construct.
 type fakeStore struct {
-	mu          sync.Mutex
-	t           sqlc.Task
-	pr          sqlc.Project
+	mu       sync.Mutex
+	t        sqlc.Task
+	pr       sqlc.Project
 	invocations []sqlc.StageInvocation
 	events      []sqlc.Event
+	enqueued    []string
 }
 
 func newFakeStore(t sqlc.Task, pr sqlc.Project) *fakeStore {
@@ -89,6 +90,13 @@ func (s *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (
 	defer s.mu.Unlock()
 	s.events = append(s.events, sqlc.Event{Type: arg.Type, Payload: arg.Payload})
 	return sqlc.Event{}, nil
+}
+
+func (s *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enqueued = append(s.enqueued, arg.Kind)
+	return sqlc.Job{Kind: arg.Kind}, nil
 }
 
 func (s *fakeStore) taskState() string {
