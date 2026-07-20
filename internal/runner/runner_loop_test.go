@@ -20,9 +20,9 @@ import (
 // fakeStore is an in-memory runner.Store. It holds one task, one project, and a
 // log of stage invocations + events. The task/project are seeded at construct.
 type fakeStore struct {
-	mu       sync.Mutex
-	t        sqlc.Task
-	pr       sqlc.Project
+	mu          sync.Mutex
+	t           sqlc.Task
+	pr          sqlc.Project
 	invocations []sqlc.StageInvocation
 	events      []sqlc.Event
 	enqueued    []string
