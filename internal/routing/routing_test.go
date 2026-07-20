@@ -87,8 +87,10 @@ func TestRender_PriorStages(t *testing.T) {
 func TestRender_Deterministic(t *testing.T) {
 	t.Parallel()
 	// Same input → identical output. The runner caches/prompts rely on this.
-	b := Block{Stage: "s", Gate: "auto", ArtifactDir: "/a", Capabilities: []string{"x"}}
-	if Render(b) != Render(b) {
+	block := Block{Stage: "s", Gate: "auto", ArtifactDir: "/a", Capabilities: []string{"x"}}
+	first := Render(block)
+	second := Render(block)
+	if first != second {
 		t.Error("Render must be deterministic for identical input")
 	}
 }

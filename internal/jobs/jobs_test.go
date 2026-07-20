@@ -16,7 +16,7 @@ import (
 // and lets a test script what ClaimNextJob returns.
 type fakeQueue struct {
 	mu            sync.Mutex
-	claimQ        []sqlc.Job // pending claims, FIFO
+	claimQueue    []sqlc.Job // pending claims, FIFO
 	completed     []int64
 	failed        map[int64]string
 	heartbeats    []int64
@@ -27,45 +27,45 @@ type fakeQueue struct {
 }
 
 func newFakeQueue(jobs ...sqlc.Job) *fakeQueue {
-	return &fakeQueue{claimQ: append([]sqlc.Job{}, jobs...), failed: map[int64]string{}}
+	return &fakeQueue{claimQueue: append([]sqlc.Job{}, jobs...), failed: map[int64]string{}}
 }
 
-func (q *fakeQueue) ClaimNextJob(_ context.Context, _ string) (sqlc.Job, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.claimErr != nil {
-		return sqlc.Job{}, q.claimErr
+func (queue *fakeQueue) ClaimNextJob(_ context.Context, _ string) (sqlc.Job, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.claimErr != nil {
+		return sqlc.Job{}, queue.claimErr
 	}
-	if len(q.claimQ) == 0 {
+	if len(queue.claimQueue) == 0 {
 		return sqlc.Job{}, sql.ErrNoRows
 	}
-	j := q.claimQ[0]
-	q.claimQ = q.claimQ[1:]
-	return j, nil
+	job := queue.claimQueue[0]
+	queue.claimQueue = queue.claimQueue[1:]
+	return job, nil
 }
-func (q *fakeQueue) CompleteJob(_ context.Context, id int64) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.completed = append(q.completed, id)
+func (queue *fakeQueue) CompleteJob(_ context.Context, id int64) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.completed = append(queue.completed, id)
 	return nil
 }
-func (q *fakeQueue) FailJob(_ context.Context, id int64, lastError string) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.failed[id] = lastError
+func (queue *fakeQueue) FailJob(_ context.Context, id int64, lastError string) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.failed[id] = lastError
 	return nil
 }
-func (q *fakeQueue) BumpHeartbeat(_ context.Context, id int64) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.heartbeats = append(q.heartbeats, id)
+func (queue *fakeQueue) BumpHeartbeat(_ context.Context, id int64) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.heartbeats = append(queue.heartbeats, id)
 	return nil
 }
-func (q *fakeQueue) RequeueStaleJobs(_ context.Context, before time.Time) ([]sqlc.Job, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.staleBefore = before
-	q.staleRequeued++
+func (queue *fakeQueue) RequeueStaleJobs(_ context.Context, before time.Time) ([]sqlc.Job, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.staleBefore = before
+	queue.staleRequeued++
 	return nil, nil
 }
 
@@ -76,11 +76,11 @@ type recordingHandler struct {
 	byKind map[string]error // kind → error to return
 }
 
-func (h *recordingHandler) Handle(_ context.Context, job sqlc.Job) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calls = append(h.calls, job.Kind)
-	if err, ok := h.byKind[job.Kind]; ok {
+func (handler *recordingHandler) Handle(_ context.Context, job sqlc.Job) error {
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	handler.calls = append(handler.calls, job.Kind)
+	if err, ok := handler.byKind[job.Kind]; ok {
 		return err
 	}
 	return nil
@@ -93,11 +93,11 @@ func TestWorker_RunsJobsToCompletion(t *testing.T) {
 		sqlc.Job{ID: 2, Kind: "advance", TaskID: "T1"},
 	)
 	handler := &recordingHandler{}
-	w := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
+	worker := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { w.Start(ctx); close(done) }()
+	go func() { worker.Start(ctx); close(done) }()
 
 	waitFor(t, func() bool {
 		handler.mu.Lock()
@@ -122,11 +122,11 @@ func TestWorker_FailsJobOnHandlerError(t *testing.T) {
 	t.Parallel()
 	queue := newFakeQueue(sqlc.Job{ID: 7, Kind: "run", TaskID: "T7"})
 	handler := &recordingHandler{byKind: map[string]error{"run": errors.New("boom")}}
-	w := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
+	worker := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { w.Start(ctx); close(done) }()
+	go func() { worker.Start(ctx); close(done) }()
 
 	waitFor(t, func() bool {
 		queue.mu.Lock()
@@ -156,11 +156,11 @@ func TestWorker_HeartbeatsDuringRun(t *testing.T) {
 
 	// A handler that blocks until released, so the heartbeat has time to fire.
 	blocking := &blockingHandler{started: &started, release: release}
-	w := New(Deps{Store: queue, Handler: blocking, Heartbeat: 5 * time.Millisecond, Poll: time.Millisecond})
+	worker := New(Deps{Store: queue, Handler: blocking, Heartbeat: 5 * time.Millisecond, Poll: time.Millisecond})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { w.Start(ctx); close(done) }()
+	go func() { worker.Start(ctx); close(done) }()
 
 	waitFor(t, started.Load, time.Second, "handler started")
 	// The heartbeat ticker should have bumped at least once while blocked.
@@ -184,9 +184,9 @@ func TestWorker_HeartbeatsDuringRun(t *testing.T) {
 func TestWorker_RecoverRequeuesStale(t *testing.T) {
 	t.Parallel()
 	queue := newFakeQueue()
-	w := New(Deps{Store: queue, Handler: &recordingHandler{}, StaleAfter: 30 * time.Second})
+	worker := New(Deps{Store: queue, Handler: &recordingHandler{}, StaleAfter: 30 * time.Second})
 
-	if err := w.Recover(context.Background()); err != nil {
+	if err := worker.Recover(context.Background()); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
 	queue.mu.Lock()
@@ -206,10 +206,10 @@ type blockingHandler struct {
 	release <-chan struct{}
 }
 
-func (h *blockingHandler) Handle(ctx context.Context, _ sqlc.Job) error {
-	h.started.Store(true)
+func (handler *blockingHandler) Handle(ctx context.Context, _ sqlc.Job) error {
+	handler.started.Store(true)
 	select {
-	case <-h.release:
+	case <-handler.release:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

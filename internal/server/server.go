@@ -34,8 +34,8 @@ type Server struct {
 // New constructs the server and all execution-model dependencies. The worker is
 // not started here — Run starts it after recovery so no job runs before stale
 // ones are reconciled.
-func New(cfg config.Config, log *slog.Logger, st *store.Store) *Server {
-	q := sqlc.New(st.DB)
+func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
+	queries := sqlc.New(dataStore.DB)
 
 	// Operator model override (optional; nil → built-in per-agent defaults).
 	modelsCfg, _ := models.Load() // ErrNoConfig is expected in the common case
@@ -44,8 +44,8 @@ func New(cfg config.Config, log *slog.Logger, st *store.Store) *Server {
 	// adapter, per-task worktrees, and the runner that composes them.
 	packs := pack.NewDirSource(cfg.PacksDir)
 	adapter := agent.NewOpencodeAdapter(cfg.OpencodeBinary)
-	r := runner.New(runner.Deps{
-		Store:     runnerStore{q},
+	runnerInst := runner.New(runner.Deps{
+		Store:     runnerStore{queries},
 		Packs:     packs,
 		Adapter:   adapter,
 		Models:    modelsCfg,
@@ -54,15 +54,15 @@ func New(cfg config.Config, log *slog.Logger, st *store.Store) *Server {
 	})
 
 	worker := jobs.New(jobs.Deps{
-		Store:       jobs.QueueStore{Q: q},
-		Handler:     r,
+		Store:       jobs.QueueStore{Q: queries},
+		Handler:     runnerInst,
 		MaxAttempts: cfg.JobMaxAttempts,
 		Log:         log,
 	})
 
-	a := api.New(q, log, r.Cancels())
+	apiInst := api.New(queries, log, runnerInst.Cancels())
 
-	return &Server{cfg: cfg, log: log, store: st, api: a, runner: r, worker: worker, pool: cfg.WorkerPoolSize}
+	return &Server{cfg: cfg, log: log, store: dataStore, api: apiInst, runner: runnerInst, worker: worker, pool: cfg.WorkerPoolSize}
 }
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
@@ -85,7 +85,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
-	for i := 0; i < s.pool; i++ {
+	for workerIndex := 0; workerIndex < s.pool; workerIndex++ {
 		go s.worker.Start(workerCtx)
 	}
 

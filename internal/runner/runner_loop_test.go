@@ -21,88 +21,88 @@ import (
 // log of stage invocations + events. The task/project are seeded at construct.
 type fakeStore struct {
 	mu          sync.Mutex
-	t           sqlc.Task
-	pr          sqlc.Project
+	task        sqlc.Task
+	project     sqlc.Project
 	invocations []sqlc.StageInvocation
 	events      []sqlc.Event
 	enqueued    []string
 }
 
-func newFakeStore(t sqlc.Task, pr sqlc.Project) *fakeStore {
-	return &fakeStore{t: t, pr: pr}
+func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
+	return &fakeStore{task: task, project: project}
 }
 
-func (s *fakeStore) GetTask(_ context.Context, _ sqlc.GetTaskParams) (sqlc.Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.t, nil
+func (store *fakeStore) GetTask(_ context.Context, _ sqlc.GetTaskParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.task, nil
 }
-func (s *fakeStore) GetProject(_ context.Context, _ sqlc.GetProjectParams) (sqlc.Project, error) {
-	return s.pr, nil
+func (store *fakeStore) GetProject(_ context.Context, _ sqlc.GetProjectParams) (sqlc.Project, error) {
+	return store.project, nil
 }
-func (s *fakeStore) UpdateTaskState(_ context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.t.State = arg.State
-	return s.t, nil
+func (store *fakeStore) UpdateTaskState(_ context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.task.State = arg.State
+	return store.task, nil
 }
-func (s *fakeStore) UpdateTaskStage(_ context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.t.State = arg.State
+func (store *fakeStore) UpdateTaskStage(_ context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.task.State = arg.State
 	if arg.CurrentStage.Valid {
-		s.t.CurrentStage = arg.CurrentStage
+		store.task.CurrentStage = arg.CurrentStage
 	}
-	return s.t, nil
+	return store.task, nil
 }
-func (s *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	inv := sqlc.StageInvocation{
-		ID: fmt.Sprintf("inv-%d", len(s.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
+func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	invocation := sqlc.StageInvocation{
+		ID: fmt.Sprintf("inv-%d", len(store.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
 		TaskID: arg.TaskID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
 	}
-	s.invocations = append(s.invocations, inv)
-	return inv, nil
+	store.invocations = append(store.invocations, invocation)
+	return invocation, nil
 }
-func (s *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.FinishStageInvocationParams) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.invocations {
-		if s.invocations[i].ID == arg.ID {
-			s.invocations[i].SessionID = arg.SessionID
-			s.invocations[i].StopReason = arg.StopReason
+func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.FinishStageInvocationParams) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for invocationIdx := range store.invocations {
+		if store.invocations[invocationIdx].ID == arg.ID {
+			store.invocations[invocationIdx].SessionID = arg.SessionID
+			store.invocations[invocationIdx].StopReason = arg.StopReason
 			return nil
 		}
 	}
 	return nil
 }
-func (s *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.invocations) == 0 {
+func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.invocations) == 0 {
 		return sqlc.StageInvocation{}, sql.ErrNoRows
 	}
-	return s.invocations[len(s.invocations)-1], nil
+	return store.invocations[len(store.invocations)-1], nil
 }
-func (s *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.events = append(s.events, sqlc.Event{Type: arg.Type, Payload: arg.Payload})
+func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.events = append(store.events, sqlc.Event{Type: arg.Type, Payload: arg.Payload})
 	return sqlc.Event{}, nil
 }
 
-func (s *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.enqueued = append(s.enqueued, arg.Kind)
+func (store *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.enqueued = append(store.enqueued, arg.Kind)
 	return sqlc.Job{Kind: arg.Kind}, nil
 }
 
-func (s *fakeStore) taskState() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.t.State
+func (store *fakeStore) taskState() string {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.task.State
 }
 
 // scriptAdapter emits a scripted Result per stage. The map stageID→ResultJSON
@@ -111,26 +111,26 @@ type scriptAdapter struct {
 	scripts map[string]agent.ResultJSON
 }
 
-func (a *scriptAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
-	ch := make(chan agent.Event, 2)
+func (adapter *scriptAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
+	eventCh := make(chan agent.Event, 2)
 	go func() {
-		defer close(ch)
-		rj, ok := a.scripts[stageOf(inv)]
+		defer close(eventCh)
+		scripted, ok := adapter.scripts[stageOf(inv)]
 		if !ok {
-			ch <- agent.Event{Kind: agent.EventError, Err: fmt.Errorf("no script for stage %q", stageOf(inv))}
+			eventCh <- agent.Event{Kind: agent.EventError, Err: fmt.Errorf("no script for stage %q", stageOf(inv))}
 			return
 		}
-		ch <- agent.Event{Kind: agent.EventStream, Chunk: "working..."}
-		ch <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{SessionID: "sess-" + stageOf(inv), ResultJSON: rj}}
+		eventCh <- agent.Event{Kind: agent.EventStream, Chunk: "working..."}
+		eventCh <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{SessionID: "sess-" + stageOf(inv), ResultJSON: scripted}}
 	}()
-	return ch, nil
+	return eventCh, nil
 }
 
 // stageOf recovers the stage id from the routing block the runner rendered.
 func stageOf(inv agent.Invocation) string {
 	for _, line := range splitLines(inv.RoutingBlock) {
-		if mid := substringAfter(line, "stage **"); mid != "" {
-			return substringBefore(mid, "**")
+		if middle := substringAfter(line, "stage **"); middle != "" {
+			return substringBefore(middle, "**")
 		}
 	}
 	return ""
@@ -155,7 +155,7 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	}
 
 	// Pack: spec(human_approval)→impl(auto)→done(terminal).
-	pk := scriptPack("spec", map[string]pack.Stage{
+	taskPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "impl"}}},
 		"impl": {Gate: pack.GateAuto, Prompt: "impl.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {}, // terminal marker
@@ -170,37 +170,37 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 		"impl": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
 
-	src := &staticSource{pk: pk}
-	r := New(Deps{Store: store, Packs: src, Adapter: adapter, AgentName: "opencode"})
+	src := &staticSource{pk: taskPack}
+	runner := New(Deps{Store: store, Packs: src, Adapter: adapter, AgentName: "opencode"})
 
 	// run: spec completes but the human_approval gate pauses.
-	if err := r.Handle(t.Context(), job("run", "T1", "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", "T1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
 		t.Fatalf("after spec run, state = %q, want paused_gate", got)
 	}
-	if n := len(store.invocations); n != 1 {
-		t.Fatalf("expected 1 invocation after run, got %d", n)
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("expected 1 invocation after run, got %d", count)
 	}
 
 	// advance: gate passed → impl auto-advances → done terminal → final gate.
-	if err := r.Handle(t.Context(), job("advance", "T1", "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("advance", "T1", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	if got := store.taskState(); got != "awaiting_memory_commit" {
 		t.Fatalf("after advance, state = %q, want awaiting_memory_commit", got)
 	}
 	// spec + impl invoked; done is a terminal marker (no invocation).
-	if n := len(store.invocations); n != 2 {
-		t.Fatalf("expected 2 invocations (spec+impl), got %d", n)
+	if count := len(store.invocations); count != 2 {
+		t.Fatalf("expected 2 invocations (spec+impl), got %d", count)
 	}
 	// The task recorded it reached the final stage.
 	store.mu.Lock()
-	cur := store.t.CurrentStage.String
+	currentStage := store.task.CurrentStage.String
 	store.mu.Unlock()
-	if cur != "done" {
-		t.Fatalf("current_stage = %q, want done", cur)
+	if currentStage != "done" {
+		t.Fatalf("current_stage = %q, want done", currentStage)
 	}
 }
 
@@ -210,7 +210,7 @@ func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	pk := scriptPack("spec", map[string]pack.Stage{
+	taskPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
@@ -220,9 +220,9 @@ func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusBlocked, OpenQuestions: []string{"which framework?"}},
 	}}
-	r := New(Deps{Store: store, Packs: &staticSource{pk: pk}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
 
-	if err := r.Handle(t.Context(), job("run", "T2", "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", "T2", "tn", "us")); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_open_questions" {
@@ -236,7 +236,7 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	pk := scriptPack("spec", map[string]pack.Stage{
+	taskPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
@@ -248,14 +248,14 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 	adapter := &slowAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
-	r := New(Deps{Store: store, Packs: &staticSource{pk: pk}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
 
 	done := make(chan error, 1)
-	go func() { done <- r.Handle(t.Context(), job("run", "T3", "tn", "us")) }()
+	go func() { done <- runner.Handle(t.Context(), job("run", "T3", "tn", "us")) }()
 
 	// Wait for the registry to register the run, then cancel it.
-	waitForRegistered(r.Cancels(), "T3", 2*time.Second)
-	if !r.Cancels().Cancel("T3") {
+	waitForRegistered(runner.Cancels(), "T3", 2*time.Second)
+	if !runner.Cancels().Cancel("T3") {
 		t.Fatal("Cancel returned false; expected an in-flight run")
 	}
 	select {
@@ -278,8 +278,8 @@ func job(kind, taskID, tenant, user string) sqlc.Job {
 // staticSource serves a single fixed pack for any ref.
 type staticSource struct{ pk *pack.Pack }
 
-func (s *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error) {
-	return s.pk, nil
+func (src *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error) {
+	return src.pk, nil
 }
 
 // slowAdapter emits its result only after a release signal; used to test cancel.
@@ -287,23 +287,23 @@ type slowAdapter struct {
 	scripts map[string]agent.ResultJSON
 }
 
-func (a *slowAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
-	ch := make(chan agent.Event, 2)
+func (adapter *slowAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
+	eventCh := make(chan agent.Event, 2)
 	go func() {
-		defer close(ch)
+		defer close(eventCh)
 		// Block until ctx is cancelled (the cancel handler aborts the run).
 		<-ctx.Done()
-		ch <- agent.Event{Kind: agent.EventError, Err: fmt.Errorf("cancelled: %w", ctx.Err())}
+		eventCh <- agent.Event{Kind: agent.EventError, Err: fmt.Errorf("cancelled: %w", ctx.Err())}
 	}()
-	return ch, nil
+	return eventCh, nil
 }
 
-func waitForRegistered(reg *CancelRegistry, taskID string, timeout time.Duration) {
+func waitForRegistered(registry *CancelRegistry, taskID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		reg.mu.Lock()
-		_, ok := reg.m[taskID]
-		reg.mu.Unlock()
+		registry.mu.Lock()
+		_, ok := registry.byTask[taskID]
+		registry.mu.Unlock()
 		if ok {
 			return
 		}
@@ -337,35 +337,35 @@ func initRepoWithCommit(dir string) error {
 }
 
 // tiny string helpers for parsing the stage id out of the rendered routing block.
-func splitLines(s string) []string {
-	var out []string
+func splitLines(text string) []string {
+	var lines []string
 	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\n' {
+			lines = append(lines, text[start:index])
+			start = index + 1
 		}
 	}
-	return append(out, s[start:])
+	return append(lines, text[start:])
 }
-func substringAfter(s, sep string) string {
-	i := indexOf(s, sep)
-	if i < 0 {
+func substringAfter(text, separator string) string {
+	index := indexOf(text, separator)
+	if index < 0 {
 		return ""
 	}
-	return s[i+len(sep):]
+	return text[index+len(separator):]
 }
-func substringBefore(s, sep string) string {
-	i := indexOf(s, sep)
-	if i < 0 {
-		return s
+func substringBefore(text, separator string) string {
+	index := indexOf(text, separator)
+	if index < 0 {
+		return text
 	}
-	return s[:i]
+	return text[:index]
 }
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
+func indexOf(text, substr string) int {
+	for index := 0; index+len(substr) <= len(text); index++ {
+		if text[index:index+len(substr)] == substr {
+			return index
 		}
 	}
 	return -1

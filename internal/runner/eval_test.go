@@ -20,158 +20,158 @@ func TestEvaluate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		in       StageInput
-		wantAct  Action
-		wantEvt  engine.TaskEvent // empty for ActionAdvance
-		wantRS   string           // stop_reason
-		wantNext string           // next stage (ActionAdvance)
-		wantErr  bool
+		name       string
+		input      StageInput
+		wantAction Action
+		wantEvent  engine.TaskEvent // empty for ActionAdvance
+		wantStop   string           // stop_reason
+		wantNext   string           // next stage (ActionAdvance)
+		wantErr    bool
 	}{
 		{
 			name: "blocked with open questions → pause for answers (resume)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusBlocked, OpenQuestions: []string{"which DB?"}},
 				Stage:  nextStage("impl"),
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopOpenQ, wantRS: "open_questions",
+			wantAction: ActionPause, wantEvent: engine.EventStopOpenQ, wantStop: "open_questions",
 		},
 		{
 			name: "blocked without open questions → gate review (strict default)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusBlocked},
 				Stage:  nextStage("impl"),
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopGate, wantRS: "gate",
+			wantAction: ActionPause, wantEvent: engine.EventStopGate, wantStop: "gate",
 		},
 		{
 			name: "complete + auto gate → advance to next stage",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  nextStage("impl"),
 			},
-			wantAct: ActionAdvance, wantNext: "impl",
+			wantAction: ActionAdvance, wantNext: "impl",
 		},
 		{
 			name: "complete + auto_if_clean + clean → advance",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  pack.Stage{Gate: pack.GateAutoIfClean, Transitions: []pack.Transition{{To: "review"}}},
 				Clean:  true,
 			},
-			wantAct: ActionAdvance, wantNext: "review",
+			wantAction: ActionAdvance, wantNext: "review",
 		},
 		{
 			name: "complete + auto_if_clean + dirty → gate review",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  pack.Stage{Gate: pack.GateAutoIfClean, Transitions: []pack.Transition{{To: "review"}}},
 				Clean:  false,
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopGate, wantRS: "gate",
+			wantAction: ActionPause, wantEvent: engine.EventStopGate, wantStop: "gate",
 		},
 		{
 			name: "complete + human_approval → gate review",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  pack.Stage{Gate: pack.GateHumanApproval, Transitions: []pack.Transition{{To: "review"}}},
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopGate, wantRS: "gate",
+			wantAction: ActionPause, wantEvent: engine.EventStopGate, wantStop: "gate",
 		},
 		{
 			name: "complete + auto_on_approval → gate review (advances on explicit continue)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  pack.Stage{Gate: pack.GateAutoOnApproval, Transitions: []pack.Transition{{To: "review"}}},
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopGate, wantRS: "gate",
+			wantAction: ActionPause, wantEvent: engine.EventStopGate, wantStop: "gate",
 		},
 		{
 			name: "complete + terminal stage → reach final gate",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  terminalStage(pack.GateHumanFinal),
 			},
-			wantAct: ActionFinal, wantEvt: engine.EventReachFinalGate,
+			wantAction: ActionFinal, wantEvent: engine.EventReachFinalGate,
 		},
 		{
 			name: "partial + terminal stage → reach final gate (partial still finishes)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusPartial},
 				Stage:  terminalStage(pack.GateHumanFinal),
 			},
-			wantAct: ActionFinal, wantEvt: engine.EventReachFinalGate,
+			wantAction: ActionFinal, wantEvent: engine.EventReachFinalGate,
 		},
 		{
 			name: "partial + auto gate → advance (operator chose auto; respect it)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusPartial},
 				Stage:  nextStage("review"),
 			},
-			wantAct: ActionAdvance, wantNext: "review",
+			wantAction: ActionAdvance, wantNext: "review",
 		},
 		{
 			name: "adapter error → retryable pause (paused_user_stop shape, §5.3)",
-			in: StageInput{
+			input: StageInput{
 				Result:       &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:        nextStage("impl"),
 				AdapterError: true,
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopUser, wantRS: "adapter_error",
+			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "adapter_error",
 		},
 		{
 			name: "parse error → retryable pause",
-			in: StageInput{
+			input: StageInput{
 				Result:     &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:      nextStage("impl"),
 				ParseError: true,
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopUser, wantRS: "parse_error",
+			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "parse_error",
 		},
 		{
 			name: "adapter error takes precedence over a complete result",
-			in: StageInput{
+			input: StageInput{
 				Result:       &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:        nextStage("impl"),
 				AdapterError: true, ParseError: true,
 			},
-			wantAct: ActionPause, wantEvt: engine.EventStopUser, wantRS: "adapter_error",
+			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "adapter_error",
 		},
 		{
 			name:    "no result and no error → programming error",
-			in:      StageInput{Stage: nextStage("impl")},
+			input:   StageInput{Stage: nextStage("impl")},
 			wantErr: true,
 		},
 		{
 			name: "advance on a stage with no transitions → error (guard against bad pack)",
-			in: StageInput{
+			input: StageInput{
 				Result: &agent.ResultJSON{Status: agent.StatusComplete},
 				Stage:  pack.Stage{Gate: pack.GateAuto}, // terminal, but auto gate
 			},
 			// Terminal + complete returns ActionFinal first, so this shouldn't
-			// reach advance(). Construct the case directly via a non-terminal
+			// reach advance().Construct the case directly via a non-terminal
 			// marker: covered by the explicit advance() unit test below.
-			wantAct: ActionFinal, wantEvt: engine.EventReachFinalGate,
+			wantAction: ActionFinal, wantEvent: engine.EventReachFinalGate,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Evaluate(tc.in)
+			got, err := Evaluate(tc.input)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Evaluate err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
 				return
 			}
-			if got.Action != tc.wantAct {
-				t.Errorf("Action = %v, want %v", got.Action, tc.wantAct)
+			if got.Action != tc.wantAction {
+				t.Errorf("Action = %v, want %v", got.Action, tc.wantAction)
 			}
-			if got.FSMEvent != tc.wantEvt {
-				t.Errorf("FSMEvent = %q, want %q", got.FSMEvent, tc.wantEvt)
+			if got.FSMEvent != tc.wantEvent {
+				t.Errorf("FSMEvent = %q, want %q", got.FSMEvent, tc.wantEvent)
 			}
-			if got.StopReason != tc.wantRS {
-				t.Errorf("StopReason = %q, want %q", got.StopReason, tc.wantRS)
+			if got.StopReason != tc.wantStop {
+				t.Errorf("StopReason = %q, want %q", got.StopReason, tc.wantStop)
 			}
 			if got.NextStage != tc.wantNext {
 				t.Errorf("NextStage = %q, want %q", got.NextStage, tc.wantNext)
@@ -204,15 +204,15 @@ func TestEvaluate_StopReasonsAreDistinct(t *testing.T) {
 		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: nextStage("i"), AdapterError: true},
 		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: nextStage("i"), ParseError: true},
 	}
-	for _, c := range cases {
-		d, _ := Evaluate(c)
-		if d.StopReason != "" {
-			want[d.StopReason] = true
+	for _, caseInput := range cases {
+		decision, _ := Evaluate(caseInput)
+		if decision.StopReason != "" {
+			want[decision.StopReason] = true
 		}
 	}
-	for rs, seen := range want {
+	for reason, seen := range want {
 		if !seen {
-			t.Errorf("stop_reason %q was never produced by the evaluator", rs)
+			t.Errorf("stop_reason %q was never produced by the evaluator", reason)
 		}
 	}
 }

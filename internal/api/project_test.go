@@ -75,6 +75,6 @@ type repoSetupError struct {
 	err  error
 }
 
-func (e *repoSetupError) Error() string {
-	return "git " + e.args[0] + ": " + e.err.Error() + " (" + string(e.out) + ")"
+func (setupErr *repoSetupError) Error() string {
+	return "git " + setupErr.args[0] + ": " + setupErr.err.Error() + " (" + string(setupErr.out) + ")"
 }

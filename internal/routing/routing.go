@@ -9,11 +9,17 @@
 // the preamble regardless of pack or agent. Memory and capabilities sections
 // are inert stubs here — their renderers slot in when Epic 1 / Epic 6 land,
 // with no change to the runner.
+//
+// The block text lives in template.md next to this file (embedded at build)
+// so the prompt can be edited without touching Go; the contract stays in code
+// only via the Block fields the runner fills in.
 package routing
 
 import (
+	_ "embed"
 	"fmt"
 	"strings"
+	"text/template"
 )
 
 // Block is the input to Render: the per-invocation context the runner assembles.
@@ -43,59 +49,32 @@ type PriorStage struct {
 	Path  string // absolute path to that stage's result.json
 }
 
+// templateText is the routing-block markdown. Embedded at build so the binary
+// stays self-contained; editing the file requires a recompile, which keeps the
+// orchestrator-owned result.json contract versioned with the code that depends
+// on it.
+//
+//go:embed template.md
+var templateText string
+
+// blockTemplate is parsed once at package init. Must panics if the template is
+// malformed — that is a compile-time-ish bug we want to surface immediately,
+// not a runtime failure path for Render.
+var blockTemplate = template.Must(template.New("routing").
+	Funcs(template.FuncMap{"join": strings.Join}).
+	Parse(templateText))
+
 // Render produces the markdown routing block. It is deterministic and pure;
 // the runner prepends it to the role-pure prompt from the pack.
-func Render(b Block) string {
-	var sb strings.Builder
-	fmt.Fprintln(&sb, "# Agentum routing block")
-	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "You are running as stage **%s** (gate: %s) in task %s on project %s.\n",
-		b.Stage, b.Gate, b.TaskID, b.ProjectName)
-	fmt.Fprintln(&sb)
-
-	// Orchestrator-owned result.json contract — identical for every pack/agent.
-	fmt.Fprintln(&sb, "## Your output contract (REQUIRED)")
-	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "Write your structured result to:\n  %s/result.json\n", b.ArtifactDir)
-	fmt.Fprintln(&sb, "This file is the orchestrator's signal to advance, pause, or gate. It MUST be")
-	fmt.Fprintln(&sb, "valid JSON with at minimum:")
-	fmt.Fprintln(&sb, "- `schema_version`: \"1\"")
-	fmt.Fprintln(&sb, "- `status`: \"complete\" | \"partial\" | \"blocked\"")
-	fmt.Fprintln(&sb, "Optional fields (default empty): `summary`, `open_questions[]`, `artifacts[]`,")
-	fmt.Fprintln(&sb, "`memory_writes[]`, `edit_targets[]`, `notes`.")
-	fmt.Fprintln(&sb, "If you cannot complete, set `status: \"blocked\"` and list what you need in")
-	fmt.Fprintln(&sb, "`open_questions`. Unknown fields are ignored (forward-compatible).")
-	fmt.Fprintln(&sb)
-
-	// Memory section — inert stub until Epic 1.
-	fmt.Fprintln(&sb, "## Memory (project decisions, most recent first)")
-	fmt.Fprintln(&sb)
-	if strings.TrimSpace(b.Memory) != "" {
-		fmt.Fprintln(&sb, b.Memory)
-	} else {
-		fmt.Fprintln(&sb, "_No project decisions injected yet._")
+//
+// Execute against a strings.Builder cannot fail on the write side (Builder's
+// Writer contract never errors), and a Block-shape mismatch would have been
+// caught at parse time; the panic surfaces any template-walk bug rather than
+// silently emitting a partial block.
+func Render(block Block) string {
+	var builder strings.Builder
+	if err := blockTemplate.Execute(&builder, block); err != nil {
+		panic(fmt.Sprintf("routing: execute template: %v", err))
 	}
-	fmt.Fprintln(&sb)
-
-	// Capabilities section — inert stub until Epic 6.
-	fmt.Fprintln(&sb, "## Capabilities available")
-	fmt.Fprintln(&sb)
-	if len(b.Capabilities) > 0 {
-		fmt.Fprintf(&sb, "Granted: %s\n", strings.Join(b.Capabilities, ", "))
-	} else {
-		fmt.Fprintln(&sb, "_No capabilities declared (agent uses its native defaults)._")
-	}
-	fmt.Fprintln(&sb)
-
-	// Prior stage artifacts — filesystem-as-bus cross-references.
-	if len(b.PriorStages) > 0 {
-		fmt.Fprintln(&sb, "## Prior stage artifacts")
-		fmt.Fprintln(&sb)
-		for _, ps := range b.PriorStages {
-			fmt.Fprintf(&sb, "- **%s**: %s\n", ps.Stage, ps.Path)
-		}
-		fmt.Fprintln(&sb)
-	}
-
-	return sb.String()
+	return builder.String()
 }

@@ -42,18 +42,18 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func getenv(k, d string) string {
-	if v, ok := os.LookupEnv(k); ok {
-		return v
+func getenv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
 	}
-	return d
+	return fallback
 }
 
-func getenvInt(k string, d int) int {
-	if v, ok := os.LookupEnv(k); ok {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+func getenvInt(key string, fallback int) int {
+	if rawValue, ok := os.LookupEnv(key); ok {
+		if parsed, err := strconv.Atoi(rawValue); err == nil {
+			return parsed
 		}
 	}
-	return d
+	return fallback
 }

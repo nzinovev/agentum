@@ -75,34 +75,34 @@ type StageInput struct {
 // Evaluate maps a stage's outcome to a Decision. It is pure and table-tested.
 // The mapping follows 04 §7.4; error/parse/timeout outcomes reuse the
 // paused_user_stop shape (per §5.3) rather than introducing a new FSM state.
-func Evaluate(in StageInput) (Decision, error) {
+func Evaluate(input StageInput) (Decision, error) {
 	// Adapter error: the run itself failed. Retryable stop-point, not task
 	// failure — the user retries (fresh invocation; there is no session to
 	// resume from a crashed run).
-	if in.AdapterError {
+	if input.AdapterError {
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "adapter_error"}, nil
 	}
 	// Parse error: the agent ran but result.json was missing or invalid. Same
 	// retryable shape; the user reviews the worktree and retries.
-	if in.ParseError {
+	if input.ParseError {
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "parse_error"}, nil
 	}
-	if in.Result == nil {
+	if input.Result == nil {
 		// Defensive: no error flag and no result is a programming error.
 		return Decision{}, fmt.Errorf("runner: evaluate called with neither result nor error")
 	}
 
 	// Blocked with open questions → pause for human answers (session-id resume).
-	if in.Result.Status == "blocked" && len(in.Result.OpenQuestions) > 0 {
+	if input.Result.Status == "blocked" && len(input.Result.OpenQuestions) > 0 {
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopOpenQ, StopReason: "open_questions"}, nil
 	}
 
-	complete := in.Result.Status == "complete" || in.Result.Status == "partial"
+	complete := input.Result.Status == "complete" || input.Result.Status == "partial"
 
 	// A terminal stage (no transitions) that completes reaches the final gate,
 	// regardless of its declared gate value — the awaiting_memory_commit state
 	// IS the final approval.
-	if complete && in.Stage.Terminal() {
+	if complete && input.Stage.Terminal() {
 		return Decision{Action: ActionFinal, FSMEvent: engine.EventReachFinalGate}, nil
 	}
 
@@ -113,13 +113,13 @@ func Evaluate(in StageInput) (Decision, error) {
 	}
 
 	// Complete, non-terminal: route by the stage's gate.
-	switch in.Stage.Gate {
+	switch input.Stage.Gate {
 	case pack.GateAuto:
-		return advance(in)
+		return advance(input)
 
 	case pack.GateAutoIfClean:
-		if in.Clean {
-			return advance(in)
+		if input.Clean {
+			return advance(input)
 		}
 		// Not clean: the agent touched files beyond its declared edit_targets,
 		// so surface for review even though the gate would otherwise auto-pass.
@@ -134,16 +134,16 @@ func Evaluate(in StageInput) (Decision, error) {
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopGate, StopReason: "gate"}, nil
 
 	default:
-		return Decision{}, fmt.Errorf("runner: unknown gate %q on stage %q", in.Stage.Gate, in.StageID)
+		return Decision{}, fmt.Errorf("runner: unknown gate %q on stage %q", input.Stage.Gate, input.StageID)
 	}
 }
 
 // advance builds an ActionAdvance decision, reading the next stage from the
 // stage's first transition. Conditions (Epic 4) are not evaluated here — the
 // first transition wins at MVP.
-func advance(in StageInput) (Decision, error) {
-	if len(in.Stage.Transitions) == 0 {
-		return Decision{}, fmt.Errorf("runner: stage %q has no transition to advance along", in.StageID)
+func advance(input StageInput) (Decision, error) {
+	if len(input.Stage.Transitions) == 0 {
+		return Decision{}, fmt.Errorf("runner: stage %q has no transition to advance along", input.StageID)
 	}
-	return Decision{Action: ActionAdvance, NextStage: in.Stage.Transitions[0].To}, nil
+	return Decision{Action: ActionAdvance, NextStage: input.Stage.Transitions[0].To}, nil
 }

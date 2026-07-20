@@ -31,41 +31,41 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	mgr := New()
+	manager := New()
 	taskID := "task-001"
 
 	// First create: makes the worktree.
-	wt, err := mgr.Create(t.Context(), repo, taskID)
+	worktree, err := manager.Create(t.Context(), repo, taskID)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if wt.Branch != "agentum/task-001" {
-		t.Errorf("Branch = %q", wt.Branch)
+	if worktree.Branch != "agentum/task-001" {
+		t.Errorf("Branch = %q", worktree.Branch)
 	}
-	if !isWorktree(wt.Root) {
-		t.Fatalf("worktree not created at %s", wt.Root)
+	if !isWorktree(worktree.Root) {
+		t.Fatalf("worktree not created at %s", worktree.Root)
 	}
 	// The branch is checked out in the worktree.
-	if out, err := git(t.Context(), wt.Root, "rev-parse", "--abbrev-ref", "HEAD"); err != nil {
+	if out, err := git(t.Context(), worktree.Root, "rev-parse", "--abbrev-ref", "HEAD"); err != nil {
 		t.Fatalf("rev-parse HEAD: %v (%s)", err, out)
 	} else if got := string(out); got[:len("agentum/task-001")] != "agentum/task-001" {
 		t.Errorf("HEAD branch = %q", got)
 	}
 
 	// Second create: idempotent — returns the existing worktree, no error.
-	wt2, err := mgr.Create(t.Context(), repo, taskID)
+	secondWorktree, err := manager.Create(t.Context(), repo, taskID)
 	if err != nil {
 		t.Fatalf("idempotent Create: %v", err)
 	}
-	if wt2.Root != wt.Root {
+	if secondWorktree.Root != worktree.Root {
 		t.Error("idempotent Create returned a different path")
 	}
 
 	// Remove: tears down worktree + branch.
-	if err := mgr.Remove(t.Context(), repo, taskID); err != nil {
+	if err := manager.Remove(t.Context(), repo, taskID); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if isWorktree(wt.Root) {
+	if isWorktree(worktree.Root) {
 		t.Error("worktree still present after Remove")
 	}
 	// Branch gone.
@@ -76,7 +76,7 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 
 	// Remove again: no-op, no error.
-	if err := mgr.Remove(t.Context(), repo, taskID); err != nil {
+	if err := manager.Remove(t.Context(), repo, taskID); err != nil {
 		t.Errorf("second Remove should be a no-op, got: %v", err)
 	}
 }
@@ -87,9 +87,9 @@ func TestManager_EnsureIgnored(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	mgr := New()
+	manager := New()
 
-	if _, err := mgr.Create(t.Context(), repo, "task-002"); err != nil {
+	if _, err := manager.Create(t.Context(), repo, "task-002"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -150,6 +150,6 @@ type setupError struct {
 	err  error
 }
 
-func (e *setupError) Error() string {
-	return "git " + e.args[0] + ": " + e.err.Error() + " (" + string(e.out) + ")"
+func (setupErr *setupError) Error() string {
+	return "git " + setupErr.args[0] + ": " + setupErr.err.Error() + " (" + string(setupErr.out) + ")"
 }

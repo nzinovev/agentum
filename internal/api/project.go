@@ -24,18 +24,18 @@ type projectResponse struct {
 	UpdatedAt       string   `json:"updated_at"`
 }
 
-func toProjectResponse(p sqlc.Project) projectResponse {
-	rel := p.RelatedProjects
-	if rel == nil {
-		rel = []string{}
+func toProjectResponse(project sqlc.Project) projectResponse {
+	related := project.RelatedProjects
+	if related == nil {
+		related = []string{}
 	}
 	return projectResponse{
-		ID:              p.ID,
-		RepoPath:        p.RepoPath,
-		Name:            p.Name,
-		RelatedProjects: rel,
-		CreatedAt:       p.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:       p.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		ID:              project.ID,
+		RepoPath:        project.RepoPath,
+		Name:            project.Name,
+		RelatedProjects: related,
+		CreatedAt:       project.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:       project.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
@@ -49,9 +49,9 @@ func validateGitRepo(path string) error {
 	if err != nil {
 		// Surface git's own stderr when present — it usually names the real
 		// problem (not a repo, no such path). Trim so the API message stays tidy.
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
 				return errors.New(msg)
 			}
 		}
@@ -69,13 +69,13 @@ func validateGitRepo(path string) error {
 // Body: {repo_path, name, related_projects?}. tenant/user come from the
 // Principal. Idempotent: re-registering an existing repo_path updates name and
 // the related set rather than failing.
-func (a *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "project:create", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "project:create", ""); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -103,15 +103,15 @@ func (a *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proj, err := a.q.CreateProject(r.Context(), sqlc.CreateProjectParams{
-		TenantID:        p.TenantID,
-		UserID:          p.UserID,
+	proj, err := api.queries.CreateProject(r.Context(), sqlc.CreateProjectParams{
+		TenantID:        principal.TenantID,
+		UserID:          principal.UserID,
 		RepoPath:        req.RepoPath,
 		Name:            req.Name,
 		RelatedProjects: req.RelatedProjects,
 	})
 	if err != nil {
-		logUnexpected(a.log, err, "CreateProject")
+		logUnexpected(api.log, err, "CreateProject")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
@@ -119,23 +119,23 @@ func (a *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetProject GET /api/v1/projects/{id}
-func (a *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "project:read", r.PathValue("id")); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "project:read", r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
-	proj, err := a.q.GetProject(r.Context(), sqlc.GetProjectParams{ID: r.PathValue("id"), TenantID: p.TenantID})
+	proj, err := api.queries.GetProject(r.Context(), sqlc.GetProjectParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, codeNotFound, "project not found")
 			return
 		}
-		logUnexpected(a.log, err, "GetProject")
+		logUnexpected(api.log, err, "GetProject")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
@@ -143,32 +143,32 @@ func (a *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListProjects GET /api/v1/projects?limit=...&offset=...
-func (a *API) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "project:list", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "project:list", ""); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
 	limit := clampInt(queryInt(r, "limit", 50), 1, 200)
 	offset := clampInt(queryInt(r, "offset", 0), 0, 10000)
 
-	projs, err := a.q.ListProjects(r.Context(), sqlc.ListProjectsParams{
-		TenantID: p.TenantID,
+	projs, err := api.queries.ListProjects(r.Context(), sqlc.ListProjectsParams{
+		TenantID: principal.TenantID,
 		Limit:    int32(limit),
 		Offset:   int32(offset),
 	})
 	if err != nil {
-		logUnexpected(a.log, err, "ListProjects")
+		logUnexpected(api.log, err, "ListProjects")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	resp := make([]projectResponse, 0, len(projs))
-	for _, pr := range projs {
-		resp = append(resp, toProjectResponse(pr))
+	for _, project := range projs {
+		resp = append(resp, toProjectResponse(project))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

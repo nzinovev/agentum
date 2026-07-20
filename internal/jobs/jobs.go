@@ -44,34 +44,34 @@ type QueueStore struct {
 	Q *sqlc.Queries
 }
 
-func (s QueueStore) ClaimNextJob(ctx context.Context, workerID string) (sqlc.Job, error) {
-	return s.Q.ClaimNextJob(ctx, nullStr(workerID))
+func (queue QueueStore) ClaimNextJob(ctx context.Context, workerID string) (sqlc.Job, error) {
+	return queue.Q.ClaimNextJob(ctx, nullStr(workerID))
 }
 
-func (s QueueStore) CompleteJob(ctx context.Context, id int64) error {
-	return s.Q.CompleteJob(ctx, id)
+func (queue QueueStore) CompleteJob(ctx context.Context, id int64) error {
+	return queue.Q.CompleteJob(ctx, id)
 }
 
-func (s QueueStore) FailJob(ctx context.Context, id int64, lastError string) error {
-	return s.Q.FailJob(ctx, sqlc.FailJobParams{ID: id, LastError: nullStr(lastError)})
+func (queue QueueStore) FailJob(ctx context.Context, id int64, lastError string) error {
+	return queue.Q.FailJob(ctx, sqlc.FailJobParams{ID: id, LastError: nullStr(lastError)})
 }
 
-func (s QueueStore) BumpHeartbeat(ctx context.Context, id int64) error {
-	return s.Q.BumpHeartbeat(ctx, id)
+func (queue QueueStore) BumpHeartbeat(ctx context.Context, id int64) error {
+	return queue.Q.BumpHeartbeat(ctx, id)
 }
 
-func (s QueueStore) RequeueStaleJobs(ctx context.Context, before time.Time) ([]sqlc.Job, error) {
-	return s.Q.RequeueStaleJobs(ctx, sql.NullTime{Time: before, Valid: true})
+func (queue QueueStore) RequeueStaleJobs(ctx context.Context, before time.Time) ([]sqlc.Job, error) {
+	return queue.Q.RequeueStaleJobs(ctx, sql.NullTime{Time: before, Valid: true})
 }
 
-func nullStr(s string) sql.NullString {
-	return sql.NullString{String: s, Valid: s != ""}
+func nullStr(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
 }
 
 // Enqueuer inserts a pending job. Used by HTTP handlers; kept in this package so
 // the queue's write surface is named in one place.
 type Enqueuer interface {
-	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
+	EnqueueJob(ctx context.Context, params sqlc.EnqueueJobParams) (sqlc.Job, error)
 }
 
 // Defaults for the worker knobs. Tunable via Deps; these match 04 §7.5.
@@ -109,45 +109,45 @@ type Deps struct {
 }
 
 // New builds a Worker with sensible defaults for unset fields.
-func New(d Deps) *Worker {
-	wid := d.WorkerID
+func New(deps Deps) *Worker {
+	wid := deps.WorkerID
 	if wid == "" {
 		wid = defaultWorkerID()
 	}
-	log := d.Log
+	log := deps.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	max := d.MaxAttempts
-	if max == 0 {
-		max = DefaultMaxAttempts
+	maxAttempts := deps.MaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = DefaultMaxAttempts
 	}
 	return &Worker{
-		store: d.Store, handler: d.Handler, workerID: wid,
-		poll: orDefault(d.Poll, DefaultPoll), heartbeat: orDefault(d.Heartbeat, DefaultHeartbeat),
-		staleAfter: orDefault(d.StaleAfter, DefaultStaleAfter), maxAttempts: max, log: log,
+		store: deps.Store, handler: deps.Handler, workerID: wid,
+		poll: orDefault(deps.Poll, DefaultPoll), heartbeat: orDefault(deps.Heartbeat, DefaultHeartbeat),
+		staleAfter: orDefault(deps.StaleAfter, DefaultStaleAfter), maxAttempts: maxAttempts, log: log,
 	}
 }
 
 // Start is the claim loop. It blocks until ctx is cancelled; run it in its own
 // goroutine. Errors during claim are logged and the loop backs off briefly so a
 // transient DB issue does not spin.
-func (w *Worker) Start(ctx context.Context) {
+func (worker *Worker) Start(ctx context.Context) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		job, err := w.store.ClaimNextJob(ctx, w.workerID)
+		job, err := worker.store.ClaimNextJob(ctx, worker.workerID)
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
-				w.log.Error("claim job", "error", err)
+				worker.log.Error("claim job", "error", err)
 			}
-			if err := sleep(ctx, w.poll); err != nil {
+			if err := sleep(ctx, worker.poll); err != nil {
 				return
 			}
 			continue
 		}
-		w.run(ctx, job)
+		worker.run(ctx, job)
 	}
 }
 
@@ -155,38 +155,38 @@ func (w *Worker) Start(ctx context.Context) {
 // handler runs, so the recovery pass can detect a dead worker; the outcome is
 // recorded as done or failed. The handler sees the worker's ctx so cancelling
 // the worker (shutdown) aborts the in-flight run too.
-func (w *Worker) run(ctx context.Context, job sqlc.Job) {
-	hbCtx, stopHB := context.WithCancel(ctx)
-	defer stopHB()
-	go w.heartbeatLoop(hbCtx, job.ID)
+func (worker *Worker) run(ctx context.Context, job sqlc.Job) {
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go worker.heartbeatLoop(heartbeatCtx, job.ID)
 
-	err := w.handler.Handle(ctx, job)
-	stopHB()
+	err := worker.handler.Handle(ctx, job)
+	stopHeartbeat()
 
 	if err == nil {
-		if cerr := w.store.CompleteJob(ctx, job.ID); cerr != nil {
-			w.log.Error("complete job", "job", job.ID, "error", cerr)
+		if completeErr := worker.store.CompleteJob(ctx, job.ID); completeErr != nil {
+			worker.log.Error("complete job", "job", job.ID, "error", completeErr)
 		}
 		return
 	}
-	w.log.Warn("job failed", "job", job.ID, "task", job.TaskID, "kind", job.Kind, "error", err)
-	if ferr := w.store.FailJob(ctx, job.ID, err.Error()); ferr != nil {
-		w.log.Error("fail job", "job", job.ID, "error", ferr)
+	worker.log.Warn("job failed", "job", job.ID, "task", job.TaskID, "kind", job.Kind, "error", err)
+	if failErr := worker.store.FailJob(ctx, job.ID, err.Error()); failErr != nil {
+		worker.log.Error("fail job", "job", job.ID, "error", failErr)
 	}
 }
 
 // heartbeatLoop bumps heartbeat_at until ctx is cancelled (job done or worker
 // stop). Named distinctly from the heartbeat field.
-func (w *Worker) heartbeatLoop(ctx context.Context, jobID int64) {
-	t := time.NewTicker(w.heartbeat)
-	defer t.Stop()
+func (worker *Worker) heartbeatLoop(ctx context.Context, jobID int64) {
+	ticker := time.NewTicker(worker.heartbeat)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			if err := w.store.BumpHeartbeat(ctx, jobID); err != nil {
-				w.log.Warn("heartbeat", "job", jobID, "error", err)
+		case <-ticker.C:
+			if err := worker.store.BumpHeartbeat(ctx, jobID); err != nil {
+				worker.log.Warn("heartbeat", "job", jobID, "error", err)
 			}
 		}
 	}
@@ -195,43 +195,43 @@ func (w *Worker) heartbeatLoop(ctx context.Context, jobID int64) {
 // Recover runs at boot, before the worker starts. It re-queues jobs a previous
 // worker died on (heartbeat older than staleAfter), failing any over the poison
 // bound so a bad job cannot loop forever (04 §7.5–§7.6).
-func (w *Worker) Recover(ctx context.Context) error {
-	cutoff := time.Now().Add(-w.staleAfter)
-	stale, err := w.store.RequeueStaleJobs(ctx, cutoff)
+func (worker *Worker) Recover(ctx context.Context) error {
+	cutoff := time.Now().Add(-worker.staleAfter)
+	stale, err := worker.store.RequeueStaleJobs(ctx, cutoff)
 	if err != nil {
 		return fmt.Errorf("recover: requeue stale: %w", err)
 	}
 	for _, job := range stale {
-		if int(job.Attempts) >= w.maxAttempts {
+		if int(job.Attempts) >= worker.maxAttempts {
 			// Over the bound: fail it rather than re-queueing forever. The task
 			// is left in its current state; the operator inspects and resumes.
-			if ferr := w.store.FailJob(ctx, job.ID, fmt.Sprintf("exceeded max attempts (%d)", w.maxAttempts)); ferr != nil {
-				w.log.Error("recover: fail poison job", "job", job.ID, "error", ferr)
+			if failErr := worker.store.FailJob(ctx, job.ID, fmt.Sprintf("exceeded max attempts (%d)", worker.maxAttempts)); failErr != nil {
+				worker.log.Error("recover: fail poison job", "job", job.ID, "error", failErr)
 			}
-			w.log.Warn("recover: poison job failed", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+			worker.log.Warn("recover: poison job failed", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
 			continue
 		}
-		w.log.Info("recover: requeued stale job", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+		worker.log.Info("recover: requeued stale job", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
 	}
 	return nil
 }
 
-// orDefault returns v when non-zero, else def.
-func orDefault(v, def time.Duration) time.Duration {
-	if v == 0 {
-		return def
+// orDefault returns value when non-zero, else fallback.
+func orDefault(value, fallback time.Duration) time.Duration {
+	if value == 0 {
+		return fallback
 	}
-	return v
+	return value
 }
 
 // sleep returns ctx.Err() when the context was cancelled during the sleep.
-func sleep(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
+func sleep(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-t.C:
+	case <-timer.C:
 		return nil
 	}
 }

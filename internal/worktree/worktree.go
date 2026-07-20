@@ -60,7 +60,7 @@ func New() *Manager { return &Manager{} }
 // repoPath on branch agentum/<task-id>, rooted at the repo's current HEAD. It
 // ensures the repo ignores its own .agentum/ dir so worktrees and artifacts do
 // not pollute the user's working tree as untracked files.
-func (m *Manager) Create(ctx context.Context, repoPath, taskID string) (*Worktree, error) {
+func (manager *Manager) Create(ctx context.Context, repoPath, taskID string) (*Worktree, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (m *Manager) Create(ctx context.Context, repoPath, taskID string) (*Worktre
 		return &Worktree{Root: wtPath, Branch: branch, RepoPath: repoAbs}, nil
 	}
 
-	if err := m.ensureIgnored(ctx, repoAbs); err != nil {
+	if err := manager.ensureIgnored(ctx, repoAbs); err != nil {
 		// Non-fatal: a missing exclude entry only means the user sees untracked
 		// .agentum files. Log-worthy at the caller, not a creation blocker.
 		_ = err
@@ -101,7 +101,7 @@ func (m *Manager) Create(ctx context.Context, repoPath, taskID string) (*Worktre
 // Remove deletes the worktree for taskID and prunes its branch. Safe to call on
 // an already-removed task (no-op). Used at terminal state (done/cancelled/
 // failed) per §7.1.3.
-func (m *Manager) Remove(ctx context.Context, repoPath, taskID string) error {
+func (manager *Manager) Remove(ctx context.Context, repoPath, taskID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (m *Manager) Remove(ctx context.Context, repoPath, taskID string) error {
 // (.git/info/exclude, resolved via git so worktree-shared repos are correct) so
 // the worktrees dir and in-worktree artifact dirs never appear as untracked.
 // Idempotent. This is local-only: it does not touch any tracked .gitignore.
-func (m *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
+func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
 	out, err := git(ctx, repoAbs, "rev-parse", "--git-path", "info/exclude")
 	if err != nil {
 		return fmt.Errorf("locate excludes file: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -151,12 +151,12 @@ func (m *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
 	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
 		excludeEntry = "\n" + excludeEntry
 	}
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	file, err := os.OpenFile(excludePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("open excludes file: %w", err)
 	}
-	defer f.Close()
-	if _, err := f.WriteString(excludeEntry); err != nil {
+	defer file.Close()
+	if _, err := file.WriteString(excludeEntry); err != nil {
 		return fmt.Errorf("write excludes file: %w", err)
 	}
 	return nil
@@ -165,8 +165,8 @@ func (m *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
 // isWorktree reports whether path looks like an existing worktree (a non-empty
 // dir containing a .git file — worktrees use a .git file, not a .git dir).
 func isWorktree(path string) bool {
-	fi, err := os.Stat(path)
-	if err != nil || !fi.IsDir() {
+	fileInfo, err := os.Stat(path)
+	if err != nil || !fileInfo.IsDir() {
 		return false
 	}
 	// A git worktree's working dir holds a `.git` file pointing at the common
