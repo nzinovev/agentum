@@ -27,6 +27,37 @@ and land with the epic named in the table.
 - **State transitions** route through `engine.Next`. An illegal transition is
   `409 illegal_transition`, never a silent write.
 
+## Projects
+
+A project binds a local git repository to an Agentum project id (one repo = one
+project per tenant). Tasks reference a project; the runner creates a per-task
+worktree off the project's repo. Registration is idempotent: re-`POST`ing the
+same `repo_path` updates `name` / `related_projects` rather than failing.
+
+| Method | Path | Status | Body / Query → Response |
+|---|---|---|---|
+| `POST` | `/projects` | ✅ | `{repo_path, name, related_projects?}` → `201 Project` / `400 bad_input` (if `repo_path` is not a git work tree) |
+| `GET` | `/projects` | ✅ | `?limit=&offset=` → `200 Project[]` |
+| `GET` | `/projects/{id}` | ✅ | → `200 Project` / `404 not_found` |
+
+`repo_path` must point inside a real git work tree (validated at registration).
+`related_projects` is an **inert seam**: stored now, it will grant cross-project
+read access (a path-scoped `fs.read` capability) in a later epic — never
+auto-discovered, the configured set is the security boundary.
+
+### Project
+
+```json
+{
+  "id": "uuid",
+  "repo_path": "/home/me/repos/my-app",
+  "name": "My App",
+  "related_projects": [],
+  "created_at": "2026-07-09T...",
+  "updated_at": "2026-07-09T..."
+}
+```
+
 ## Tasks
 
 | Method | Path | Status | Body / Query → Response |
@@ -34,8 +65,8 @@ and land with the epic named in the table.
 | `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, input?}` → `201 Task` |
 | `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
 | `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
-| `POST` | `/tasks/{id}/start` | ✅ | `created → running` → `200 Task` / `409 illegal_transition` |
-| `POST` | `/tasks/{id}/cancel` | stub | any non-terminal → `cancelled`. Epic: foundation |
+| `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
+| `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (aborts in-flight run) → `200 Task` / `409 illegal_transition` |
 
 ### Task
 
@@ -78,12 +109,17 @@ The three gate **actions** from §3.4:
 
 | Method | Path | Status | Action |
 |---|---|---|---|
-| `POST` | `/tasks/{id}/invocations/{iid}/continue` | stub | resume with answers / context. Epic 2 |
-| `POST` | `/tasks/{id}/invocations/{iid}/advance` | stub | pass the gate → next stage runs. Epic 2 |
+| `POST` | `/tasks/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job) |
+| `POST` | `/tasks/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
 | `POST` | `/tasks/{id}/invocations/{iid}/approve` | stub | final approval → task done + memory commits. Epic 2 |
 | `POST` | `/tasks/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
 | `POST` | `/tasks/{id}/invocations/{iid}/ask-to-edit` | stub | scoped agent-mediated edit; re-stops for review. Epic 2 |
 | `POST` | `/tasks/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
+
+> `continue` / `advance` are implemented but operate on the **task**, not the
+> invocation id: they enqueue a job that drives the runner. The `{iid}` path
+> parameter is accepted for contract stability but the runner resumes from the
+> task's current state. `cancel` is `POST /tasks/{id}/cancel`.
 
 ## Artifacts
 

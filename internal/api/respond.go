@@ -6,6 +6,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -14,12 +15,18 @@ import (
 	"github.com/nzinovev/agentum/internal/engine"
 )
 
-// writeJSON encodes v as JSON with the given status. Errors are intentionally
+// nullStr builds a sql.NullString; empty → invalid (NULL). Used for nullable
+// columns surfaced as NullString by sqlc (e.g. the per-task event filter).
+func nullStr(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
+}
+
+// writeJSON encodes value as JSON with the given status. Errors are intentionally
 // surfaced to the caller (it is the handler's last write).
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 // errorBody is the structured error shape for all /api/v1/* failures. `code`
@@ -66,8 +73,8 @@ func notImplemented(w http.ResponseWriter, epic, what string) {
 // statusForEngine maps an engine.FSM error to (httpStatus, code). Returns
 // (0,"") when err is nil or not engine-shaped.
 func statusForEngine(err error) (int, string, bool) {
-	var ill *engine.ErrIllegalTransition
-	if errors.As(err, &ill) {
+	var illegalErr *engine.ErrIllegalTransition
+	if errors.As(err, &illegalErr) {
 		return http.StatusConflict, codeIllegalTransition, true
 	}
 	return 0, "", false

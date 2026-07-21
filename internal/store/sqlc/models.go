@@ -16,10 +16,26 @@ type Event struct {
 	ID        int64           `json:"id"`
 	TenantID  string          `json:"tenant_id"`
 	UserID    string          `json:"user_id"`
-	TaskID    string          `json:"task_id"`
+	TaskID    sql.NullString  `json:"task_id"`
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+}
+
+type Job struct {
+	ID          int64           `json:"id"`
+	TenantID    string          `json:"tenant_id"`
+	UserID      string          `json:"user_id"`
+	TaskID      string          `json:"task_id"`
+	Kind        string          `json:"kind"`
+	Status      string          `json:"status"`
+	WorkerID    sql.NullString  `json:"worker_id"`
+	HeartbeatAt sql.NullTime    `json:"heartbeat_at"`
+	Attempts    int32           `json:"attempts"`
+	LastError   sql.NullString  `json:"last_error"`
+	Payload     json.RawMessage `json:"payload"`
+	CreatedAt   time.Time       `json:"created_at"`
+	FinishedAt  sql.NullTime    `json:"finished_at"`
 }
 
 type MemoryEntry struct {
@@ -32,10 +48,21 @@ type MemoryEntry struct {
 	Title        string         `json:"title"`
 	Body         string         `json:"body"`
 	Keywords     []string       `json:"keywords"`
-	SourceTaskID string         `json:"source_task_id"`
+	SourceTaskID sql.NullString `json:"source_task_id"`
 	SourceStage  sql.NullString `json:"source_stage"`
 	Status       string         `json:"status"`
 	CreatedAt    time.Time      `json:"created_at"`
+}
+
+type Project struct {
+	ID              string    `json:"id"`
+	TenantID        string    `json:"tenant_id"`
+	UserID          string    `json:"user_id"`
+	RepoPath        string    `json:"repo_path"`
+	Name            string    `json:"name"`
+	RelatedProjects []string  `json:"related_projects"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type StageInvocation struct {
@@ -46,7 +73,7 @@ type StageInvocation struct {
 	Stage        string                `json:"stage"`
 	Sequence     int32                 `json:"sequence"`
 	SessionID    sql.NullString        `json:"session_id"`
-	ResumeOf     string                `json:"resume_of"`
+	ResumeOf     sql.NullString        `json:"resume_of"`
 	StopReason   sql.NullString        `json:"stop_reason"`
 	PendingEdits json.RawMessage       `json:"pending_edits"`
 	Result       pqtype.NullRawMessage `json:"result"`
@@ -65,4 +92,5 @@ type Task struct {
 	State        string          `json:"state"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
+	CurrentStage sql.NullString  `json:"current_stage"`
 }

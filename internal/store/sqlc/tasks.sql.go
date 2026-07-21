@@ -7,13 +7,14 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 )
 
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack, title, input, state)
 VALUES ($1, $2, $3, $4, $5, $6, 'created')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
 `
 
 type CreateTaskParams struct {
@@ -46,12 +47,13 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CurrentStage,
 	)
 	return i, err
 }
 
 const getTask = `-- name: GetTask :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at FROM tasks WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage FROM tasks WHERE id = $1 AND tenant_id = $2
 `
 
 type GetTaskParams struct {
@@ -73,12 +75,13 @@ func (q *Queries) GetTask(ctx context.Context, arg GetTaskParams) (Task, error) 
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CurrentStage,
 	)
 	return i, err
 }
 
 const listTasksByProject = `-- name: ListTasksByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at FROM tasks
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage FROM tasks
 WHERE tenant_id = $1 AND project_id = $2
 ORDER BY created_at DESC
 LIMIT $3 OFFSET $4
@@ -116,6 +119,7 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 			&i.State,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CurrentStage,
 		); err != nil {
 			return nil, err
 		}
@@ -130,10 +134,50 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 	return items, nil
 }
 
+const updateTaskStage = `-- name: UpdateTaskStage :one
+UPDATE tasks SET current_stage = $3, state = $4, updated_at = now()
+WHERE id = $1 AND tenant_id = $2
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
+`
+
+type UpdateTaskStageParams struct {
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenant_id"`
+	CurrentStage sql.NullString `json:"current_stage"`
+	State        string         `json:"state"`
+}
+
+// Set the runner's current position in the pack and (optionally) the state in
+// one write. currentStage may be empty (e.g. clearing on terminal); state is
+// always set. Used by the runner as it walks the pack's stages.
+func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, updateTaskStage,
+		arg.ID,
+		arg.TenantID,
+		arg.CurrentStage,
+		arg.State,
+	)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.Input,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+	)
+	return i, err
+}
+
 const updateTaskState = `-- name: UpdateTaskState :one
 UPDATE tasks SET state = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
 `
 
 type UpdateTaskStateParams struct {
@@ -156,6 +200,7 @@ func (q *Queries) UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CurrentStage,
 	)
 	return i, err
 }

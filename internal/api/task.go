@@ -26,44 +26,44 @@ type taskResponse struct {
 	UpdatedAt    string          `json:"updated_at"`
 }
 
-func toTaskResponse(t sqlc.Task) taskResponse {
-	in := t.Input
-	if len(in) == 0 {
-		in = json.RawMessage("{}")
+func toTaskResponse(task sqlc.Task) taskResponse {
+	input := task.Input
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
 	}
 	return taskResponse{
-		ID:           t.ID,
-		ProjectID:    t.ProjectID,
-		PipelinePack: t.PipelinePack,
-		Title:        t.Title,
-		Input:        in,
-		State:        t.State,
-		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:    t.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		ID:           task.ID,
+		ProjectID:    task.ProjectID,
+		PipelinePack: task.PipelinePack,
+		Title:        task.Title,
+		Input:        input,
+		State:        task.State,
+		CreatedAt:    task.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:    task.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
 // requirePrincipal extracts the Principal, writing a structured error on failure.
 // Returns false when the caller should return.
 func requirePrincipal(w http.ResponseWriter, r *http.Request) (authz.Principal, bool) {
-	p, ok := authz.PrincipalFrom(r.Context())
+	principal, ok := authz.PrincipalFrom(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unresolved principal")
 		return authz.Principal{}, false
 	}
-	return p, true
+	return principal, true
 }
 
 // handleCreateTask POST /api/v1/tasks
 // Body: {project_id, pipeline_pack, title, input?}. tenant/user come from the
 // Principal, never the body.
-func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "task:create", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "task:create", ""); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -85,16 +85,16 @@ func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		req.Input = json.RawMessage("{}")
 	}
 
-	task, err := a.q.CreateTask(r.Context(), sqlc.CreateTaskParams{
-		TenantID:     p.TenantID,
-		UserID:       p.UserID,
+	task, err := api.queries.CreateTask(r.Context(), sqlc.CreateTaskParams{
+		TenantID:     principal.TenantID,
+		UserID:       principal.UserID,
 		ProjectID:    req.ProjectID,
 		PipelinePack: req.PipelinePack,
 		Title:        req.Title,
 		Input:        req.Input,
 	})
 	if err != nil {
-		logUnexpected(a.log, err, "CreateTask")
+		logUnexpected(api.log, err, "CreateTask")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
@@ -102,23 +102,23 @@ func (a *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetTask GET /api/v1/tasks/{id}
-func (a *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "task:read", r.PathValue("id")); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "task:read", r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
-	task, err := a.q.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: p.TenantID})
+	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
 			return
 		}
-		logUnexpected(a.log, err, "GetTask")
+		logUnexpected(api.log, err, "GetTask")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
@@ -126,13 +126,13 @@ func (a *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListTasks GET /api/v1/tasks?project_id=...&limit=...&offset=...
-func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "task:list", ""); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "task:list", ""); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -144,46 +144,46 @@ func (a *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	limit := clampInt(queryInt(r, "limit", 50), 1, 200)
 	offset := clampInt(queryInt(r, "offset", 0), 0, 10000)
 
-	tasks, err := a.q.ListTasksByProject(r.Context(), sqlc.ListTasksByProjectParams{
-		TenantID:  p.TenantID,
+	tasks, err := api.queries.ListTasksByProject(r.Context(), sqlc.ListTasksByProjectParams{
+		TenantID:  principal.TenantID,
 		ProjectID: projectID,
 		Limit:     int32(limit),
 		Offset:    int32(offset),
 	})
 	if err != nil {
-		logUnexpected(a.log, err, "ListTasksByProject")
+		logUnexpected(api.log, err, "ListTasksByProject")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	resp := make([]taskResponse, 0, len(tasks))
-	for _, t := range tasks {
-		resp = append(resp, toTaskResponse(t))
+	for _, task := range tasks {
+		resp = append(resp, toTaskResponse(task))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleStartTask POST /api/v1/tasks/{id}/start
-// Transitions created -> running through engine.Next. This is the proof point
-// that the FSM gates every state change: an illegal transition is a 409, never
-// a silent write.
-func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
-	p, ok := requirePrincipal(w, r)
+// Transitions created -> running through engine.Next and enqueues a run job.
+// The worker (not this request) drives the stages; the handler returns as soon
+// as the job is queued. An illegal transition is a 409, never a silent write.
+func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
 	if !ok {
 		return
 	}
-	if d := authz.Can(r.Context(), p, "task:start", r.PathValue("id")); !d.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, d.Reason)
+	if decision := authz.Can(r.Context(), principal, "task:start", r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
 	id := r.PathValue("id")
-	task, err := a.q.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: p.TenantID})
+	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: principal.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
 			return
 		}
-		logUnexpected(a.log, err, "GetTask")
+		logUnexpected(api.log, err, "GetTask")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
@@ -194,37 +194,49 @@ func (a *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := a.q.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+	updated, err := api.queries.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
 		ID:       task.ID,
-		TenantID: p.TenantID,
+		TenantID: principal.TenantID,
 		State:    string(next),
 	})
 	if err != nil {
-		logUnexpected(a.log, err, "UpdateTaskState")
+		logUnexpected(api.log, err, "UpdateTaskState")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+
+	// Enqueue the run job; the worker picks it up and drives the stages. A
+	// failure here leaves the task running with no driver — the recovery pass
+	// surfaces it as an interrupted pause on the next boot.
+	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "run",
+		Payload: []byte("{}"),
+	}); err != nil {
+		logUnexpected(api.log, err, "EnqueueJob")
+		writeError(w, http.StatusInternalServerError, codeInternal, "task started but run job could not be enqueued")
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
 func queryInt(r *http.Request, key string, def int) int {
-	v := r.URL.Query().Get(key)
-	if v == "" {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
 		return def
 	}
-	n, err := strconv.Atoi(v)
+	parsed, err := strconv.Atoi(raw)
 	if err != nil {
 		return def
 	}
-	return n
+	return parsed
 }
 
-func clampInt(v, lo, hi int) int {
-	if v < lo {
-		return lo
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
 	}
-	if v > hi {
-		return hi
+	if value > max {
+		return max
 	}
-	return v
+	return value
 }

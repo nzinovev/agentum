@@ -56,3 +56,11 @@ package they cover.
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `chore:`,
   `docs:`, `refactor:`). PRs land via **squash-merge**, so the PR title is the
   commit on `main`.
+- **No magic variable names.** Every identifier carries a descriptive name — no
+  `a`, `b`, `p`, `d`, `t`, `m`, `q` or other single-letter/short-cryptic
+  variables. The only single-letter names allowed are the universal Go idioms
+  the style guide sanctions: `w`/`r` in `net/http` handlers, `ctx`, `err`, `i`
+  in index loops, and `k`/`v` in map range. Receiver names are descriptive too
+  (`api *API`, `runner *Runner`, `queue QueueStore`) and consistent across all
+  methods of a type. When wrapping errors from a sub-call, expand the short
+  form (`cerr` → `completeErr`, `ferr` → `failErr`) so the cause is readable.
