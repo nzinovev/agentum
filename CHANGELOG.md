@@ -10,6 +10,44 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Safe lifecycle, checkpoints, and code egress** (F.6.1): the primitive Epic 8
+  reuses for every execution unit. Separates four concepts that were previously
+  conflated: **pause** (non-terminal, resumable), **terminal abort**
+  (`POST /tasks/{id}/cancel` — worktree torn down, branch + recovery work
+  preserved), **worktree teardown** (disposable working tree only — the
+  `agentum/<task-id>` branch and its commits are the durable delivery output),
+  and **cleanup** (`POST /tasks/{id}/cleanup` — explicit, idempotent, audited
+  branch deletion on a terminal task). A generic `cancel` cannot ambiguously
+  mean all three.
+  - Task input records `base_ref` (branch/tag/SHA/`HEAD`, default `HEAD`);
+    Agentum resolves it **once** to an immutable `base_commit` before creating
+    the worktree (`worktree.Manager.Create` branches off the resolved SHA, so a
+    later move of `base_ref` cannot retcon lineage). Terminal teardown captures
+    `result_commit` (the `agentum/<task-id>` tip); `base_commit..result_commit`
+    is the review/handoff diff and survives teardown. The task response exposes
+    `base_ref` / `base_commit` / `result_commit` / `branch`.
+  - **Orchestrator-owned checkpoints** (`task_checkpoints` table): immutable
+    commit SHAs at stage boundaries (`base` + `post-<stage>`). Agents may edit
+    and inspect git but cannot create/delete/reset/rebase delivery refs —
+    Agentum owns boundary checkpoints.
+  - **Reconciliation before retry/resume**: a crashed worktree is classified as
+    `clean`, `resumable`, `restorable`, or `needs_attention`; a restorable tree
+    is reset to the last checkpoint (`Restore` = `git reset --hard` +
+    `git clean -fd`) so a side-effectful stage is never blindly replayed against
+    a half-modified tree. A needs-attention tree fails the task for a human
+    rather than guessing.
+  - **Transactional outbox**: every HTTP FSM transition that carries a
+    runnable-job intent enqueues the job in the same database transaction
+    (`api.runInTx`); a failed enqueue rolls back the transition, so a task can
+    never be left `running` with no driver intent.
+  - **Periodic reconciler** (`internal/jobs.Reconciler`): runs at boot and on a
+    ticker (not only process startup) to re-queue stale job leases and repair
+    orphaned running tasks (state=`running` with no live job) by pausing them
+    for explicit human resume. Bounded by `AGENTUM_JOB_MAX_ATTEMPTS`.
+  - Lifecycle tests prove a committed change survives terminal teardown and is
+    diffable as `base_commit..result_commit`; that pause/resume, abort, crash,
+    and cleanup preserve their documented invariants; and that the reconciler
+    repairs orphaned tasks without replaying side effects.
 - **Foundation** (#1): Go engine, Postgres store (goose migrations embedded and
   auto-applied on boot), single-front-door HTTP API with middleware boundary,
   multi-tenant schema (`tenant_id` + `user_id` on every row), explicit task FSM,

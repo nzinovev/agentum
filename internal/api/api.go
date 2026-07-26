@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 
@@ -14,17 +16,39 @@ type TaskCanceler interface {
 }
 
 // API wires the sqlc querier behind the HTTP handlers. It is constructed once
-// per process and mounts the v1 surface on the server's mux via Register.
+// per process and mounts the v1 surface on the server's mux via Register. The
+// db handle backs the transactional outbox: every FSM transition that carries a
+// runnable-job intent enqueues inside the same tx, so a handler that cannot
+// enqueue rolls back the transition (F.6.1 AC #6).
 type API struct {
+	db      *sql.DB
 	queries *sqlc.Queries
 	log     *slog.Logger
 	cancels TaskCanceler
 }
 
-// New builds the API. cancels lets the cancel handler abort an in-flight run;
-// nil leaves cancel as a no-op (the FSM transition still applies).
-func New(queries *sqlc.Queries, log *slog.Logger, cancels TaskCanceler) *API {
-	return &API{queries: queries, log: log, cancels: cancels}
+// New builds the API. db backs the transactional outbox; cancels lets the cancel
+// handler abort an in-flight run (nil leaves cancel as a no-op — the FSM
+// transition still applies).
+func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels TaskCanceler) *API {
+	return &API{db: db, queries: queries, log: log, cancels: cancels}
+}
+
+// runInTx executes fn against a fresh transaction-scoped Queries. Commit on nil,
+// rollback (and error propagation) otherwise. This is the transactional-outbox
+// primitive: a handler composes its FSM transition + EnqueueJob inside fn and
+// they land atomically — a post-transition enqueue failure can never leave the
+// task in a state whose runnable intent was lost.
+func (api *API) runInTx(ctx context.Context, fn func(qtx *sqlc.Queries) error) error {
+	tx, err := api.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(api.queries.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Register attaches the full v1 surface to the mux. Implemented endpoints live
@@ -43,6 +67,7 @@ func (api *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/tasks/{id}", api.handleGetTask)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/start", api.handleStartTask)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", api.handleCancelTask)
+	mux.HandleFunc("POST /api/v1/tasks/{id}/cleanup", api.handleCleanupTask)
 
 	// Stage invocations (read-only for now).
 	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations", api.handleListInvocations)

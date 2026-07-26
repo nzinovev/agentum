@@ -62,11 +62,23 @@ auto-discovered, the configured set is the security boundary.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, input?}` → `201 Task` |
+| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, input?, base_ref?}` → `201 Task` |
 | `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
 | `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
-| `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (aborts in-flight run) → `200 Task` / `409 illegal_transition` |
+| `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Task` / `409 illegal_transition` |
+| `POST` | `/tasks/{id}/cleanup` | ✅ | terminal task → branch deleted (idempotent, audited) → `202 Task` / `409 illegal_transition` (if not terminal) |
+
+`base_ref` is the git ref the task builds against (branch / tag / SHA / `HEAD`).
+It is resolved once to an immutable `base_commit` before the worktree is
+created; omitted defaults to `HEAD`. See `docs/execution.md` § "Safe lifecycle,
+checkpoints, and code egress" for the full lineage / abort / cleanup model.
+
+`cancel` is a **terminal abort**: the in-flight run is aborted and the worktree
+is torn down, but the `agentum/<task-id>` branch and any committed recovery work
+survive for review. `cleanup` is the **explicit, post-terminal disposal** that
+deletes the branch; it is a distinct verb because cancel and cleanup must not be
+ambiguous with each other or with pause.
 
 ### Task
 
@@ -78,6 +90,10 @@ auto-discovered, the configured set is the security boundary.
   "title": "Add auth to /settings",
   "input": {},
   "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_memory_commit | done | failed | cancelled",
+  "base_ref": "main",
+  "base_commit": "a1b2... full SHA the task branched from, set on first run",
+  "result_commit": "c3d4... full SHA captured at terminal teardown; empty until then",
+  "branch": "agentum/<task-id>",
   "created_at": "2026-07-05T...",
   "updated_at": "2026-07-05T..."
 }

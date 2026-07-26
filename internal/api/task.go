@@ -11,10 +11,15 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // taskResponse is the public task shape. tenant_id and user_id are intentionally
-// absent: identity is implicit in the Principal, not echoed back.
+// absent: identity is implicit in the Principal, not echoed back. base_commit /
+// result_commit / branch expose the git egress surface (F.6.1 AC #7): base_ref
+// is the user-supplied input, base_commit the once-resolved immutable lineage
+// anchor, result_commit the recorded tip at terminal teardown, and branch the
+// resolvable delivery ref that survives worktree teardown.
 type taskResponse struct {
 	ID           string          `json:"id"`
 	ProjectID    string          `json:"project_id"`
@@ -22,6 +27,10 @@ type taskResponse struct {
 	Title        string          `json:"title"`
 	Input        json.RawMessage `json:"input"`
 	State        string          `json:"state"`
+	BaseRef      string          `json:"base_ref"`
+	BaseCommit   string          `json:"base_commit"`
+	ResultCommit string          `json:"result_commit"`
+	Branch       string          `json:"branch"`
 	CreatedAt    string          `json:"created_at"`
 	UpdatedAt    string          `json:"updated_at"`
 }
@@ -38,9 +47,22 @@ func toTaskResponse(task sqlc.Task) taskResponse {
 		Title:        task.Title,
 		Input:        input,
 		State:        task.State,
+		BaseRef:      task.BaseRef,
+		BaseCommit:   nullStringOr(task.BaseCommit),
+		ResultCommit: nullStringOr(task.ResultCommit),
+		Branch:       worktree.BranchFor(task.ID),
 		CreatedAt:    task.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:    task.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
+}
+
+// nullStringOr returns the String value when Valid, else "". Keeps the response
+// shape a plain string for nullable commit columns (unset reads as "").
+func nullStringOr(value sql.NullString) string {
+	if value.Valid {
+		return value.String
+	}
+	return ""
 }
 
 // requirePrincipal extracts the Principal, writing a structured error on failure.
@@ -72,6 +94,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		PipelinePack string          `json:"pipeline_pack"`
 		Title        string          `json:"title"`
 		Input        json.RawMessage `json:"input"`
+		BaseRef      string          `json:"base_ref"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, codeBadInput, "invalid JSON body")
@@ -84,6 +107,13 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if len(req.Input) == 0 {
 		req.Input = json.RawMessage("{}")
 	}
+	// base_ref defaults to HEAD at the call site so the SQL stays
+	// inference-clean (sqlc emits a plain string param). The column default is
+	// the backstop; this makes the intent explicit and the recorded input
+	// reproducible.
+	if req.BaseRef == "" {
+		req.BaseRef = "HEAD"
+	}
 
 	task, err := api.queries.CreateTask(r.Context(), sqlc.CreateTaskParams{
 		TenantID:     principal.TenantID,
@@ -92,6 +122,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		PipelinePack: req.PipelinePack,
 		Title:        req.Title,
 		Input:        req.Input,
+		BaseRef:      req.BaseRef,
 	})
 	if err != nil {
 		logUnexpected(api.log, err, "CreateTask")
@@ -194,26 +225,30 @@ func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := api.queries.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-		ID:       task.ID,
-		TenantID: principal.TenantID,
-		State:    string(next),
-	})
-	if err != nil {
-		logUnexpected(api.log, err, "UpdateTaskState")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-		return
-	}
-
-	// Enqueue the run job; the worker picks it up and drives the stages. A
-	// failure here leaves the task running with no driver — the recovery pass
-	// surfaces it as an interrupted pause on the next boot.
-	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "run",
-		Payload: []byte("{}"),
+	// Transactional outbox (F.6.1 AC #6): the FSM transition and the run-job
+	// enqueue commit in one tx. A failed enqueue rolls back the transition, so
+	// the task can never be left running with no driver intent.
+	var updated sqlc.Task
+	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
+		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+			ID:       task.ID,
+			TenantID: principal.TenantID,
+			State:    string(next),
+		})
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "run",
+			Payload: []byte("{}"),
+		}); enqueueErr != nil {
+			return enqueueErr
+		}
+		updated = transitioned
+		return nil
 	}); err != nil {
-		logUnexpected(api.log, err, "EnqueueJob")
-		writeError(w, http.StatusInternalServerError, codeInternal, "task started but run job could not be enqueued")
+		logUnexpected(api.log, err, "StartTask tx")
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))

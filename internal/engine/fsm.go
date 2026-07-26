@@ -1,6 +1,20 @@
 // Package engine holds the orchestrator core: the explicit task lifecycle,
 // stage invocation, and (later) the pipeline runner, pack registry, and memory
 // component.
+//
+// F.6.1 lifecycle vocabulary — these are distinct verbs, never conflated into a
+// single ambiguous "cancel":
+//   - pause (StatePaused*) is non-terminal and resumable via continue/advance.
+//   - EventCancel is a terminal abort: the task moves to StateCancelled and the
+//     worktree is torn down, but the agentum/<task-id> branch and any committed
+//     recovery work survive for review. Branch deletion is NOT part of cancel.
+//   - Branch deletion (worktree.DeleteBranch) is an explicit, idempotent cleanup
+//     action that lives outside this FSM — it operates on already-terminal tasks
+//     and is audited separately. The FSM has no edge for it because it does not
+//     change task state.
+//
+// StateDone mirrors cancel's teardown contract: RemoveWorktree only. The branch
+// + result_commit remain resolvable so a human can review base_commit..result.
 package engine
 
 import "fmt"
