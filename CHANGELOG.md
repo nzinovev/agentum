@@ -10,6 +10,48 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Immutable artifact revisions and evidence manifest** (F.7): the worktree is
+  disposable, the artifacts an agent produces during a stage and the inputs that
+  shaped the run are the durable record. Two pieces:
+  - **Artifact revisions** (`artifact_revisions` table + content-addressed FS
+    blob store): every produced or edited artifact variant becomes a new
+    immutable revision stored outside the worktree at
+    `<ArtifactRoot>/<hash[:2]>/<hash>` (default
+    `<cwd>/.agentum/artifacts`, overridable via `AGENTUM_ARTIFACT_ROOT`). Edits
+    chain via `prev_revision_id`; the single `is_current` pointer per
+    `(task, name)` is the only mutable bit (enforced by a partial unique index).
+    Revisions are linked to their producing `stage_invocation` via
+    `source_invocation_id`. An optional execution coordinate
+    (`delivery_step` / `execution_unit` / `phase`) rides along as provenance —
+    inert when NULL, single-unit runs never fill it. A `Syncer` materializes
+    the current revisions back into the worktree on `continue` / `advance` so
+    the agent starts from the same content the prior invocation produced. A
+    best-effort `DefaultRedactor` scrubs Bearer / Authorization headers, AWS
+    AKIA keys, GitHub PATs, labeled `token|secret|password|api_key` values, and
+    PEM private key blocks before bytes enter the store.
+  - **Evidence manifest** (`task_manifests` table, one per task): records every
+    input that shaped the run — input task + revision, project + base_commit,
+    pack + version + content hash, prompt revisions the adapter saw, adapter +
+    declared capabilities, model + tier, effective capability profile, memory
+    slice, input/output artifact revisions, check set version + results, human
+    gate decisions, and the git lineage (branch, checkpoints, base_commit,
+    result_commit). Append-only while in flight; sealed at terminal state
+    (`done | failed | cancelled | interrupted`). Corrections after sealing land
+    in `task_manifest_corrections` as linked rows with a fresh body snapshot —
+    the sealed row is never edited. Subsystems not yet wired (project memory,
+    project checks, capability enforcement) are listed explicitly under
+    `body.missing` rather than hidden.
+  - **Read surface**: `GET /tasks/{id}/artifacts[?current=true]`,
+    `GET /tasks/{id}/artifacts/revisions/{rid}`,
+    `GET /tasks/{id}/artifacts/revisions/{rid}/content` (streamed),
+    `GET /tasks/{id}/manifest`, `GET /tasks/{id}/manifest/diff?other=<task-id>`
+    (input-level diff — outputs and human decisions are not compared, those are
+    results not inputs), `POST /tasks/{id}/manifest/corrections`.
+  - Table-driven tests for the blob store (roundtrip, idempotent, concurrent,
+    invalid hash), the redactor (Bearer / AWS / GitHub / labeled / PEM /
+    binary), the syncer (write / skip / escape / pinned), the manifest body
+    merge semantics, and the per-axis input-level diff (order-independent,
+    output-ignoring).
 - **Safe lifecycle, checkpoints, and code egress** (F.6.1): the primitive Epic 8
   reuses for every execution unit. Separates four concepts that were previously
   conflated: **pause** (non-terminal, resumable), **terminal abort**
