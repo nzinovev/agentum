@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
