@@ -5,12 +5,15 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/api"
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/config"
 	"github.com/nzinovev/agentum/internal/jobs"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/runner"
@@ -26,6 +29,8 @@ type Server struct {
 	cfg        config.Config
 	log        *slog.Logger
 	store      *store.Store
+	artifacts  *artifacts.SQLStore
+	manifest   *manifest.Service
 	api        *api.API
 	runner     *runner.Runner
 	worker     *jobs.Worker
@@ -43,16 +48,31 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 	modelsCfg, _ := models.Load() // ErrNoConfig is expected in the common case
 
 	// The execution model: pack source over a configured root, the opencode
-	// adapter, per-task worktrees, and the runner that composes them.
+	// adapter, per-task worktrees, the artifact revisions store, the evidence
+	// manifest service, and the runner that composes them.
 	packs := pack.NewDirSource(cfg.PacksDir)
 	adapter := agent.NewOpencodeAdapter(cfg.OpencodeBinary)
+	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
+		DB:      dataStore.DB,
+		Queries: queries,
+		Blobs:   artifacts.NewBlobStore(cfg.ArtifactRoot),
+		Log:     log,
+	})
+	manifestService := manifest.New(manifest.Deps{
+		DB:      dataStore.DB,
+		Queries: queries,
+		Log:     log,
+	})
 	runnerInst := runner.New(runner.Deps{
-		Store:     runnerStore{queries},
-		Packs:     packs,
-		Adapter:   adapter,
-		Models:    modelsCfg,
-		AgentName: "opencode",
-		Log:       log,
+		Store:          runnerStore{queries},
+		Packs:          packs,
+		Adapter:        adapter,
+		Models:         modelsCfg,
+		Artifacts:      artifactStore,
+		Manifest:       manifestService,
+		AgentName:      "opencode",
+		AdapterVersion: agentOpencodeVersion,
+		Log:            log,
 	})
 
 	worker := jobs.New(jobs.Deps{
@@ -74,14 +94,22 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Log:         log,
 	})
 
-	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels())
+	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels(),
+		api.WithArtifactStore(artifactStore), api.WithManifestService(manifestService))
 
 	return &Server{
-		cfg: cfg, log: log, store: dataStore, api: apiInst,
-		runner: runnerInst, worker: worker, reconciler: reconciler,
+		cfg: cfg, log: log, store: dataStore,
+		artifacts: artifactStore, manifest: manifestService,
+		api: apiInst, runner: runnerInst, worker: worker, reconciler: reconciler,
 		pool: cfg.WorkerPoolSize,
 	}
 }
+
+// agentOpencodeVersion is the static adapter version recorded in the manifest.
+// A live lookup (e.g. shelling out to `opencode --version`) would land here
+// when the adapter learns to report it; today it is a fixed string so two runs
+// against the same build hash the same value.
+const agentOpencodeVersion = "opencode-adapter-v1"
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
 // This is the single front door: the UI and every external caller use the same

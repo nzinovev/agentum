@@ -100,6 +100,9 @@ func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStage
 func (store *fakeStore) LatestCheckpointForTask(_ context.Context, _ sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error) {
 	return sqlc.TaskCheckpoint{}, sql.ErrNoRows // no checkpoints in the fake
 }
+func (store *fakeStore) ListCheckpointsForTask(_ context.Context, _ sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error) {
+	return nil, nil // no checkpoints in the fake
+}
 func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error) {
 	return sqlc.TaskCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}, nil
 }

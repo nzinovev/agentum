@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -21,6 +22,12 @@ type Config struct {
 	WorkerPoolSize int    // concurrent job workers (1 is fine for single-host MVP)
 	JobMaxAttempts int    // poison bound before a job is failed (04 §7.5)
 	OpencodeBinary string // path to the opencode binary the adapter shells out to
+
+	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
+	// Defaults to .agentum/artifacts under the process CWD; the worktree's own
+	// per-stage artifact dir is separate and disposable — this root survives
+	// worktree teardown so revisions remain readable for review / comparison.
+	ArtifactRoot string
 }
 
 func Load() (Config, error) {
@@ -35,6 +42,7 @@ func Load() (Config, error) {
 		WorkerPoolSize: getenvInt("AGENTUM_WORKER_POOL_SIZE", 1),
 		JobMaxAttempts: getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
 		OpencodeBinary: getenv("AGENTUM_OPENCODE_BINARY", "opencode"),
+		ArtifactRoot:   getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
@@ -56,4 +64,16 @@ func getenvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// defaultArtifactRoot returns .agentum/artifacts under the current working
+// directory. The .agentum/ prefix matches the worktree tree's gitignore entry
+// so an operator pointing the root at a project repo's .agentum/ stays
+// untracked. Operators may override via AGENTUM_ARTIFACT_ROOT.
+func defaultArtifactRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ".agentum/artifacts"
+	}
+	return filepath.Join(cwd, ".agentum", "artifacts")
 }
