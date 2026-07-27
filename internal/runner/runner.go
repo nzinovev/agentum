@@ -2,18 +2,23 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"log/slog"
 
 	"github.com/nzinovev/agentum/internal/agent"
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/routing"
@@ -34,6 +39,7 @@ type Store interface {
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
 	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
+	ListCheckpointsForTask(ctx context.Context, arg sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error)
 	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
@@ -56,7 +62,18 @@ type Runner struct {
 	cancels   *CancelRegistry
 	sink      Sink
 	agentName string
+	adapterV  string // adapter binary version, best-effort; recorded in manifest
 	log       *slog.Logger
+
+	// art is the immutable artifact revisions store. nil in unit tests that
+	// don't exercise evidence capture; captureArtifacts is a no-op then.
+	art artifacts.Store
+	// syncer materializes current revisions back into the worktree on resume.
+	// nil when art is nil.
+	syncer *artifacts.Syncer
+	// mfst is the evidence manifest service. nil in unit tests; manifest
+	// operations are no-ops then.
+	mfst *manifest.Service
 }
 
 // Deps bundles Runner construction. AgentName is the adapter's identity for
@@ -70,7 +87,20 @@ type Deps struct {
 	Cancels   *CancelRegistry
 	Sink      Sink
 	AgentName string
-	Log       *slog.Logger
+	// AdapterVersion is the adapter binary version, surfaced in the manifest
+	// for cross-run comparison. Empty when unknown.
+	AdapterVersion string
+	Log            *slog.Logger
+
+	// Artifacts is the durable artifact revisions store. May be nil in unit
+	// tests; capture and sync become no-ops then.
+	Artifacts artifacts.Store
+	// Syncer materializes current revisions into the worktree on resume.
+	// Required when Artifacts is set; the runner derives one if nil.
+	Syncer *artifacts.Syncer
+	// Manifest is the evidence manifest service. May be nil in unit tests;
+	// manifest operations become no-ops then.
+	Manifest *manifest.Service
 }
 
 // New builds a Runner. Cancels/Worktrees/Log default to fresh instances.
@@ -87,9 +117,17 @@ func New(deps Deps) *Runner {
 	if log == nil {
 		log = slog.Default()
 	}
+	syncer := deps.Syncer
+	if syncer == nil {
+		if sqlStore, ok := deps.Artifacts.(*artifacts.SQLStore); ok {
+			syncer = artifacts.NewSyncer(sqlStore)
+		}
+	}
 	return &Runner{
 		store: deps.Store, packs: deps.Packs, adapter: deps.Adapter, models: deps.Models,
-		wt: worktreeManager, cancels: cancels, sink: deps.Sink, agentName: deps.AgentName, log: log,
+		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
+		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
+		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
 	}
 }
 
@@ -141,6 +179,16 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 		return fmt.Errorf("teardown: load project: %w", err)
 	}
 	runner.recordResultCommit(ctx, task, project.RepoPath)
+	// Refresh task state (recordResultCommit may have set result_commit) and
+	// seal the manifest. The seal captures the final git lineage; a sealed
+	// manifest is the immutable record a comparison / reproduction reads.
+	updatedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	if refreshErr == nil {
+		runner.sealManifestAtTerminal(ctx, updatedTask)
+	} else {
+		runner.log.Warn("teardown: reload task for seal", "task", task.ID, "error", refreshErr)
+		runner.sealManifestAtTerminal(ctx, task)
+	}
 	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
 		runner.log.Error("teardown worktree", "task", task.ID, "error", err)
 		return err
@@ -248,6 +296,12 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		"base_commit": baseCommit, "branch": worktree.BranchFor(task.ID),
 	})
 
+	// Record the initial manifest evidence (input, project, pack, declared
+	// capabilities, adapter) once the lineage anchor is set. Best-effort: a
+	// failure here is logged inside the helper and does not fail the run.
+	runner.recordInitialEvidence(ctx, task, project, taskPack)
+	runner.recordGitEvidence(ctx, task)
+
 	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)
 	if err != nil {
 		return runner.failTask(ctx, task, err)
@@ -262,6 +316,10 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	defer runner.cancels.Unregister(job.TaskID)
 
 	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
+	// On resume / advance, sync the current artifact revisions back into the
+	// worktree so the agent starts from the same content the prior invocation
+	// produced. No-op for a fresh run (no revisions yet).
+	runner.syncRevisionsIntoWorktree(ctx, run, startStage)
 	return runner.runLoop(runCtx, run, startStage, resumeSession)
 }
 
@@ -482,6 +540,9 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// Skipped on adapter/parse error — there is no trustworthy commit to record.
 	if result != nil && !adapterErr && !parseErr {
 		runner.recordStageCheckpoint(ctx, run, stageID)
+		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
+		// the manifest service is nil in unit tests.
+		runner.recordGitEvidence(ctx, run.task)
 	}
 
 	decision, err := Evaluate(StageInput{
@@ -629,6 +690,15 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		sessionID = terminal.SessionID
 		telemetry = terminal.Telemetry
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
+		// Capture produced artifacts (result.json + the agent-declared
+		// artifact paths) into the durable revisions store. Best-effort: a
+		// capture failure is logged and the run continues — the parsed result
+		// is already on the invocation row, and the manifest's "missing"
+		// section will record the gap.
+		runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
+		// Record evidence of the prompt + model the adapter saw. The manifest
+		// service is nil in unit tests; AddEvidence is a no-op then.
+		runner.recordStageEvidence(ctx, run, stageID, stage, model)
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,
@@ -676,6 +746,13 @@ func (runner *Runner) failTask(ctx context.Context, task sqlc.Task, cause error)
 		return fmt.Errorf("%w (and failed to mark task failed: %v)", cause, err)
 	}
 	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{"from": task.State, "to": string(engine.StateFailed), "error": cause.Error()})
+	// Seal the manifest with reason=failed so the partial evidence is still
+	// the immutable record of what was attempted. The teardown job will run
+	// the git-evidence + seal again; the seal is idempotent.
+	failedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	if refreshErr == nil {
+		runner.sealManifestAtTerminal(ctx, failedTask)
+	}
 	// Best-effort: schedule worktree teardown. A failed task's worktree is not
 	// needed for recovery (the session, if any, is gone); remove it. Enqueuing
 	// (not removing inline) serializes with the still-running driving job.
@@ -727,6 +804,7 @@ const (
 	EvWorktreeReconciled = "task.worktree_reconciled"
 	EvCheckpointRecorded = "task.checkpoint_recorded"
 	EvTaskCleanedUp      = "task.cleaned_up"
+	EvRevisionsSynced    = "task.revisions_synced"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

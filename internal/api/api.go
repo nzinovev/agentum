@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -25,13 +27,40 @@ type API struct {
 	queries *sqlc.Queries
 	log     *slog.Logger
 	cancels TaskCanceler
+
+	// art is the immutable artifact revisions store. Nil when the server did
+	// not wire one (e.g. tests); the artifact read handlers 404 then.
+	art artifacts.Store
+	// mfst is the evidence manifest service. Nil when the server did not wire
+	// one; the manifest read handlers 404 then.
+	mfst *manifest.Service
+}
+
+// Option configures an API at construction. Used for the artifact store +
+// manifest service — both are optional so unit tests can build a minimal API.
+type Option func(*API)
+
+// WithArtifactStore attaches an immutable artifact revisions store to the API.
+// Required for the artifact read handlers to do anything useful.
+func WithArtifactStore(store artifacts.Store) Option {
+	return func(apiInst *API) { apiInst.art = store }
+}
+
+// WithManifestService attaches an evidence manifest service to the API.
+// Required for the manifest read handlers to do anything useful.
+func WithManifestService(service *manifest.Service) Option {
+	return func(apiInst *API) { apiInst.mfst = service }
 }
 
 // New builds the API. db backs the transactional outbox; cancels lets the cancel
 // handler abort an in-flight run (nil leaves cancel as a no-op — the FSM
-// transition still applies).
-func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels TaskCanceler) *API {
-	return &API{db: db, queries: queries, log: log, cancels: cancels}
+// transition still applies). Options wire the artifact store + manifest service.
+func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels TaskCanceler, options ...Option) *API {
+	apiInst := &API{db: db, queries: queries, log: log, cancels: cancels}
+	for _, option := range options {
+		option(apiInst)
+	}
+	return apiInst
 }
 
 // runInTx executes fn against a fresh transaction-scoped Queries. Commit on nil,
@@ -72,6 +101,20 @@ func (api *API) Register(mux *http.ServeMux) {
 	// Stage invocations (read-only for now).
 	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations", api.handleListInvocations)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations/{iid}", api.handleGetInvocation)
+
+	// Artifacts (revisions store): list revisions + stream content. These are
+	// the read surface over the immutable, worktree-independent revisions store
+	// (F.7). A missing revision is a 404; the handler never falls back to the
+	// disposable worktree path.
+	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts", api.handleListArtifacts)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/revisions/{rid}", api.handleGetArtifactRevision)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/revisions/{rid}/content", api.handleGetArtifactContent)
+
+	// Evidence manifest (read-only). GET returns the manifest body + seal
+	// metadata + corrections; GET .../diff compares two sealed manifests.
+	mux.HandleFunc("GET /api/v1/tasks/{id}/manifest", api.handleGetManifest)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/manifest/diff", api.handleDiffManifest)
+	mux.HandleFunc("POST /api/v1/tasks/{id}/manifest/corrections", api.handleCorrectManifest)
 
 	// Gate actions (§3.2 stop conditions → continue semantics).
 	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/continue", api.handleInvocationContinue)

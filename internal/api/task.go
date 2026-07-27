@@ -129,6 +129,15 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
+	// Initialize the evidence manifest for the task. Best-effort: a failure
+	// here is logged but does not fail the task creation — the runner's
+	// recordInitialEvidence is a backstop, and the read handlers return a
+	// clear "not initialized" 404 rather than crashing.
+	if api.mfst != nil {
+		if initErr := api.mfst.Init(r.Context(), principal.TenantID, principal.UserID, task.ID); initErr != nil {
+			api.log.Warn("init manifest at task creation", "task", task.ID, "error", initErr)
+		}
+	}
 	writeJSON(w, http.StatusCreated, toTaskResponse(task))
 }
 

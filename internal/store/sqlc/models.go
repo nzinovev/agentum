@@ -12,6 +12,26 @@ import (
 	"github.com/sqlc-dev/pqtype"
 )
 
+type ArtifactRevision struct {
+	ID                 string         `json:"id"`
+	TenantID           string         `json:"tenant_id"`
+	UserID             string         `json:"user_id"`
+	TaskID             string         `json:"task_id"`
+	Name               string         `json:"name"`
+	Kind               string         `json:"kind"`
+	ContentHash        string         `json:"content_hash"`
+	ContentSize        int64          `json:"content_size"`
+	ActionType         string         `json:"action_type"`
+	PrevRevisionID     sql.NullString `json:"prev_revision_id"`
+	SourceInvocationID sql.NullString `json:"source_invocation_id"`
+	DeliveryStep       sql.NullString `json:"delivery_step"`
+	ExecutionUnit      sql.NullString `json:"execution_unit"`
+	Phase              sql.NullString `json:"phase"`
+	Actor              string         `json:"actor"`
+	CreatedAt          time.Time      `json:"created_at"`
+	IsCurrent          bool           `json:"is_current"`
+}
+
 type Event struct {
 	ID        int64           `json:"id"`
 	TenantID  string          `json:"tenant_id"`
@@ -106,4 +126,27 @@ type TaskCheckpoint struct {
 	Label     string    `json:"label"`
 	CommitSha string    `json:"commit_sha"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type TaskManifest struct {
+	ID         string          `json:"id"`
+	TenantID   string          `json:"tenant_id"`
+	UserID     string          `json:"user_id"`
+	TaskID     string          `json:"task_id"`
+	Body       json.RawMessage `json:"body"`
+	SealedAt   sql.NullTime    `json:"sealed_at"`
+	SealedBy   sql.NullString  `json:"sealed_by"`
+	SealReason sql.NullString  `json:"seal_reason"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+type TaskManifestCorrection struct {
+	ID         string          `json:"id"`
+	TenantID   string          `json:"tenant_id"`
+	UserID     string          `json:"user_id"`
+	ManifestID string          `json:"manifest_id"`
+	Body       json.RawMessage `json:"body"`
+	Reason     string          `json:"reason"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
