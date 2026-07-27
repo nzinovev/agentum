@@ -68,8 +68,9 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleInvocationApprove POST /api/v1/tasks/{id}/invocations/{iid}/approve
-// Final approval → task done. Memory commit (Epic 1) is deferred; for now this
-// completes the task and schedules worktree teardown.
+// Final approval → task done. Memory commit (Epic 1) is deferred. The teardown
+// job records result_commit (the agentum/<task-id> tip) and removes the worktree
+// only — the branch + result_commit remain resolvable for review (F.6.1 AC #3).
 func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePrincipal(w, r)
 	if !ok {
@@ -98,27 +99,38 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
 	}
-	updated, err := api.queries.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-		ID: task.ID, TenantID: principal.TenantID, State: string(next),
-	})
-	if err != nil {
+	// Transactional outbox: the done transition and the teardown-job enqueue
+	// commit atomically. result_commit capture happens inside the teardown job
+	// (the runner owns the worktree manager) before the worktree is removed.
+	var updated sqlc.Task
+	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
+		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		})
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+		}); enqueueErr != nil {
+			return enqueueErr
+		}
+		updated = transitioned
+		return nil
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
-	}
-	// Schedule teardown; the worker removes the worktree once the task is done.
-	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-	}); err != nil {
-		logUnexpected(api.log, err, "EnqueueJob(teardown)")
-		// Non-fatal: the task is done; teardown can be retried/forced manually.
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
 // handleCancelTask POST /api/v1/tasks/{id}/cancel
-// Cancel any non-terminal task: abort the in-flight run (if any) via the cancel
-// registry, then transition to cancelled. Non-destructive — session-id resume
-// and the worktree survive until teardown (PR4).
+// Terminal abort: any non-terminal task → cancelled. The in-flight run (if any)
+// is aborted via the cancel registry, then the FSM transition + teardown-job
+// enqueue commit atomically. F.6.1: cancel is a terminal ABORT, distinct from
+// pause (non-terminal) and cleanup (explicit branch deletion). The teardown job
+// removes the worktree only — the agentum/<task-id> branch and any committed
+// recovery work survive for review (AC #4).
 func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePrincipal(w, r)
 	if !ok {
@@ -155,45 +167,60 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
 	}
-	updated, err := api.queries.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-		ID: task.ID, TenantID: principal.TenantID, State: string(next),
-	})
-	if err != nil {
-		logUnexpected(api.log, err, "UpdateTaskState")
+	// Transactional outbox: abort transition + teardown enqueue in one tx.
+	var updated sqlc.Task
+	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
+		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		})
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+		}); enqueueErr != nil {
+			return enqueueErr
+		}
+		updated = transitioned
+		return nil
+	}); err != nil {
+		logUnexpected(api.log, err, "CancelTask tx")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
-	}
-	// Schedule teardown; the worker removes the worktree once the run has aborted.
-	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-	}); err != nil {
-		logUnexpected(api.log, err, "EnqueueJob(teardown)")
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
 // applyResume runs the FSM transition and enqueues the driving job, carrying an
 // optional payload (continue's answers/context). Shared by continue/advance.
+// Transactional outbox (F.6.1 AC #6): the transition and the enqueue commit in
+// one tx, so a resume can never leave the task running with no driver job.
 func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEvent, kind string, payload []byte) (sqlc.Task, error) {
 	principal, _ := authz.PrincipalFrom(r.Context())
 	next, err := engine.Next(engine.TaskState(task.State), event)
 	if err != nil {
 		return sqlc.Task{}, err
 	}
-	updated, err := api.queries.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-		ID: task.ID, TenantID: principal.TenantID, State: string(next),
-	})
-	if err != nil {
-		return sqlc.Task{}, err
-	}
-	jobParams := sqlc.EnqueueJobParams{
-		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: kind,
-		Payload: []byte("{}"),
-	}
+	jobPayload := []byte("{}")
 	if len(payload) > 0 && string(payload) != "null" {
-		jobParams.Payload = payload
+		jobPayload = payload
 	}
-	if _, err := api.queries.EnqueueJob(r.Context(), jobParams); err != nil {
+	var updated sqlc.Task
+	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
+		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		})
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: kind, Payload: jobPayload,
+		}); enqueueErr != nil {
+			return enqueueErr
+		}
+		updated = transitioned
+		return nil
+	}); err != nil {
 		return sqlc.Task{}, err
 	}
 	return updated, nil
@@ -229,6 +256,50 @@ func (api *API) resumeFromPauseRead(w http.ResponseWriter, r *http.Request, want
 		return sqlc.Task{}, false
 	}
 	return updated, true
+}
+
+// handleCleanupTask POST /api/v1/tasks/{id}/cleanup
+// Explicit, idempotent branch deletion (F.6.1 AC #4). Distinct verb from
+// cancel (terminal abort) and pause: cleanup operates on an ALREADY-terminal
+// task and removes its delivery artifacts. A generic cancel cannot ambiguously
+// mean all three. Enqueues a cleanup job (the runner owns the worktree manager
+// that performs the git branch deletion); the job is idempotent, so re-posting
+// is safe. Audited via the task.cleanup_done event.
+func (api *API) handleCleanupTask(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if decision := authz.Can(r.Context(), principal, "task:cleanup", r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+		return
+	}
+	id := r.PathValue("id")
+	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: principal.TenantID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
+			return
+		}
+		logUnexpected(api.log, err, "GetTask(cleanup)")
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
+		return
+	}
+	// Cleanup is post-terminal only. A running/paused task's branch is live
+	// delivery state — deleting it would destroy in-flight work.
+	if !engine.IsTerminal(engine.TaskState(task.State)) {
+		writeError(w, http.StatusConflict, codeIllegalTransition,
+			"cleanup requires a terminal task; task is "+task.State)
+		return
+	}
+	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+		TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "cleanup", Payload: []byte("{}"),
+	}); err != nil {
+		logUnexpected(api.log, err, "EnqueueJob(cleanup)")
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, toTaskResponse(task))
 }
 
 // statusForTransition maps an engine/transition error to an HTTP response.

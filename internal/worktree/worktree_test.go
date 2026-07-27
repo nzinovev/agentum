@@ -34,8 +34,9 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	manager := New()
 	taskID := "task-001"
 
-	// First create: makes the worktree.
-	worktree, err := manager.Create(t.Context(), repo, taskID)
+	// First create: makes the worktree. Empty baseCommit → HEAD (the
+	// pre-F.6.1 path; production always passes a resolved SHA).
+	worktree, err := manager.Create(t.Context(), repo, taskID, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 
 	// Second create: idempotent — returns the existing worktree, no error.
-	secondWorktree, err := manager.Create(t.Context(), repo, taskID)
+	secondWorktree, err := manager.Create(t.Context(), repo, taskID, "")
 	if err != nil {
 		t.Fatalf("idempotent Create: %v", err)
 	}
@@ -61,23 +62,36 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 		t.Error("idempotent Create returned a different path")
 	}
 
-	// Remove: tears down worktree + branch.
-	if err := manager.Remove(t.Context(), repo, taskID); err != nil {
-		t.Fatalf("Remove: %v", err)
+	// RemoveWorktree: tears down the working tree only. The branch must survive
+	// (F.6.1 AC #3 — branch + commits remain resolvable after teardown).
+	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if isWorktree(worktree.Root) {
-		t.Error("worktree still present after Remove")
+		t.Error("worktree still present after RemoveWorktree")
 	}
-	// Branch gone.
+	if out, err := git(t.Context(), repo, "branch", "--list", "agentum/task-001"); err != nil {
+		t.Fatalf("branch --list: %v", err)
+	} else if len(out) == 0 {
+		t.Errorf("branch deleted by RemoveWorktree; want it preserved: %q", out)
+	}
+
+	// DeleteBranch: explicit cleanup removes the branch now. Idempotent.
+	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
 	if out, err := git(t.Context(), repo, "branch", "--list", "agentum/task-001"); err != nil {
 		t.Fatalf("branch --list: %v", err)
 	} else if len(out) != 0 {
-		t.Errorf("branch still exists after Remove: %q", out)
+		t.Errorf("branch still exists after DeleteBranch: %q", out)
 	}
 
-	// Remove again: no-op, no error.
-	if err := manager.Remove(t.Context(), repo, taskID); err != nil {
-		t.Errorf("second Remove should be a no-op, got: %v", err)
+	// Both ops idempotent on a fully-cleaned task: no-op, no error.
+	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
+		t.Errorf("second RemoveWorktree should be a no-op, got: %v", err)
+	}
+	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+		t.Errorf("second DeleteBranch should be a no-op, got: %v", err)
 	}
 }
 
@@ -89,7 +103,7 @@ func TestManager_EnsureIgnored(t *testing.T) {
 	}
 	manager := New()
 
-	if _, err := manager.Create(t.Context(), repo, "task-002"); err != nil {
+	if _, err := manager.Create(t.Context(), repo, "task-002", ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

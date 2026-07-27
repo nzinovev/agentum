@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -27,9 +28,13 @@ type Store interface {
 	GetProject(ctx context.Context, arg sqlc.GetProjectParams) (sqlc.Project, error)
 	UpdateTaskState(ctx context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error)
 	UpdateTaskStage(ctx context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error)
+	SetBaseCommit(ctx context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Task, error)
+	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
+	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
+	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
 }
@@ -105,6 +110,8 @@ func (runner *Runner) Handle(ctx context.Context, job sqlc.Job) error {
 		return runner.drive(ctx, job)
 	case "teardown":
 		return runner.teardown(ctx, job)
+	case "cleanup":
+		return runner.cleanup(ctx, job)
 	case "cancel":
 		return nil
 	default:
@@ -113,9 +120,17 @@ func (runner *Runner) Handle(ctx context.Context, job sqlc.Job) error {
 }
 
 // teardown removes the task's worktree once it has reached a terminal state
-// (done/cancelled/failed). Idempotent: a missing worktree is a no-op. Enqueued
-// by the cancel/approve handlers and by failTask; the worker claims it after the
-// driving run job is done, so it never races the runner (04 §7.1.3).
+// (done/cancelled/failed). F.6.1: the worktree is disposable, the branch is not
+// — RemoveWorktree deletes the working tree only; agentum/<task-id> and any
+// committed recovery/delivery work remain resolvable. Idempotent: a missing
+// worktree is a no-op. Enqueued by the cancel/approve handlers and by failTask;
+// the worker claims it after the driving run job is done, so it never races the
+// runner (04 §7.1.3). Branch deletion is a separate explicit cleanup action.
+//
+// Before removing the worktree, teardown captures the agentum/<task-id> tip as
+// result_commit — the immutable record of what was delivered (done) or recovered
+// (cancelled/failed). The branch survives teardown, so result_commit is always
+// resolvable after the fact; recording it here keeps the API free of git.
 func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
 	if err != nil {
@@ -125,7 +140,8 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	if err != nil {
 		return fmt.Errorf("teardown: load project: %w", err)
 	}
-	if err := runner.wt.Remove(ctx, project.RepoPath, task.ID); err != nil {
+	runner.recordResultCommit(ctx, task, project.RepoPath)
+	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
 		runner.log.Error("teardown worktree", "task", task.ID, "error", err)
 		return err
 	}
@@ -133,10 +149,63 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	return nil
 }
 
-// drive performs the shared setup (load task + project + pack, create worktree)
-// and enters the stage loop. It registers a cancel for the task so the cancel
-// handler can abort the run mid-stage; a child context carries that cancellation
-// down to the adapter.
+// cleanup is the explicit, idempotent, audited deletion of a terminal task's
+// delivery artifacts (F.6.1 AC #4). Triggered by POST /tasks/{id}/cleanup, it
+// removes the agentum/<task-id> branch AND any lingering worktree (the latter
+// idempotent — a task whose teardown already ran has only the branch left).
+// Distinct from teardown (worktree-only at terminal state) and from cancel
+// (terminal abort): cleanup is the operator saying "I am done with this
+// delivery." Branch deletion is forced: a delivered task's commits are reviewed
+// via result_commit / the branch before cleanup; -D is the intent.
+func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
+	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
+	if err != nil {
+		return fmt.Errorf("cleanup: load task: %w", err)
+	}
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: task.ProjectID, TenantID: task.TenantID})
+	if err != nil {
+		return fmt.Errorf("cleanup: load project: %w", err)
+	}
+	// Remove any lingering worktree first (idempotent). A branch that is
+	// checked out in a worktree cannot be deleted; clearing the worktree frees it.
+	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
+		runner.log.Error("cleanup: remove worktree", "task", task.ID, "error", err)
+		return err
+	}
+	if err := runner.wt.DeleteBranch(ctx, project.RepoPath, task.ID); err != nil {
+		runner.log.Error("cleanup: delete branch", "task", task.ID, "error", err)
+		return err
+	}
+	runner.emit(ctx, task, EvTaskCleanedUp, map[string]any{"branch": worktree.BranchFor(task.ID)})
+	return nil
+}
+
+// recordResultCommit captures the agentum/<task-id> tip as result_commit if it
+// is not already recorded and the branch is resolvable. Best-effort: a branch
+// that is already gone (cleanup ran, or never created) is a no-op. result_commit
+// remains queryable as the diff target against base_commit after teardown.
+func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, repoPath string) {
+	if task.ResultCommit.Valid && task.ResultCommit.String != "" {
+		return
+	}
+	tip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(task.ID))
+	if err != nil {
+		// Branch not resolvable (never created, or already cleaned up). Nothing
+		// to record — leave result_commit NULL rather than guessing.
+		return
+	}
+	if _, err := runner.store.SetResultCommit(ctx, sqlc.SetResultCommitParams{
+		ID: task.ID, TenantID: task.TenantID, ResultCommit: nullStr(tip),
+	}); err != nil {
+		runner.log.Warn("record result_commit", "task", task.ID, "error", err)
+	}
+}
+
+// drive performs the shared setup (load task + project + pack, resolve the
+// lineage anchor, reconcile any partially-modified worktree, create the
+// worktree off base_commit, record the base checkpoint) and enters the stage
+// loop. It registers a cancel for the task so the cancel handler can abort the
+// run mid-stage; a child context carries that cancellation down to the adapter.
 func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
 	if err != nil {
@@ -151,10 +220,33 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return runner.failTask(ctx, task, fmt.Errorf("resolve pack %q: %w", task.PipelinePack, err))
 	}
 
-	taskWorktree, err := runner.wt.Create(ctx, project.RepoPath, task.ID)
+	// Resolve the lineage anchor once. base_commit is what the worktree branches
+	// from and what checkpoints diff against; recording it immutably before any
+	// work means a later move of base_ref cannot retcon the task's lineage.
+	task, err = runner.resolveBaseCommit(ctx, task, project.RepoPath)
+	if err != nil {
+		return runner.failTask(ctx, task, err)
+	}
+	baseCommit := task.BaseCommit.String
+
+	taskWorktree, err := runner.wt.Create(ctx, project.RepoPath, task.ID, baseCommit)
 	if err != nil {
 		return runner.failTask(ctx, task, fmt.Errorf("create worktree: %w", err))
 	}
+
+	// Record the base as a checkpoint so a crash before the first stage completes
+	// still has a restore target. Idempotent: ON CONFLICT replaces the SHA.
+	runner.recordCheckpoint(ctx, task, "base", baseCommit)
+
+	// Reconcile before driving a side-effectful stage. A crashed worktree may be
+	// clean, safely resumable, restorable to the last checkpoint, or in a state
+	// that needs a human — never blindly replayed.
+	if err := runner.reconcileWorktree(ctx, task, project.RepoPath, baseCommit, taskWorktree.Root); err != nil {
+		return err
+	}
+	runner.emit(ctx, task, EvWorktreeCreated, map[string]any{
+		"base_commit": baseCommit, "branch": worktree.BranchFor(task.ID),
+	})
 
 	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)
 	if err != nil {
@@ -171,6 +263,104 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 
 	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
 	return runner.runLoop(runCtx, run, startStage, resumeSession)
+}
+
+// resolveBaseCommit resolves task.BaseRef to a full SHA exactly once and pins it
+// on the row. SetBaseCommit's `WHERE base_commit IS NULL` makes a concurrent
+// resolver a no-op; we re-read to pick up the canonical value either way. The
+// worktree branches from this SHA, so a missing/unknown ref fails the task
+// before any side effect rather than mid-stage.
+func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, repoPath string) (sqlc.Task, error) {
+	if task.BaseCommit.Valid && task.BaseCommit.String != "" {
+		return task, nil
+	}
+	baseRef := task.BaseRef
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	sha, err := runner.wt.ResolveRef(ctx, repoPath, baseRef)
+	if err != nil {
+		return task, fmt.Errorf("resolve base_ref %q: %w", baseRef, err)
+	}
+	if _, err := runner.store.SetBaseCommit(ctx, sqlc.SetBaseCommitParams{
+		ID: task.ID, TenantID: task.TenantID, BaseCommit: nullStr(sha),
+	}); err != nil {
+		return task, fmt.Errorf("persist base_commit: %w", err)
+	}
+	// Re-read so the returned task carries the canonical base_commit (ours if we
+	// won the race, the other resolver's if we lost).
+	return runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+}
+
+// reconcileWorktree enforces the F.6.1 "never blindly replay a side-effectful
+// stage" invariant. The worktree is classified; restorable trees are restored
+// to the last checkpoint (so the next stage starts from a known-good commit),
+// needs-attention trees fail the task rather than guessing, and clean/resumable
+// trees proceed as-is.
+func (runner *Runner) reconcileWorktree(ctx context.Context, task sqlc.Task, repoPath, baseCommit, wtRoot string) error {
+	lastCheckpoint := ""
+	if cp, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	}); err == nil {
+		lastCheckpoint = cp.CommitSha
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		runner.log.Warn("load last checkpoint for reconcile", "task", task.ID, "error", err)
+	}
+
+	state, err := runner.wt.Reconcile(ctx, repoPath, task.ID, baseCommit, lastCheckpoint)
+	if err != nil {
+		return runner.failTask(ctx, task, fmt.Errorf("reconcile worktree: %w", err))
+	}
+	switch state.Class {
+	case worktree.ClassClean, worktree.ClassResumable:
+		runner.emit(ctx, task, EvWorktreeReconciled, map[string]any{
+			"class": state.Class.String(), "head": state.HeadCommit,
+		})
+		return nil
+	case worktree.ClassRestorable:
+		// Restore to the checkpoint before the stage runs — uncommitted work from
+		// a crashed run must not bleed into the retry.
+		if err := runner.wt.Restore(ctx, wtRoot, state.CheckpointCommit); err != nil {
+			return runner.failTask(ctx, task, fmt.Errorf("restore worktree to checkpoint: %w", err))
+		}
+		runner.emit(ctx, task, EvWorktreeReconciled, map[string]any{
+			"class": state.Class.String(), "restored_to": state.CheckpointCommit,
+		})
+		return nil
+	default:
+		return runner.failTask(ctx, task, fmt.Errorf("worktree needs human attention (class=%s)", state.Class))
+	}
+}
+
+// recordCheckpoint captures an orchestrator-owned boundary SHA. Idempotent per
+// label — a retry after a crash that re-crosses the same boundary upserts
+// rather than duplicates. Best-effort: a checkpoint write failure is logged,
+// not fatal (the lineage and result_commit are independent of checkpoints).
+func (runner *Runner) recordCheckpoint(ctx context.Context, task sqlc.Task, label, commit string) {
+	if commit == "" {
+		return
+	}
+	if _, err := runner.store.CreateCheckpoint(ctx, sqlc.CreateCheckpointParams{
+		TenantID: task.TenantID, UserID: task.UserID, TaskID: task.ID,
+		Label: label, CommitSha: commit,
+	}); err != nil {
+		runner.log.Warn("record checkpoint", "task", task.ID, "label", label, "error", err)
+		return
+	}
+	runner.emit(ctx, task, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
+}
+
+// recordStageCheckpoint captures the worktree's current HEAD as a post-stage
+// boundary checkpoint. The label is `post-<stage>`; the SHA is read from the
+// worktree (the agent's commit tip, if it committed). A read failure is logged
+// and skipped — the lineage anchor and result_commit do not depend on it.
+func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) {
+	head, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
+	if err != nil {
+		runner.log.Warn("read head for checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
+		return
+	}
+	runner.recordCheckpoint(ctx, run.task, "post-"+stageID, head)
 }
 
 // stageRun bundles the per-task state the loop and adapter invocation share.
@@ -284,6 +474,14 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// cancelled. Otherwise the adapter_error pause would race and overwrite it.
 	if err := ctx.Err(); err != nil {
 		return stageOutcome{done: true}, nil
+	}
+
+	// A successful stage invocation crossed a boundary: capture the worktree's
+	// HEAD as an orchestrator-owned checkpoint so a later crash can restore to
+	// this point rather than blindly replaying the next side-effectful stage.
+	// Skipped on adapter/parse error — there is no trustworthy commit to record.
+	if result != nil && !adapterErr && !parseErr {
+		runner.recordStageCheckpoint(ctx, run, stageID)
 	}
 
 	decision, err := Evaluate(StageInput{
@@ -521,11 +719,14 @@ func (runner *Runner) isClean(repoPath, taskID string) bool {
 // Event types the runner emits. The runner owns its taxonomy; the SSE layer
 // frames whatever string the events table carries.
 const (
-	EvTaskStateChanged = "task.state_changed"
-	EvStageStarted     = "stage.started"
-	EvStageStopped     = "stage.stopped"
-	EvWorktreeCreated  = "task.worktree_created"
-	EvWorktreeRemoved  = "task.worktree_removed"
+	EvTaskStateChanged   = "task.state_changed"
+	EvStageStarted       = "stage.started"
+	EvStageStopped       = "stage.stopped"
+	EvWorktreeCreated    = "task.worktree_created"
+	EvWorktreeRemoved    = "task.worktree_removed"
+	EvWorktreeReconciled = "task.worktree_reconciled"
+	EvCheckpointRecorded = "task.checkpoint_recorded"
+	EvTaskCleanedUp      = "task.cleaned_up"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

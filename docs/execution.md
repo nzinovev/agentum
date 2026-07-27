@@ -182,21 +182,114 @@ silent re-execution.
 
 Worktrees are torn down by Agentum on **terminal state** — `done`, `cancelled`,
 or `failed` — not by a TTL and not manually (`04 §7.1.3`). Teardown is a runner
-job (`kind=teardown`) that runs `git worktree remove --force` + deletes the
-task branch. It is enqueued by:
+job (`kind=teardown`) that runs `git worktree remove --force` **only**. The
+`agentum/<task-id>` branch and its commits are NOT deleted at teardown — they
+are the durable delivery output that survives for review and Epic 8 handoff.
+Branch deletion is a separate, explicit `cleanup` action (below). It is
+enqueued by:
 
 - `handleInvocationApprove` — after the task moves to `done`.
 - `handleCancelTask` — after the task moves to `cancelled`.
 - `failTask` (best-effort) — when a run moves the task to `failed`.
 
-Enqueuing (rather than removing inline) serializes teardown with the still-running
-driving job — it never races the runner. The teardown job is idempotent: a
-missing worktree is a no-op.
+Before removing the worktree, the teardown job captures the tip of
+`agentum/<task-id>` as `result_commit` on the task row — the immutable record of
+what was delivered (done) or recovered (cancelled/failed). The branch survives
+teardown, so `result_commit` is always resolvable after the fact; the
+`base_commit..result_commit` range is the review/handoff surface.
+
+Enqueuing (rather than removing inline) serializes teardown with the
+still-running driving job — it never races the runner. The teardown job is
+idempotent: a missing worktree is a no-op.
 
 **F.6 gap (until F.7):** artifact *files* live inside the worktree. Teardown
 discards them; only the parsed `result.json` (already persisted as jsonb on
-`stage_invocations`) and git history survive. F.7 (object-storage seam) makes
-artifacts durable independently of worktree lifecycle.
+`stage_invocations`), the branch, and the commit history survive. F.7
+(object-storage seam) makes artifacts durable independently of worktree
+lifecycle.
+
+## Safe lifecycle, checkpoints, and code egress (F.6.1)
+
+This is the primitive Epic 8 reuses for every execution unit. It separates four
+concepts that were previously conflated:
+
+| Concept | Verb | Effect | Branch + commits |
+|---|---|---|---|
+| **Pause** | FSM `stop_*` events | Non-terminal; resumable via `continue`/`advance` | preserved |
+| **Terminal abort** | `POST /tasks/{id}/cancel` (FSM `cancel`) | Terminal (`cancelled`); worktree torn down | **preserved** |
+| **Worktree teardown** | `teardown` job | Removes the disposable working tree | **preserved** |
+| **Cleanup** | `POST /tasks/{id}/cleanup` (`cleanup` job) | Explicit branch deletion; idempotent; audited | deleted |
+
+A generic `cancel` cannot ambiguously mean all three — each is a distinct,
+named action. Pause is non-terminal; abort is terminal-but-preserves-delivery;
+cleanup is post-terminal disposal.
+
+### Git lineage: base_ref, base_commit, result_commit
+
+Every task records its git lineage explicitly:
+
+- **`base_ref`** (input): the ref the task builds against — branch / tag / SHA /
+  `HEAD`. Set at `POST /tasks`, defaults to `HEAD`. The input record is
+  reproducible from this.
+- **`base_commit`** (anchor): the full SHA `base_ref` resolved to, captured
+  **once** before the worktree is created (`SetBaseCommit` is a `WHERE
+  base_commit IS NULL` no-op after the first capture). The worktree branches
+  from this SHA, so a later move of `base_ref` cannot retcon the task's lineage.
+- **`result_commit`** (delivery): the tip of `agentum/<task-id>` captured at
+  terminal teardown. Immutable; the branch survives teardown so this is always
+  resolvable. `base_commit..result_commit` is the review/handoff diff.
+
+The task response exposes all three plus `branch` (the canonical
+`agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
+without touching git. Provider PR creation belongs to Epic P and is not required
+for safe local egress.
+
+### Checkpoints
+
+The orchestrator owns boundary checkpoints (`task_checkpoints` table): immutable
+SHAs recorded at stage boundaries. The runner captures `base` (the lineage
+anchor) plus a `post-<stage>` checkpoint after each successful stage invocation.
+`(task_id, label)` is unique, so a retry that re-crosses a boundary upserts
+rather than duplicates.
+
+Agents may edit and inspect git but cannot create, delete, reset, or rebase
+delivery refs — `agentum/<task-id>` and checkpoint SHAs are orchestrator-owned.
+The routing block tells the agent this; Agentum enforces it by being the only
+thing that touches those refs.
+
+### Reconciliation before retry/resume
+
+Before driving a side-effectful stage on a retry or resume, the runner
+reconciles the worktree (`worktree.Manager.Reconcile`). A crashed worktree is
+classified as one of:
+
+| Class | Condition | Runner action |
+|---|---|---|
+| `clean` | HEAD at base_commit (or last checkpoint), tree clean | proceed |
+| `resumable` | committed work beyond base, tree clean | proceed from HEAD |
+| `restorable` | uncommitted changes | `Restore` to last checkpoint (or base), then proceed |
+| `needs_attention` | worktree missing, or HEAD in an unexpected lineage | fail the task — surface for a human |
+
+A side-effectful stage is never blindly replayed against a half-modified tree.
+`Restore` is `git reset --hard <checkpoint>` + `git clean -fd`, so the
+post-restore tree is byte-identical to the checkpoint (untracked agent-written
+files from the crashed run are discarded).
+
+### Transactional outbox + periodic reconciler
+
+Every HTTP-driven FSM transition that carries a runnable-job intent enqueues the
+job **inside the same database transaction** as the transition
+(`api.runInTx`). A handler that cannot enqueue rolls back the transition — a
+task can never be left `running` with no driver intent.
+
+A periodic reconciler (`internal/jobs.Reconciler`, started on boot and on a
+ticker) repairs what crashes still leave behind, not only at process startup:
+
+- **Stale job leases** — `status='running' AND heartbeat_at < now() - stale` —
+  re-queued, or failed past `AGENTUM_JOB_MAX_ATTEMPTS`.
+- **Orphaned tasks** — `state='running'` with no live (pending/running) job —
+  transitioned to `paused_user_stop` (reason `interrupted`) so a human resumes
+  explicitly. Conservative by design: a half-run stage is never auto-replayed.
 
 ## Events
 

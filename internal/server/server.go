@@ -19,21 +19,23 @@ import (
 )
 
 // Server wires the full execution model: the HTTP boundary (api), the runner
-// (the stage loop), and the job worker that drives it. One process runs one
-// worker pool over a shared Postgres-backed queue.
+// (the stage loop), the job worker that drives it, and the periodic reconciler
+// that repairs stale leases and orphaned tasks between restarts. One process
+// runs one worker pool over a shared Postgres-backed queue.
 type Server struct {
-	cfg    config.Config
-	log    *slog.Logger
-	store  *store.Store
-	api    *api.API
-	runner *runner.Runner
-	worker *jobs.Worker
-	pool   int
+	cfg        config.Config
+	log        *slog.Logger
+	store      *store.Store
+	api        *api.API
+	runner     *runner.Runner
+	worker     *jobs.Worker
+	reconciler *jobs.Reconciler
+	pool       int
 }
 
-// New constructs the server and all execution-model dependencies. The worker is
-// not started here — Run starts it after recovery so no job runs before stale
-// ones are reconciled.
+// New constructs the server and all execution-model dependencies. The worker
+// and reconciler are not started here — Run starts them after recovery so no
+// job runs before stale ones are reconciled.
 func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 	queries := sqlc.New(dataStore.DB)
 
@@ -60,9 +62,25 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Log:         log,
 	})
 
-	apiInst := api.New(queries, log, runnerInst.Cancels())
+	// The reconciler repairs stale job leases AND orphaned running tasks (a
+	// crash between the FSM transition and EnqueueJob). *sqlc.Queries satisfies
+	// TaskStore directly; QueueStore adapts the queue side. The tenant seam is
+	// the single-tenant id from config until SSO/RBAC arrive.
+	reconciler := jobs.NewReconciler(jobs.ReconcilerDeps{
+		TenantID:    cfg.TenantID,
+		Queue:       jobs.QueueStore{Q: queries},
+		Tasks:       queries,
+		MaxAttempts: cfg.JobMaxAttempts,
+		Log:         log,
+	})
 
-	return &Server{cfg: cfg, log: log, store: dataStore, api: apiInst, runner: runnerInst, worker: worker, pool: cfg.WorkerPoolSize}
+	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels())
+
+	return &Server{
+		cfg: cfg, log: log, store: dataStore, api: apiInst,
+		runner: runnerInst, worker: worker, reconciler: reconciler,
+		pool: cfg.WorkerPoolSize,
+	}
 }
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
@@ -74,14 +92,14 @@ func (s *Server) Handler() http.Handler {
 	return applyBoundary(mux, s.cfg, s.log)
 }
 
-// Run serves HTTP and the job worker until ctx is cancelled, then shuts down
-// gracefully. Recovery runs first so a crashed worker's stale jobs are
-// re-queued before any new job is claimed.
+// Run serves HTTP, the job worker, and the periodic reconciler until ctx is
+// cancelled, then shuts down gracefully. The reconciler runs its first pass
+// before the worker starts, so a crashed worker's stale jobs and any orphaned
+// tasks are repaired before any new job is claimed.
 func (s *Server) Run(ctx context.Context) error {
-	if err := s.worker.Recover(ctx); err != nil {
-		// Recovery is best-effort; log and continue rather than refusing boot.
-		s.log.Error("worker recovery failed", "error", err)
-	}
+	reconcilerCtx, cancelReconciler := context.WithCancel(ctx)
+	defer cancelReconciler()
+	go s.reconciler.Start(reconcilerCtx, jobs.DefaultReconcileInterval)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

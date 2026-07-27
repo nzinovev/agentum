@@ -55,6 +55,18 @@ func (store *fakeStore) UpdateTaskStage(_ context.Context, arg sqlc.UpdateTaskSt
 	}
 	return store.task, nil
 }
+func (store *fakeStore) SetBaseCommit(_ context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.task.BaseCommit = arg.BaseCommit
+	return store.task, nil
+}
+func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.task.ResultCommit = arg.ResultCommit
+	return store.task, nil
+}
 func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -84,6 +96,12 @@ func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStage
 		return sqlc.StageInvocation{}, sql.ErrNoRows
 	}
 	return store.invocations[len(store.invocations)-1], nil
+}
+func (store *fakeStore) LatestCheckpointForTask(_ context.Context, _ sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error) {
+	return sqlc.TaskCheckpoint{}, sql.ErrNoRows // no checkpoints in the fake
+}
+func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error) {
+	return sqlc.TaskCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}, nil
 }
 func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
 	store.mu.Lock()

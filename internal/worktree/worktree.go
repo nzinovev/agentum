@@ -3,6 +3,13 @@
 // <task-id>/ on branch agentum/<task-id>, reuses it across stages and resumes,
 // and tears it down when the task reaches a terminal state.
 //
+// F.6.1 splits teardown into two distinct actions:
+//   - RemoveWorktree disposes of the per-task working tree at terminal state.
+//     The branch agentum/<task-id> and its commits survive — they are the
+//     durable delivery output a human reviews and Epic 8 hands off.
+//   - DeleteBranch is the explicit, audited cleanup that removes the branch once
+//     the delivery is no longer needed. It is never auto-run at teardown.
+//
 // Per-stage artifacts live under the worktree at <root>/.agentum/<task-id>/
 // .ag-artifacts/<stage>/ (the §6.4 path convention; filesystem-as-bus, C1/C4).
 // The runner computes these paths via ArtifactDir and creates the directories
@@ -48,19 +55,23 @@ func ArtifactDir(wtRoot, taskID, stage string) string {
 	return filepath.Join(wtRoot, ".agentum", taskID, ".ag-artifacts", stage)
 }
 
-// Manager creates and removes per-task worktrees. It carries no mutable state;
-// methods are safe to call concurrently for different task ids (git serializes
-// worktree operations internally).
+// Manager creates, inspects, reconciles, and removes per-task worktrees. It
+// carries no mutable state; methods are safe to call concurrently for different
+// task ids (git serializes worktree operations internally).
 type Manager struct{}
 
 // New returns a Manager.
 func New() *Manager { return &Manager{} }
 
 // Create makes (or, if it already exists, returns) the worktree for taskID off
-// repoPath on branch agentum/<task-id>, rooted at the repo's current HEAD. It
-// ensures the repo ignores its own .agentum/ dir so worktrees and artifacts do
-// not pollute the user's working tree as untracked files.
-func (manager *Manager) Create(ctx context.Context, repoPath, taskID string) (*Worktree, error) {
+// repoPath on branch agentum/<task-id>, rooted at baseCommit. A non-empty
+// baseCommit (a resolved full SHA) is used as the branch start-point so the
+// task's lineage is pinned to exactly what base_ref pointed at when the runner
+// resolved it; an empty baseCommit falls back to the repo's current HEAD (used
+// by tests and the pre-F.6.1 path). It ensures the repo ignores its own
+// .agentum/ dir so worktrees and artifacts do not pollute the user's working
+// tree as untracked files.
+func (manager *Manager) Create(ctx context.Context, repoPath, taskID, baseCommit string) (*Worktree, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -72,7 +83,9 @@ func (manager *Manager) Create(ctx context.Context, repoPath, taskID string) (*W
 	branch := BranchFor(taskID)
 
 	// Idempotent: a worktree already at this path is returned as-is. This keeps
-	// resume/retry (which re-enters Create) from failing on the second pass.
+	// resume/retry (which re-enters Create) from failing on the second pass —
+	// and preserves the lineage of an in-flight task (we never rebuild it from
+	// a different base mid-run).
 	if isWorktree(wtPath) {
 		return &Worktree{Root: wtPath, Branch: branch, RepoPath: repoAbs}, nil
 	}
@@ -88,20 +101,231 @@ func (manager *Manager) Create(ctx context.Context, repoPath, taskID string) (*W
 		return nil, fmt.Errorf("create worktree parent dir: %w", err)
 	}
 
-	// Create the worktree on a new branch from HEAD. -b names the branch; the
-	// branch is created off the repo's current HEAD and checked out in the new
-	// working tree. -f would overwrite a stale path; we avoid it and rely on
-	// idempotency above plus explicit Remove for teardown.
-	if out, err := git(ctx, repoAbs, "worktree", "add", "-b", branch, wtPath); err != nil {
+	// Create the worktree on a new branch off baseCommit (or HEAD). -b names the
+	// branch; the branch is created off the start-point and checked out in the
+	// new working tree. Pinning to baseCommit is what makes base_commit an
+	// immutable lineage anchor — a later move of base_ref cannot retcon it.
+	args := []string{"worktree", "add", "-b", branch, wtPath}
+	if baseCommit != "" {
+		args = append(args, baseCommit)
+	}
+	if out, err := git(ctx, repoAbs, args...); err != nil {
 		return nil, fmt.Errorf("git worktree add: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return &Worktree{Root: wtPath, Branch: branch, RepoPath: repoAbs}, nil
 }
 
-// Remove deletes the worktree for taskID and prunes its branch. Safe to call on
-// an already-removed task (no-op). Used at terminal state (done/cancelled/
-// failed) per §7.1.3.
-func (manager *Manager) Remove(ctx context.Context, repoPath, taskID string) error {
+// ResolveRef resolves a ref (branch / tag / SHA / "HEAD") to its full commit SHA
+// in the project repo. Used once per task, before the worktree is created, so
+// base_commit is an immutable anchor. Returns ErrUnknownRef when the ref cannot
+// be resolved — the caller surfaces this as a bad-input error before any work
+// starts.
+func (manager *Manager) ResolveRef(ctx context.Context, repoPath, ref string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(ref) == "" {
+		ref = "HEAD"
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve repo path: %w", err)
+	}
+	// --verify ensures a single SHA; ^{commit} peels tags to the commit so a
+	// tag base_ref lands on the commit it points at. --quiet keeps stderr clean
+	// on a miss; we synthesize a typed error for the caller.
+	out, err := git(ctx, repoAbs, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return "", fmt.Errorf("%w: %q", ErrUnknownRef, ref)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// HeadCommit returns the full commit SHA the worktree's HEAD currently points
+// at. The runner records this at stage boundaries as a checkpoint SHA. Operates
+// on the worktree dir (the checked-out branch HEAD), not the project repo.
+func (manager *Manager) HeadCommit(ctx context.Context, wtRoot string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	out, err := git(ctx, wtRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// IsClean reports whether the worktree has no uncommitted changes. Exposed so
+// the runner's evaluator (auto_if_clean gate) and the reconciler share one
+// definition of "clean". Any porcelain entry ⇒ not clean.
+func (manager *Manager) IsClean(ctx context.Context, wtRoot string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := git(ctx, wtRoot, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("git status: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return len(strings.TrimSpace(string(out))) == 0, nil
+}
+
+// Restore moves the worktree's checked-out branch, its index, its working tree,
+// AND removes untracked files to the given commit. Used by the reconciler when a
+// crashed worktree is classified as restorable: it restores the last checkpoint
+// (or base_commit) so a side-effectful stage is never blindly replayed against a
+// half-modified tree. `git reset --hard` alone does not remove untracked files
+// the agent may have written mid-stage, so Restore pairs it with `git clean
+// -fd` — the post-restore tree is byte-identical to the checkpoint. The commit
+// must be a resolvable full SHA from a prior checkpoint or base_commit.
+func (manager *Manager) Restore(ctx context.Context, wtRoot, commit string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(commit) == "" {
+		return errors.New("worktree: Restore requires a non-empty commit")
+	}
+	out, err := git(ctx, wtRoot, "reset", "--hard", commit)
+	if err != nil {
+		return fmt.Errorf("git reset --hard %s: %w (%s)", commit, err, strings.TrimSpace(string(out)))
+	}
+	// Remove untracked files AND empty dirs the agent left behind mid-stage.
+	// -d lets clean remove directories; -f makes non-empty untracked removal
+	// non-interactive. The .agentum/ worktree-local artifact tree is excluded
+	// (gitignored), so this never touches result.json or stage artifacts.
+	cleanOut, err := git(ctx, wtRoot, "clean", "-fd")
+	if err != nil {
+		return fmt.Errorf("git clean -fd: %w (%s)", err, strings.TrimSpace(string(cleanOut)))
+	}
+	return nil
+}
+
+// Classification is the reconciler's verdict on a worktree's state after a
+// crash, before a retry/resume. It drives the runner's recovery policy: a
+// side-effectful stage is replayed only against a clean or safely-resumable
+// tree; a restorable tree is reset to CheckpointCommit first; anything else
+// surfaces for a human.
+type Classification int
+
+const (
+	// ClassUnknown is the zero value and is never returned by Reconcile; it
+	// exists so an unset Classification reads as "not yet classified".
+	ClassUnknown Classification = iota
+	// ClassClean: no committed work beyond the base and no uncommitted changes.
+	// The stage can start fresh as if it had never run.
+	ClassClean
+	// ClassResumable: committed work exists beyond the base, and the working
+	// tree is clean. The next stage resumes from the recorded HEAD.
+	ClassResumable
+	// ClassRestorable: the working tree has uncommitted changes. The runner
+	// resets to CheckpointCommit (the last checkpoint, or base_commit if none)
+	// before retrying — a side-effectful stage is never replayed against a
+	// partially-modified tree.
+	ClassRestorable
+	// ClassNeedsAttention: the worktree is missing or in a state the reconciler
+	// cannot safely classify (detached HEAD, HEAD behind base). The runner
+	// surfaces this for a human rather than guessing.
+	ClassNeedsAttention
+)
+
+// String gives the audit-log / event payload representation of a class.
+func (classification Classification) String() string {
+	switch classification {
+	case ClassClean:
+		return "clean"
+	case ClassResumable:
+		return "resumable"
+	case ClassRestorable:
+		return "restorable"
+	case ClassNeedsAttention:
+		return "needs_attention"
+	default:
+		return "unknown"
+	}
+}
+
+// ReconcileState is the reconciler's verdict: the class plus the commit the
+// runner should act on. For ClassRestorable it is the restore target (last
+// checkpoint SHA, falling back to baseCommit); for the clean/resumable classes
+// it is the current HEAD; for needs-attention it is empty.
+type ReconcileState struct {
+	Class            Classification
+	HeadCommit       string // current worktree HEAD (empty if worktree missing)
+	CheckpointCommit string // restore target for ClassRestorable (last checkpoint or base)
+}
+
+// Reconcile classifies the worktree for taskID after a crash, before a retry or
+// resume. baseCommit is the task's resolved base_commit (the lineage anchor);
+// lastCheckpoint is the most recent orchestrator-recorded checkpoint SHA, or ""
+// if none exists yet (the reconciler then falls back to baseCommit).
+//
+// The classification is conservative by design: when in doubt, surface for
+// human attention rather than risk replaying a side-effectful stage.
+func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCommit, lastCheckpoint string) (ReconcileState, error) {
+	if err := ctx.Err(); err != nil {
+		return ReconcileState{}, err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return ReconcileState{}, fmt.Errorf("resolve repo path: %w", err)
+	}
+	wtPath := PathFor(repoAbs, taskID)
+	if !isWorktree(wtPath) {
+		// Worktree gone but task wants to run: a human removed it (or teardown
+		// ran early). Re-creating would silently rebuild from base and replay
+		// side effects — surface instead.
+		return ReconcileState{Class: ClassNeedsAttention}, nil
+	}
+
+	head, err := manager.HeadCommit(ctx, wtPath)
+	if err != nil {
+		return ReconcileState{}, err
+	}
+	clean, err := manager.IsClean(ctx, wtPath)
+	if err != nil {
+		return ReconcileState{}, err
+	}
+
+	// Dirty working tree ⇒ restorable. The restore target is the last checkpoint
+	// (an orchestrator-owned boundary) if one exists; otherwise base_commit.
+	if !clean {
+		restoreTarget := lastCheckpoint
+		if strings.TrimSpace(restoreTarget) == "" {
+			restoreTarget = baseCommit
+		}
+		return ReconcileState{Class: ClassRestorable, HeadCommit: head, CheckpointCommit: restoreTarget}, nil
+	}
+
+	// Clean working tree. If HEAD is exactly the base or the last checkpoint,
+	// nothing has happened since that boundary — clean. Otherwise committed
+	// work exists and the next stage resumes from HEAD.
+	if head == baseCommit {
+		return ReconcileState{Class: ClassClean, HeadCommit: head, CheckpointCommit: baseCommit}, nil
+	}
+	if lastCheckpoint != "" && head == lastCheckpoint {
+		return ReconcileState{Class: ClassClean, HeadCommit: head, CheckpointCommit: lastCheckpoint}, nil
+	}
+	// Guard: if HEAD is not the base and not ahead of it (e.g. force-pushed
+	// behind, or detached), do not guess — the lineage is unexpected.
+	if baseCommit != "" {
+		ancestorOut, ancestorErr := git(ctx, repoAbs, "merge-base", "--is-ancestor", baseCommit, head)
+		if ancestorErr != nil {
+			// merge-base --is-ancestor exits non-zero when NOT an ancestor;
+			// distinguish that from a real git failure by checking stdout/stderr
+			// is empty (a real failure usually carries a message).
+			out := strings.TrimSpace(string(ancestorOut))
+			if out == "" && baseCommit != head {
+				return ReconcileState{Class: ClassNeedsAttention, HeadCommit: head}, nil
+			}
+		}
+	}
+	return ReconcileState{Class: ClassResumable, HeadCommit: head, CheckpointCommit: lastCheckpoint}, nil
+}
+
+// RemoveWorktree removes only the per-task working tree. The agentum/<task-id>
+// branch and its commits remain resolvable — they are the durable delivery
+// output that survives teardown (F.6.1 AC #3). Idempotent: a missing worktree
+// is a no-op. Used at terminal state (done/cancelled/failed).
+func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, taskID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -110,23 +334,40 @@ func (manager *Manager) Remove(ctx context.Context, repoPath, taskID string) err
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
 	wtPath := PathFor(repoAbs, taskID)
-	branch := BranchFor(taskID)
-
-	if isWorktree(wtPath) {
-		// --force: the worktree may contain uncommitted agent work; teardown at
-		// terminal state discards it (artifacts were already captured).
-		if out, err := git(ctx, repoAbs, "worktree", "remove", "--force", wtPath); err != nil {
-			return fmt.Errorf("git worktree remove: %w (%s)", err, strings.TrimSpace(string(out)))
-		}
+	if !isWorktree(wtPath) {
+		return nil
 	}
-	// Delete the task branch. -D forces removal even if not merged: a cancelled
-	// or failed task's branch is discarded; a done task's commits were merged
-	// elsewhere (F.8) or are abandoned by design at MVP. Errors for a missing
-	// branch are ignored (already gone / never created).
-	if out, err := git(ctx, repoAbs, "branch", "-D", branch); err != nil {
-		if !strings.Contains(string(out), "not found") {
-			return fmt.Errorf("git branch delete: %w (%s)", err, strings.TrimSpace(string(out)))
+	// --force: the worktree may contain uncommitted agent work; teardown at
+	// terminal state discards the *working tree* but the branch tip (committed
+	// delivery) is preserved by virtue of not deleting the branch here.
+	out, err := git(ctx, repoAbs, "worktree", "remove", "--force", wtPath)
+	if err != nil {
+		return fmt.Errorf("git worktree remove: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// DeleteBranch removes the agentum/<task-id> branch. This is the explicit,
+// audited cleanup action — distinct from terminal teardown. Idempotent: a
+// missing branch is a no-op. -D forces removal even if not merged: a delivered
+// task's commits are reviewed via result_commit / the branch ref; deletion is
+// the operator saying "I am done with this delivery."
+func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, taskID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	branch := BranchFor(taskID)
+	out, err := git(ctx, repoAbs, "branch", "-D", branch)
+	if err != nil {
+		// A missing branch is a successful no-op; anything else is real.
+		if strings.Contains(string(out), "not found") {
+			return nil
 		}
+		return fmt.Errorf("git branch delete: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -185,6 +426,13 @@ func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// ErrNotExist is returned when a worktree is expected but absent. Kept for
-// callers that want to distinguish from a git failure.
-var ErrNotExist = errors.New("worktree does not exist")
+// Typed errors the callers branch on.
+var (
+	// ErrNotExist is returned when a worktree is expected but absent. Kept for
+	// callers that want to distinguish from a git failure.
+	ErrNotExist = errors.New("worktree does not exist")
+	// ErrUnknownRef is returned by ResolveRef when the ref cannot be resolved
+	// to a commit in the repo. Callers surface it as a bad-input error before
+	// any work starts.
+	ErrUnknownRef = errors.New("worktree: unknown ref")
+)

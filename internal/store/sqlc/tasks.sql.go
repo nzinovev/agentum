@@ -12,9 +12,9 @@ import (
 )
 
 const createTask = `-- name: CreateTask :one
-INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack, title, input, state)
-VALUES ($1, $2, $3, $4, $5, $6, 'created')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
+INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack, title, input, base_ref, state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'created')
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
 `
 
 type CreateTaskParams struct {
@@ -24,6 +24,7 @@ type CreateTaskParams struct {
 	PipelinePack string          `json:"pipeline_pack"`
 	Title        string          `json:"title"`
 	Input        json.RawMessage `json:"input"`
+	BaseRef      string          `json:"base_ref"`
 }
 
 func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, error) {
@@ -34,6 +35,7 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		arg.PipelinePack,
 		arg.Title,
 		arg.Input,
+		arg.BaseRef,
 	)
 	var i Task
 	err := row.Scan(
@@ -48,12 +50,71 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
 	)
 	return i, err
 }
 
+const findOrphanedRunningTasks = `-- name: FindOrphanedRunningTasks :many
+SELECT t.id, t.tenant_id, t.user_id, t.project_id, t.pipeline_pack, t.title, t.input, t.state, t.created_at, t.updated_at, t.current_stage, t.base_ref, t.base_commit, t.result_commit FROM tasks t
+WHERE t.tenant_id = $1
+  AND t.state = 'running'
+  AND NOT EXISTS (
+      SELECT 1 FROM jobs j
+      WHERE j.task_id = t.id
+        AND j.tenant_id = t.tenant_id
+        AND j.status IN ('pending', 'running')
+  )
+ORDER BY t.updated_at
+`
+
+// Reconciler probe (F.6.1 AC #6): tasks whose state says they are running but
+// have no live (pending or running) job. A crash between the FSM transition and
+// EnqueueJob, or a worker that died and its job already failed, leaves the task
+// here. The reconciler transitions these to paused_user_stop (interrupted) so a
+// human explicitly resumes — safer than auto-replay of a half-run stage.
+func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, findOrphanedRunningTasks, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.UserID,
+			&i.ProjectID,
+			&i.PipelinePack,
+			&i.Title,
+			&i.Input,
+			&i.State,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CurrentStage,
+			&i.BaseRef,
+			&i.BaseCommit,
+			&i.ResultCommit,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTask = `-- name: GetTask :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage FROM tasks WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks WHERE id = $1 AND tenant_id = $2
 `
 
 type GetTaskParams struct {
@@ -76,12 +137,49 @@ func (q *Queries) GetTask(ctx context.Context, arg GetTaskParams) (Task, error) 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+	)
+	return i, err
+}
+
+const getTaskForUpdate = `-- name: GetTaskForUpdate :one
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+`
+
+type GetTaskForUpdateParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// Locking read used by SetBaseCommit callers that need the post-resolution row
+// even when the UPDATE matched zero rows (base_commit already set). FOR UPDATE
+// serializes concurrent first-resolvers on the same task.
+func (q *Queries) GetTaskForUpdate(ctx context.Context, arg GetTaskForUpdateParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, getTaskForUpdate, arg.ID, arg.TenantID)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.Input,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
 	)
 	return i, err
 }
 
 const listTasksByProject = `-- name: ListTasksByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage FROM tasks
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks
 WHERE tenant_id = $1 AND project_id = $2
 ORDER BY created_at DESC
 LIMIT $3 OFFSET $4
@@ -120,6 +218,9 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CurrentStage,
+			&i.BaseRef,
+			&i.BaseCommit,
+			&i.ResultCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -134,10 +235,84 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 	return items, nil
 }
 
+const setBaseCommit = `-- name: SetBaseCommit :one
+UPDATE tasks SET base_commit = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+`
+
+type SetBaseCommitParams struct {
+	ID         string         `json:"id"`
+	TenantID   string         `json:"tenant_id"`
+	BaseCommit sql.NullString `json:"base_commit"`
+}
+
+// Resolve-once: capture the immutable SHA the task's base_ref pointed at. The
+// runner calls this before creating the worktree; it must be a no-op after the
+// first capture (WHERE base_commit IS NULL) so the recorded base cannot drift
+// if base_ref is later moved. Returns the row whether or not it changed.
+func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, setBaseCommit, arg.ID, arg.TenantID, arg.BaseCommit)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.Input,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+	)
+	return i, err
+}
+
+const setResultCommit = `-- name: SetResultCommit :one
+UPDATE tasks SET result_commit = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+`
+
+type SetResultCommitParams struct {
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenant_id"`
+	ResultCommit sql.NullString `json:"result_commit"`
+}
+
+// Capture the tip of agentum/<task-id> at final approval. The branch + this
+// commit remain resolvable after teardown; recorded once, on approve.
+func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, setResultCommit, arg.ID, arg.TenantID, arg.ResultCommit)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.Input,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+	)
+	return i, err
+}
+
 const updateTaskStage = `-- name: UpdateTaskStage :one
 UPDATE tasks SET current_stage = $3, state = $4, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
 `
 
 type UpdateTaskStageParams struct {
@@ -170,6 +345,9 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
 	)
 	return i, err
 }
@@ -177,7 +355,7 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 const updateTaskState = `-- name: UpdateTaskState :one
 UPDATE tasks SET state = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
 `
 
 type UpdateTaskStateParams struct {
@@ -201,6 +379,9 @@ func (q *Queries) UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
 	)
 	return i, err
 }
