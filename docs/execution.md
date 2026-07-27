@@ -202,11 +202,10 @@ Enqueuing (rather than removing inline) serializes teardown with the
 still-running driving job — it never races the runner. The teardown job is
 idempotent: a missing worktree is a no-op.
 
-**F.6 gap (until F.7):** artifact *files* live inside the worktree. Teardown
-discards them; only the parsed `result.json` (already persisted as jsonb on
-`stage_invocations`), the branch, and the commit history survive. F.7
-(object-storage seam) makes artifacts durable independently of worktree
-lifecycle.
+**F.7:** artifact *files* are now durable independently of the worktree —
+`artifact_revisions` rows + the content-addressed blob store survive teardown.
+The parsed `result.json` is still on `stage_invocations.result`; the revisions
+store adds the bytes and the immutable edit chain.
 
 ## Safe lifecycle, checkpoints, and code egress (F.6.1)
 
@@ -301,6 +300,8 @@ volume sane and matches the audit-trail intent.
 
 F.6 emits: `task.state_changed`, `stage.started`, `stage.stopped`,
 `stage.telemetry`, `task.worktree_created`, `task.worktree_removed`.
+F.7 adds: `task.revisions_synced` (current revisions materialized into the
+worktree at stage start).
 
 See `docs/api.md#events-sse` for the SSE contract.
 
@@ -323,8 +324,6 @@ that the loop works with a live agent, not just fakes.
 
 These land with their epics — the seams exist, the behavior does not:
 
-- **Artifact durability** beyond the DB-stored `result.json` → **F.7**
-  (object-storage interface; survives worktree teardown).
 - **Memory push/pull** → **Epic 1** (the routing block's "Project decisions"
   section is an inert stub until 1.2/1.3 land).
 - **MCP capability pass-through** → **Epic 6** (the routing block's
@@ -338,3 +337,118 @@ These land with their epics — the seams exist, the behavior does not:
 - **`LISTEN/NOTIFY` low-latency wake** — poll is fine for MVP.
 - **Per-project pack roots** — pack root is server-wide config
   (`config.Config.PacksDir`, default `./packs`).
+
+## Evidence manifest and artifact revisions (F.7)
+
+The worktree is disposable; the artifacts an agent produces during a stage and
+the inputs that shaped the run are the durable record. F.7 splits that record
+into two pieces:
+
+- **Artifact revisions** — every produced or edited artifact variant becomes
+  an immutable, content-addressed revision stored outside the worktree. Edits
+  chain via `prev_revision_id`; the worktree-independent blob store survives
+  teardown.
+- **Evidence manifest** — one row per task that records everything that went
+  into the run: input task + revision, project + base commit, pack + version +
+  hash, prompt revisions, adapter + declared capabilities, model + tier,
+  effective capability profile, memory slice, input/output artifact revisions,
+  check set version + results, human gate decisions, branch / checkpoints /
+  result commits. The manifest is append-only while a run is in flight and
+  sealed at terminal state; corrections after sealing are linked rows that
+  supersede rather than rewrite.
+
+### Storage layout
+
+```
+<ArtifactRoot>/                       # config.ArtifactRoot, default .agentum/artifacts
+  <hash[:2]>/
+    <hash>                            # the content-addressed blob
+```
+
+The revisions index lives in Postgres (`artifact_revisions`); the bytes live on
+the FS in a canonical location independent of any worktree. Two revisions with
+the same content share one blob.
+
+### Revisions and the immutable chain
+
+```sql
+artifact_revisions(
+  id, tenant_id, user_id, task_id,
+  name, kind,                          -- identity within the task
+  content_hash, content_size,          -- content addressing
+  action_type,                         -- create | edit
+  prev_revision_id,                    -- chain to the prior revision
+  source_invocation_id,                -- NULL for human edits
+  delivery_step, execution_unit, phase, -- optional execution coordinate
+  actor,                               -- human | agent | system
+  is_current                           -- the single mutable bit
+)
+```
+
+- A new revision chains via `prev_revision_id`. Edits never overwrite.
+- `is_current` is the single "current" pointer per `(task, name)`; the partial
+  unique index `idx_artifact_rev_current` enforces one current per name.
+- A `PUT /tasks/{id}/invocations/{iid}/artifacts/{name}` creates a new
+  revision; a revision already referenced by an `invocation` is never
+  modified, so a later edit cannot retroactively change what an agent saw.
+- On `continue` / `advance`, the runner syncs the current revisions back into
+  the worktree before the next stage runs (`artifacts.Syncer`).
+- The execution coordinate (`delivery_step`, `execution_unit`, `phase`) is
+  optional and inert when NULL. Single-unit runs leave it empty; Epic 8
+  populates it.
+
+### Secret redaction
+
+Before bytes enter the store, `artifacts.DefaultRedactor` scans text-kind
+content for high-entropy token patterns (Authorization / Bearer headers, AWS
+AKIA keys, GitHub PATs, generic `token|secret|password|api_key`-labeled
+values, PEM private key blocks) and substitutes `[REDACTED]` for matches.
+Binary content is passed through. The redactor is best-effort, not a security
+boundary — operators remain responsible for what their agents emit.
+
+### Manifest lifecycle
+
+| Phase | Action | Who |
+|---|---|---|
+| Init | `POST /tasks` creates a manifest row (empty body) | API |
+| Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage | runner |
+| Seal | At terminal state, `Seal(reason)` freezes the body. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failTask`) |
+| Correct | `POST /tasks/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot | API |
+
+Subsystems not yet wired (project memory, capability enforcement, project
+checks) are listed explicitly under `body.missing` — the manifest never hides
+an absent input, it surfaces it.
+
+### Comparing two runs
+
+`GET /tasks/{id}/manifest/diff?other=<task-id>` returns the structural
+comparison between two sealed manifest bodies. The diff surfaces *input-level*
+differences only — the things that meaningfully change what an agent would do:
+
+- input task + revision
+- project + base_commit
+- pack (name, version, content hash)
+- prompt revisions (per stage)
+- adapter (name, version, declared capabilities)
+- model + tier
+- effective capability profile
+- memory slice (entry hashes)
+- input artifact revisions
+- check set version
+- git base
+- execution coordinate (when set)
+
+Outputs (artifacts produced) and human decisions are **not** compared — those
+are *results*, not inputs. Two runs that produced different output but had
+identical inputs are the same comparable run; the diff is empty.
+
+### Read surface
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/tasks/{id}/artifacts` | list revisions; `?current=true` narrows to current |
+| `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | one revision (no bytes) |
+| `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | streams the blob bytes |
+| `GET` | `/tasks/{id}/manifest` | manifest body + seal info + corrections |
+| `GET` | `/tasks/{id}/manifest/diff?other=<task-id>` | input-level diff |
+| `POST` | `/tasks/{id}/manifest/corrections` | add a post-seal correction |

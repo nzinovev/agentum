@@ -139,10 +139,100 @@ The three gate **actions** from §3.4:
 
 ## Artifacts
 
+Two surfaces: the legacy stubs under `/tasks/{id}/invocations/{iid}/artifacts/{name}`
+(Epic 2) and the F.7 immutable revisions surface.
+
 | Method | Path | Status | Notes |
 |---|---|---|---|
+| `GET` | `/tasks/{id}/artifacts` | ✅ | list revisions for a task. `?current=true` narrows to current revisions. |
+| `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
+| `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
 | `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | stub | fetch an artifact. Epic 2 |
 | `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | stub | edit-and-approve via artifact write. Epic 2 |
+
+The revisions store is content-addressed and lives outside any worktree. Each
+edit creates a new immutable revision that chains to the prior one; the
+`current` pointer is the single mutable bit per `(task, name)`.
+
+### Artifact revision
+
+```json
+{
+  "id": "uuid",
+  "task_id": "uuid",
+  "name": "specs/auth.md",
+  "kind": "spec | code | adr | result_json | …",
+  "content_hash": "sha256 hex",
+  "content_size": 1234,
+  "action_type": "create | edit",
+  "prev_revision_id": "uuid (empty for create)",
+  "source_invocation_id": "uuid (empty for human edits)",
+  "delivery_step": "optional — empty for single-unit runs",
+  "execution_unit": "optional — empty for single-unit runs",
+  "phase": "optional — empty for single-unit runs",
+  "actor": "human | agent | system",
+  "is_current": true,
+  "created_at": "2026-07-09T..."
+}
+```
+
+## Evidence manifest
+
+One manifest per task. Records the inputs that shaped the run (input task +
+revision, project + base commit, pack + version + hash, prompt revisions,
+adapter + declared capabilities, model + tier, effective capability profile,
+memory slice, input/output artifact revisions, check set version + results,
+human gate decisions, branch + checkpoints + result commits).
+
+| Method | Path | Status | Notes |
+|---|---|---|---|
+| `GET` | `/tasks/{id}/manifest` | ✅ | manifest body + seal info + corrections |
+| `GET` | `/tasks/{id}/manifest/diff?other=<task-id>` | ✅ | input-level diff vs another task's manifest |
+| `POST` | `/tasks/{id}/manifest/corrections` | ✅ | add a post-seal correction (body: `{reason, body?}`) |
+
+The manifest body is filled append-only while the run is in flight and sealed
+at terminal state (`done | failed | cancelled | interrupted`). Corrections
+after sealing are linked rows with a `reason` and a fresh body snapshot; the
+sealed row is never edited.
+
+### Manifest body shape
+
+```json
+{
+  "schema_version": "1",
+  "input":            { "task_id": "…", "title": "…", "input": {}, "revision": "…", "pipeline_pack": "…" },
+  "project":          { "project_id": "…", "repo_path": "…", "name": "…", "base_ref": "…", "base_commit": "…" },
+  "pack":             { "ref": "…", "name": "…", "version": "1.0.0", "content_hash": "…", "forked": false },
+  "prompts":          [{ "stage_id": "spec", "hash": "…" }],
+  "adapter":          { "name": "opencode", "version": "…", "declared_capabilities": [] },
+  "model":            { "tier": "strong", "model": "…", "agent_name": "opencode" },
+  "capabilities":     { "declared": [], "granted": [] },
+  "memory":           { "scope": "project", "hashes": [], "entries": 0 },
+  "artifacts":        { "inputs": [], "outputs": [] },
+  "checks":           { "set_version": "", "results": [] },
+  "human_gates":      [{ "stage": "…", "gate": "…", "decision": "…", "actor": "…", "timestamp": "…" }],
+  "git":              { "branch": "agentum/…", "base_commit": "…", "result_commit": "…", "checkpoints": [] },
+  "execution_coordinate": { "delivery_step": "", "execution_unit": "", "phase": "" },
+  "missing":          ["memory", "checks", "capabilities", "human_gates"]
+}
+```
+
+### Diff response
+
+The diff is one SectionDelta per axis that differs (or `null` for axes that
+match):
+
+```json
+{
+  "input":               { "reason": "input-revision", "summary": "…" },
+  "pack":                { "reason": "pack-version", "summary": "…" },
+  "model":               null,
+  "execution_coordinate": null
+}
+```
+
+The diff is **input-level only**. Outputs (artifacts produced) and human
+decisions are not compared — those are results, not inputs.
 
 ## Memory
 
