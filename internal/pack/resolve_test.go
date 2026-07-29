@@ -252,23 +252,32 @@ func TestDirSource_Resolve(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.ref, func(t *testing.T) {
 			t.Parallel()
-			p, err := src.Resolve(context.Background(), tc.ref)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("Resolve(%q) expected error, got nil", tc.ref)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Resolve(%q): %v", tc.ref, err)
-			}
-			if p.Pack.Name != "probe" {
-				t.Errorf("name = %q, want probe", p.Pack.Name)
-			}
-			if p.BaseRef != tc.ref {
-				t.Errorf("BaseRef = %q, want %q", p.BaseRef, tc.ref)
-			}
+			assertSourceResolve(t, src, tc.ref, tc.wantErr)
 		})
+	}
+}
+
+// assertSourceResolve runs one DirSource.Resolve case: on the error path it
+// asserts a non-nil error; on the happy path it asserts the resolved pack
+// identity and that BaseRef echoes the ref. Lifted out of the table driver so
+// the nested error/happy branches do not inflate the test's complexity.
+func assertSourceResolve(t *testing.T, src *DirSource, ref string, wantErr bool) {
+	t.Helper()
+	p, err := src.Resolve(context.Background(), ref)
+	if wantErr {
+		if err == nil {
+			t.Fatalf("Resolve(%q) expected error, got nil", ref)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", ref, err)
+	}
+	if p.Pack.Name != "probe" {
+		t.Errorf("name = %q, want probe", p.Pack.Name)
+	}
+	if p.BaseRef != ref {
+		t.Errorf("BaseRef = %q, want %q", p.BaseRef, ref)
 	}
 }
 

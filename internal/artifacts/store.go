@@ -65,29 +65,18 @@ func (sqlStore *SQLStore) Put(ctx context.Context, params PutParams) (Revision, 
 		params.Actor = ActorSystem
 	}
 
-	// Redact first — we hash and store the redacted bytes, not the raw input.
-	bytesToStore := params.Bytes
-	if sqlStore.redactor != nil {
-		redacted, redactErr := sqlStore.redactor.Redact(params.Name, params.Kind, params.Bytes)
-		if redactErr != nil {
-			return Revision{}, fmt.Errorf("artifacts: redact %q: %w", params.Name, redactErr)
-		}
-		if redacted != nil {
-			bytesToStore = redacted
-		}
+	bytesToStore, contentHash, err := sqlStore.redactAndHash(params)
+	if err != nil {
+		return Revision{}, err
 	}
 
-	contentHash := Hash(bytesToStore)
-
 	// Idempotent edit: identical content under the same (task, name) is a
-	// no-op. We must do this before the transaction so the no-op path does not
-	// open a tx for nothing.
-	if prior, priorErr := sqlStore.queries.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: params.TaskID, TenantID: params.TenantID, Name: params.Name,
-	}); priorErr == nil && prior.ContentHash == contentHash {
+	// no-op. Checked before the transaction so the no-op path does not open a
+	// tx for nothing.
+	if prior, hit, priorErr := sqlStore.currentIfUnchanged(ctx, params, contentHash); priorErr != nil {
+		return Revision{}, priorErr
+	} else if hit {
 		return fromRow(prior), nil
-	} else if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
-		return Revision{}, fmt.Errorf("artifacts: load prior current: %w", priorErr)
 	}
 
 	// Write the blob first. Idempotent on hash: a concurrent Put for the same
@@ -96,13 +85,57 @@ func (sqlStore *SQLStore) Put(ctx context.Context, params PutParams) (Revision, 
 		return Revision{}, fmt.Errorf("artifacts: write blob: %w", err)
 	}
 
-	actionType := ActionCreate
-	prevID := sql.NullString{}
-	if _, priorFound := sqlStore.lookupCurrent(ctx, params.TenantID, params.TaskID, params.Name); priorFound != nil {
-		actionType = ActionEdit
-		prevID = sql.NullString{String: priorFound.ID, Valid: true}
-	}
+	actionType, prevID := sqlStore.editBase(ctx, params)
+	return sqlStore.commitRevision(ctx, params, contentHash, bytesToStore, actionType, prevID)
+}
 
+// redactAndHash returns the bytes to store (redacted when a redactor is
+// configured and the kind is text) and their sha256 hash. The hash is taken
+// over the redacted bytes so the index and the FS blob always agree.
+func (sqlStore *SQLStore) redactAndHash(params PutParams) ([]byte, string, error) {
+	bytesToStore := params.Bytes
+	if sqlStore.redactor != nil {
+		redacted, err := sqlStore.redactor.Redact(params.Name, params.Kind, params.Bytes)
+		if err != nil {
+			return nil, "", fmt.Errorf("artifacts: redact %q: %w", params.Name, err)
+		}
+		if redacted != nil {
+			bytesToStore = redacted
+		}
+	}
+	return bytesToStore, Hash(bytesToStore), nil
+}
+
+// currentIfUnchanged loads the current revision of (task, name) and reports
+// whether it already carries contentHash (an idempotent hit). Returns the row,
+// whether it hit, and any real store error — sql.ErrNoRows is not an error
+// here, it just means "no prior revision".
+func (sqlStore *SQLStore) currentIfUnchanged(ctx context.Context, params PutParams, contentHash string) (sqlc.ArtifactRevision, bool, error) {
+	prior, err := sqlStore.queries.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
+		TaskID: params.TaskID, TenantID: params.TenantID, Name: params.Name,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sqlc.ArtifactRevision{}, false, nil
+		}
+		return sqlc.ArtifactRevision{}, false, fmt.Errorf("artifacts: load prior current: %w", err)
+	}
+	return prior, prior.ContentHash == contentHash, nil
+}
+
+// editBase decides whether this revision is a create or an edit, returning the
+// action and the prev_revision_id to chain to. An absent prior current ⇒ create.
+func (sqlStore *SQLStore) editBase(ctx context.Context, params PutParams) (Action, sql.NullString) {
+	if _, prior := sqlStore.lookupCurrent(ctx, params.TenantID, params.TaskID, params.Name); prior != nil {
+		return ActionEdit, sql.NullString{String: prior.ID, Valid: true}
+	}
+	return ActionCreate, sql.NullString{}
+}
+
+// commitRevision runs the demote-then-insert in one transaction so the partial
+// unique index on (task_id, name) WHERE is_current never sees two currents at
+// once. The prior current is demoted before the insert for that reason.
+func (sqlStore *SQLStore) commitRevision(ctx context.Context, params PutParams, contentHash string, bytesToStore []byte, actionType Action, prevID sql.NullString) (Revision, error) {
 	tx, txErr := sqlStore.db.BeginTx(ctx, nil)
 	if txErr != nil {
 		return Revision{}, fmt.Errorf("artifacts: begin tx: %w", txErr)
@@ -110,10 +143,6 @@ func (sqlStore *SQLStore) Put(ctx context.Context, params PutParams) (Revision, 
 	defer func() { _ = tx.Rollback() }()
 
 	qtx := sqlStore.queries.WithTx(tx)
-
-	// Demote the prior current revision of (task, name). No-op for the first
-	// revision. Run before the insert so the partial unique index on
-	// (task_id, name) WHERE is_current never sees two currents at once.
 	if err := qtx.DemoteArtifactRevision(ctx, sqlc.DemoteArtifactRevisionParams{
 		TaskID: params.TaskID, Name: params.Name,
 	}); err != nil {

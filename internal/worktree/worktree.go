@@ -37,6 +37,10 @@ type Worktree struct {
 	RepoPath string // absolute path to the project repo it was created from
 }
 
+// revParseCmd is the git subcommand several methods use to resolve refs and
+// HEAD to a commit SHA. A const so the calls share one source of truth.
+const revParseCmd = "rev-parse"
+
 // BranchFor returns the canonical branch name for a task.
 func BranchFor(taskID string) string {
 	return "agentum/" + taskID
@@ -134,7 +138,7 @@ func (manager *Manager) ResolveRef(ctx context.Context, repoPath, ref string) (s
 	// --verify ensures a single SHA; ^{commit} peels tags to the commit so a
 	// tag base_ref lands on the commit it points at. --quiet keeps stderr clean
 	// on a miss; we synthesize a typed error for the caller.
-	out, err := git(ctx, repoAbs, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	out, err := git(ctx, repoAbs, revParseCmd, "--verify", "--quiet", ref+"^{commit}")
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
 		return "", fmt.Errorf("%w: %q", ErrUnknownRef, ref)
 	}
@@ -148,7 +152,7 @@ func (manager *Manager) HeadCommit(ctx context.Context, wtRoot string) (string, 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	out, err := git(ctx, wtRoot, "rev-parse", "HEAD")
+	out, err := git(ctx, wtRoot, revParseCmd, "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse HEAD: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -285,40 +289,56 @@ func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCom
 		return ReconcileState{}, err
 	}
 
-	// Dirty working tree ⇒ restorable. The restore target is the last checkpoint
-	// (an orchestrator-owned boundary) if one exists; otherwise base_commit.
+	// Dirty working tree ⇒ restorable. The restore target is the last
+	// checkpoint (an orchestrator-owned boundary) if one exists; otherwise
+	// base_commit.
 	if !clean {
-		restoreTarget := lastCheckpoint
-		if strings.TrimSpace(restoreTarget) == "" {
-			restoreTarget = baseCommit
-		}
-		return ReconcileState{Class: ClassRestorable, HeadCommit: head, CheckpointCommit: restoreTarget}, nil
+		return ReconcileState{
+			Class: ClassRestorable, HeadCommit: head,
+			CheckpointCommit: restoreTarget(lastCheckpoint, baseCommit),
+		}, nil
 	}
+	return classifyCleanTree(ctx, repoAbs, head, baseCommit, lastCheckpoint)
+}
 
-	// Clean working tree. If HEAD is exactly the base or the last checkpoint,
-	// nothing has happened since that boundary — clean. Otherwise committed
-	// work exists and the next stage resumes from HEAD.
+// restoreTarget picks the commit a restorable worktree resets to: the last
+// checkpoint when one was recorded, else the task's base_commit.
+func restoreTarget(lastCheckpoint, baseCommit string) string {
+	if strings.TrimSpace(lastCheckpoint) != "" {
+		return lastCheckpoint
+	}
+	return baseCommit
+}
+
+// classifyCleanTree verdicts a clean working tree. If HEAD is exactly the base
+// or the last checkpoint, nothing has happened since that boundary — clean.
+// Otherwise committed work exists and the next stage resumes from HEAD, unless
+// HEAD is not descended from base (a divergent lineage), which surfaces for a
+// human rather than guessing.
+func classifyCleanTree(ctx context.Context, repoAbs, head, baseCommit, lastCheckpoint string) (ReconcileState, error) {
 	if head == baseCommit {
 		return ReconcileState{Class: ClassClean, HeadCommit: head, CheckpointCommit: baseCommit}, nil
 	}
 	if lastCheckpoint != "" && head == lastCheckpoint {
 		return ReconcileState{Class: ClassClean, HeadCommit: head, CheckpointCommit: lastCheckpoint}, nil
 	}
-	// Guard: if HEAD is not the base and not ahead of it (e.g. force-pushed
-	// behind, or detached), do not guess — the lineage is unexpected.
-	if baseCommit != "" {
-		ancestorOut, ancestorErr := git(ctx, repoAbs, "merge-base", "--is-ancestor", baseCommit, head)
-		if ancestorErr != nil {
-			// merge-base --is-ancestor exits non-zero when NOT an ancestor;
-			// distinguish that from a real git failure by checking stdout/stderr
-			// is empty (a real failure usually carries a message).
-			out := strings.TrimSpace(string(ancestorOut))
-			if out == "" && baseCommit != head {
-				return ReconcileState{Class: ClassNeedsAttention, HeadCommit: head}, nil
-			}
-		}
+	if lineageDiverged(ctx, repoAbs, baseCommit, head) {
+		return ReconcileState{Class: ClassNeedsAttention, HeadCommit: head}, nil
 	}
 	return ReconcileState{Class: ClassResumable, HeadCommit: head, CheckpointCommit: lastCheckpoint}, nil
+}
+
+// lineageDiverged reports whether head is cleanly NOT descended from
+// baseCommit — an unexpected lineage (force-pushed behind, detached) the
+// reconciler must not guess about. `merge-base --is-ancestor` exits non-zero
+// when base is not an ancestor; an empty output on that non-zero exit is the
+// clean verdict, while a real git failure usually carries a message.
+func lineageDiverged(ctx context.Context, repoAbs, baseCommit, head string) bool {
+	if baseCommit == "" || baseCommit == head {
+		return false
+	}
+	out, err := git(ctx, repoAbs, "merge-base", "--is-ancestor", baseCommit, head)
+	return err != nil && strings.TrimSpace(string(out)) == ""
 }
 
 // RemoveWorktree removes only the per-task working tree. The agentum/<task-id>
@@ -377,7 +397,7 @@ func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, taskID strin
 // the worktrees dir and in-worktree artifact dirs never appear as untracked.
 // Idempotent. This is local-only: it does not touch any tracked .gitignore.
 func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
-	out, err := git(ctx, repoAbs, "rev-parse", "--git-path", "info/exclude")
+	out, err := git(ctx, repoAbs, revParseCmd, "--git-path", "info/exclude")
 	if err != nil {
 		return fmt.Errorf("locate excludes file: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

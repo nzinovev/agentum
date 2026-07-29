@@ -106,6 +106,10 @@ func newDelta(reason, summary string) *SectionDelta {
 	return &SectionDelta{Reason: reason, Summary: summary}
 }
 
+// promptStagePrefix is the shared lead-in for prompt-delta summaries. A const
+// so the three summary variants stay consistent and typo-free.
+const promptStagePrefix = "prompt for stage "
+
 func diffInputs(left, right *InputEvidence) *SectionDelta {
 	if left == nil && right == nil {
 		return nil
@@ -167,15 +171,15 @@ func diffPrompts(left, right []PromptRevision) *SectionDelta {
 	for stage, leftHash := range leftMap {
 		rightHash, ok := rightMap[stage]
 		if !ok {
-			return newDelta("prompt-set", "prompt for stage "+stage+" missing on right")
+			return newDelta("prompt-set", promptStagePrefix+stage+" missing on right")
 		}
 		if leftHash != rightHash {
-			return newDelta("prompt-hash", "prompt for stage "+stage+" differs")
+			return newDelta("prompt-hash", promptStagePrefix+stage+" differs")
 		}
 	}
 	for stage := range rightMap {
 		if _, ok := leftMap[stage]; !ok {
-			return newDelta("prompt-set", "prompt for stage "+stage+" missing on left")
+			return newDelta("prompt-set", promptStagePrefix+stage+" missing on left")
 		}
 	}
 	return nil

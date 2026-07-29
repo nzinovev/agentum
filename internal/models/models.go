@@ -27,7 +27,12 @@ import (
 
 // ErrNoConfig is returned by Load when no models.yaml is present. Callers fall
 // back to the baked-in default for the active agent.
-var ErrNoConfig = errors.New("models: no models.yaml; using built-in default")
+var ErrNoConfig = errors.New("models: no " + modelsConfigFile + "; using built-in default")
+
+// modelsConfigFile is the operator-override filename Load looks for in each
+// candidate directory. A const so the error message and every search path
+// agree on it.
+const modelsConfigFile = "models.yaml"
 
 // Config is a tier→model mapping plus the default tier.
 type Config struct {
@@ -122,13 +127,13 @@ func candidatePaths() []string {
 		out = append(out, env)
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(cwd, "models.yaml"))
+		out = append(out, filepath.Join(cwd, modelsConfigFile))
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		out = append(out, filepath.Join(xdg, "agentum", "models.yaml"))
+		out = append(out, filepath.Join(xdg, "agentum", modelsConfigFile))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		out = append(out, filepath.Join(home, ".config", "agentum", "models.yaml"))
+		out = append(out, filepath.Join(home, ".config", "agentum", modelsConfigFile))
 	}
 	return out
 }

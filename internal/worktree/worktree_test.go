@@ -47,11 +47,7 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 		t.Fatalf("worktree not created at %s", worktree.Root)
 	}
 	// The branch is checked out in the worktree.
-	if out, err := git(t.Context(), worktree.Root, "rev-parse", "--abbrev-ref", "HEAD"); err != nil {
-		t.Fatalf("rev-parse HEAD: %v (%s)", err, out)
-	} else if got := string(out); got[:len("agentum/task-001")] != "agentum/task-001" {
-		t.Errorf("HEAD branch = %q", got)
-	}
+	assertBranchCheckedOut(t, worktree.Root, "agentum/task-001")
 
 	// Second create: idempotent — returns the existing worktree, no error.
 	secondWorktree, err := manager.Create(t.Context(), repo, taskID, "")
@@ -70,21 +66,13 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	if isWorktree(worktree.Root) {
 		t.Error("worktree still present after RemoveWorktree")
 	}
-	if out, err := git(t.Context(), repo, "branch", "--list", "agentum/task-001"); err != nil {
-		t.Fatalf("branch --list: %v", err)
-	} else if len(out) == 0 {
-		t.Errorf("branch deleted by RemoveWorktree; want it preserved: %q", out)
-	}
+	assertBranchListHas(t, repo, "agentum/task-001", true)
 
 	// DeleteBranch: explicit cleanup removes the branch now. Idempotent.
 	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
 		t.Fatalf("DeleteBranch: %v", err)
 	}
-	if out, err := git(t.Context(), repo, "branch", "--list", "agentum/task-001"); err != nil {
-		t.Fatalf("branch --list: %v", err)
-	} else if len(out) != 0 {
-		t.Errorf("branch still exists after DeleteBranch: %q", out)
-	}
+	assertBranchListHas(t, repo, "agentum/task-001", false)
 
 	// Both ops idempotent on a fully-cleaned task: no-op, no error.
 	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
@@ -92,6 +80,27 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
 		t.Errorf("second DeleteBranch should be a no-op, got: %v", err)
+	}
+}
+
+// assertBranchCheckedOut confirms the worktree's HEAD points at branch. The
+// git call + parse lives here so the call site is a single assertion (no inline
+// else-if that would inflate the caller's complexity).
+func assertBranchCheckedOut(t *testing.T, wtRoot, branch string) {
+	t.Helper()
+	out := strings.TrimSpace(mustGit(t, wtRoot, "rev-parse", "--abbrev-ref", "HEAD"))
+	if out != branch {
+		t.Errorf("HEAD branch = %q, want %q", out, branch)
+	}
+}
+
+// assertBranchListHas confirms the project repo's `git branch --list` for
+// branch reports present (want true) or absent (want false).
+func assertBranchListHas(t *testing.T, repo, branch string, want bool) {
+	t.Helper()
+	out := mustGit(t, repo, "branch", "--list", branch)
+	if present := strings.TrimSpace(out) != ""; present != want {
+		t.Errorf("branch %q present=%v, want %v (output=%q)", branch, present, want, out)
 	}
 }
 
