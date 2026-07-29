@@ -43,7 +43,16 @@ type Decision struct {
 }
 
 func Allow() Decision        { return Decision{Allowed: true, Reason: "owner"} }
-func Deny(r string) Decision { return Decision{Allowed: false, Reason: r} }
+func Deny(r string) Decision { return Decision{false, r} }
+
+// Action vocabulary. These are the `action` arguments callers pass to Can.
+// Centralized here so the permission surface has one source of truth — a typo
+// in a handler cannot silently invent a new permission.
+const (
+	// ActionTaskRead is the right to read a task and its artifacts / manifest.
+	// Every read-side handler (tasks, artifacts, manifest, diff) checks it.
+	ActionTaskRead = "task:read"
+)
 
 // Can is THE permission function. action/resource are coarse today and refine
 // per-route as handlers land.

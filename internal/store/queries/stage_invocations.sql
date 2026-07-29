@@ -1,6 +1,6 @@
 -- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: GetStageInvocation :one

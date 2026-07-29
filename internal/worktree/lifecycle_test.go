@@ -34,17 +34,7 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 	}
 
 	// Simulate an agent making a committed change on the task branch.
-	if err := os.WriteFile(filepath.Join(wt.Root, "feature.txt"), []byte("new work"), 0o644); err != nil {
-		t.Fatalf("write feature file: %v", err)
-	}
-	for _, args := range [][]string{
-		{"add", "feature.txt"},
-		{"commit", "--quiet", "-m", "implement feature"},
-	} {
-		if out, err := git(t.Context(), wt.Root, args...); err != nil {
-			t.Fatalf("git %s: %v (%s)", args[0], err, out)
-		}
-	}
+	commitInWorktree(t, wt, "feature.txt", "new work", "implement feature")
 
 	// Capture the result_commit (the branch tip) before teardown.
 	resultCommit, err := manager.HeadCommit(t.Context(), wt.Root)
@@ -63,21 +53,9 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 		t.Fatal("worktree dir still present after teardown")
 	}
 
-	// The branch and its commits remain resolvable in the project repo. The
-	// diff base_commit..result_commit must show exactly the feature file.
-	if err := refExists(repo, "agentum/"+taskID); err != nil {
-		t.Fatalf("branch not resolvable after teardown: %v", err)
-	}
-	diff := mustGit(t, repo, "diff", "--name-only", baseCommit+".."+resultCommit)
-	if strings.TrimSpace(diff) != "feature.txt" {
-		t.Fatalf("base..result diff = %q, want feature.txt", diff)
-	}
-
-	// The branch tip equals the recorded result_commit (the audit anchor).
-	branchTip := strings.TrimSpace(mustGit(t, repo, "rev-parse", "agentum/"+taskID))
-	if branchTip != resultCommit {
-		t.Fatalf("branch tip = %s, result_commit = %s; they must match", branchTip, resultCommit)
-	}
+	// The branch and its commits remain resolvable; result_commit is the
+	// diffable delivery anchor.
+	assertDeliverySurvives(t, repo, taskID, baseCommit, resultCommit)
 
 	// Explicit cleanup deletes the branch (and only the branch; worktree already
 	// gone). Idempotent.
@@ -89,6 +67,43 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 	}
 	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
 		t.Fatalf("DeleteBranch must be idempotent: %v", err)
+	}
+}
+
+// commitInWorktree stages a single file as a commit on the worktree's checked-
+// out branch — the shape of an agent's committed change. Lifted out of the
+// teardown test so the add/commit loop does not inflate its complexity.
+func commitInWorktree(t *testing.T, wt *Worktree, filename, body, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(wt.Root, filename), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+	for _, args := range [][]string{
+		{"add", filename},
+		{"commit", "--quiet", "-m", msg},
+	} {
+		if out, err := git(t.Context(), wt.Root, args...); err != nil {
+			t.Fatalf("git %s: %v (%s)", args[0], err, out)
+		}
+	}
+}
+
+// assertDeliverySurvives checks the F.6.1 invariant that terminal teardown
+// preserves: the agentum/<task-id> branch stays resolvable, the
+// base_commit..result_commit diff is exactly the committed feature, and the
+// branch tip equals the recorded result_commit.
+func assertDeliverySurvives(t *testing.T, repo, taskID, baseCommit, resultCommit string) {
+	t.Helper()
+	if err := refExists(repo, "agentum/"+taskID); err != nil {
+		t.Fatalf("branch not resolvable after teardown: %v", err)
+	}
+	diff := mustGit(t, repo, "diff", "--name-only", baseCommit+".."+resultCommit)
+	if strings.TrimSpace(diff) != "feature.txt" {
+		t.Fatalf("base..result diff = %q, want feature.txt", diff)
+	}
+	branchTip := strings.TrimSpace(mustGit(t, repo, "rev-parse", "agentum/"+taskID))
+	if branchTip != resultCommit {
+		t.Fatalf("branch tip = %s, result_commit = %s; they must match", branchTip, resultCommit)
 	}
 }
 
@@ -202,28 +217,7 @@ func TestReconcile_Classifications(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			repo := t.TempDir()
-			if err := initRepoWithCommit(repo); err != nil {
-				t.Fatalf("setup repo: %v", err)
-			}
-			manager := New()
-			baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
-			if err != nil {
-				t.Fatalf("resolve base: %v", err)
-			}
-			wt, err := manager.Create(t.Context(), repo, "task-"+sanitized(tc.name), baseCommit)
-			if err != nil {
-				t.Fatalf("create: %v", err)
-			}
-			lastCheckpoint := tc.arrange(t, repo, wt, baseCommit)
-
-			state, err := manager.Reconcile(t.Context(), repo, "task-"+sanitized(tc.name), baseCommit, lastCheckpoint)
-			if err != nil {
-				t.Fatalf("Reconcile: %v", err)
-			}
-			if state.Class != tc.want {
-				t.Fatalf("class = %s, want %s", state.Class, tc.want)
-			}
+			assertReconcileClass(t, tc.arrange, tc.want)
 		})
 	}
 
@@ -244,6 +238,37 @@ func TestReconcile_Classifications(t *testing.T) {
 			t.Fatalf("class = %s, want needs_attention", state.Class)
 		}
 	})
+}
+
+// assertReconcileClass runs one reconciler case: build a repo + worktree off
+// HEAD, run the case's arrange step, then assert Reconcile's verdict. Lifted
+// out of the table driver so the setup/error branches do not inflate the
+// test's complexity.
+func assertReconcileClass(t *testing.T, arrange func(*testing.T, string, *Worktree, string) string, want Classification) {
+	t.Helper()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	manager := New()
+	baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatalf("resolve base: %v", err)
+	}
+	taskID := "task-" + sanitized(t.Name())
+	wt, err := manager.Create(t.Context(), repo, taskID, baseCommit)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	lastCheckpoint := arrange(t, repo, wt, baseCommit)
+
+	state, err := manager.Reconcile(t.Context(), repo, taskID, baseCommit, lastCheckpoint)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if state.Class != want {
+		t.Fatalf("class = %s, want %s", state.Class, want)
+	}
 }
 
 // TestReconcile_RestorableResetsToCheckpoint proves the restorable class

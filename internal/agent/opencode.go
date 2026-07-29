@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/nzinovev/agentum/internal/caps"
 )
 
 // OpencodeAdapter drives the `opencode` CLI as a subprocess: one invocation
@@ -33,8 +36,18 @@ func NewOpencodeAdapter(binary string) *OpencodeAdapter {
 // stream events on the returned channel, and on completion reads + parses
 // ArtifactDir/result.json. On ctx cancellation it kills the process group and
 // emits EventError.
+//
+// Enforcement is applied before the subprocess starts: the effective profile is
+// confirmed enforceable, a per-invocation opencode permission config is written
+// into the worktree, the child environment is credential-scrubbed, and the
+// profile's hard/idle timeouts wrap ctx. A profile that grants a capability the
+// adapter cannot enforce returns an error here — the invocation does not start.
 func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
 	if err := validateInvocation(inv); err != nil {
+		return nil, err
+	}
+	plan, err := prepareEnforcement(inv)
+	if err != nil {
 		return nil, err
 	}
 	bin, err := exec.LookPath(a.binary)
@@ -42,12 +55,20 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 		return nil, fmt.Errorf("opencode adapter: binary %q not found: %w", a.binary, err)
 	}
 
+	runCtx, cancelTimeouts := applyTimeouts(ctx, plan.timeout.hard)
+	defer cancelTimeouts()
+
 	args := buildOpencodeArgs(bin, inv)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	// Put the child in its own process group so cancellation can kill the
 	// whole tree (opencode may spawn subagents, formatters, LSP servers).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Dir = inv.Workdir
+	// Credential-scrubbed environment: every var in the deny list is dropped
+	// unless the profile grants the matching secret.<name>. Passing the env
+	// explicitly also means the child never inherits interactive-shell extras
+	// the parent may have carried.
+	cmd.Env = plan.env
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -61,11 +82,20 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	}
 
 	ch := make(chan Event, 16)
-	go a.run(ctx, cmd, stdout, inv, ch)
+	go a.run(runCtx, cmd, stdout, inv, ch, plan)
 	return ch, nil
 }
 
-func (a *OpencodeAdapter) run(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event) {
+// Supported reports the capability categories the opencode adapter can
+// technically enforce. The runner intersects this with pack / stage / role
+// inputs; the adapter re-checks the effective profile at Invoke time as
+// defense-in-depth (a profile built by any other path must still be enforceable
+// before the subprocess may start).
+func (a *OpencodeAdapter) Supported() []caps.Category {
+	return append([]caps.Category(nil), opencodeSupported...)
+}
+
+func (a *OpencodeAdapter) run(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
 	defer close(ch)
 
 	state := &invokeState{}
@@ -82,6 +112,12 @@ func (a *OpencodeAdapter) run(ctx context.Context, cmd *exec.Cmd, stdout io.Read
 		}
 	}()
 
+	// Idle timeout: a watcher resets a timer on every observed stream chunk; if
+	// no chunk arrives within the profile's IdleTimeout, the run is cancelled
+	// (which the cancel watcher above turns into a process-group kill). No-op
+	// when IdleTimeout is zero.
+	idleReset := startIdleWatcher(ctx, plan.timeout.hard.IdleTimeout, cmd)
+
 	scanner := bufio.NewScanner(stdout)
 	// opencode tool input can be large; raise the per-line limit.
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -89,6 +125,9 @@ func (a *OpencodeAdapter) run(ctx context.Context, cmd *exec.Cmd, stdout io.Read
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+		if idleReset != nil {
+			idleReset()
 		}
 		if ev, ok := state.ingest(line); ok && ev != nil {
 			ch <- *ev
@@ -251,6 +290,43 @@ func killProcessGroup(cmd *exec.Cmd) {
 	// SIGTERM first; SIGKILL after grace is the job of exec.CommandContext's
 	// own reaping. We send to -pgid to hit the whole group.
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+}
+
+// applyTimeouts wraps ctx with the profile's HardTimeout when non-zero. The
+// returned cancel func releases the timer's resources; callers MUST defer it.
+// IdleTimeout is enforced stream-side in run() (startIdleWatcher) since it
+// depends on observed progress, not wall-clock.
+func applyTimeouts(ctx context.Context, profile caps.Profile) (context.Context, context.CancelFunc) {
+	if profile.HardTimeout > 0 {
+		return context.WithTimeout(ctx, profile.HardTimeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+// startIdleWatcher launches a goroutine that cancels the run when no stream
+// chunk arrives within idleTimeout. It returns a reset function the scanner
+// loop calls on every chunk; calling reset after stop is a no-op. Returns nil
+// when idleTimeout is zero (no idle cap configured).
+func startIdleWatcher(ctx context.Context, idleTimeout time.Duration, cmd *exec.Cmd) func() {
+	if idleTimeout <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(idleTimeout)
+	reset := func() {
+		timer.Reset(idleTimeout)
+	}
+	go func() {
+		select {
+		case <-timer.C:
+			// Idle budget exhausted: kill the group so the run unblocks. The
+			// resulting ctx cancellation surfaces as EventError at the end of
+			// run().
+			killProcessGroup(cmd)
+		case <-ctx.Done():
+			timer.Stop()
+		}
+	}()
+	return reset
 }
 
 func waitDoneAsync(cmd *exec.Cmd) <-chan struct{} {

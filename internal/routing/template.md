@@ -21,7 +21,11 @@ If you cannot complete, set `status: "blocked"` and list what you need in
 
 ## Capabilities available
 
-{{if .Capabilities}}Granted: {{join .Capabilities ", "}}{{else}}_No capabilities declared (agent uses its native defaults)._{{end}}
+The capabilities below are the complete set granted to this invocation. Anything
+not listed is denied and will be blocked at the runtime layer — do not attempt
+it. These are code-enforced; asking politely does not grant more.
+
+{{if .Capabilities}}Granted: {{join .Capabilities ", "}}{{else}}_No capabilities granted (every tool action is denied — you may only write the structured result file).{{end}}
 
 {{if .PriorStages}}## Prior stage artifacts
 

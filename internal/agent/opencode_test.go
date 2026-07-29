@@ -28,6 +28,16 @@ func TestIngest_NDJSONFixture(t *testing.T) {
 		}
 	}
 
+	checkIngestedState(t, st, chunks)
+}
+
+// checkIngestedState asserts the stream-derived fields the fixture must
+// produce: sessionID, telemetry across two step-finishes, snapshot, the single
+// write activity, and the expected stream chunks. Lifted out of the test body
+// to keep TestIngest_NDJSONFixture a flat ingest loop with no assertion
+// nesting.
+func checkIngestedState(t *testing.T, st *invokeState, chunks []string) {
+	t.Helper()
 	if want := "ses_0cbeb1097ffeOspARButu4sJM2"; st.sessionID != want {
 		t.Errorf("sessionID = %q, want %q", st.sessionID, want)
 	}
@@ -50,9 +60,9 @@ func TestIngest_NDJSONFixture(t *testing.T) {
 	if len(st.activity) != 1 {
 		t.Fatalf("activity len = %d, want 1", len(st.activity))
 	}
-	a := st.activity[0]
-	if a.Tool != "write" || a.Status != "completed" || a.Target != "/tmp/hello.txt" {
-		t.Errorf("activity = %+v, want write/completed//tmp/hello.txt", a)
+	activity := st.activity[0]
+	if activity.Tool != "write" || activity.Status != "completed" || activity.Target != "/tmp/hello.txt" {
+		t.Errorf("activity = %+v, want write/completed//tmp/hello.txt", activity)
 	}
 	// One text chunk ("done") + one opaque unknown-event chunk.
 	if len(chunks) != 2 {

@@ -157,26 +157,34 @@ func TestEvaluate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Evaluate(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Evaluate err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if got.Action != tc.wantAction {
-				t.Errorf("Action = %v, want %v", got.Action, tc.wantAction)
-			}
-			if got.FSMEvent != tc.wantEvent {
-				t.Errorf("FSMEvent = %q, want %q", got.FSMEvent, tc.wantEvent)
-			}
-			if got.StopReason != tc.wantStop {
-				t.Errorf("StopReason = %q, want %q", got.StopReason, tc.wantStop)
-			}
-			if got.NextStage != tc.wantNext {
-				t.Errorf("NextStage = %q, want %q", got.NextStage, tc.wantNext)
-			}
+			assertEvalCase(t, tc.input, tc.wantAction, tc.wantEvent, tc.wantStop, tc.wantNext, tc.wantErr)
 		})
+	}
+}
+
+// assertEvalCase runs one Evaluate case and checks every field of the decision.
+// Lifted out of TestEvaluate so the table driver stays a flat loop and the
+// per-case checks live in a function with no nesting-driven complexity.
+func assertEvalCase(t *testing.T, input StageInput, wantAction Action, wantEvent engine.TaskEvent, wantStop, wantNext string, wantErr bool) {
+	t.Helper()
+	got, err := Evaluate(input)
+	if (err != nil) != wantErr {
+		t.Fatalf("Evaluate err = %v, wantErr = %v", err, wantErr)
+	}
+	if wantErr {
+		return
+	}
+	if got.Action != wantAction {
+		t.Errorf("Action = %v, want %v", got.Action, wantAction)
+	}
+	if got.FSMEvent != wantEvent {
+		t.Errorf("FSMEvent = %q, want %q", got.FSMEvent, wantEvent)
+	}
+	if got.StopReason != wantStop {
+		t.Errorf("StopReason = %q, want %q", got.StopReason, wantStop)
+	}
+	if got.NextStage != wantNext {
+		t.Errorf("NextStage = %q, want %q", got.NextStage, wantNext)
 	}
 }
 

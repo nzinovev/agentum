@@ -15,7 +15,11 @@
 // The Adapter synthesizes its returned Result from both.
 package agent
 
-import "context"
+import (
+	"context"
+
+	"github.com/nzinovev/agentum/internal/caps"
+)
 
 // Adapter is the boundary to an external coding agent. Implementations MUST
 // honor ctx cancellation: abort the agent subprocess, release resources, and
@@ -27,7 +31,19 @@ type Adapter interface {
 	// the final meaningful event is an EventResult or EventError. The channel
 	// must be drained by the caller. A non-nil error means the run could not
 	// start at all; errors during the run arrive on the channel.
+	//
+	// Implementations MUST refuse to start when inv.Profile grants a capability
+	// they cannot technically enforce (see caps.Profile.EnforceableBy). This is
+	// the "the adapter confirms it can enforce all granted permissions" rule:
+	// an unenforceable profile returns a non-nil error and never spawns the
+	// agent subprocess.
 	Invoke(ctx context.Context, inv Invocation) (<-chan Event, error)
+
+	// Supported returns the capability categories this adapter can technically
+	// enforce at runtime. The runner intersects this with the pack, stage, and
+	// role inputs to compute the effective profile, and the adapter checks the
+	// result again at Invoke time as defense-in-depth.
+	Supported() []caps.Category
 }
 
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives
@@ -40,6 +56,13 @@ type Invocation struct {
 	Capabilities  []string // pack∩stage capability subset (declared = passed at MVP)
 	ResumeSession string   // non-empty → resume that session id; empty → fresh invocation
 	Model         string   // optional provider/model override (BYO-models, F.4)
+
+	// Profile is the effective, code-enforced capability profile for this
+	// invocation. The adapter MUST refuse to start if Profile grants a
+	// capability it cannot enforce, and MUST apply Profile to the agent
+	// subprocess (filesystem / command / network / mcp / secret enforcement +
+	// time limits). Required for every invocation — deny-by-default.
+	Profile caps.Profile
 }
 
 // EventKind distinguishes the things an adapter emits on its stream.

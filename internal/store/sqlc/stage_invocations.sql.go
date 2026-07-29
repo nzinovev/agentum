@@ -13,20 +13,21 @@ import (
 )
 
 const createStageInvocation = `-- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at
+INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile
 `
 
 type CreateStageInvocationParams struct {
-	TenantID   string         `json:"tenant_id"`
-	UserID     string         `json:"user_id"`
-	TaskID     string         `json:"task_id"`
-	Stage      string         `json:"stage"`
-	Sequence   int32          `json:"sequence"`
-	SessionID  sql.NullString `json:"session_id"`
-	ResumeOf   sql.NullString `json:"resume_of"`
-	StopReason sql.NullString `json:"stop_reason"`
+	TenantID          string                `json:"tenant_id"`
+	UserID            string                `json:"user_id"`
+	TaskID            string                `json:"task_id"`
+	Stage             string                `json:"stage"`
+	Sequence          int32                 `json:"sequence"`
+	SessionID         sql.NullString        `json:"session_id"`
+	ResumeOf          sql.NullString        `json:"resume_of"`
+	StopReason        sql.NullString        `json:"stop_reason"`
+	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 }
 
 func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvocationParams) (StageInvocation, error) {
@@ -39,6 +40,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		arg.SessionID,
 		arg.ResumeOf,
 		arg.StopReason,
+		arg.CapabilityProfile,
 	)
 	var i StageInvocation
 	err := row.Scan(
@@ -55,6 +57,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.Result,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.CapabilityProfile,
 	)
 	return i, err
 }
@@ -88,7 +91,7 @@ func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvo
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at FROM stage_invocations WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile FROM stage_invocations WHERE id = $1 AND tenant_id = $2
 `
 
 type GetStageInvocationParams struct {
@@ -113,12 +116,13 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 		&i.Result,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.CapabilityProfile,
 	)
 	return i, err
 }
 
 const latestStageForTask = `-- name: LatestStageForTask :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at FROM stage_invocations
+SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile FROM stage_invocations
 WHERE task_id = $1 AND tenant_id = $2
 ORDER BY sequence DESC
 LIMIT 1
@@ -146,6 +150,7 @@ func (q *Queries) LatestStageForTask(ctx context.Context, arg LatestStageForTask
 		&i.Result,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.CapabilityProfile,
 	)
 	return i, err
 }

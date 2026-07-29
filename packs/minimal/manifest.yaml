@@ -9,7 +9,7 @@ pack:
 memory:
   reads: [project]
   writes: true
-capabilities: [fs.read]
+capabilities: [fs.read, fs.write, git.read, git.write, exec.bash]
 budgets:
   fix_cycles: 1
   ask_to_edit: 1
@@ -19,11 +19,14 @@ entry: spec
 stages:
   spec:
     gate: human_approval
+    role: analyst
     prompt: prompts/spec.md
+    capabilities: [fs.read, git.read]
     transitions:
       - to: implement
   implement:
     gate: auto_if_clean
+    role: implementer
     prompt: prompts/implement.md
     transitions:
       - to: done

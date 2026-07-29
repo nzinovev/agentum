@@ -106,6 +106,8 @@ stages:
     gate: <gate-value>
     prompt: <path>
     tier: <name>           # optional
+    role: <role-name>      # optional; selects the capability-profile template
+    capabilities: [...]    # optional; narrows the pack's capabilities for this stage
     transitions:
       - to: <stage-id>
       - to: <stage-id>
@@ -117,6 +119,8 @@ stages:
 | `gate` | non-terminal stages | One of the [gate values](#gate-values). Ignored on terminal stages. |
 | `prompt` | non-terminal stages | Path relative to the pack dir; must not escape it. Absent on terminal stages. |
 | `tier` | optional | Overrides `tiers.default` for this stage. |
+| `role` | optional | Capability-profile selector: `analyst` \| `reviewer` \| `implementer` \| `fixer`. Absent → derived from the stage id by convention (spec/analyze/design → analyst; review → reviewer; implement → implementer; fix → fixer; default analyst). See [docs/capabilities.md](capabilities.md). |
+| `capabilities` | optional | Stage-level subset that narrows the pack's `capabilities` for this stage. Absent → inherit the pack set; present → only the listed categories. Entries are scope-less categories (`fs.read`, `fs.write`, `git.read`, `git.write`, `exec.bash`, `net.fetch`) or named entities (`secret.<name>`, `mcp.<server>`). |
 | `transitions` | optional | Outgoing edges. Absent ⇒ terminal. |
 
 A **terminal stage** (no `transitions`) is an engine state, not an agent

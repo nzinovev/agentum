@@ -11,6 +11,13 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 )
 
+// Repeated manifest-handler messages, as constants so the wording callers and
+// logs match on cannot drift.
+const (
+	msgManifestServiceNotConfigured = "manifest service not configured"
+	msgManifestNotInitialized       = "manifest not initialized"
+)
+
 // manifestResponse is the public shape of a manifest. body is the merged
 // manifest body (sealed body with the latest correction applied); seal_info
 // carries the seal metadata; corrections lists post-seal amendments in order.
@@ -72,18 +79,18 @@ func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "manifest service not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
 		return
 	}
 	body, seal, corrections, err := api.mfst.Get(r.Context(), principal.TenantID, taskID)
 	if err != nil {
 		if errors.Is(err, manifest.ErrNoManifest) {
-			writeError(w, http.StatusNotFound, codeNotFound, "manifest not initialized")
+			writeError(w, http.StatusNotFound, codeNotFound, msgManifestNotInitialized)
 			return
 		}
 		logUnexpected(api.log, err, "GetManifest")
@@ -104,7 +111,7 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leftID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", leftID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, leftID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -113,12 +120,12 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "other query parameter (task id) is required")
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "task:read", rightID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, rightID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "manifest service not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
 		return
 	}
 	leftBody, _, _, err := api.mfst.Get(r.Context(), principal.TenantID, leftID)
@@ -156,12 +163,12 @@ func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "manifest service not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
 		return
 	}
 	var req struct {
@@ -185,11 +192,11 @@ func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := api.mfst.Correct(r.Context(), principal.TenantID, principal.UserID, taskID, req.Reason, patch); err != nil {
 		if errors.Is(err, manifest.ErrNoManifest) {
-			writeError(w, http.StatusNotFound, codeNotFound, "manifest not initialized")
+			writeError(w, http.StatusNotFound, codeNotFound, msgManifestNotInitialized)
 			return
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "manifest not initialized")
+			writeError(w, http.StatusNotFound, codeNotFound, msgManifestNotInitialized)
 			return
 		}
 		logUnexpected(api.log, err, "CorrectManifest")
