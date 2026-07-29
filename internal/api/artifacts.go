@@ -11,6 +11,13 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 )
 
+// Repeated artifact-handler messages, as constants so the wording callers and
+// logs match on cannot drift.
+const (
+	msgArtifactStoreNotConfigured = "artifact store not configured"
+	msgRevisionNotFound           = "revision not found"
+)
+
 // artifactRevisionResponse is the public shape of an artifact revision. The
 // content_hash is the worktree-independent content address — the bytes the
 // agent wrote can be reconstructed from it via the blob store. prev_revision_id
@@ -63,12 +70,12 @@ func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "artifact store not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
 		return
 	}
 	currentOnly, _ := strconv.ParseBool(r.URL.Query().Get("current"))
@@ -101,18 +108,18 @@ func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request
 		return
 	}
 	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "artifact store not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
 		return
 	}
 	revision, err := api.art.Get(r.Context(), principal.TenantID, r.PathValue("rid"))
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "revision not found")
+			writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
 			return
 		}
 		logUnexpected(api.log, err, "GetArtifactRevision")
@@ -122,7 +129,7 @@ func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request
 	if revision.TaskID != taskID {
 		// Tenant-can-read but the revision belongs to a different task. Treat
 		// as not-found rather than leaking the cross-task existence.
-		writeError(w, http.StatusNotFound, codeNotFound, "revision not found")
+		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, toArtifactRevisionResponse(revision))
@@ -138,18 +145,18 @@ func (api *API) handleGetArtifactContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, "task:read", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "artifact store not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
 		return
 	}
 	revision, err := api.art.Get(r.Context(), principal.TenantID, r.PathValue("rid"))
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "revision not found")
+			writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
 			return
 		}
 		logUnexpected(api.log, err, "GetArtifactContent")
@@ -157,7 +164,7 @@ func (api *API) handleGetArtifactContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if revision.TaskID != taskID {
-		writeError(w, http.StatusNotFound, codeNotFound, "revision not found")
+		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", contentTypeForKind(revision.Kind))
