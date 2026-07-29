@@ -105,6 +105,21 @@ type Stage struct {
 	Tier        string       `yaml:"tier,omitempty"`   // optional; overrides Tiers.Default
 	Transitions []Transition `yaml:"transitions,omitempty"`
 
+	// Role is the optional capability-profile selector for this stage. One of
+	// analyst | reviewer | implementer | fixer. When absent, the runner derives
+	// it from the stage id by convention (spec/analyze→analyst, review→
+	// reviewer, implement→implementer, fix→fixer; default analyst). The role
+	// selects the baseline capability template; caps.Effective still intersects
+	// it with pack ∩ stage ∩ host. See internal/caps.
+	Role string `yaml:"role,omitempty"`
+
+	// Capabilities is the optional stage-level subset that narrows the pack's
+	// declared capabilities for this stage. Absent means "inherit the pack
+	// set"; present means "this stage allows only these." Each entry is a
+	// scope-less category (e.g. "fs.read", "fs.write", "git.read") or a named
+	// entity ("secret.github_token", "mcp.github").
+	Capabilities []string `yaml:"capabilities,omitempty"`
+
 	// promptText is the loaded prompt file contents. Unexported so the override
 	// resolver can only set it via the loader's discipline.
 	promptText string

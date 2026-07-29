@@ -9,11 +9,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"log/slog"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
@@ -62,6 +64,13 @@ type Runner struct {
 	adapterV  string // adapter binary version, best-effort; recorded in manifest
 	log       *slog.Logger
 
+	// hardTimeout / idleTimeout are the per-invocation caps the runner layers
+	// onto every effective capability profile (zero = no cap). Sourced from
+	// config; the profile carries them to the adapter, which wraps ctx with the
+	// hard cap and watches the stream for the idle cap.
+	hardTimeout time.Duration
+	idleTimeout time.Duration
+
 	// art is the immutable artifact revisions store. nil in unit tests that
 	// don't exercise evidence capture; captureArtifacts is a no-op then.
 	art artifacts.Store
@@ -98,6 +107,12 @@ type Deps struct {
 	// Manifest is the evidence manifest service. May be nil in unit tests;
 	// manifest operations become no-ops then.
 	Manifest *manifest.Service
+
+	// HardTimeout / IdleTimeout are the per-invocation caps applied to every
+	// stage invocation (zero = no cap). Sourced from config; carried by the
+	// effective capability profile to the adapter.
+	HardTimeout time.Duration
+	IdleTimeout time.Duration
 }
 
 // New builds a Runner. Cancels/Worktrees/Log default to fresh instances.
@@ -125,6 +140,7 @@ func New(deps Deps) *Runner {
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
 		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
+		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
 }
 
@@ -633,9 +649,18 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 	model, _ := models.Resolve(runner.models, runner.agentName, tier) // best-effort; empty is acceptable
 
+	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
+	// the configured timeouts layered on. Computed before the invocation row is
+	// created so the profile is persisted even when the adapter refuses to
+	// start (an unenforceable profile is itself audit evidence).
+	profile := runner.computeProfile(run.taskPack, stageID, stage, runner.adapter.Supported(),
+		runner.hardTimeout, runner.idleTimeout)
+	profileBytes := marshalProfile(profile)
+
 	block := routing.Render(routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
+		Capabilities: profileTokens(profile),
 	})
 
 	// Next sequence number + resume_of for this task.
@@ -649,19 +674,37 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	invocation, err := runner.store.CreateStageInvocation(ctx, sqlc.CreateStageInvocationParams{
 		TenantID: run.task.TenantID, UserID: run.task.UserID, TaskID: run.task.ID,
 		Stage: stageID, Sequence: seq, ResumeOf: resumeOf,
+		CapabilityProfile: toNullRaw(profileBytes),
 	})
 	if err != nil {
 		runner.log.Error("create stage invocation", "task", run.task.ID, "stage", stageID, "error", err)
 		return nil, true, false
 	}
 
+	// Record the effective profile as audit evidence before the run starts. A
+	// denied capability is as much a part of the record as a granted one: this
+	// is what makes "the invocation was deny-by-default" reconstructible later.
+	runner.emit(ctx, run.task, EvCapabilityEnforced, map[string]any{
+		"stage": stageID, "invocation": invocation.ID,
+		"role": string(profile.Source.Role), "profile": profile,
+	})
+
 	eventCh, invokeErr := runner.adapter.Invoke(ctx, agent.Invocation{
 		Workdir: run.worktree.Root, ArtifactDir: artifactDir,
 		Prompt: stage.PromptText(), RoutingBlock: block,
 		ResumeSession: resumeSession, Model: model,
+		Profile: profile,
 	})
 	if invokeErr != nil {
-		runner.finalize(ctx, invocation, run.task, "", "adapter_error", nil)
+		// An unenforceable profile (caps.ErrUnenforceable) is a distinct stop
+		// reason — the invocation never started because the runtime could not
+		// honor the profile. Anything else is a plain adapter_error.
+		stopReason := "adapter_error"
+		if errors.Is(invokeErr, caps.ErrUnenforceable) {
+			stopReason = "capability_unenforceable"
+		}
+		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
+		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
 		return nil, true, false
 	}
 
@@ -693,9 +736,10 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		// is already on the invocation row, and the manifest's "missing"
 		// section will record the gap.
 		runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
-		// Record evidence of the prompt + model the adapter saw. The manifest
-		// service is nil in unit tests; AddEvidence is a no-op then.
-		runner.recordStageEvidence(ctx, run, stageID, stage, model)
+		// Record evidence of the prompt + model + effective capability profile
+		// the adapter saw. The manifest service is nil in unit tests;
+		// AddEvidence is a no-op then.
+		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile)
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,
@@ -801,6 +845,12 @@ const (
 	EvWorktreeReconciled = "task.worktree_reconciled"
 	EvCheckpointRecorded = "task.checkpoint_recorded"
 	EvTaskCleanedUp      = "task.cleaned_up"
+	// EvCapabilityEnforced records the effective capability profile granted to
+	// a stage invocation, emitted before the adapter is invoked. The profile
+	// (grants + denials + role + source inputs) is the audit evidence that the
+	// invocation was deny-by-default; a later review reconstructs "what could
+	// this run do" from it.
+	EvCapabilityEnforced = "stage.capability_enforced"
 	EvRevisionsSynced    = "task.revisions_synced"
 )
 

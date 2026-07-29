@@ -10,6 +10,51 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Code-enforced capability profiles** (Epic 6): every agent invocation now
+  runs under an effective `caps.Profile` that is computed, persisted, and
+  applied as a real boundary — not as a prompt instruction. v1 protects against
+  accidental agent actions in the single-owner local runtime (a malicious
+  process, kernel/container escape, compromised adapter, and prompt injection
+  are explicitly out of scope and documented as escape paths in
+  `docs/capabilities.md`).
+  - **Provider-neutral model** (`internal/caps`): a capability taxonomy
+    (`fs.read`, `fs.write`, `artifact.write`, `exec.bash`, `git.read`,
+    `git.write`, `git.delivery`, `net.fetch`, `secret.<name>`, `mcp.<server>`)
+    with role templates (`analyst`, `reviewer`, `implementer`, `fixer`,
+    `system`). The effective profile is `host ∩ pack ∩ stage ∩ (role ∪
+    invocation-grant)`, deny by default. `git.delivery` is orchestrator-only;
+    no agent role includes it. Time/resource limits ride as `HardTimeout` /
+    `IdleTimeout` profile fields.
+  - **Opencode adapter enforcement** (`internal/agent/enforce.go`): before the
+    subprocess starts, the adapter confirms the profile is enforceable
+    (`EnforceableBy`), writes a per-invocation deny-by-default opencode
+    permission config (`<worktree>/.opencode/opencode.json`), scrubs
+    credential-bearing env vars (re-added only for granted `secret.<name>`),
+    applies deny patterns for delivery-ref mutation (`git push`, `git reset
+    --hard`, `git branch -D`, `git update-ref`, `git rebase`, …), and wraps ctx
+    with the hard/idle timeouts. An unenforceable profile refuses to start with
+    `stop_reason=capability_unenforceable`.
+  - **Pack role + stage capabilities**: optional `stage.role` (one of analyst /
+    reviewer / implementer / fixer; defaults to a convention derived from the
+    stage id) and optional `stage.capabilities` (a per-stage subset that
+    narrows the pack ceiling; absent → inherit). Documented in
+    `docs/pack-format.md`.
+  - **Saved effective profile**: `stage_invocations.capability_profile` jsonb
+    (migration `0007`) is the authoritative per-invocation record; a
+    `stage.capability_enforced` event and a per-stage snapshot in the manifest's
+    `body.capabilities.effective` section mirror it for audit and cross-run
+    diff.
+  - **Routing block** now renders the exact granted set with a deny-by-default
+    notice (replacing the old "native defaults" stub).
+  - **Config**: `AGENTUM_HARD_TIMEOUT_SECONDS` / `AGENTUM_IDLE_TIMEOUT_SECONDS`
+    layer per-invocation caps onto every profile (zero = no cap).
+  - Table-driven tests in `internal/caps` (intersection, role templates,
+    enforceability) and `internal/agent` (config rendering, env scrub, scope
+    substitution, unenforceable refusal); an integration suite in
+    `internal/runner/capabilities_test.go` proves role isolation (analyst /
+    reviewer / implementer), deny-by-default, the unenforceable-profile refusal
+    path, and that the profile is saved + emitted as evidence — all without the
+    opencode binary.
 - **Immutable artifact revisions and evidence manifest** (F.7): the worktree is
   disposable, the artifacts an agent produces during a stage and the inputs that
   shaped the run are the durable record. Two pieces:

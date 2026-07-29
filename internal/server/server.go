@@ -71,6 +71,8 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Manifest:       manifestService,
 		AgentName:      "opencode",
 		AdapterVersion: agentOpencodeVersion,
+		HardTimeout:    time.Duration(cfg.HardTimeoutSeconds) * time.Second,
+		IdleTimeout:    time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
 		Log:            log,
 	})
 

@@ -23,6 +23,12 @@ type Config struct {
 	JobMaxAttempts int    // poison bound before a job is failed (04 §7.5)
 	OpencodeBinary string // path to the opencode binary the adapter shells out to
 
+	// Per-invocation capability timeouts (Epic 6). Zero means no cap; the
+	// values are layered onto every effective capability profile and enforced
+	// by the adapter (hard via ctx deadline, idle via stream-chunk watchdog).
+	HardTimeoutSeconds int
+	IdleTimeoutSeconds int
+
 	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
 	// Defaults to .agentum/artifacts under the process CWD; the worktree's own
 	// per-stage artifact dir is separate and disposable — this root survives
@@ -43,6 +49,9 @@ func Load() (Config, error) {
 		JobMaxAttempts: getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
 		OpencodeBinary: getenv("AGENTUM_OPENCODE_BINARY", "opencode"),
 		ArtifactRoot:   getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
+
+		HardTimeoutSeconds: getenvInt("AGENTUM_HARD_TIMEOUT_SECONDS", 0),
+		IdleTimeoutSeconds: getenvInt("AGENTUM_IDLE_TIMEOUT_SECONDS", 0),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")

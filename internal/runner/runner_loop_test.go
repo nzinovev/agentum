@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -73,6 +74,7 @@ func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.Create
 	invocation := sqlc.StageInvocation{
 		ID: fmt.Sprintf("inv-%d", len(store.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
 		TaskID: arg.TaskID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
+		CapabilityProfile: arg.CapabilityProfile,
 	}
 	store.invocations = append(store.invocations, invocation)
 	return invocation, nil
@@ -130,6 +132,16 @@ func (store *fakeStore) taskState() string {
 // defines what each invocation "produces"; an absent stage yields EventError.
 type scriptAdapter struct {
 	scripts map[string]agent.ResultJSON
+}
+
+// Supported declares every capability category so the runner's profile
+// computation is unconstrained by the fake in loop tests (the fake does not
+// enforce anything — it only checks loop mechanics).
+func (adapter *scriptAdapter) Supported() []caps.Category {
+	return []caps.Category{
+		caps.CatFsRead, caps.CatFsWrite, caps.CatArtifactWrite, caps.CatExecBash,
+		caps.CatGitRead, caps.CatGitWrite, caps.CatNetFetch, "secret", "mcp",
+	}
 }
 
 func (adapter *scriptAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
@@ -306,6 +318,14 @@ func (src *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error
 // slowAdapter emits its result only after a release signal; used to test cancel.
 type slowAdapter struct {
 	scripts map[string]agent.ResultJSON
+}
+
+// Supported mirrors scriptAdapter.Supported — the fake does not enforce.
+func (adapter *slowAdapter) Supported() []caps.Category {
+	return []caps.Category{
+		caps.CatFsRead, caps.CatFsWrite, caps.CatArtifactWrite, caps.CatExecBash,
+		caps.CatGitRead, caps.CatGitWrite, caps.CatNetFetch, "secret", "mcp",
+	}
 }
 
 func (adapter *slowAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {

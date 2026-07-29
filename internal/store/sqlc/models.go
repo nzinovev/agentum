@@ -86,19 +86,20 @@ type Project struct {
 }
 
 type StageInvocation struct {
-	ID           string                `json:"id"`
-	TenantID     string                `json:"tenant_id"`
-	UserID       string                `json:"user_id"`
-	TaskID       string                `json:"task_id"`
-	Stage        string                `json:"stage"`
-	Sequence     int32                 `json:"sequence"`
-	SessionID    sql.NullString        `json:"session_id"`
-	ResumeOf     sql.NullString        `json:"resume_of"`
-	StopReason   sql.NullString        `json:"stop_reason"`
-	PendingEdits json.RawMessage       `json:"pending_edits"`
-	Result       pqtype.NullRawMessage `json:"result"`
-	StartedAt    time.Time             `json:"started_at"`
-	FinishedAt   sql.NullTime          `json:"finished_at"`
+	ID                string                `json:"id"`
+	TenantID          string                `json:"tenant_id"`
+	UserID            string                `json:"user_id"`
+	TaskID            string                `json:"task_id"`
+	Stage             string                `json:"stage"`
+	Sequence          int32                 `json:"sequence"`
+	SessionID         sql.NullString        `json:"session_id"`
+	ResumeOf          sql.NullString        `json:"resume_of"`
+	StopReason        sql.NullString        `json:"stop_reason"`
+	PendingEdits      json.RawMessage       `json:"pending_edits"`
+	Result            pqtype.NullRawMessage `json:"result"`
+	StartedAt         time.Time             `json:"started_at"`
+	FinishedAt        sql.NullTime          `json:"finished_at"`
+	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 }
 
 type Task struct {

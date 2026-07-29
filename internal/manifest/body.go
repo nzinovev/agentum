@@ -110,12 +110,25 @@ type ModelEvidence struct {
 	AgentName string `json:"agent_name,omitempty"`
 }
 
-// CapabilityProfile is the effective capability set granted to the invocation.
-// Today it is the pack∩stage declared subset (declared = passed at MVP). When
-// Epic 6 lands it grows a Grant field (the operator-granted subset).
+// CapabilityProfile records the capability evidence for a run. Declared is the
+// pack-wide ceiling; Effective is the per-invocation profile the runtime
+// enforced (host ∩ pack ∩ stage ∩ role), keyed by stage so each invocation's
+// deny-by-default baseline is reconstructible. Granted is retained for the
+// pre-Epic-6 callers that wrote a flat list.
 type CapabilityProfile struct {
-	Declared []string `json:"declared"`
-	Granted  []string `json:"granted,omitempty"`
+	Declared  []string                 `json:"declared"`
+	Granted   []string                 `json:"granted,omitempty"`
+	Effective []StageCapabilityProfile `json:"effective,omitempty"`
+}
+
+// StageCapabilityProfile is the effective profile snapshot for one stage
+// invocation. It mirrors the fields the runtime enforced, so a later review or
+// cross-run diff can reconstruct "what could this invocation do" without
+// re-deriving the intersection. Profile is the raw caps.Profile JSON.
+type StageCapabilityProfile struct {
+	Stage   string          `json:"stage"`
+	Role    string          `json:"role"`
+	Profile json.RawMessage `json:"profile"`
 }
 
 // MemorySlice is the memory pulled into the run. The Hashes list is the
@@ -253,7 +266,7 @@ func mergeBodies(existing Body, patch Body) Body {
 		merged.Model = patch.Model
 	}
 	if patch.Capabilities != nil {
-		merged.Capabilities = patch.Capabilities
+		merged.Capabilities = mergeCapabilityProfile(merged.Capabilities, patch.Capabilities)
 	}
 	if patch.Memory != nil {
 		merged.Memory = patch.Memory
@@ -403,6 +416,51 @@ func appendUniqueCheckpoint(base []CheckpointRef, additions []CheckpointRef) []C
 			}
 		}
 		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// mergeCapabilityProfile combines existing with patch. Declared and Granted
+// overwrite (latest wins — the pack-wide ceiling is set once at run start and
+// does not change per stage); Effective appends, de-duplicating by Stage so
+// each invocation's snapshot accumulates across the run.
+func mergeCapabilityProfile(existing *CapabilityProfile, patch *CapabilityProfile) *CapabilityProfile {
+	if existing == nil {
+		return patch
+	}
+	merged := &CapabilityProfile{
+		Declared:  existing.Declared,
+		Granted:   existing.Granted,
+		Effective: append([]StageCapabilityProfile(nil), existing.Effective...),
+	}
+	if patch.Declared != nil {
+		merged.Declared = patch.Declared
+	}
+	if patch.Granted != nil {
+		merged.Granted = patch.Granted
+	}
+	merged.Effective = appendUniqueStageCapability(merged.Effective, patch.Effective)
+	return merged
+}
+
+// appendUniqueStageCapability appends entries whose Stage is not already
+// present (a re-run of the same stage replaces the prior snapshot — the latest
+// invocation's profile is the authoritative one for that stage).
+func appendUniqueStageCapability(base []StageCapabilityProfile, additions []StageCapabilityProfile) []StageCapabilityProfile {
+	out := make([]StageCapabilityProfile, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		replaced := false
+		for index, present := range out {
+			if present.Stage == addition.Stage {
+				out[index] = addition
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
 			out = append(out, addition)
 		}
 	}

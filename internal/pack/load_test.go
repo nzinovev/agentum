@@ -193,6 +193,13 @@ stages:
 			manifest:   replace(validManifest, "fix_cycles: 2", "fix_cycles: -1"),
 			wantSubstr: "fix_cycles must be non-negative",
 		},
+		{
+			name: "unknown stage role",
+			manifest: replace(validManifest,
+				"    prompt: prompts/spec.md\n    transitions:",
+				"    prompt: prompts/spec.md\n    role: wizard\n    transitions:"),
+			wantSubstr: "role",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,6 +257,31 @@ func TestTerminalWithPrompt(t *testing.T) {
 	}
 	if err := p.Validate(); err == nil {
 		t.Fatal("Validate expected error for terminal stage with a prompt")
+	}
+}
+
+// TestValidate_RoleAndCapabilitiesAccepted: a stage declaring a known role and
+// a stage-level capability subset validates cleanly, and the fields round-trip
+// through the loader.
+func TestValidate_RoleAndCapabilitiesAccepted(t *testing.T) {
+	t.Parallel()
+	manifest := replace(validManifest,
+		"    prompt: prompts/spec.md\n    transitions:",
+		"    prompt: prompts/spec.md\n    role: analyst\n    capabilities: [fs.read, git.read]\n    transitions:")
+	dir := writePack(t, manifest, validPrompts())
+	packResult, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := packResult.Validate(); err != nil {
+		t.Fatalf("Validate with role+capabilities failed: %v", err)
+	}
+	spec := packResult.Stages["spec"]
+	if spec.Role != "analyst" {
+		t.Errorf("spec.Role = %q, want analyst", spec.Role)
+	}
+	if len(spec.Capabilities) != 2 {
+		t.Errorf("spec.Capabilities = %v, want [fs.read git.read]", spec.Capabilities)
 	}
 }
 

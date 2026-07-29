@@ -53,11 +53,18 @@ func TestRender_Capabilities(t *testing.T) {
 			t.Errorf("capabilities not rendered; got:\n%s", got)
 		}
 	})
-	t.Run("none declared renders stub", func(t *testing.T) {
+	t.Run("none granted renders deny-by-default notice", func(t *testing.T) {
 		t.Parallel()
 		got := Render(Block{Stage: "impl", Gate: "auto", ArtifactDir: "/x"})
-		if !strings.Contains(got, "No capabilities declared") {
-			t.Error("absent capabilities must render the inert stub")
+		// An empty capability set is a deny-by-default profile, not "native
+		// defaults" — the rendered text must say the agent may only write its
+		// structured result, so a reader does not assume the runtime left tools
+		// unrestricted.
+		if !strings.Contains(got, "No capabilities granted") {
+			t.Error("absent capabilities must render the deny-by-default notice")
+		}
+		if strings.Contains(got, "native defaults") {
+			t.Error("the old 'native defaults' wording must not appear — profiles are code-enforced")
 		}
 	})
 }

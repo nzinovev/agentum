@@ -40,6 +40,12 @@ func (p *Pack) Validate() error {
 		GateAuto: true, GateAutoIfClean: true, GateAutoOnApproval: true,
 		GateHumanApproval: true, GateHumanFinal: true, GateHumanEdit: true,
 	}
+	// knownStageRoles mirrors caps.KnownRoles. Inlined to keep the pack
+	// package a pure data format with no import of caps; the two must stay
+	// in sync. A stage's role selects the capability-profile template.
+	knownStageRoles := map[string]bool{
+		"analyst": true, "reviewer": true, "implementer": true, "fixer": true,
+	}
 	for id, st := range p.Stages {
 		if id == "" {
 			problems = append(problems, "stage has an empty id")
@@ -57,6 +63,12 @@ func (p *Pack) Validate() error {
 		// Non-terminal: gate must be a known value.
 		if !gateOK[st.Gate] {
 			problems = append(problems, fmt.Sprintf("stage %q gate %q is not one of the six-value vocabulary", id, st.Gate))
+		}
+		if st.Role != "" && !knownStageRoles[st.Role] {
+			// The role selects the capability-profile template (see
+			// internal/caps). The set is mirrored here so the pack validates
+			// without importing caps; the two lists must stay in sync.
+			problems = append(problems, fmt.Sprintf("stage %q role %q is not one of {analyst, reviewer, implementer, fixer}", id, st.Role))
 		}
 		if st.Prompt == "" {
 			problems = append(problems, fmt.Sprintf("stage %q is non-terminal and requires a prompt", id))

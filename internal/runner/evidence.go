@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
@@ -102,15 +104,16 @@ func (runner *Runner) captureFilePath(
 	}
 }
 
-// recordStageEvidence adds the prompt + model + adapter evidence for one stage
-// to the manifest. Called after a successful stage invocation. No-op when the
-// manifest service is nil (unit tests).
+// recordStageEvidence adds the prompt + model + adapter + effective-capability
+// evidence for one stage to the manifest. Called after a successful stage
+// invocation. No-op when the manifest service is nil (unit tests).
 func (runner *Runner) recordStageEvidence(
 	ctx context.Context,
 	run stageRun,
 	stageID string,
 	stage pack.Stage,
 	model string,
+	profile caps.Profile,
 ) {
 	if runner.mfst == nil {
 		return
@@ -120,12 +123,20 @@ func (runner *Runner) recordStageEvidence(
 	if tier == "" {
 		tier = run.taskPack.Tiers.Default
 	}
+	stageProfileJSON, _ := json.Marshal(profile)
 	patch := manifest.Body{
 		Prompts: []manifest.PromptRevision{{StageID: stageID, Hash: promptHash}},
 		Model: &manifest.ModelEvidence{
 			Tier: tier, Model: model, AgentName: runner.agentName,
 		},
 		Adapter: runner.adapterEvidence(),
+		Capabilities: &manifest.CapabilityProfile{
+			Effective: []manifest.StageCapabilityProfile{{
+				Stage:   stageID,
+				Role:    string(profile.Source.Role),
+				Profile: stageProfileJSON,
+			}},
+		},
 	}
 	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
 		// Sealed manifest is unexpected mid-run; logged but not fatal — the

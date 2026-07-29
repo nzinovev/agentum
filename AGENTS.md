@@ -46,6 +46,12 @@ package they cover.
 - **Memory commits at task-done.** Rows in `memory_entries` are inserted only on
   final approval. Retrieval is recency-ordered; keyword pull must exist before
   the flywheel test window closes (around task ~20).
+- **Code-enforced capability profiles.** Every agent invocation runs under an
+  effective `caps.Profile` computed as host ∩ pack ∩ stage ∩ role, deny by
+  default. Profiles live in `internal/caps`; the opencode adapter materializes
+  them in `internal/agent/enforce.go` (permission config + env scrub + ctx
+  timeouts). Never bypass the adapter to run an agent — the profile is the
+  boundary. `git.delivery` is orchestrator-only; no agent role includes it.
 
 ## Conventions
 
