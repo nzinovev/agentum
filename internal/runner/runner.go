@@ -151,7 +151,7 @@ func New(deps Deps) *Runner {
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
 		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
-		checkExec: deps.CheckExec,
+		checkExec:   deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
 }
@@ -739,16 +739,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		terminalEr error
 	)
 	for event := range eventCh {
-		switch event.Kind {
-		case agent.EventStream:
-			if runner.sink != nil && event.Chunk != "" {
-				runner.sink(run.task.ID, stageID, event.Chunk)
-			}
-		case agent.EventResult:
-			terminal = event.Result
-		case agent.EventError:
-			terminalEr = event.Err
-		}
+		sessionID, telemetry, terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, sessionID, telemetry, terminal, terminalEr)
 	}
 	if terminal != nil {
 		sessionID = terminal.SessionID
@@ -773,12 +764,42 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// EventError: classify. A result.json read/parse failure is a parse error
 	// (the agent ran but its output was unusable); anything else is an adapter
 	// error (crash, stream failure, cancellation).
-	reason := "adapter_error"
-	if terminalEr != nil && strings.Contains(terminalEr.Error(), "result.json") {
-		reason = "parse_error"
-	}
+	reason := classifyAdapterFailure(terminalEr)
 	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
 	return nil, reason == "adapter_error", reason == "parse_error"
+}
+
+// observeEvent folds one adapter stream event into the accumulator the drain
+// loop carries. Stream chunks are forwarded live to the sink; result and error
+// events are captured for post-loop classification. The accumulator is returned
+// so the loop body stays a single expression with no local branching state.
+func (runner *Runner) observeEvent(
+	event agent.Event, taskID, stageID, sessionID string,
+	telemetry agent.Telemetry, terminal *agent.Result, terminalEr error,
+) (string, agent.Telemetry, *agent.Result, error) {
+	switch event.Kind {
+	case agent.EventStream:
+		if runner.sink != nil && event.Chunk != "" {
+			runner.sink(taskID, stageID, event.Chunk)
+		}
+	case agent.EventResult:
+		terminal = event.Result
+	case agent.EventError:
+		terminalEr = event.Err
+	}
+	return sessionID, telemetry, terminal, terminalEr
+}
+
+// classifyAdapterFailure maps an adapter error to a stop reason. A result.json
+// read/parse failure is a parse error (the agent ran but its output was
+// unusable); anything else is an adapter error (crash, stream failure,
+// cancellation). A nil error is treated as an adapter error only by the caller's
+// contract — here nil simply yields the default adapter_error.
+func classifyAdapterFailure(terminalEr error) string {
+	if terminalEr != nil && strings.Contains(terminalEr.Error(), "result.json") {
+		return "parse_error"
+	}
+	return "adapter_error"
 }
 
 // finalize writes the stage_invocation outcome. result may be nil.

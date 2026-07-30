@@ -82,9 +82,8 @@ func Resolve(registry *Registry, packRequests, taskRequests []Request) (*Set, er
 		}
 	}
 
-	// Pack and task requests add by name only. Unknown names are collected and
-	// reported together so a misconfigured pack surfaces every bad reference at
-	// once.
+	// Pack and task requests add by name only; unknown names are reported
+	// together so a misconfigured pack surfaces every bad reference at once.
 	var unknown []string
 	for _, layer := range []struct {
 		label string
@@ -93,25 +92,7 @@ func Resolve(registry *Registry, packRequests, taskRequests []Request) (*Set, er
 		{LayerPack, packRequests},
 		{LayerTask, taskRequests},
 	} {
-		for _, req := range layer.reqs {
-			definition, ok := registry.byName[req.Name]
-			if !ok {
-				unknown = appendUnique(unknown, req.Name)
-				continue
-			}
-			item, exists := items[req.Name]
-			if !exists {
-				item = &Item{Definition: definition, Sources: []string{layer.label}}
-				items[req.Name] = item
-			} else {
-				item.Sources = appendUnique(item.Sources, layer.label)
-			}
-			// Monotonic OR: a required request makes the check mandatory; a
-			// request cannot undo an existing required flag.
-			if req.Required {
-				item.Required = true
-			}
-		}
+		unknown = applyRequests(items, registry.byName, layer.label, layer.reqs, unknown)
 	}
 
 	if len(unknown) > 0 {
@@ -125,6 +106,33 @@ func Resolve(registry *Registry, packRequests, taskRequests []Request) (*Set, er
 	}
 	set.SetVersion = setVersion(set.Items, registry.Revision)
 	return set, nil
+}
+
+// applyRequests folds one layer's requests into items. A request for a name not
+// in byName is appended to unknown; otherwise the named item is created (or its
+// sources extended) and the required flag is OR'd in (monotonic — a request can
+// never clear an existing required flag). Returns the updated unknown list.
+func applyRequests(items map[string]*Item, byName map[string]Definition, layer string, reqs []Request, unknown []string) []string {
+	for _, req := range reqs {
+		definition, ok := byName[req.Name]
+		if !ok {
+			unknown = appendUnique(unknown, req.Name)
+			continue
+		}
+		item, exists := items[req.Name]
+		if !exists {
+			item = &Item{Definition: definition, Sources: []string{layer}}
+			items[req.Name] = item
+		} else {
+			item.Sources = appendUnique(item.Sources, layer)
+		}
+		// Monotonic OR: a required request makes the check mandatory; a
+		// request cannot undo an existing required flag.
+		if req.Required {
+			item.Required = true
+		}
+	}
+	return unknown
 }
 
 // materialize turns the name→item map into a name-sorted slice so the effective

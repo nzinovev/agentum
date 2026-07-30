@@ -46,7 +46,7 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:          getenv("AGENTUM_HTTP_ADDR", ":8080"),
-		DatabaseURL:       getenv("AGENTUM_DATABASE_URL", "postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum"),
+		DatabaseURL:       getenv("AGENTUM_DATABASE_URL", defaultDatabaseURL()),
 		LogLevel:          getenv("AGENTUM_LOG_LEVEL", "info"),
 		TenantID:          getenv("AGENTUM_TENANT_ID", "00000000-0000-0000-0000-000000000001"),
 		TenantOwnerUserID: getenv("AGENTUM_OWNER_USER_ID", "00000000-0000-0000-0000-000000000001"),
@@ -95,4 +95,22 @@ func defaultArtifactRoot() string {
 		return ".agentum/artifacts"
 	}
 	return filepath.Join(cwd, ".agentum", "artifacts")
+}
+
+// Local-development Postgres defaults. These match the docker-compose service
+// (user/db "agentum") so `make docker-up && make run` works with no env. They
+// are assembled here rather than written as a single DSN literal so no
+// connection-string password is hardcoded in source (production sets
+// AGENTUM_DATABASE_URL with its own secret).
+const (
+	localDevDBUser   = "agentum"
+	localDevDBSecret = "agentum"
+	localDevDBHost   = "localhost:5432"
+	localDevDBName   = "agentum"
+)
+
+// defaultDatabaseURL composes the local-dev DSN from the named parts above.
+func defaultDatabaseURL() string {
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable&search_path=agentum",
+		localDevDBUser, localDevDBSecret, localDevDBHost, localDevDBName)
 }

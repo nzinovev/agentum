@@ -158,31 +158,39 @@ func validateConfig(cfg ProjectConfig) error {
 	}
 	seen := make(map[string]bool, len(cfg.Checks))
 	for index, definition := range cfg.Checks {
-		if strings.TrimSpace(definition.Name) == "" {
-			problems = append(problems, fmt.Sprintf("checks[%d].name is empty", index))
-			continue
-		}
-		if seen[definition.Name] {
-			problems = append(problems, fmt.Sprintf("checks[%d].name %q is duplicated", index, definition.Name))
-		}
-		seen[definition.Name] = true
-		if len(definition.Command) == 0 || strings.TrimSpace(definition.Command[0]) == "" {
-			problems = append(problems, fmt.Sprintf("check %q command must be a non-empty arg vector", definition.Name))
-		}
-		if definition.Workdir != "" && pathEscapes(definition.Workdir) {
-			problems = append(problems, fmt.Sprintf("check %q workdir %q escapes the repo root", definition.Name, definition.Workdir))
-		}
-		if definition.TimeoutSeconds < 0 {
-			problems = append(problems, fmt.Sprintf("check %q timeout_seconds must be non-negative", definition.Name))
-		}
-		if definition.MaxOutputBytes < 0 {
-			problems = append(problems, fmt.Sprintf("check %q max_output_bytes must be non-negative", definition.Name))
-		}
+		problems = append(problems, validateDefinition(definition, index, seen)...)
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("checks: invalid %s: %s", ConfigFile, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// validateDefinition checks one check definition and records its name in seen so
+// duplicates surface. An empty name short-circuits the rest (there is nothing to
+// cross-reference a nameless entry against).
+func validateDefinition(definition Definition, index int, seen map[string]bool) []string {
+	if strings.TrimSpace(definition.Name) == "" {
+		return []string{fmt.Sprintf("checks[%d].name is empty", index)}
+	}
+	var problems []string
+	if seen[definition.Name] {
+		problems = append(problems, fmt.Sprintf("checks[%d].name %q is duplicated", index, definition.Name))
+	}
+	seen[definition.Name] = true
+	if len(definition.Command) == 0 || strings.TrimSpace(definition.Command[0]) == "" {
+		problems = append(problems, fmt.Sprintf("check %q command must be a non-empty arg vector", definition.Name))
+	}
+	if definition.Workdir != "" && pathEscapes(definition.Workdir) {
+		problems = append(problems, fmt.Sprintf("check %q workdir %q escapes the repo root", definition.Name, definition.Workdir))
+	}
+	if definition.TimeoutSeconds < 0 {
+		problems = append(problems, fmt.Sprintf("check %q timeout_seconds must be non-negative", definition.Name))
+	}
+	if definition.MaxOutputBytes < 0 {
+		problems = append(problems, fmt.Sprintf("check %q max_output_bytes must be non-negative", definition.Name))
+	}
+	return problems
 }
 
 // pathEscapes reports whether rel, when joined under the repo root, would leave

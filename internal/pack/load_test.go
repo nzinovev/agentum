@@ -337,19 +337,26 @@ checks:
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			err = packResult.Validate()
-			if tc.wantSubstr == "" {
-				if err != nil {
-					t.Fatalf("expected clean validation, got: %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
-			}
-			if !strings.Contains(err.Error(), tc.wantSubstr) {
-				t.Fatalf("expected error containing %q, got %q", tc.wantSubstr, err.Error())
-			}
+			assertValidationError(t, packResult.Validate(), tc.wantSubstr)
 		})
+	}
+}
+
+// assertValidationError enforces the expected validation outcome: when wantSubstr
+// is empty validation must pass; otherwise it must fail with an error containing
+// the substring. Lifted so each table case reads flat.
+func assertValidationError(t *testing.T, err error, wantSubstr string) {
+	t.Helper()
+	if wantSubstr == "" {
+		if err != nil {
+			t.Fatalf("expected clean validation, got: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", wantSubstr)
+	}
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("expected error containing %q, got %q", wantSubstr, err.Error())
 	}
 }

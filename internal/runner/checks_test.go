@@ -54,49 +54,82 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := t.TempDir()
-			if err := initRepoWithCommit(repo); err != nil {
-				t.Fatalf("setup repo: %v", err)
-			}
-			if tc.checksYAML != "" {
-				if err := os.WriteFile(filepath.Join(repo, checks.ConfigFile), []byte(tc.checksYAML), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				if err := gitCommitAll(repo, "add project checks"); err != nil {
-					t.Fatalf("commit checks: %v", err)
-				}
-			}
-
-			// Single auto stage → terminal: one run job reaches the terminal
-			// stage, where the delivery checks are enforced.
-			taskPack := scriptPack("spec", map[string]pack.Stage{
-				"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
-				"done": {},
-			})
-			task := sqlc.Task{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
-			proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-			store := newFakeStore(task, proj)
-			adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
-				"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
-			}}
-			executor := checks.NewExecutor(checks.ExecutorDeps{})
-			runner := New(Deps{
-				Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-				AgentName: "opencode", CheckExec: executor,
-			})
-
-			handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
-			if tc.wantErr && handleErr == nil {
-				t.Fatal("expected Handle to return an error for the blocked delivery, got nil")
-			}
-			if !tc.wantErr && handleErr != nil {
-				t.Fatalf("unexpected Handle error: %v", handleErr)
-			}
-			if got := store.taskState(); got != tc.wantState {
-				t.Fatalf("state = %q, want %q", got, tc.wantState)
-			}
+			tc := tc
+			runDeliveryChecksCase(t, tc)
 		})
 	}
+}
+
+// runDeliveryChecksCase seeds a repo with the case's registry (if any), drives a
+// single auto stage to the terminal boundary where delivery checks are enforced,
+// and asserts the resulting task state and Handle error. The check commands use
+// `true`/`false`, real binaries on the linux host these runner tests target.
+func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
+	t.Helper()
+	repo := seedRepoWithChecks(t, tc.checksYAML)
+
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
+	}}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+	})
+
+	handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
+	assertHandleError(t, handleErr, tc.wantErr)
+	if got := store.taskState(); got != tc.wantState {
+		t.Fatalf("state = %q, want %q", got, tc.wantState)
+	}
+}
+
+// seedRepoWithChecks inits a throwaway git repo and commits checksYAML as
+// .agentum.yaml when non-empty, so the worktree (branched from the repo HEAD)
+// and the base_commit registry read both carry it.
+func seedRepoWithChecks(t *testing.T, checksYAML string) string {
+	t.Helper()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	if checksYAML == "" {
+		return repo
+	}
+	if err := os.WriteFile(filepath.Join(repo, checks.ConfigFile), []byte(checksYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitCommitAll(repo, "add project checks"); err != nil {
+		t.Fatalf("commit checks: %v", err)
+	}
+	return repo
+}
+
+// assertHandleError enforces the expected Handle return: a blocked delivery
+// surfaces a non-nil error, a clean run surfaces nil.
+func assertHandleError(t *testing.T, handleErr error, wantErr bool) {
+	t.Helper()
+	switch {
+	case wantErr && handleErr == nil:
+		t.Fatal("expected Handle to return an error for the blocked delivery, got nil")
+	case !wantErr && handleErr != nil:
+		t.Fatalf("unexpected Handle error: %v", handleErr)
+	}
+}
+
+// deliveryCheckCase is the table row TestRunner_DeliveryChecks iterates; lifted
+// to a named type so the helper signature reads cleanly.
+type deliveryCheckCase struct {
+	name       string
+	checksYAML string
+	wantState  string
+	wantErr    bool
 }
 
 // TestRunner_DeliveryChecksUnknownPackCheckFails proves a pack referencing an
@@ -152,12 +185,8 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 		if len(requests) != 2 {
 			t.Fatalf("expected 2 requests, got %d", len(requests))
 		}
-		if !requests[0].Required || requests[0].Name != "build" {
-			t.Errorf("build should be required: %+v", requests[0])
-		}
-		if requests[1].Required || requests[1].Name != "lint" {
-			t.Errorf("lint should be optional: %+v", requests[1])
-		}
+		assertRequest(t, requests[0], "build", true)
+		assertRequest(t, requests[1], "lint", false)
 		if packCheckRequests(nil) != nil {
 			t.Error("nil pack must yield nil requests")
 		}
@@ -167,9 +196,7 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 		if len(requests) != 2 {
 			t.Fatalf("expected 2 requests, got %d", len(requests))
 		}
-		if !requests[0].Required || requests[0].Name != "t1" {
-			t.Errorf("t1 should be required: %+v", requests[0])
-		}
+		assertRequest(t, requests[0], "t1", true)
 		if taskCheckRequests(nil) != nil {
 			t.Error("nil input must yield nil")
 		}
@@ -177,6 +204,18 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 			t.Error("malformed input must yield nil")
 		}
 	})
+}
+
+// assertRequest checks one mapped request carries the expected name and
+// required flag, keeping the per-call assertions flat.
+func assertRequest(t *testing.T, req checks.Request, name string, required bool) {
+	t.Helper()
+	if req.Name != name {
+		t.Errorf("request name = %q, want %q", req.Name, name)
+	}
+	if req.Required != required {
+		t.Errorf("request %q required = %v, want %v", name, req.Required, required)
+	}
 }
 
 // gitCommitAll stages every change under dir and commits it, so the worktree

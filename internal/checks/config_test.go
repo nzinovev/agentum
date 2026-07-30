@@ -90,23 +90,33 @@ checks:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			registry, err := Parse([]byte(tc.yaml))
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			if !assertParseError(t, err, tc.wantErr) {
+				if registry.Revision == "" {
+					t.Fatal("Revision is empty for a valid registry")
 				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got %q", tc.wantErr, err.Error())
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if registry.Revision == "" {
-				t.Fatal("Revision is empty for a valid registry")
 			}
 		})
 	}
+}
+
+// assertParseError enforces the expected parse outcome: when wantErr is set the
+// error must contain it; otherwise there must be no error. Returns whether an
+// error was expected (so the caller knows to skip the success checks).
+func assertParseError(t *testing.T, err error, wantErr string) bool {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return false
+	}
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("expected error containing %q, got %q", wantErr, err.Error())
+	}
+	return true
 }
 
 func TestParseCollectsAllProblems(t *testing.T) {
