@@ -1,0 +1,58 @@
+# Agentum project configuration.
+#
+# This is the versioned registry of named checks the project owns. Commands live
+# ONLY here (an argument vector — no shell unless a check explicitly invokes one,
+# like the fmt check below). Packs and per-task input may add checks to a run by
+# NAME only; they can never supply a command, remove a required (baseline) check,
+# or weaken the mandatory set. A required-check failure blocks delivery.
+#
+# The orchestrator runs these itself, against the task's checkpoint commit, after
+# the final stage and before the result reaches the review gate — so Agentum
+# reads its own build/test result from its own executor, never from an agent's
+# claim that "tests passed." This is the dogfooding seam.
+api: agentum/v1
+
+checks:
+  # Build the whole module. Mirrors the AGENTS.md "before done" gate.
+  - name: build
+    description: "go build ./..."
+    command: ["go", "build", "./..."]
+    workdir: "."
+    timeout_seconds: 240
+    max_output_bytes: 1048576
+    required: true
+
+  # go vet. Static correctness checks the project mandates.
+  - name: vet
+    description: "go vet ./..."
+    command: ["go", "vet", "./..."]
+    workdir: "."
+    timeout_seconds: 240
+    max_output_bytes: 1048576
+    required: true
+
+  # Formatting must be clean: gofmt -l lists files needing formatting, and the
+  # check fails when that list is non-empty. The project config legitimately
+  # invokes a shell here; pack/agent input still cannot inject one (they only
+  # reference this check by name).
+  - name: fmt
+    description: "gofmt -l . must be empty"
+    command:
+      - sh
+      - "-c"
+      - "test -z \"$(gofmt -l .)\""
+    workdir: "."
+    timeout_seconds: 60
+    max_output_bytes: 262144
+    required: true
+
+  # The full unit suite. Required so a regression cannot be delivered even when
+  # a human reviewer is inclined to approve. Excludes the integration build tag
+  # (runner_live_test) the same way `go test ./...` does by default.
+  - name: test
+    description: "go test ./..."
+    command: ["go", "test", "./..."]
+    workdir: "."
+    timeout_seconds: 600
+    max_output_bytes: 1048576
+    required: true

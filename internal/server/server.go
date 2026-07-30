@@ -10,6 +10,7 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/api"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/config"
 	"github.com/nzinovev/agentum/internal/jobs"
 	"github.com/nzinovev/agentum/internal/manifest"
@@ -62,6 +63,11 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Queries: queries,
 		Log:     log,
 	})
+	checkExecutor := checks.NewExecutor(checks.ExecutorDeps{
+		DefaultTimeout:   time.Duration(cfg.CheckTimeoutSeconds) * time.Second,
+		DefaultMaxOutput: cfg.CheckMaxOutputBytes,
+		Log:              log,
+	})
 	runnerInst := runner.New(runner.Deps{
 		Store:          runnerStore{queries},
 		Packs:          packs,
@@ -69,6 +75,7 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Models:         modelsCfg,
 		Artifacts:      artifactStore,
 		Manifest:       manifestService,
+		CheckExec:      checkExecutor,
 		AgentName:      "opencode",
 		AdapterVersion: agentOpencodeVersion,
 		HardTimeout:    time.Duration(cfg.HardTimeoutSeconds) * time.Second,

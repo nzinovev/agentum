@@ -26,30 +26,46 @@ func TestProfile_DenyByDefault(t *testing.T) {
 func TestProfile_RoleTemplatesAreScoped(t *testing.T) {
 	t.Parallel()
 	for _, role := range KnownRoles {
-		tokens := RoleTemplate(role)
-		if len(tokens) == 0 {
-			t.Errorf("role %q has an empty template", role)
-		}
-		for _, token := range tokens {
-			if CategoryOf(token) == CatGitDelivery {
-				t.Errorf("agent role %q grants git.delivery — delivery refs must stay orchestrator-owned", role)
-			}
-			if CategoryOf(token) == CatNetFetch {
-				t.Errorf("agent role %q grants net.fetch — network must be an explicit per-invocation grant", role)
-			}
-			if enforcementCategory(token) == "secret" {
-				t.Errorf("agent role %q grants a secret — credentials must be an explicit per-invocation grant", role)
-			}
-			if enforcementCategory(token) == "mcp" {
-				t.Errorf("agent role %q grants an mcp server — MCP must be an explicit per-invocation grant", role)
-			}
-		}
+		assertRoleTokensGrantNothingDangerous(t, role)
 	}
 	// System role is the only one that carries git.delivery.
 	systemTokens := RoleTemplate(RoleSystem)
 	if !containsToken(systemTokens, Token(CatGitDelivery)) {
 		t.Errorf("system role must grant git.delivery, got %v", systemTokens)
 	}
+}
+
+// assertRoleTokensGrantNothingDangerous checks one agent role's template carries
+// no empty template and no git.delivery / net.fetch / secret / mcp grant — those
+// must stay orchestrator-owned or be explicit per-invocation grants.
+func assertRoleTokensGrantNothingDangerous(t *testing.T, role Role) {
+	t.Helper()
+	tokens := RoleTemplate(role)
+	if len(tokens) == 0 {
+		t.Errorf("role %q has an empty template", role)
+	}
+	for _, token := range tokens {
+		forbidden := forbiddenAgentCategories(token)
+		if forbidden != "" {
+			t.Errorf("agent role %q grants %s — %s", role, token, forbidden)
+		}
+	}
+}
+
+// forbiddenAgentCategories returns the reason a token is forbidden in an agent
+// role template, or "" when the token is allowed.
+func forbiddenAgentCategories(token Token) string {
+	switch {
+	case CategoryOf(token) == CatGitDelivery:
+		return "delivery refs must stay orchestrator-owned"
+	case CategoryOf(token) == CatNetFetch:
+		return "network must be an explicit per-invocation grant"
+	case enforcementCategory(token) == "secret":
+		return "credentials must be an explicit per-invocation grant"
+	case enforcementCategory(token) == "mcp":
+		return "MCP must be an explicit per-invocation grant"
+	}
+	return ""
 }
 
 // TestEffective_IntersectionDropsAbsentCategories: a capability missing from

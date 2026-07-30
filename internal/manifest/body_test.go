@@ -133,3 +133,36 @@ func TestMergeBodies_NilPatchArtifactsPreservesBase(t *testing.T) {
 		t.Errorf("Artifacts not preserved: %+v", merged.Artifacts)
 	}
 }
+
+func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
+	t.Parallel()
+	base := Body{Checks: &CheckEvidence{
+		SetVersion: "v1", Commit: "c1", MandatoryPassed: true,
+		Results: []CheckResult{{Name: "build", Status: "pass", DefinitionRevision: "dr1"}},
+	}}
+	patch := Body{Checks: &CheckEvidence{
+		SetVersion: "v2", Commit: "c2",
+		Results: []CheckResult{
+			{Name: "build", Status: "fail", DefinitionRevision: "dr1"}, // same name → replace
+			{Name: "test", Status: "pass"},                             // new
+		},
+	}}
+	merged := mergeBodies(base, patch)
+	if merged.Checks.SetVersion != "v2" {
+		t.Errorf("SetVersion should take patch value, got %q", merged.Checks.SetVersion)
+	}
+	if merged.Checks.Commit != "c2" {
+		t.Errorf("Commit should take patch value, got %q", merged.Checks.Commit)
+	}
+	if !merged.Checks.MandatoryPassed {
+		t.Error("MandatoryPassed must be monotonic (OR): once true, stays true")
+	}
+	if len(merged.Checks.Results) != 2 {
+		t.Fatalf("expected 2 deduped results, got %d: %+v", len(merged.Checks.Results), merged.Checks.Results)
+	}
+	for _, result := range merged.Checks.Results {
+		if result.Name == "build" && result.Status != "fail" {
+			t.Errorf("build result should be replaced with fail, got %q", result.Status)
+		}
+	}
+}

@@ -11,8 +11,28 @@ import (
 // (multi-error) so a pack author sees all issues at once.
 func (p *Pack) Validate() error {
 	var problems []string
+	problems = append(problems, p.validateIdentity()...)
+	problems = append(problems, p.validateEntry()...)
+	problems = append(problems, p.validateStages()...)
+	problems = append(problems, p.validateMemory()...)
+	problems = append(problems, p.validateBudgets()...)
+	problems = append(problems, validateCheckPolicy(p.Checks)...)
 
-	// api + identity
+	// reachability + terminal-exit (only meaningful once the structural checks
+	// already passed, so we can assume refs resolve).
+	if len(problems) == 0 {
+		problems = append(problems, validateGraph(p)...)
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("pack: invalid: %s", joinErrors(problems))
+	}
+	return nil
+}
+
+// validateIdentity checks api, pack name, pack version, and that stages exist.
+func (p *Pack) validateIdentity() []string {
+	var problems []string
 	if p.API != APIVersion {
 		problems = append(problems, fmt.Sprintf("api must be %q, got %q", APIVersion, p.API))
 	}
@@ -22,20 +42,25 @@ func (p *Pack) Validate() error {
 	if !isSemver(p.Pack.Version) {
 		problems = append(problems, fmt.Sprintf("pack.version must be semver MAJOR.MINOR.PATCH, got %q", p.Pack.Version))
 	}
-
-	// stages present at all
 	if len(p.Stages) == 0 {
 		problems = append(problems, "stages is empty")
 	}
+	return problems
+}
 
-	// entry
+// validateEntry checks the entry stage is declared and defined.
+func (p *Pack) validateEntry() []string {
 	if p.Entry == "" {
-		problems = append(problems, "entry is required")
-	} else if _, ok := p.Stages[p.Entry]; !ok {
-		problems = append(problems, fmt.Sprintf("entry %q is not defined in stages", p.Entry))
+		return []string{"entry is required"}
 	}
+	if _, ok := p.Stages[p.Entry]; !ok {
+		return []string{fmt.Sprintf("entry %q is not defined in stages", p.Entry)}
+	}
+	return nil
+}
 
-	// per-stage + transition refs
+// validateStages checks every stage's gate, role, prompt, and transitions.
+func (p *Pack) validateStages() []string {
 	gateOK := map[Gate]bool{
 		GateAuto: true, GateAutoIfClean: true, GateAutoOnApproval: true,
 		GateHumanApproval: true, GateHumanFinal: true, GateHumanEdit: true,
@@ -46,81 +71,98 @@ func (p *Pack) Validate() error {
 	knownStageRoles := map[string]bool{
 		"analyst": true, "reviewer": true, "implementer": true, "fixer": true,
 	}
-	for id, st := range p.Stages {
-		if id == "" {
-			problems = append(problems, "stage has an empty id")
+	var problems []string
+	for id, stage := range p.Stages {
+		problems = append(problems, p.validateStage(id, stage, gateOK, knownStageRoles)...)
+	}
+	return problems
+}
+
+// validateStage checks one stage. Terminal stages are engine states (no prompt,
+// no gate); non-terminal stages require a known gate, a valid role, and a loaded
+// prompt, and each transition must point at a defined, non-self stage.
+func (p *Pack) validateStage(id string, stage Stage, gateOK map[Gate]bool, knownStageRoles map[string]bool) []string {
+	if id == "" {
+		return []string{"stage has an empty id"}
+	}
+	if stage.Terminal() {
+		if stage.Prompt != "" {
+			return []string{fmt.Sprintf("stage %q is terminal and must not declare a prompt", id)}
+		}
+		return nil
+	}
+	var problems []string
+	if !gateOK[stage.Gate] {
+		problems = append(problems, fmt.Sprintf("stage %q gate %q is not one of the six-value vocabulary", id, stage.Gate))
+	}
+	if stage.Role != "" && !knownStageRoles[stage.Role] {
+		// The role selects the capability-profile template (see internal/caps).
+		// The set is mirrored here so the pack validates without importing caps;
+		// the two lists must stay in sync.
+		problems = append(problems, fmt.Sprintf("stage %q role %q is not one of {analyst, reviewer, implementer, fixer}", id, stage.Role))
+	}
+	problems = append(problems, p.validateStagePrompt(id, stage)...)
+	problems = append(problems, validateTransitions(id, stage, p.Stages)...)
+	return problems
+}
+
+// validateStagePrompt checks a non-terminal stage's prompt is declared and
+// loaded non-empty.
+func (p *Pack) validateStagePrompt(id string, stage Stage) []string {
+	if stage.Prompt == "" {
+		return []string{fmt.Sprintf("stage %q is non-terminal and requires a prompt", id)}
+	}
+	if p.PromptText[id] == "" {
+		return []string{fmt.Sprintf("stage %q prompt %q loaded empty", id, stage.Prompt)}
+	}
+	return nil
+}
+
+// validateTransitions checks each transition target is a defined, non-self stage.
+func validateTransitions(id string, stage Stage, stages map[string]Stage) []string {
+	var problems []string
+	for index, transition := range stage.Transitions {
+		if transition.To == "" {
+			problems = append(problems, fmt.Sprintf("stage %q transition[%d].to is empty", id, index))
 			continue
 		}
-		if st.Terminal() {
-			// Terminal stages are engine states (done/cancelled/failed). They
-			// carry no prompt and no gate — there is no agent invocation to
-			// control. Gate is ignored if present.
-			if st.Prompt != "" {
-				problems = append(problems, fmt.Sprintf("stage %q is terminal and must not declare a prompt", id))
-			}
-			continue
-		}
-		// Non-terminal: gate must be a known value.
-		if !gateOK[st.Gate] {
-			problems = append(problems, fmt.Sprintf("stage %q gate %q is not one of the six-value vocabulary", id, st.Gate))
-		}
-		if st.Role != "" && !knownStageRoles[st.Role] {
-			// The role selects the capability-profile template (see
-			// internal/caps). The set is mirrored here so the pack validates
-			// without importing caps; the two lists must stay in sync.
-			problems = append(problems, fmt.Sprintf("stage %q role %q is not one of {analyst, reviewer, implementer, fixer}", id, st.Role))
-		}
-		if st.Prompt == "" {
-			problems = append(problems, fmt.Sprintf("stage %q is non-terminal and requires a prompt", id))
-		} else if p.PromptText[id] == "" {
-			problems = append(problems, fmt.Sprintf("stage %q prompt %q loaded empty", id, st.Prompt))
-		}
-		for i, tr := range st.Transitions {
-			if tr.To == "" {
-				problems = append(problems, fmt.Sprintf("stage %q transition[%d].to is empty", id, i))
-				continue
-			}
-			if _, ok := p.Stages[tr.To]; !ok {
-				problems = append(problems, fmt.Sprintf("stage %q transition[%d].to %q is not a defined stage", id, i, tr.To))
-			} else if tr.To == id {
-				problems = append(problems, fmt.Sprintf("stage %q transition[%d].to %q is a self-loop", id, i, tr.To))
-			}
+		if _, ok := stages[transition.To]; !ok {
+			problems = append(problems, fmt.Sprintf("stage %q transition[%d].to %q is not a defined stage", id, index, transition.To))
+		} else if transition.To == id {
+			problems = append(problems, fmt.Sprintf("stage %q transition[%d].to %q is a self-loop", id, index, transition.To))
 		}
 	}
+	return problems
+}
 
-	// memory scopes
+// validateMemory checks the declared memory scopes are known and unique.
+func (p *Pack) validateMemory() []string {
+	var problems []string
 	seen := map[MemoryScope]bool{}
-	for _, sc := range p.Memory.Reads {
-		switch sc {
+	for _, scope := range p.Memory.Reads {
+		switch scope {
 		case ScopeProject, ScopeUser, ScopeOrg:
-			if seen[sc] {
-				problems = append(problems, fmt.Sprintf("memory.reads lists %q more than once", sc))
+			if seen[scope] {
+				problems = append(problems, fmt.Sprintf("memory.reads lists %q more than once", scope))
 			}
-			seen[sc] = true
+			seen[scope] = true
 		default:
-			problems = append(problems, fmt.Sprintf("memory.reads %q is not one of {project, user, org}", sc))
+			problems = append(problems, fmt.Sprintf("memory.reads %q is not one of {project, user, org}", scope))
 		}
 	}
+	return problems
+}
 
-	// budgets
+// validateBudgets checks the recursion caps are non-negative.
+func (p *Pack) validateBudgets() []string {
+	var problems []string
 	if p.Budgets.FixCycles < 0 {
 		problems = append(problems, "budgets.fix_cycles must be non-negative")
 	}
 	if p.Budgets.AskToEdit < 0 {
 		problems = append(problems, "budgets.ask_to_edit must be non-negative")
 	}
-
-	// reachability + terminal-exit (only meaningful once stages resolve)
-	if len(problems) == 0 {
-		if errs := validateGraph(p); len(errs) > 0 {
-			problems = append(problems, errs...)
-		}
-	}
-
-	if len(problems) > 0 {
-		return fmt.Errorf("pack: invalid: %s", joinErrors(problems))
-	}
-	return nil
+	return problems
 }
 
 // validateGraph checks (1) every stage is reachable from entry, and (2) at
@@ -203,4 +245,39 @@ func parseUint(s string) (int, error) {
 
 func joinErrors(msgs []string) string {
 	return strings.Join(msgs, "; ")
+}
+
+// validateCheckPolicy checks the pack's check references are well-formed: names
+// are non-empty, unique within each list, and not listed as both required and
+// optional. It does NOT check the names exist in a project registry — the pack
+// is portable across projects, so that cross-check belongs to checks.Resolve at
+// run time.
+func validateCheckPolicy(policy CheckPolicy) []string {
+	var problems []string
+	seenRequired := make(map[string]bool, len(policy.Required))
+	for index, name := range policy.Required {
+		if strings.TrimSpace(name) == "" {
+			problems = append(problems, fmt.Sprintf("checks.required[%d] is empty", index))
+			continue
+		}
+		if seenRequired[name] {
+			problems = append(problems, fmt.Sprintf("checks.required lists %q more than once", name))
+		}
+		seenRequired[name] = true
+	}
+	seenOptional := make(map[string]bool, len(policy.Optional))
+	for index, name := range policy.Optional {
+		if strings.TrimSpace(name) == "" {
+			problems = append(problems, fmt.Sprintf("checks.optional[%d] is empty", index))
+			continue
+		}
+		if seenRequired[name] {
+			problems = append(problems, fmt.Sprintf("checks: %q appears in both required and optional", name))
+		}
+		if seenOptional[name] {
+			problems = append(problems, fmt.Sprintf("checks.optional lists %q more than once", name))
+		}
+		seenOptional[name] = true
+	}
+	return problems
 }

@@ -50,6 +50,7 @@ type Pack struct {
 	Capabilities []string          `yaml:"capabilities"`
 	Budgets      Budgets           `yaml:"budgets"`
 	Tiers        Tiers             `yaml:"tiers"`
+	Checks       CheckPolicy       `yaml:"checks"`
 	Entry        string            `yaml:"entry"`
 	Stages       map[string]Stage  `yaml:"stages"`
 	PromptText   map[string]string `yaml:"-"` // keyed by stage id; populated by Load
@@ -95,6 +96,19 @@ type Budgets struct {
 // model ids resolve via the BYO-models config (F.4) in Epic 3.
 type Tiers struct {
 	Default string `yaml:"default"`
+}
+
+// CheckPolicy is the pack's contribution to the project-check set. A pack may
+// add checks to the effective set *by name only* — the names must exist in the
+// project's versioned registry (.agentum.yaml); the runner's checks.Resolve
+// rejects unknown names before any execution. Required names are mandatory (a
+// failure blocks delivery); Optional names run but do not block. Neither can
+// supply a command, remove a project baseline check, or weaken an already-
+// mandatory check — mandatory is monotonic across the project baseline, the
+// pack, and the task.
+type CheckPolicy struct {
+	Required []string `yaml:"required,omitempty"`
+	Optional []string `yaml:"optional,omitempty"`
 }
 
 // Stage is one agent-invocation step in the pipeline. Non-terminal stages have

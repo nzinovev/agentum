@@ -157,18 +157,34 @@ type ArtifactRef struct {
 	Stage       string `json:"stage,omitempty"`
 }
 
-// CheckEvidence is the versioned set of checks + their results. Empty until
-// project checks land; the manifest explicitly records this under Missing.
+// CheckEvidence is the versioned set of project checks + their results. The
+// orchestrator runs the resolved set itself (not the agent) at the delivery
+// boundary, against the commit recorded here, and records the outcome as
+// evidence a final review reconstructs. MandatoryPassed is the delivery gate: a
+// false value blocked the task from reaching successful final delivery.
 type CheckEvidence struct {
-	SetVersion string        `json:"set_version,omitempty"`
-	Results    []CheckResult `json:"results,omitempty"`
+	SetVersion       string        `json:"set_version,omitempty"`
+	RegistryRevision string        `json:"registry_revision,omitempty"`
+	Commit           string        `json:"commit,omitempty"`
+	Profile          string        `json:"profile,omitempty"`
+	MandatoryPassed  bool          `json:"mandatory_passed"`
+	Results          []CheckResult `json:"results,omitempty"`
 }
 
-// CheckResult is one check outcome.
+// CheckResult is one check outcome. It carries the definition revision (so a
+// result is tied to the exact contract that ran), the exit code, the wall-clock
+// duration, the capped stdout/stderr, and a reason for any non-pass status.
 type CheckResult struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	Name               string `json:"name"`
+	Required           bool   `json:"required,omitempty"`
+	Status             string `json:"status"`
+	ExitCode           int    `json:"exit_code,omitempty"`
+	DurationMs         int64  `json:"duration_ms"`
+	Stdout             string `json:"stdout,omitempty"`
+	Stderr             string `json:"stderr,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	DefinitionRevision string `json:"definition_revision,omitempty"`
+	Source             string `json:"source,omitempty"`
 }
 
 // HumanDecision is one human gate decision.
@@ -275,7 +291,7 @@ func mergeBodies(existing Body, patch Body) Body {
 		merged.Artifacts = mergeArtifactEvidence(merged.Artifacts, patch.Artifacts)
 	}
 	if patch.Checks != nil {
-		merged.Checks = patch.Checks
+		merged.Checks = mergeCheckEvidence(merged.Checks, patch.Checks)
 	}
 	if len(patch.HumanGates) > 0 {
 		merged.HumanGates = appendUniqueHumanDecision(merged.HumanGates, patch.HumanGates)
@@ -472,4 +488,46 @@ func firstNonEmpty(preferred, fallback string) string {
 		return preferred
 	}
 	return fallback
+}
+
+// mergeCheckEvidence combines two CheckEvidence. The set/registry/commit/profile
+// scalars take the patch's value when set (the runner writes a fresh full set
+// each delivery boundary), and results are merged de-duplicating by name so a
+// re-run after resume replaces a prior result for the same check with the latest
+// one. MandatoryPassed is the OR of the two — once mandatory checks passed, a
+// later partial patch must not flip it back.
+func mergeCheckEvidence(existing *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
+	if existing == nil {
+		return patch
+	}
+	merged := &CheckEvidence{
+		SetVersion:       firstNonEmpty(patch.SetVersion, existing.SetVersion),
+		RegistryRevision: firstNonEmpty(patch.RegistryRevision, existing.RegistryRevision),
+		Commit:           firstNonEmpty(patch.Commit, existing.Commit),
+		Profile:          firstNonEmpty(patch.Profile, existing.Profile),
+		MandatoryPassed:  existing.MandatoryPassed || patch.MandatoryPassed,
+		Results:          appendUniqueCheckResult(existing.Results, patch.Results),
+	}
+	return merged
+}
+
+// appendUniqueCheckResult appends results whose Name is not already in base; a
+// repeat name replaces the prior entry so the latest run's result wins.
+func appendUniqueCheckResult(base []CheckResult, additions []CheckResult) []CheckResult {
+	out := make([]CheckResult, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		replaced := false
+		for index, present := range out {
+			if present.Name == addition.Name {
+				out[index] = addition
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, addition)
+		}
+	}
+	return out
 }

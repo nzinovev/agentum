@@ -10,6 +10,51 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Orchestrator-owned project checks**: the project ships a versioned registry
+  of named checks (`.agentum.yaml`, tracked in the repo) and Agentum runs the
+  resolved set itself at the delivery boundary — never trusting an agent's claim
+  that tests passed. A mandatory (baseline) failure blocks delivery.
+  - **Project registry** (`internal/checks`): `.agentum.yaml` defines named
+    checks as argument vectors (no shell injection), each with a worktree-scoped
+    `workdir`, `timeout_seconds`, `max_output_bytes`, and a `required` flag
+    (project baseline). Validated and content-hashed at load so a changed
+    contract is detectable across runs. The registry is read from the task's
+    `base_commit` (agent-immutable) via `worktree.FileAtCommit`, so an agent
+    editing the file in its worktree cannot weaken the checks gating its own
+    delivery.
+  - **Monotonic resolution** (`checks.Resolve`): the effective set is the union
+    of the project baseline + the pack's `checks.required`/`optional` + the
+    task's `checks` input. Pack and task add checks **by name only** — unknown
+    names are rejected before execution, commands are never accepted from them,
+    and `required` is monotonic (once mandatory, always mandatory; no layer can
+    weaken the baseline).
+  - **Executor** (`checks.Executor`): runs the set under a fixed minimal
+    boundary — arg-vector commands from the registry only, a workdir that cannot
+    escape the worktree, a scrubbed environment (provider credentials like
+    `OPENAI_API_KEY` / `*_TOKEN` stripped), per-check timeouts, and capped
+    stdout/stderr. Its profile label is recorded as audit evidence.
+  - **Delivery gating**: the runner enforces the set after the final stage's
+    checkpoint and before the review gate, against the checkpoint commit (the SHA
+    that becomes `result_commit`). A mandatory failure fails the task; the
+    sealed manifest carries the per-check evidence for review.
+  - **Manifest evidence**: the `body.checks` section now carries the set version,
+    registry revision, verified commit, executor profile, mandatory-passed flag,
+    and per-check results (status, exit code, duration, capped output, reason,
+    definition revision, source layer). Append-only merge with `required`/pass
+    monotonicity.
+  - **Pack `checks`** field (`pack.CheckPolicy`): `required`/`optional` name
+    lists, validated for non-empty and unique names. Documented in
+    `docs/pack-format.md`.
+  - **Config**: `AGENTUM_CHECK_TIMEOUT_SECONDS` /
+    `AGENTUM_CHECK_MAX_OUTPUT_BYTES` set executor defaults (a check's own values
+    take precedence).
+  - **Dogfooding**: the agentum repo ships its own `.agentum.yaml` baseline
+    (`go build`, `go vet`, `gofmt -l`, `go test`), all required.
+  - Table-driven tests in `internal/checks` (registry validation/hashing,
+    monotonic resolution, unknown-name rejection, executor statuses/timeout/
+    output-cap/env-scrub) and an integration suite in
+    `internal/runner/checks_test.go` (delivery gating on pass/fail/optional/
+    unknown-name).
 - **Code-enforced capability profiles** (Epic 6): every agent invocation now
   runs under an effective `caps.Profile` that is computed, persisted, and
   applied as a real boundary — not as a prompt instruction. v1 protects against

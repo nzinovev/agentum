@@ -52,6 +52,16 @@ package they cover.
   them in `internal/agent/enforce.go` (permission config + env scrub + ctx
   timeouts). Never bypass the adapter to run an agent — the profile is the
   boundary. `git.delivery` is orchestrator-only; no agent role includes it.
+- **Orchestrator-owned project checks.** The project ships a versioned registry
+  of named checks (`.agentum.yaml`, tracked in the repo). Commands live ONLY in
+  that registry (an arg vector; no shell injection). Packs and task input add
+  checks by name only — `checks.Resolve` rejects unknown names, never accepts a
+  command, and cannot weaken the mandatory baseline (required is monotonic). The
+  runner enforces the resolved set itself, against the post-stage checkpoint
+  commit, before the result reaches the review gate; a mandatory failure blocks
+  delivery. The check executor runs under a fixed minimal boundary (scrubbed
+  env, no provider credentials). Never trust an agent's claim that checks
+  passed — Agentum reads the result from its own executor.
 
 ## Conventions
 

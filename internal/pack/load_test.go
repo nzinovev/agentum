@@ -291,3 +291,72 @@ func replace(s, old, new string) string {
 	}
 	return strings.Replace(s, old, new, 1)
 }
+
+func TestValidate_CheckPolicy(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		checks     string
+		wantSubstr string
+	}{
+		{
+			name: "valid required and optional",
+			checks: `
+checks:
+  required: [build]
+  optional: [lint]`,
+		},
+		{
+			name: "empty required name",
+			checks: `
+checks:
+  required: [""]`,
+			wantSubstr: "checks.required",
+		},
+		{
+			name: "duplicate optional name",
+			checks: `
+checks:
+  optional: [lint, lint]`,
+			wantSubstr: "lists \"lint\" more than once",
+		},
+		{
+			name: "name in both required and optional",
+			checks: `
+checks:
+  required: [build]
+  optional: [build]`,
+			wantSubstr: "both required and optional",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := validManifest + tc.checks
+			dir := writePack(t, manifest, validPrompts())
+			packResult, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			assertValidationError(t, packResult.Validate(), tc.wantSubstr)
+		})
+	}
+}
+
+// assertValidationError enforces the expected validation outcome: when wantSubstr
+// is empty validation must pass; otherwise it must fail with an error containing
+// the substring. Lifted so each table case reads flat.
+func assertValidationError(t *testing.T, err error, wantSubstr string) {
+	t.Helper()
+	if wantSubstr == "" {
+		if err != nil {
+			t.Fatalf("expected clean validation, got: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", wantSubstr)
+	}
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("expected error containing %q, got %q", wantSubstr, err.Error())
+	}
+}

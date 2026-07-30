@@ -16,6 +16,7 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
@@ -80,6 +81,9 @@ type Runner struct {
 	// mfst is the evidence manifest service. nil in unit tests; manifest
 	// operations are no-ops then.
 	mfst *manifest.Service
+	// checkExec runs the orchestrator-owned project checks at the delivery
+	// boundary. nil in unit tests; project checks are skipped then.
+	checkExec *checks.Executor
 }
 
 // Deps bundles Runner construction. AgentName is the adapter's identity for
@@ -107,6 +111,13 @@ type Deps struct {
 	// Manifest is the evidence manifest service. May be nil in unit tests;
 	// manifest operations become no-ops then.
 	Manifest *manifest.Service
+
+	// CheckExec runs the orchestrator-owned project checks at the delivery
+	// boundary. May be nil in unit tests; project checks are skipped then. When
+	// set, the runner enforces the project baseline (plus pack/task requests)
+	// after the final-stage checkpoint and before the task reaches the review
+	// gate; a mandatory failure blocks delivery by failing the task.
+	CheckExec *checks.Executor
 
 	// HardTimeout / IdleTimeout are the per-invocation caps applied to every
 	// stage invocation (zero = no cap). Sourced from config; carried by the
@@ -140,6 +151,7 @@ func New(deps Deps) *Runner {
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
 		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
+		checkExec:   deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
 }
@@ -517,10 +529,15 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	}
 
 	// A terminal stage (no transitions) is an engine marker, not an agent
-	// invocation: reaching it means the pipeline is complete. Fire the final
-	// gate directly, without invoking the adapter (terminal stages omit a
-	// prompt by the pack convention).
+	// invocation: reaching it means the pipeline is complete. Enforce the
+	// orchestrator-owned project checks first (against the last post-stage
+	// checkpoint, i.e. the worktree HEAD), then fire the final gate. A mandatory
+	// check failure blocks delivery: the task fails rather than reaching the
+	// review gate, and the check evidence in the manifest is the record.
 	if stage.Terminal() {
+		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+			return stageOutcome{}, err
+		}
 		if err := runner.reachTerminalStage(ctx, run.task, stageID); err != nil {
 			return stageOutcome{}, err
 		}
@@ -576,6 +593,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	case ActionPause:
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
 	case ActionFinal:
+		// Defensive double-enforcement: eval only returns ActionFinal for a
+		// terminal stage, and terminal stages short-circuit to the branch above
+		// before invoking the adapter. Should the final outcome arise here
+		// anyway, the project checks still gate delivery.
+		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+			return stageOutcome{}, err
+		}
 		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, stageID)
 	}
 	return stageOutcome{}, fmt.Errorf("runner: unknown decision action %d", decision.Action)
@@ -715,16 +739,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		terminalEr error
 	)
 	for event := range eventCh {
-		switch event.Kind {
-		case agent.EventStream:
-			if runner.sink != nil && event.Chunk != "" {
-				runner.sink(run.task.ID, stageID, event.Chunk)
-			}
-		case agent.EventResult:
-			terminal = event.Result
-		case agent.EventError:
-			terminalEr = event.Err
-		}
+		sessionID, telemetry, terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, sessionID, telemetry, terminal, terminalEr)
 	}
 	if terminal != nil {
 		sessionID = terminal.SessionID
@@ -749,12 +764,42 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// EventError: classify. A result.json read/parse failure is a parse error
 	// (the agent ran but its output was unusable); anything else is an adapter
 	// error (crash, stream failure, cancellation).
-	reason := "adapter_error"
-	if terminalEr != nil && strings.Contains(terminalEr.Error(), "result.json") {
-		reason = "parse_error"
-	}
+	reason := classifyAdapterFailure(terminalEr)
 	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
 	return nil, reason == "adapter_error", reason == "parse_error"
+}
+
+// observeEvent folds one adapter stream event into the accumulator the drain
+// loop carries. Stream chunks are forwarded live to the sink; result and error
+// events are captured for post-loop classification. The accumulator is returned
+// so the loop body stays a single expression with no local branching state.
+func (runner *Runner) observeEvent(
+	event agent.Event, taskID, stageID, sessionID string,
+	telemetry agent.Telemetry, terminal *agent.Result, terminalEr error,
+) (string, agent.Telemetry, *agent.Result, error) {
+	switch event.Kind {
+	case agent.EventStream:
+		if runner.sink != nil && event.Chunk != "" {
+			runner.sink(taskID, stageID, event.Chunk)
+		}
+	case agent.EventResult:
+		terminal = event.Result
+	case agent.EventError:
+		terminalEr = event.Err
+	}
+	return sessionID, telemetry, terminal, terminalEr
+}
+
+// classifyAdapterFailure maps an adapter error to a stop reason. A result.json
+// read/parse failure is a parse error (the agent ran but its output was
+// unusable); anything else is an adapter error (crash, stream failure,
+// cancellation). A nil error is treated as an adapter error only by the caller's
+// contract — here nil simply yields the default adapter_error.
+func classifyAdapterFailure(terminalEr error) string {
+	if terminalEr != nil && strings.Contains(terminalEr.Error(), "result.json") {
+		return "parse_error"
+	}
+	return "adapter_error"
 }
 
 // finalize writes the stage_invocation outcome. result may be nil.
@@ -852,6 +897,11 @@ const (
 	// this run do" from it.
 	EvCapabilityEnforced = "stage.capability_enforced"
 	EvRevisionsSynced    = "task.revisions_synced"
+	// EvProjectChecksRun records the orchestrator-owned project-check outcome at
+	// the delivery boundary. The manifest body carries the full per-check
+	// results; this event is the durable signal that Agentum ran its own checks
+	// (not the agent's claim) against the checkpoint commit.
+	EvProjectChecksRun = "task.project_checks_run"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

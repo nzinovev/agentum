@@ -320,6 +320,81 @@ adapter to a stop point (the `spec` stage's `human_approval` gate pauses the
 task at `paused_gate`) and a `session_id` is captured. This is the F.6 proof
 that the loop works with a live agent, not just fakes.
 
+## Project checks (orchestrator-owned)
+
+An agent must not get to declare its own work "done" by claiming tests passed.
+For honest dogfooding, Agentum runs the project's checks itself and reads the
+result from its own executor. The commands are project-owned (they depend on the
+stack), so they live in a versioned project file, not in a pack or an architect's
+plan.
+
+### The registry (`.agentum.yaml`)
+
+A tracked file at the repo root carries the versioned registry of named checks:
+
+```yaml
+api: agentum/v1
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+    workdir: "."
+    timeout_seconds: 240
+    max_output_bytes: 1048576
+    required: true          # project baseline: always runs, failure blocks delivery
+  - name: lint
+    command: ["golangci-lint", "run"]
+    required: false         # registered but optional unless a pack/task requires it
+```
+
+Each check is an **argument vector** (first element is the binary; no shell
+unless a check explicitly invokes one). Only this file supplies commands — it is
+versioned with the code and read from the task's `base_commit` (the lineage
+anchor, captured before the worktree is created), so the registry an agent is
+gated against is the one the project committed, not one the agent could edit in
+its worktree.
+
+### Who can add, remove, or override what
+
+| Source | Can do | Cannot do |
+|---|---|---|
+| Project registry | Define commands, mark a check `required` (baseline) | — |
+| Pack (`checks.required` / `checks.optional`) | Add a check **by name**; mark it mandatory | Supply a command; remove a baseline check; weaken an already-mandatory check |
+| Task input (`checks.required` / `checks.optional`) | Add a check **by name**; mark it mandatory | Supply a command; remove or weaken |
+| Agent | nothing | Claim checks passed (its claim is ignored) |
+
+`checks.Resolve` enforces all of this before any execution: an unregistered name
+is rejected, a command is never accepted from pack/task input, and `required` is
+monotonic (OR across baseline + pack + task — once mandatory, always mandatory).
+The registry itself is loaded from `base_commit`, so an agent cannot weaken the
+checks by editing `.agentum.yaml` inside its worktree.
+
+### When checks run
+
+The runner runs the resolved set once, at the **final delivery boundary**: after
+the last stage's checkpoint is recorded and before the task reaches the review
+gate (`awaiting_memory_commit`). The set runs against the worktree HEAD — the
+post-stage checkpoint commit, which is the same SHA that becomes `result_commit`
+at teardown. The outcome is recorded as manifest evidence:
+
+- every per-check result (status, exit code, duration, capped stdout/stderr,
+  stop reason, definition revision, which layer contributed it);
+- the resolved set version + the registry revision;
+- the verified commit and the executor's capability label.
+
+A **mandatory failure blocks delivery**: instead of reaching the review gate, the
+task fails, and the check evidence in the sealed manifest is the record. Optional
+check failures are recorded as evidence but do not block. A successful run is the
+evidence available to the final reviewer.
+
+### The executor's boundary
+
+The executor is orchestrator code, not an agent adapter — it is not subject to
+the `caps` intersection. It is bound by code instead: arg-vector commands from
+the registry only, a worktree-scoped working directory that cannot escape, a
+scrubbed environment (provider credentials like `OPENAI_API_KEY` / `*_TOKEN` are
+stripped), per-check timeouts, and capped output. Its profile label
+(`checks-executor-v1`) is recorded on every report.
+
 ## What F.6 does not do yet
 
 These land with their epics — the seams exist, the behavior does not:
