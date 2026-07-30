@@ -1,0 +1,89 @@
+api: agentum/v1
+
+pack:
+  name: backend-dev
+  version: 1.0.0
+  persona: engineering
+  description: |
+    Universal backend development pipeline. Drives a small backend task through
+    plan → implement → review → fix → done between two mandatory human gates
+    (plan approval, final-result review). The pack describes the development
+    PROCESS only — it carries no language, framework, build, or project-layout
+    rules. Those come from the repository's own instructions (AGENTS.md), any
+    connected skills, the project configuration, and the registered project
+    checks. The same pack runs unchanged against a Go, Java/Spring, or any other
+    backend stack that supports this orchestration workflow.
+
+memory:
+  reads: [project]
+  writes: true
+
+capabilities: [fs.read, fs.write, git.read, git.write, exec.bash]
+
+budgets:
+  fix_cycles: 2
+  ask_to_edit: 1
+
+tiers:
+  default: fast
+
+# Checks are intentionally NOT named here. The mandatory build/test/verify
+# commands are project-owned: they live in the project's .agentum.yaml registry
+# (the baseline, marked required), not in this pack. Naming stack-specific
+# checks here would make the pack non-portable. The orchestrator runs the
+# resolved baseline itself at the delivery boundary regardless of the pack, so a
+# mandatory-check failure blocks delivery without the pack naming anything.
+
+entry: plan
+
+stages:
+  # Gate 1 — plan approval. The analyst reads the task and the project context,
+  # produces an implementation plan, and stops for a human. No stage with source
+  # write capability runs until this gate is passed, so no source changes before
+  # an approved plan.
+  plan:
+    gate: human_approval
+    role: analyst
+    prompt: prompts/plan.md
+    capabilities: [fs.read, git.read]
+    transitions:
+      - to: implement
+
+  # Autonomous execution begins after plan approval. implement → review → (fix →
+  # review)* → done runs without further human action when it converges.
+  implement:
+    gate: auto
+    role: implementer
+    prompt: prompts/implement.md
+    transitions:
+      - to: review
+
+  # The reviewer independently verifies the result against the approved plan and
+  # the project's conventions, then emits a verdict. Routing is result-driven:
+  # verdict "approved" → done; anything else → fix (the default/first edge). The
+  # fix-cycle budget bounds the loop.
+  review:
+    gate: auto
+    role: reviewer
+    prompt: prompts/review.md
+    capabilities: [fs.read, git.read]
+    transitions:
+      - to: fix
+        condition: verdict == "changes_requested"
+      - to: done
+        condition: verdict == "approved"
+
+  # The fixer addresses only the reviewer's specific findings, then returns to
+  # review. Entering this stage consumes one fix-cycle.
+  fix:
+    gate: auto
+    role: fixer
+    prompt: prompts/fix.md
+    transitions:
+      - to: review
+
+  # Terminal marker. Reaching it triggers the orchestrator-owned project checks
+  # (against the post-stage checkpoint commit) and then the final-result review
+  # gate. A mandatory-check failure blocks the result from reaching the gate as
+  # a success.
+  done: {}

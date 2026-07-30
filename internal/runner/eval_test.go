@@ -198,6 +198,99 @@ func TestAdvance_NoTransition(t *testing.T) {
 	}
 }
 
+// TestSelectTransition covers the result-driven routing the fix-loop depends on.
+// The review stage fans out to fix (changes_requested) and done (approved); the
+// first matching condition wins, and a missing/unrecognized verdict falls back
+// to the first transition so a reviewer that did not explicitly approve keeps
+// the loop moving (bounded by the fix-cycle budget).
+func TestSelectTransition(t *testing.T) {
+	t.Parallel()
+	reviewStage := pack.Stage{Gate: pack.GateAuto, Transitions: []pack.Transition{
+		{To: "fix", Condition: `verdict == "changes_requested"`},
+		{To: "done", Condition: `verdict == "approved"`},
+	}}
+
+	cases := []struct {
+		name   string
+		stage  pack.Stage
+		result *agent.ResultJSON
+		wantTo string
+	}{
+		{
+			name:   "approved verdict routes to done (second edge)",
+			stage:  reviewStage,
+			result: &agent.ResultJSON{Status: agent.StatusComplete, Verdict: "approved"},
+			wantTo: "done",
+		},
+		{
+			name:   "changes_requested routes to fix (first edge)",
+			stage:  reviewStage,
+			result: &agent.ResultJSON{Status: agent.StatusComplete, Verdict: "changes_requested"},
+			wantTo: "fix",
+		},
+		{
+			name:   "missing verdict falls back to first edge (fix)",
+			stage:  reviewStage,
+			result: &agent.ResultJSON{Status: agent.StatusComplete},
+			wantTo: "fix",
+		},
+		{
+			name:   "unrecognized verdict falls back to first edge (fix)",
+			stage:  reviewStage,
+			result: &agent.ResultJSON{Status: agent.StatusComplete, Verdict: "needs_info"},
+			wantTo: "fix",
+		},
+		{
+			name:   "single unconditional transition always wins",
+			stage:  pack.Stage{Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "review"}}},
+			result: &agent.ResultJSON{Status: agent.StatusComplete, Verdict: "approved"},
+			wantTo: "review",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := selectTransition(tc.stage, tc.result)
+			if got.To != tc.wantTo {
+				t.Fatalf("selectTransition.To = %q, want %q", got.To, tc.wantTo)
+			}
+		})
+	}
+}
+
+// TestConditionMatches pins the minimal predicate grammar: empty matches
+// always, `field == "value"` matches on equality, and anything else does not.
+func TestConditionMatches(t *testing.T) {
+	t.Parallel()
+	complete := &agent.ResultJSON{Status: agent.StatusComplete, Verdict: "approved"}
+	cases := []struct {
+		name      string
+		condition string
+		result    *agent.ResultJSON
+		want      bool
+	}{
+		{"empty matches", "", complete, true},
+		{"verdict equal", `verdict == "approved"`, complete, true},
+		{"verdict unequal", `verdict == "changes_requested"`, complete, false},
+		{"status equal", `status == "complete"`, complete, true},
+		{"status unequal", `status == "blocked"`, complete, false},
+		{"single quotes", `verdict == 'approved'`, complete, true},
+		{"no spaces", `verdict=="approved"`, complete, true},
+		{"unknown field", `mood == "happy"`, complete, false},
+		{"malformed", `verdict approved`, complete, false},
+		{"nil result", `verdict == "approved"`, nil, false},
+		{"empty condition nil result", "", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := conditionMatches(tc.condition, tc.result); got != tc.want {
+				t.Fatalf("conditionMatches(%q) = %v, want %v", tc.condition, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvaluate_StopReasonsAreDistinct(t *testing.T) {
 	t.Parallel()
 	// The stop_reason enum is how the UI/API distinguishes pause causes; they must

@@ -47,12 +47,12 @@ violation and surfaces as a retryable stop-point — not a silent skip.
     {"kind": "decision", "title": "Auth via session cookies", "body": "...", "keywords": ["auth", "session"]}
   ],
   "edit_targets": [],
+  "verdict": "approved",
   "notes": "Optional free-form text."
 }
 ```
 
 ### Fields
-
 | Field | Required | Type | Notes |
 |---|---|---|---|
 | `schema_version` | yes | string | Must be `"1"`. |
@@ -62,6 +62,7 @@ violation and surfaces as a retryable stop-point — not a silent skip.
 | `artifacts` | no | object[] | Produced artifacts. `path` is relative to the worktree root (or absolute within it); `kind` is an optional free-form label (`spec`, `code`, `adr`, …). |
 | `memory_writes` | no | object[] | Proposed memory entries. Committed only when the whole task is finally approved. `kind` ∈ `{decision, convention, spec_ref, fix, note}`; `keywords` is a string array. |
 | `edit_targets` | no | string[] | Scoped-edit targets for the ask-to-edit gate action (e.g. `"src/auth.ts:session"`). |
+| `verdict` | no | string | The stage's pass/fail signal for result-driven routing. Today only review stages read it: `"approved"` routes to the approved transition; anything else (commonly `"changes_requested"`) routes to the fix transition. Free-form and pack-defined — no enum is enforced here. |
 | `notes` | no | string | Free-form text. |
 
 ### Parsing rules
@@ -81,6 +82,9 @@ violation and surfaces as a retryable stop-point — not a silent skip.
 - `status` + `open_questions` → the gate decision (any open question, or
   `status` ≠ `complete`, stops for a human; otherwise the stage's gate value
   decides auto-advance vs human review).
+- `verdict` → result-driven routing between a stage's conditional transitions
+  (a review stage routes `approved` to done, anything else to fix). The fix-cycle
+  budget bounds the loop.
 - `memory_writes` → staged, committed at final task approval (not at this gate).
 - `artifacts` → the next stage reads them by path; the UI lists them.
 - `edit_targets` → scope the ask-to-edit gate action.

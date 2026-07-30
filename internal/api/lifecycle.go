@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -55,7 +57,9 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 }
 
 // handleInvocationAdvance POST /api/v1/tasks/{id}/invocations/{iid}/advance
-// Pass a gate → the next stage runs (a fresh invocation).
+// Pass a gate → the next stage runs (a fresh invocation). For the backend-dev
+// pack this is the plan-approval human gate: the decision is recorded as audit
+// evidence before the source-writing stages are allowed to run.
 func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requirePrincipal(w, r); !ok {
 		return
@@ -64,6 +68,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	api.recordHumanGate(r, task, "approval", "approved")
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
@@ -102,25 +107,12 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	// Transactional outbox: the done transition and the teardown-job enqueue
 	// commit atomically. result_commit capture happens inside the teardown job
 	// (the runner owns the worktree manager) before the worktree is removed.
-	var updated sqlc.Task
-	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
-		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		updated = transitioned
-		return nil
-	}); err != nil {
+	updated, err := api.transitionAndEnqueueTeardown(r, task, next)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
+	api.recordHumanGate(r, updated, "final", "approved")
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
@@ -168,26 +160,20 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Transactional outbox: abort transition + teardown enqueue in one tx.
-	var updated sqlc.Task
-	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
-		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		updated = transitioned
-		return nil
-	}); err != nil {
+	updated, err := api.transitionAndEnqueueTeardown(r, task, next)
+	if err != nil {
 		logUnexpected(api.log, err, "CancelTask tx")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
+	// A cancel at the final-review gate is a result rejection; anywhere else it
+	// is a mid-run abort. Both are terminal and preserve the branch + evidence —
+	// the decision is recorded so the audit trail distinguishes the two.
+	cancelDecision := "cancelled"
+	if engine.TaskState(task.State) == engine.StateAwaitingMemoryCommit {
+		cancelDecision = "rejected"
+	}
+	api.recordHumanGate(r, updated, "cancel", cancelDecision)
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
@@ -312,8 +298,60 @@ func statusForTransition(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 }
 
+// transitionAndEnqueueTeardown applies a terminal transition and enqueues the
+// worktree teardown job inside one transaction — the transactional outbox: a
+// handler that cannot enqueue rolls back the transition, so a task is never
+// left terminal with no teardown intent. Shared by approve and cancel, both of
+// which reach a terminal state whose worktree disposal is the teardown job.
+// Identity (tenant_id, user_id) is read from the request's principal, never the
+// body.
+func (api *API) transitionAndEnqueueTeardown(r *http.Request, task sqlc.Task, nextState engine.TaskState) (sqlc.Task, error) {
+	principal, _ := authz.PrincipalFrom(r.Context())
+	var updated sqlc.Task
+	transitionErr := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
+		transitioned, err := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
+			ID: task.ID, TenantID: principal.TenantID, State: string(nextState),
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
+			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+		}); err != nil {
+			return err
+		}
+		updated = transitioned
+		return nil
+	})
+	return updated, transitionErr
+}
+
 // principalTenant returns the tenant id from the request's principal.
 func principalTenant(r *http.Request) string {
 	principal, _ := authz.PrincipalFrom(r.Context())
 	return principal.TenantID
+}
+
+// recordHumanGate writes one human gate decision to the evidence manifest. The
+// FSM already makes the underlying action idempotent (a second advance/approve/
+// cancel cannot apply from the resulting state), so the recording runs at most
+// once per decision; after the task reaches a terminal state the manifest is
+// sealed and AddEvidence is a logged no-op. Best-effort: a manifest write
+// failure never blocks the lifecycle transition it accompanies.
+func (api *API) recordHumanGate(r *http.Request, task sqlc.Task, gate, decision string) {
+	if api.mfst == nil {
+		return
+	}
+	principal, _ := authz.PrincipalFrom(r.Context())
+	stage := ""
+	if task.CurrentStage.Valid {
+		stage = task.CurrentStage.String
+	}
+	patch := manifest.Body{HumanGates: []manifest.HumanDecision{{
+		Stage: stage, Gate: gate, Decision: decision,
+		Actor: principal.UserID, Timestamp: time.Now().UTC(),
+	}}}
+	if err := api.mfst.AddEvidence(r.Context(), task.TenantID, task.ID, patch); err != nil {
+		api.log.Warn("record human gate", "task", task.ID, "gate", gate, "error", err)
+	}
 }

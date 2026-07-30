@@ -87,6 +87,27 @@ func TestParseResultJSON_UnknownFieldsIgnored(t *testing.T) {
 	}
 }
 
+func TestParseResultJSON_Verdict(t *testing.T) {
+	t.Parallel()
+	// Verdict is the review-stage routing signal. It is optional and free-form;
+	// present values pass through verbatim, absent values stay empty.
+	r, err := ParseResultJSON([]byte(`{"schema_version":"1","status":"complete","verdict":"approved"}`))
+	if err != nil {
+		t.Fatalf("verdict parse: %v", err)
+	}
+	if r.Verdict != "approved" {
+		t.Errorf("verdict = %q, want approved", r.Verdict)
+	}
+
+	absent, err := ParseResultJSON([]byte(`{"schema_version":"1","status":"complete"}`))
+	if err != nil {
+		t.Fatalf("absent verdict parse: %v", err)
+	}
+	if absent.Verdict != "" {
+		t.Errorf("verdict = %q, want empty", absent.Verdict)
+	}
+}
+
 func TestResultContractPreamble_ContainsPath(t *testing.T) {
 	t.Parallel()
 	got := ResultContractPreamble("/wt/.agentum/wt1/.ag-artifacts/spec")

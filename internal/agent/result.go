@@ -41,6 +41,14 @@ type ResultJSON struct {
 	MemoryWrites  []MemoryWrite `json:"memory_writes,omitempty"`
 	EditTargets   []string      `json:"edit_targets,omitempty"`
 	Notes         string        `json:"notes,omitempty"`
+
+	// Verdict is the stage's structured pass/fail signal for result-driven
+	// routing. Today only review stages read it: the runner routes a reviewer
+	// verdict of "approved" to the approved transition and anything else to the
+	// changes-requested transition (the pack orders the default path first).
+	// It is a free-form, pack-defined string — no enum is enforced here, since
+	// verdict values are a pack/role concern, not a contract invariant.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // Artifact is one produced file/reference.
@@ -70,6 +78,7 @@ type rawResultJSON struct {
 	MemoryWrites  []MemoryWrite `json:"memory_writes"`
 	EditTargets   []string      `json:"edit_targets"`
 	Notes         *string       `json:"notes"`
+	Verdict       *string       `json:"verdict"`
 }
 
 // ParseResultJSON strict-parses result.json bytes per docs/agent-contract.md:
@@ -116,6 +125,9 @@ func ParseResultJSON(data []byte) (ResultJSON, error) {
 	if raw.Notes != nil {
 		out.Notes = *raw.Notes
 	}
+	if raw.Verdict != nil {
+		out.Verdict = *raw.Verdict
+	}
 	for i, mw := range raw.MemoryWrites {
 		switch mw.Kind {
 		case MemDecision, MemConvention, MemSpecRef, MemFix, MemNote:
@@ -154,11 +166,13 @@ func ResultContractPreamble(absArtifactDir string) string {
   "artifacts": [{"path": "...", "kind": "spec|code|adr|..."}],
   "memory_writes": [{"kind": "decision", "title": "...", "body": "...", "keywords": ["..."]}],
   "edit_targets": ["..."],
+  "verdict": "approved | changes_requested",
   "notes": "..."
 }`)
 	b.WriteString("\n```\n")
 	b.WriteString("- status must be one of: complete, partial, blocked.\n")
 	b.WriteString("- memory_writes.kind must be one of: decision, convention, spec_ref, fix, note.\n")
+	b.WriteString("- verdict is the pass/fail signal a review stage routes on: set it to \"approved\"\n  only when the work is accepted, otherwise \"changes_requested\". Other stages\n  leave it empty.\n")
 	b.WriteString("- Unknown fields are ignored. Absent optionals default empty.\n")
 	return b.String()
 }

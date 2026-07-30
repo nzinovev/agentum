@@ -10,6 +10,55 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Backend Development pipeline (`packs/backend-dev`)**: a universal,
+  stack-agnostic pack that drives a small backend task between two mandatory
+  human gates — plan approval and final-result review. It carries no language,
+  framework, build, or project-layout rules and names no project checks (it
+  relies on the project's `.agentum.yaml` baseline), so the same pack runs
+  unchanged across Go, Java/Spring, or any backend stack.
+  - Stages: `plan` (human_approval, analyst) → `implement` → `review` →
+    `(fix → review)*` → `done`. The plan gate is the only stage before the
+    source-writing stages, so no source changes before an approved plan.
+  - Process-focused prompts instruct agents to follow the repository's
+    `AGENTS.md`, project config, and registered checks rather than carrying
+    stack-specific rules in the pack.
+- **Result-driven routing + the review/fix loop**: the runner now evaluates a
+  stage's conditional transitions against the parsed `result.json`, so a review
+  stage routes `verdict == "approved"` to done and anything else to fix.
+  - **`verdict` field** in result.json (`agent.ResultJSON.Verdict`): the
+    review pass/fail signal. Free-form and pack-defined; documented in
+    `docs/agent-contract.md`.
+  - **Minimal condition evaluator** (`runner.selectTransition`): first matching
+    `field == "value"` predicate wins (recognized fields: `verdict`, `status`);
+    empty condition always matches; no match falls back to the first transition.
+    This is the fix-loop routing primitive, not the general Epic 4 engine.
+  - **Fix-cycle budget**: `packs.budgets.fix_cycles` is now enforced. Each entry
+    into a fixer stage consumes one cycle; a run that exceeds the budget stops
+    at `failed` with the branch + result_commit + sealed manifest preserved
+    (`task.fix_cycles_exhausted` event).
+- **Prior-stage artifacts in the routing block**: the runner now lists earlier
+  stages' `result.json` paths under "Prior stage artifacts", so a later stage
+  reads an earlier stage's structured output by path (the implementer reads the
+  approved plan, the fixer reads the reviewer findings).
+- **Human-gate evidence**: plan-approval, final-approval, and cancel/reject
+  decisions are now recorded in the manifest's `human_gates` section
+  (`manifest.HumanDecision`). Idempotent via the FSM (a second advance/approve/
+  cancel cannot apply); recorded before the accompanying lifecycle transition.
+- **Context-source evidence**: the manifest's new `instructions` section records
+  the repository's `AGENTS.md` (path + content hash, read from the
+  agent-immutable `base_commit`) and any connected skills, so "which
+  instructions shaped this run" is part of the audit trail. `human_gates` and
+  `capabilities` are no longer listed under `missing` (both are now populated).
+- **Cross-platform build**: the opencode adapter's process-group code is split
+  into `process_unix.go` / `process_windows.go` so the module builds on Windows
+  as well as Unix (previously `syscall.Setpgid`/`syscall.Kill` broke the build
+  with no build constraint).
+- Table-driven tests in `internal/runner` (condition routing, condition
+  grammar, the full backend-dev fix-loop: plan gate, immediate approval,
+  fix-then-approve convergence, fix-cycle budget exhaustion) and `internal/pack`
+  (shipped-pack load+validate canary, backend-dev process invariants).
+
+### Added
 - **Orchestrator-owned project checks**: the project ships a versioned registry
   of named checks (`.agentum.yaml`, tracked in the repo) and Agentum runs the
   resolved set itself at the delivery boundary — never trusting an agent's claim

@@ -182,9 +182,7 @@ func (runner *Runner) recordInitialEvidence(
 		}
 	}
 	missing := []string{
-		"memory",       // Epic 1 — project memory not wired yet
-		"capabilities", // capability enforcement inert at MVP
-		"human_gates",  // no decisions recorded yet
+		"memory", // Epic 1 — project memory not wired yet
 	}
 	patch := manifest.Body{
 		Input: &manifest.InputEvidence{
@@ -223,6 +221,40 @@ func (runner *Runner) recordInitialEvidence(
 // checkpoint, result_commit when known) to the manifest. Called at boundaries
 // (base resolve, post-stage checkpoint, terminal teardown). No-op when the
 // manifest service is nil.
+
+// recordInstructionsEvidence records the project instruction sources the run
+// consumed: the repository's AGENTS.md working agreement, read from the task's
+// base_commit (agent-immutable, like the checks registry — an agent editing
+// AGENTS.md in its worktree cannot retcon the instructions that shaped its run).
+// A missing AGENTS.md is recorded as Present=false so the manifest surfaces the
+// gap rather than hiding it. No-op when the manifest service is nil.
+func (runner *Runner) recordInstructionsEvidence(ctx context.Context, task sqlc.Task, repoPath string) {
+	if runner.mfst == nil {
+		return
+	}
+	agentsRef := manifest.InstructionRef{Path: agentsMDPath}
+	baseCommit := task.BaseCommit.String
+	if task.BaseCommit.Valid && baseCommit != "" {
+		if raw, err := runner.wt.FileAtCommit(ctx, repoPath, baseCommit, agentsMDPath); err == nil {
+			agentsRef.Present = true
+			agentsRef.Hash = hashForEvidenceBytes(raw)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			runner.log.Warn("read AGENTS.md for manifest", "task", task.ID, "error", err)
+		}
+	}
+	patch := manifest.Body{Instructions: &manifest.InstructionsEvidence{AgentsMD: agentsRef}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record instructions evidence", "task", task.ID, "error", err)
+	}
+}
+
+// agentsMDPath is the repository-relative path to the build-side working
+// agreement the pack prompts instruct agents to follow.
+const agentsMDPath = "AGENTS.md"
+
 func (runner *Runner) recordGitEvidence(ctx context.Context, task sqlc.Task) {
 	if runner.mfst == nil {
 		return
