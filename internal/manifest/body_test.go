@@ -144,7 +144,7 @@ func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 		SetVersion: "v2", Commit: "c2",
 		Results: []CheckResult{
 			{Name: "build", Status: "fail", DefinitionRevision: "dr1"}, // same name → replace
-			{Name: "test", Status: "pass"},                              // new
+			{Name: "test", Status: "pass"},                             // new
 		},
 	}}
 	merged := mergeBodies(base, patch)
