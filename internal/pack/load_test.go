@@ -292,6 +292,85 @@ func replace(s, old, new string) string {
 	return strings.Replace(s, old, new, 1)
 }
 
+// TestShippedPacksLoadAndValidate loads and validates every pack shipped under
+// the repository's packs/ directory. A pack committed with a structural mistake
+// (bad gate, dangling transition, unreachable stage) would otherwise surface
+// only at run time; this is the canary that catches it at test time. It also
+// pins the backend-dev pack's process invariants (no stack-specific check names,
+// two human gates via the plan gate + the terminal, a bounded fix budget).
+func TestShippedPacksLoadAndValidate(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join("..", "..", "packs")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read packs dir %s: %v", root, err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("no packs found under %s", root)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		entry := entry
+		t.Run(entry.Name(), func(t *testing.T) {
+			t.Parallel()
+			loaded, loadErr := Load(filepath.Join(root, entry.Name()))
+			if loadErr != nil {
+				t.Fatalf("Load %s: %v", entry.Name(), loadErr)
+			}
+			if err := loaded.Validate(); err != nil {
+				t.Fatalf("Validate %s: %v", entry.Name(), err)
+			}
+		})
+	}
+}
+
+// TestBackendDevPackInvariants pins the backend-dev pack's process contract: it
+// carries no stack-specific check names, it bounds the fix loop, and its plan
+// gate is the only human gate before the terminal (so no source-write stage runs
+// before plan approval).
+func TestBackendDevPackInvariants(t *testing.T) {
+	t.Parallel()
+	loaded, err := Load(filepath.Join("..", "..", "packs", "backend-dev"))
+	if err != nil {
+		t.Fatalf("Load backend-dev: %v", err)
+	}
+	if err := loaded.Validate(); err != nil {
+		t.Fatalf("Validate backend-dev: %v", err)
+	}
+	if loaded.Pack.Name != "backend-dev" {
+		t.Errorf("pack name = %q, want backend-dev", loaded.Pack.Name)
+	}
+	// No stack-specific check names: the pack relies on the project baseline so
+	// the same pack runs unchanged across Go / Java / any backend stack.
+	if len(loaded.Checks.Required) != 0 || len(loaded.Checks.Optional) != 0 {
+		t.Errorf("backend-dev must not name stack-specific checks; got required=%v optional=%v",
+			loaded.Checks.Required, loaded.Checks.Optional)
+	}
+	if loaded.Budgets.FixCycles <= 0 {
+		t.Errorf("fix_cycles = %d, want > 0", loaded.Budgets.FixCycles)
+	}
+	plan, ok := loaded.Stages["plan"]
+	if !ok {
+		t.Fatal("plan stage missing")
+	}
+	if plan.Gate != GateHumanApproval {
+		t.Errorf("plan gate = %q, want human_approval", plan.Gate)
+	}
+	// The plan stage is read-only (analyst); source-writing stages come after it.
+	if plan.Role != "analyst" {
+		t.Errorf("plan role = %q, want analyst", plan.Role)
+	}
+	// The terminal stage exists (the pipeline has an exit).
+	if _, ok := loaded.Stages["done"]; !ok {
+		t.Fatal("done terminal stage missing")
+	}
+	if !loaded.Stages["done"].Terminal() {
+		t.Error("done stage must be terminal")
+	}
+}
+
 func TestValidate_CheckPolicy(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

@@ -315,6 +315,264 @@ func (src *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error
 	return src.pk, nil
 }
 
+// backendDevPack builds the in-memory backend-dev pipeline shape: plan
+// (human_approval) → implement → review → (fix → review)* → done, with
+// result-driven review routing on the verdict and a configurable fix-cycle
+// budget. Mirrors packs/backend-dev/manifest.yaml so the loop tests exercise the
+// real pipeline structure.
+func backendDevPack(fixCycles int) *pack.Pack {
+	return &pack.Pack{
+		API: "agentum/v1", Pack: pack.Meta{Name: "backend-dev", Version: "1.0.0"},
+		Tiers: pack.Tiers{Default: "fast"}, Budgets: pack.Budgets{FixCycles: fixCycles, AskToEdit: 1},
+		Entry: "plan",
+		Stages: map[string]pack.Stage{
+			"plan":      {Gate: pack.GateHumanApproval, Role: "analyst", Prompt: "plan.md", Transitions: []pack.Transition{{To: "implement"}}},
+			"implement": {Gate: pack.GateAuto, Role: "implementer", Prompt: "implement.md", Transitions: []pack.Transition{{To: "review"}}},
+			"review": {Gate: pack.GateAuto, Role: "reviewer", Prompt: "review.md", Transitions: []pack.Transition{
+				{To: "fix", Condition: `verdict == "changes_requested"`},
+				{To: "done", Condition: `verdict == "approved"`},
+			}},
+			"fix":  {Gate: pack.GateAuto, Role: "fixer", Prompt: "fix.md", Transitions: []pack.Transition{{To: "review"}}},
+			"done": {},
+		},
+		PromptText: map[string]string{"plan": "p", "implement": "i", "review": "r", "fix": "f"},
+	}
+}
+
+// verdictAdapter scripts every non-review stage to complete and drives the
+// review stage through an ordered list of verdicts (one per review call). This
+// models a reviewer that requests changes then approves once fixes land.
+type verdictAdapter struct {
+	reviewVerdicts []string
+	calls          int
+}
+
+func (adapter *verdictAdapter) Supported() []caps.Category {
+	return []caps.Category{
+		caps.CatFsRead, caps.CatFsWrite, caps.CatArtifactWrite, caps.CatExecBash,
+		caps.CatGitRead, caps.CatGitWrite, caps.CatNetFetch, "secret", "mcp",
+	}
+}
+
+func (adapter *verdictAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
+	eventCh := make(chan agent.Event, 2)
+	go func() {
+		defer close(eventCh)
+		stage := stageOf(inv)
+		result := agent.ResultJSON{SchemaVersion: "1", Status: agent.StatusComplete, Summary: stage + " done"}
+		if stage == "review" {
+			verdict := "changes_requested"
+			if adapter.calls < len(adapter.reviewVerdicts) {
+				verdict = adapter.reviewVerdicts[adapter.calls]
+			}
+			adapter.calls++
+			result.Verdict = verdict
+		}
+		eventCh <- agent.Event{Kind: agent.EventStream, Chunk: "working..."}
+		eventCh <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{SessionID: "sess-" + stage, ResultJSON: result}}
+	}()
+	return eventCh, nil
+}
+
+// TestRunner_BackendDevPlanGateBlocksSourceStages proves the first human gate
+// (plan approval) pauses before any source-writing stage runs: a `run` job stops
+// at paused_gate after the plan stage, and only an `advance` resumes into
+// implement. No implement/fix invocation exists before the advance.
+func TestRunner_BackendDevPlanGateBlocksSourceStages(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := backendDevPack(2)
+	task := sqlc.Task{ID: "BG1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "backend-dev@1.0.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &verdictAdapter{reviewVerdicts: []string{"approved"}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "BG1", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("after run, state = %q, want paused_gate", got)
+	}
+	// Only the plan stage ran; implement/review/fix did not.
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("expected 1 invocation (plan) before approval, got %d", count)
+	}
+	if store.invocations[0].Stage != "plan" {
+		t.Fatalf("first invocation stage = %q, want plan", store.invocations[0].Stage)
+	}
+}
+
+// TestRunner_BackendDevApprovesOnFirstReview proves that after plan approval the
+// pipeline runs autonomously to the final-review gate when the reviewer approves
+// immediately: implement → review(approved) → done → awaiting_memory_commit,
+// with no fix stage invoked.
+func TestRunner_BackendDevApprovesOnFirstReview(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := backendDevPack(2)
+	task := sqlc.Task{ID: "BG2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "backend-dev@1.0.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &verdictAdapter{reviewVerdicts: []string{"approved"}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	// run: plan pauses at the gate.
+	if err := runner.Handle(t.Context(), job("run", "BG2", "tn", "us")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// advance: plan approved → autonomous run to the final gate.
+	if err := runner.Handle(t.Context(), job("advance", "BG2", "tn", "us")); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got := store.taskState(); got != "awaiting_memory_commit" {
+		t.Fatalf("state = %q, want awaiting_memory_commit", got)
+	}
+	stages := invocationStages(store.invocations)
+	if !containsStage(stages, "fix") {
+		// approved on first review → no fix stage.
+	} else {
+		t.Errorf("fix stage ran on an immediate approval; stages = %v", stages)
+	}
+	for _, want := range []string{"plan", "implement", "review"} {
+		if !containsStage(stages, want) {
+			t.Errorf("expected stage %q to have run; stages = %v", want, stages)
+		}
+	}
+}
+
+// TestRunner_BackendDevFixLoopConverges proves the autonomous fix loop: the
+// reviewer requests changes once, the fixer addresses them, the reviewer
+// approves on the second pass, and the run reaches the final-review gate.
+func TestRunner_BackendDevFixLoopConverges(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := backendDevPack(2)
+	task := sqlc.Task{ID: "BG3", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "backend-dev@1.0.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	// review #1: changes_requested → fix; review #2: approved → done.
+	adapter := &verdictAdapter{reviewVerdicts: []string{"changes_requested", "approved"}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "BG3", "tn", "us")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := runner.Handle(t.Context(), job("advance", "BG3", "tn", "us")); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got := store.taskState(); got != "awaiting_memory_commit" {
+		t.Fatalf("state = %q, want awaiting_memory_commit", got)
+	}
+	stages := invocationStages(store.invocations)
+	// Exactly one fix invocation between two reviews.
+	fixCount := 0
+	for _, stage := range stages {
+		if stage == "fix" {
+			fixCount++
+		}
+	}
+	if fixCount != 1 {
+		t.Errorf("expected exactly 1 fix invocation, got %d (stages=%v)", fixCount, stages)
+	}
+	reviewCount := 0
+	for _, stage := range stages {
+		if stage == "review" {
+			reviewCount++
+		}
+	}
+	if reviewCount != 2 {
+		t.Errorf("expected exactly 2 review invocations, got %d (stages=%v)", reviewCount, stages)
+	}
+}
+
+// TestRunner_BackendDevFixCycleBudgetExhausted proves that a reviewer which never
+// approves is bounded by the fix-cycle budget: the run stops at `failed` with the
+// branch preserved, rather than looping forever. With fix_cycles=1, one fix
+// runs and the second fix attempt triggers the budget stop.
+func TestRunner_BackendDevFixCycleBudgetExhausted(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := backendDevPack(1) // one fix allowed
+	task := sqlc.Task{ID: "BG4", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "backend-dev@1.0.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	// review always requests changes → loop until the budget stops it.
+	adapter := &verdictAdapter{reviewVerdicts: []string{"changes_requested"}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "BG4", "tn", "us")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	handleErr := runner.Handle(t.Context(), job("advance", "BG4", "tn", "us"))
+
+	if got := store.taskState(); got != "failed" {
+		t.Fatalf("state = %q, want failed after budget exhaustion", got)
+	}
+	if handleErr == nil {
+		t.Fatal("expected a non-nil Handle error on budget exhaustion, got nil")
+	}
+	// The stop reason is surfaced as a fix-cycle event.
+	foundCycleEvent := false
+	for _, event := range store.events {
+		if event.Type == EvFixCyclesExhausted {
+			foundCycleEvent = true
+		}
+	}
+	if !foundCycleEvent {
+		t.Errorf("expected a %q event, got events: %v", EvFixCyclesExhausted, eventTypes(store.events))
+	}
+	// Exactly one fix ran (budget=1); the second fix attempt was blocked.
+	fixCount := 0
+	for _, stage := range invocationStages(store.invocations) {
+		if stage == "fix" {
+			fixCount++
+		}
+	}
+	if fixCount != 1 {
+		t.Errorf("expected exactly 1 fix invocation before the budget stop, got %d", fixCount)
+	}
+}
+
+// invocationStages returns the ordered list of stage ids from the recorded
+// invocations — the sequence the loop drove.
+func invocationStages(invocations []sqlc.StageInvocation) []string {
+	out := make([]string, 0, len(invocations))
+	for _, invocation := range invocations {
+		out = append(out, invocation.Stage)
+	}
+	return out
+}
+
+func containsStage(stages []string, want string) bool {
+	for _, stage := range stages {
+		if stage == want {
+			return true
+		}
+	}
+	return false
+}
+
+func eventTypes(events []sqlc.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.Type)
+	}
+	return out
+}
+
 // slowAdapter emits its result only after a release signal; used to test cancel.
 type slowAdapter struct {
 	scripts map[string]agent.ResultJSON

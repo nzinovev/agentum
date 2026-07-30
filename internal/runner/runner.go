@@ -326,6 +326,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// failure here is logged inside the helper and does not fail the run.
 	runner.recordInitialEvidence(ctx, task, project, taskPack)
 	runner.recordGitEvidence(ctx, task)
+	runner.recordInstructionsEvidence(ctx, task, project.RepoPath)
 
 	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)
 	if err != nil {
@@ -493,11 +494,28 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 // stage and applying the evaluator's decision, until a pause point or terminal
 // state. resumeSession applies only to the first iteration. The per-stage body
 // lives in processStage; runLoop stays a flat claim-retry loop.
+//
+// The fix-cycle budget (pack.Budgets.FixCycles) is enforced here: each entry
+// into a fixer stage consumes one cycle, and a run that would exceed the budget
+// stops with the branch + evidence preserved (the reviewer could not converge
+// within the allowed cycles). The whole implement→review→fix→…→done sequence
+// runs inside a single driving job (the advance past the plan gate), so the
+// counter is local to this loop; a crash mid-loop pauses the task and the
+// reconciler restores to the last checkpoint.
 func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, resumeSession string) error {
 	stageID := startStage
+	fixCycles := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Budget gate: entering a fixer stage consumes a fix-cycle. A pack with
+		// fix_cycles=0 allows no fixes — the first change request stops the run.
+		if isFixStage(run.taskPack, stageID) {
+			if fixCycles >= run.taskPack.Budgets.FixCycles {
+				return runner.stopFixCyclesExhausted(ctx, run.task, stageID, fixCycles)
+			}
+			fixCycles++
 		}
 		outcome, err := runner.processStage(ctx, run, stageID, resumeSession)
 		if err != nil {
@@ -509,6 +527,37 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 		stageID = outcome.nextStage
 		resumeSession = "" // only the first iteration resumes
 	}
+}
+
+// isFixStage reports whether the named stage runs under the fixer role (the
+// implementer variant that addresses reviewer findings). The role comes from
+// the stage's explicit role field, falling back to caps.DeriveRole by stage-id
+// convention (any stage id containing "fix"/"patch").
+func isFixStage(taskPack *pack.Pack, stageID string) bool {
+	stage, ok := taskPack.Stages[stageID]
+	if !ok {
+		return false
+	}
+	role := caps.Role(stage.Role)
+	if role == "" {
+		role = caps.DeriveRole(stageID)
+	}
+	return role == caps.RoleFixer
+}
+
+// stopFixCyclesExhausted halts a run that exceeded its fix-cycle budget. The
+// stop is a controlled failure: the task moves to `failed` (terminal, preserves
+// the agentum/<task-id> branch + result_commit), the manifest is sealed with
+// reason=failed, and the stop reason is recorded as audit evidence. The
+// operator reviews the partial result via the branch / sealed manifest and
+// decides next steps — the pipeline did not reach a reviewable success.
+func (runner *Runner) stopFixCyclesExhausted(ctx context.Context, task sqlc.Task, stageID string, cycles int) error {
+	runner.emit(ctx, task, EvFixCyclesExhausted, map[string]any{
+		"stage": stageID, "fix_cycles": cycles, "branch": worktree.BranchFor(task.ID),
+	})
+	return runner.failTask(ctx, task,
+		fmt.Errorf("fix-cycle budget exhausted after %d cycle(s) at stage %q; result preserved on branch %s",
+			cycles, stageID, worktree.BranchFor(task.ID)))
 }
 
 // stageOutcome is processStage's verdict for one iteration of runLoop. Exactly
@@ -685,6 +734,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
 		Capabilities: profileTokens(profile),
+		PriorStages:  runner.priorStageArtifacts(run.worktree.Root, run.task.ID, stageID),
 	})
 
 	// Next sequence number + resume_of for this task.
@@ -902,6 +952,11 @@ const (
 	// results; this event is the durable signal that Agentum ran its own checks
 	// (not the agent's claim) against the checkpoint commit.
 	EvProjectChecksRun = "task.project_checks_run"
+	// EvFixCyclesExhausted records a run that stopped because the reviewer could
+	// not converge within the pack's fix-cycle budget. The run fails with the
+	// branch + evidence preserved; this event is the audit signal of the stop
+	// reason (distinct from a generic task failure).
+	EvFixCyclesExhausted = "task.fix_cycles_exhausted"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

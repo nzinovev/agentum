@@ -100,9 +100,17 @@ stages:
 
 Stages are a **named map**, not an ordered list. Each stage declares its own
 outgoing transitions, and the pack declares one `entry`. This is the substrate
-for conditional-linear routing: a transition carries an opaque `condition` and a
-stage may fan out to several destinations. (The condition evaluator itself is
-not part of format v1.)
+for conditional-linear routing: a transition carries a `condition` and a stage
+may fan out to several destinations.
+
+A minimal result-driven router evaluates conditions today: the first transition
+whose `field == "value"` predicate matches the parsed `result.json` wins
+(recognized fields: `verdict`, `status`); a transition with an empty condition
+always matches; if none match, the first transition is the default path. This is
+what the shipped `backend-dev` pack's review stage uses to route
+`verdict == "approved"` to done and anything else to fix (the fix-cycle budget
+bounds the default path). The general condition engine (arbitrary predicates) is
+deferred to Epic 4.
 
 ```yaml
 stages:
@@ -228,3 +236,10 @@ resolved, err := pack.Resolve(base, ov)
 A minimal two-stage pack (`spec → implement → done`) ships at
 [`packs/minimal/`](../packs/minimal/manifest.yaml) and is exercised by the
 loader/validator/resolver tests under `internal/pack/`.
+
+A complete backend-development pipeline (`plan → implement → review →
+(fix → review)* → done`, with two human gates and a bounded fix loop) ships at
+[`packs/backend-dev/`](../packs/backend-dev/manifest.yaml). It is
+stack-agnostic: it carries no language, framework, build, or layout rules, and
+names no project checks (it relies on the project's `.agentum.yaml` baseline so
+the same pack runs across Go, Java/Spring, or any backend stack).

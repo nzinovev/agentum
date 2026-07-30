@@ -211,9 +211,10 @@ sealed row is never edited.
   "artifacts":        { "inputs": [], "outputs": [] },
   "checks":           { "set_version": "", "results": [] },
   "human_gates":      [{ "stage": "…", "gate": "…", "decision": "…", "actor": "…", "timestamp": "…" }],
+  "instructions":     { "agents_md": { "path": "AGENTS.md", "hash": "…", "present": true }, "skills": [] },
   "git":              { "branch": "agentum/…", "base_commit": "…", "result_commit": "…", "checkpoints": [] },
   "execution_coordinate": { "delivery_step": "", "execution_unit": "", "phase": "" },
-  "missing":          ["memory", "checks", "capabilities", "human_gates"]
+  "missing":          ["memory"]
 }
 ```
 

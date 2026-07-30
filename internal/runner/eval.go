@@ -7,6 +7,7 @@ package runner
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/engine"
@@ -139,11 +140,81 @@ func Evaluate(input StageInput) (Decision, error) {
 }
 
 // advance builds an ActionAdvance decision, reading the next stage from the
-// stage's first transition. Conditions (Epic 4) are not evaluated here — the
-// first transition wins at MVP.
+// stage's transitions. When a stage declares conditions (the review stage's
+// `verdict == "approved"` edges), selectTransition evaluates them against the
+// parsed result and picks the first match; otherwise the first transition wins.
+// This is the minimal result-driven routing the fix-loop needs — not the
+// general Epic 4 condition engine.
 func advance(input StageInput) (Decision, error) {
 	if len(input.Stage.Transitions) == 0 {
 		return Decision{}, fmt.Errorf("runner: stage %q has no transition to advance along", input.StageID)
 	}
-	return Decision{Action: ActionAdvance, NextStage: input.Stage.Transitions[0].To}, nil
+	chosen := selectTransition(input.Stage, input.Result)
+	return Decision{Action: ActionAdvance, NextStage: chosen.To}, nil
+}
+
+// selectTransition picks the outgoing transition for a completed stage. The
+// first transition whose condition matches the parsed result wins; a transition
+// with an empty condition always matches. When no condition matches (the
+// reviewer emitted no recognized verdict), the first transition is the default
+// path — so a pack orders the "needs work" edge first and the "approved" edge
+// second. The fix-cycle budget bounds the default path so a reviewer that never
+// approves cannot loop forever.
+func selectTransition(stage pack.Stage, result *agent.ResultJSON) pack.Transition {
+	for _, transition := range stage.Transitions {
+		if conditionMatches(transition.Condition, result) {
+			return transition
+		}
+	}
+	return stage.Transitions[0]
+}
+
+// conditionMatches evaluates a minimal `<field> == "<value>"` predicate against
+// the parsed result. An empty condition always matches (unconditional advance).
+// Recognized fields are the routing-relevant result.json values: verdict (the
+// review pass/fail signal) and status. Any other field, or an unrecognized
+// condition form, yields no match — the caller falls back to the default path.
+func conditionMatches(condition string, result *agent.ResultJSON) bool {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return true
+	}
+	field, value, ok := splitCondition(condition)
+	if !ok {
+		return false
+	}
+	return resultFieldValue(result, field) == value
+}
+
+// splitCondition parses a `<field> == "value"` (or `<field>=='value'`) form into
+// its field name and the quoted value. ok is false for anything else.
+func splitCondition(condition string) (field, value string, ok bool) {
+	split := strings.Index(condition, "==")
+	if split <= 0 {
+		return "", "", false
+	}
+	field = strings.TrimSpace(condition[:split])
+	rawValue := strings.TrimSpace(condition[split+2:])
+	rawValue = strings.Trim(rawValue, `"'`)
+	if field == "" {
+		return "", "", false
+	}
+	return field, rawValue, true
+}
+
+// resultFieldValue reads one routing-relevant field from the parsed result. An
+// unknown field name returns the empty string (no match), so a typo in a pack
+// condition routes to the default path rather than silently matching.
+func resultFieldValue(result *agent.ResultJSON, field string) string {
+	if result == nil {
+		return ""
+	}
+	switch field {
+	case "verdict":
+		return result.Verdict
+	case "status":
+		return string(result.Status)
+	default:
+		return ""
+	}
 }

@@ -29,25 +29,27 @@ const schemaVersion = "1"
 //   - Artifacts     — input + output artifact revisions
 //   - Checks        — check set version + their results
 //   - HumanGates    — human gate decisions
+//   - Instructions  — project instruction sources consumed (AGENTS.md, skills)
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
 //   - Missing       — subsystems that did not contribute (explicit)
 type Body struct {
-	Schema              string               `json:"schema_version"`
-	Input               *InputEvidence       `json:"input,omitempty"`
-	Project             *ProjectEvidence     `json:"project,omitempty"`
-	Pack                *PackEvidence        `json:"pack,omitempty"`
-	Prompts             []PromptRevision     `json:"prompts,omitempty"`
-	Adapter             *AdapterEvidence     `json:"adapter,omitempty"`
-	Model               *ModelEvidence       `json:"model,omitempty"`
-	Capabilities        *CapabilityProfile   `json:"capabilities,omitempty"`
-	Memory              *MemorySlice         `json:"memory,omitempty"`
-	Artifacts           *ArtifactEvidence    `json:"artifacts,omitempty"`
-	Checks              *CheckEvidence       `json:"checks,omitempty"`
-	HumanGates          []HumanDecision      `json:"human_gates,omitempty"`
-	Git                 *GitEvidence         `json:"git,omitempty"`
-	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
-	Missing             []string             `json:"missing,omitempty"`
+	Schema              string                `json:"schema_version"`
+	Input               *InputEvidence        `json:"input,omitempty"`
+	Project             *ProjectEvidence      `json:"project,omitempty"`
+	Pack                *PackEvidence         `json:"pack,omitempty"`
+	Prompts             []PromptRevision      `json:"prompts,omitempty"`
+	Adapter             *AdapterEvidence      `json:"adapter,omitempty"`
+	Model               *ModelEvidence        `json:"model,omitempty"`
+	Capabilities        *CapabilityProfile    `json:"capabilities,omitempty"`
+	Memory              *MemorySlice          `json:"memory,omitempty"`
+	Artifacts           *ArtifactEvidence     `json:"artifacts,omitempty"`
+	Checks              *CheckEvidence        `json:"checks,omitempty"`
+	HumanGates          []HumanDecision       `json:"human_gates,omitempty"`
+	Instructions        *InstructionsEvidence `json:"instructions,omitempty"`
+	Git                 *GitEvidence          `json:"git,omitempty"`
+	ExecutionCoordinate *ExecutionCoordinate  `json:"execution_coordinate,omitempty"`
+	Missing             []string              `json:"missing,omitempty"`
 }
 
 // newEmptyBody returns a Body with the schema version set and nothing else.
@@ -196,6 +198,31 @@ type HumanDecision struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// InstructionsEvidence records the project instruction sources a run consumed.
+// Packs are stack-agnostic; the concrete rules come from the repository
+// (AGENTS.md, project config) and any connected skills. Recording each source's
+// presence + content hash makes "which instructions shaped this run" part of the
+// audit trail, and surfaces (under Missing) when an expected source was absent.
+type InstructionsEvidence struct {
+	// AgentsMD is the repository's AGENTS.md working agreement, read from the
+	// task's base_commit (agent-immutable, like the checks registry).
+	AgentsMD InstructionRef `json:"agents_md"`
+	// Skills are the reusable technology/method skills the run referenced. The
+	// list is empty until a skills system is wired; the absence is itself
+	// evidence that no specialized skill shaped the run.
+	Skills []InstructionRef `json:"skills,omitempty"`
+}
+
+// InstructionRef is one instruction source: its path, a content hash, and
+// whether it was present at the lineage anchor. Present=false with an empty hash
+// records that a source was expected but absent (the manifest never hides the
+// gap).
+type InstructionRef struct {
+	Path    string `json:"path"`
+	Hash    string `json:"hash,omitempty"`
+	Present bool   `json:"present"`
+}
+
 // GitEvidence is the git lineage: branch, base commit, checkpoints, result
 // commit. The runner fills this at boundaries (base resolve, post-stage
 // checkpoint, terminal teardown).
@@ -260,32 +287,12 @@ func decodeBody(raw []byte) (Body, error) {
 // mergeBodies never partially mutates existing — it builds a fresh Body.
 func mergeBodies(existing Body, patch Body) Body {
 	merged := existing
-	if patch.Schema != "" {
-		merged.Schema = patch.Schema
-	}
-	if patch.Input != nil {
-		merged.Input = patch.Input
-	}
-	if patch.Project != nil {
-		merged.Project = patch.Project
-	}
-	if patch.Pack != nil {
-		merged.Pack = patch.Pack
-	}
+	applyPointerFields(&merged, patch)
 	if len(patch.Prompts) > 0 {
 		merged.Prompts = appendUniquePrompt(merged.Prompts, patch.Prompts)
 	}
-	if patch.Adapter != nil {
-		merged.Adapter = patch.Adapter
-	}
-	if patch.Model != nil {
-		merged.Model = patch.Model
-	}
 	if patch.Capabilities != nil {
 		merged.Capabilities = mergeCapabilityProfile(merged.Capabilities, patch.Capabilities)
-	}
-	if patch.Memory != nil {
-		merged.Memory = patch.Memory
 	}
 	if patch.Artifacts != nil {
 		merged.Artifacts = mergeArtifactEvidence(merged.Artifacts, patch.Artifacts)
@@ -296,16 +303,48 @@ func mergeBodies(existing Body, patch Body) Body {
 	if len(patch.HumanGates) > 0 {
 		merged.HumanGates = appendUniqueHumanDecision(merged.HumanGates, patch.HumanGates)
 	}
+	if patch.Instructions != nil {
+		merged.Instructions = mergeInstructions(merged.Instructions, patch.Instructions)
+	}
 	if patch.Git != nil {
 		merged.Git = mergeGitEvidence(merged.Git, patch.Git)
-	}
-	if patch.ExecutionCoordinate != nil {
-		merged.ExecutionCoordinate = patch.ExecutionCoordinate
 	}
 	if len(patch.Missing) > 0 {
 		merged.Missing = appendUniqueString(merged.Missing, patch.Missing)
 	}
 	return merged
+}
+
+// applyPointerFields overwrites dst's pointer/scalar fields with the non-nil
+// (or non-empty, for Schema) values from patch. These are the "latest wins"
+// fields — a patch carrying a value replaces the existing one outright, unlike
+// the slice/merge fields which append. Lifted out of mergeBodies so its branch
+// count stays readable.
+func applyPointerFields(dst *Body, patch Body) {
+	if patch.Schema != "" {
+		dst.Schema = patch.Schema
+	}
+	if patch.Input != nil {
+		dst.Input = patch.Input
+	}
+	if patch.Project != nil {
+		dst.Project = patch.Project
+	}
+	if patch.Pack != nil {
+		dst.Pack = patch.Pack
+	}
+	if patch.Adapter != nil {
+		dst.Adapter = patch.Adapter
+	}
+	if patch.Model != nil {
+		dst.Model = patch.Model
+	}
+	if patch.Memory != nil {
+		dst.Memory = patch.Memory
+	}
+	if patch.ExecutionCoordinate != nil {
+		dst.ExecutionCoordinate = patch.ExecutionCoordinate
+	}
 }
 
 // appendUniquePrompt appends prompts from additions that are not already in
@@ -477,6 +516,41 @@ func appendUniqueStageCapability(base []StageCapabilityProfile, additions []Stag
 			}
 		}
 		if !replaced {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// mergeInstructions combines two InstructionsEvidence. The AGENTS.md ref takes
+// the patch's value when set (the runner writes it once at run start from the
+// lineage anchor); skills are appended, de-duplicating by Path so repeated
+// evidence writes do not duplicate a skill entry.
+func mergeInstructions(existing *InstructionsEvidence, patch *InstructionsEvidence) *InstructionsEvidence {
+	if existing == nil {
+		return patch
+	}
+	merged := &InstructionsEvidence{AgentsMD: existing.AgentsMD}
+	if patch.AgentsMD.Present || patch.AgentsMD.Hash != "" || patch.AgentsMD.Path != "" {
+		merged.AgentsMD = patch.AgentsMD
+	}
+	merged.Skills = appendUniqueInstructionRef(existing.Skills, patch.Skills)
+	return merged
+}
+
+// appendUniqueInstructionRef appends refs whose Path is not already in base.
+func appendUniqueInstructionRef(base []InstructionRef, additions []InstructionRef) []InstructionRef {
+	out := make([]InstructionRef, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		found := false
+		for _, present := range base {
+			if present.Path == addition.Path {
+				found = true
+				break
+			}
+		}
+		if !found {
 			out = append(out, addition)
 		}
 	}

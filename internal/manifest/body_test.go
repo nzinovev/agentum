@@ -166,3 +166,50 @@ func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeBodies_Instructions takes the AGENTS.md ref from the patch (the
+// runner writes it once at run start) and appends skills, de-duplicating by
+// path so repeated evidence writes do not duplicate a skill entry.
+func TestMergeBodies_Instructions(t *testing.T) {
+	t.Parallel()
+	base := Body{Instructions: &InstructionsEvidence{
+		AgentsMD: InstructionRef{Path: "AGENTS.md", Present: true, Hash: "old"},
+		Skills:   []InstructionRef{{Path: "spring-data", Hash: "h1"}},
+	}}
+	patch := Body{Instructions: &InstructionsEvidence{
+		AgentsMD: InstructionRef{Path: "AGENTS.md", Present: true, Hash: "new"},
+		Skills: []InstructionRef{
+			{Path: "spring-data", Hash: "h1"}, // duplicate path → dropped
+			{Path: "jpa", Hash: "h2"},         // new
+		},
+	}}
+	merged := mergeBodies(base, patch)
+	if merged.Instructions == nil {
+		t.Fatal("Instructions missing")
+	}
+	if merged.Instructions.AgentsMD.Hash != "new" {
+		t.Errorf("AgentsMD hash should take patch value, got %q", merged.Instructions.AgentsMD.Hash)
+	}
+	if len(merged.Instructions.Skills) != 2 {
+		t.Fatalf("expected 2 deduped skills, got %d: %+v", len(merged.Instructions.Skills), merged.Instructions.Skills)
+	}
+
+	// An absent AGENTS.md is recorded as Present=false, not hidden.
+	absent := mergeBodies(Body{}, Body{Instructions: &InstructionsEvidence{AgentsMD: InstructionRef{Path: "AGENTS.md"}}})
+	if absent.Instructions.AgentsMD.Present {
+		t.Error("missing AGENTS.md must be Present=false")
+	}
+}
+
+// TestHumanGateEvidenceAppends verifies the human-gate decision merge so the
+// audit trail accumulates gate decisions across a run (plan approval, final
+// approval) without duplicating identical records.
+func TestHumanGateEvidenceAppends(t *testing.T) {
+	t.Parallel()
+	base := Body{HumanGates: []HumanDecision{{Stage: "plan", Gate: "approval", Decision: "approved", Actor: "owner"}}}
+	patch := Body{HumanGates: []HumanDecision{{Stage: "done", Gate: "final", Decision: "approved", Actor: "owner"}}}
+	merged := mergeBodies(base, patch)
+	if len(merged.HumanGates) != 2 {
+		t.Fatalf("expected 2 gate decisions, got %d: %+v", len(merged.HumanGates), merged.HumanGates)
+	}
+}

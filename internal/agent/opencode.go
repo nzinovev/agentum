@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/caps"
@@ -62,7 +61,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	// Put the child in its own process group so cancellation can kill the
 	// whole tree (opencode may spawn subagents, formatters, LSP servers).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	cmd.Dir = inv.Workdir
 	// Credential-scrubbed environment: every var in the deny list is dropped
 	// unless the profile grants the matching secret.<name>. Passing the env
@@ -286,10 +285,10 @@ func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	pgid := cmd.Process.Pid
-	// SIGTERM first; SIGKILL after grace is the job of exec.CommandContext's
-	// own reaping. We send to -pgid to hit the whole group.
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	// Delegate to the platform implementation: Unix sends SIGTERM to the whole
+	// process group (-pgid); Windows has no process-group signal and relies on
+	// exec.CommandContext's own reaping.
+	terminateProcessGroup(cmd)
 }
 
 // applyTimeouts wraps ctx with the profile's HardTimeout when non-zero. The

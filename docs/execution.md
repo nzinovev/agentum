@@ -114,9 +114,25 @@ happened (`04 §7.1.6`).
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
-Multi-branch transitions are unconditional in F.6 (a stage declares one
-`transitions:` target). The condition evaluator for conditional-linear
-pipelines lands with Epic 4.
+Multi-branch transitions are evaluated by a minimal result-driven router: when a
+stage declares conditions, the first transition whose `field == "value"`
+predicate matches the parsed `result.json` wins (recognized fields: `verdict`,
+`status`); a transition with no condition always matches; if none match, the
+first transition is the default path. This is what the backend-dev fix-loop
+rides on (a review stage routes `verdict == "approved"` to done, anything else to
+fix). The general Epic 4 condition engine (arbitrary predicates, fan-out
+policies) is still deferred — only equality on routing-relevant result fields is
+evaluated today.
+
+### Fix-cycle budget
+
+A pack's `budgets.fix_cycles` bounds the review/fix loop. Each entry into a
+fixer stage consumes one cycle; a run that would exceed the budget stops at
+`failed` with the `agentum/<task-id>` branch + result_commit + sealed manifest
+preserved (the reviewer could not converge). The whole implement → review →
+(fix → review)* → done sequence runs inside the single driving job that follows
+the plan-approval gate, so the cycle counter is local to that loop. The
+`task.fix_cycles_exhausted` event is the audit signal of the stop reason.
 
 ## Job queue
 
@@ -403,9 +419,12 @@ These land with their epics — the seams exist, the behavior does not:
   section is an inert stub until 1.2/1.3 land).
 - **MCP capability pass-through** → **Epic 6** (the routing block's
   "Capabilities available" section is an inert stub).
-- **Conditional-linear pipelines** → **Epic 4** (transitions are unconditional
-  here; the condition evaluator lands with 4.1).
-- **Fix-loops** → **Epic 3** (the runner does not yet honor a fix-cycle budget).
+- **Conditional-linear pipelines** → **Epic 4** (the general condition engine
+  is deferred; a minimal `verdict`/`status` equality router drives the fix-loop
+  today — see "Stop conditions → FSM" above).
+- **Fix-loops** → the review/fix loop is wired. A pack's `budgets.fix_cycles`
+  bounds it; see "Fix-cycle budget" above. Open-ended fix policies (token/cost
+  budgets, dynamic ceilings) remain Epic 3.4.
 - **Multi-step delivery / handoff** → **F.8** (one task = one step today).
 - **Idle/hard timeout values** — the ctx seam is used, but no idle timer ships
   (`04 §5.2`).
