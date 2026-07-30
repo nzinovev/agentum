@@ -29,6 +29,13 @@ type Config struct {
 	HardTimeoutSeconds int
 	IdleTimeoutSeconds int
 
+	// Project-check executor defaults (orchestrator-owned checks). Applied when
+	// a check in the project registry (.agentum.yaml) declares no value of its
+	// own. CheckTimeoutSeconds bounds a single check; CheckMaxOutputBytes caps
+	// each stream (stdout / stderr) stored in the manifest.
+	CheckTimeoutSeconds int
+	CheckMaxOutputBytes int
+
 	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
 	// Defaults to .agentum/artifacts under the process CWD; the worktree's own
 	// per-stage artifact dir is separate and disposable — this root survives
@@ -52,6 +59,9 @@ func Load() (Config, error) {
 
 		HardTimeoutSeconds: getenvInt("AGENTUM_HARD_TIMEOUT_SECONDS", 0),
 		IdleTimeoutSeconds: getenvInt("AGENTUM_IDLE_TIMEOUT_SECONDS", 0),
+
+		CheckTimeoutSeconds: getenvInt("AGENTUM_CHECK_TIMEOUT_SECONDS", 0),
+		CheckMaxOutputBytes: getenvInt("AGENTUM_CHECK_MAX_OUTPUT_BYTES", 0),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")

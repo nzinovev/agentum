@@ -159,6 +159,37 @@ func (manager *Manager) HeadCommit(ctx context.Context, wtRoot string) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
+// FileAtCommit reads path exactly as it existed at commit in repoPath, returning
+// the raw bytes. Used to load agent-immutable project config — the checks
+// registry — from the task's lineage anchor (base_commit), so an agent that
+// edits the file inside its worktree cannot weaken the checks that gate its own
+// delivery. A path that does not exist at the commit is reported as
+// os.ErrNotExist; callers treat that as "the project defines no registry."
+func (manager *Manager) FileAtCommit(ctx context.Context, repoPath, commit, path string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(commit) == "" {
+		return nil, errors.New("worktree: FileAtCommit requires a non-empty commit")
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repo path: %w", err)
+	}
+	out, err := git(ctx, repoAbs, "show", commit+":"+path)
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		// git exits non-zero with a "does not exist" message when the path is
+		// absent at the commit; surface that as a typed os.ErrNotExist so the
+		// caller can distinguish "no registry" from a real git failure.
+		if strings.Contains(message, "does not exist") {
+			return nil, fmt.Errorf("%w: %s at %s", os.ErrNotExist, path, commit)
+		}
+		return nil, fmt.Errorf("git show %s:%s: %w (%s)", commit, path, err, message)
+	}
+	return out, nil
+}
+
 // IsClean reports whether the worktree has no uncommitted changes. Exposed so
 // the runner's evaluator (auto_if_clean gate) and the reconciler share one
 // definition of "clean". Any porcelain entry ⇒ not clean.

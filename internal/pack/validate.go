@@ -110,6 +110,15 @@ func (p *Pack) Validate() error {
 		problems = append(problems, "budgets.ask_to_edit must be non-negative")
 	}
 
+	// checks: names must be non-empty and unique within each list, and a name
+	// must not appear in both required and optional (required is authoritative).
+	// Cross-validation against the project registry happens at run time in
+	// checks.Resolve — the pack cannot know the registry, so an unknown name is
+	// rejected there, before any execution.
+	if errs := validateCheckPolicy(p.Checks); len(errs) > 0 {
+		problems = append(problems, errs...)
+	}
+
 	// reachability + terminal-exit (only meaningful once stages resolve)
 	if len(problems) == 0 {
 		if errs := validateGraph(p); len(errs) > 0 {
@@ -203,4 +212,39 @@ func parseUint(s string) (int, error) {
 
 func joinErrors(msgs []string) string {
 	return strings.Join(msgs, "; ")
+}
+
+// validateCheckPolicy checks the pack's check references are well-formed: names
+// are non-empty, unique within each list, and not listed as both required and
+// optional. It does NOT check the names exist in a project registry — the pack
+// is portable across projects, so that cross-check belongs to checks.Resolve at
+// run time.
+func validateCheckPolicy(policy CheckPolicy) []string {
+	var problems []string
+	seenRequired := make(map[string]bool, len(policy.Required))
+	for index, name := range policy.Required {
+		if strings.TrimSpace(name) == "" {
+			problems = append(problems, fmt.Sprintf("checks.required[%d] is empty", index))
+			continue
+		}
+		if seenRequired[name] {
+			problems = append(problems, fmt.Sprintf("checks.required lists %q more than once", name))
+		}
+		seenRequired[name] = true
+	}
+	seenOptional := make(map[string]bool, len(policy.Optional))
+	for index, name := range policy.Optional {
+		if strings.TrimSpace(name) == "" {
+			problems = append(problems, fmt.Sprintf("checks.optional[%d] is empty", index))
+			continue
+		}
+		if seenRequired[name] {
+			problems = append(problems, fmt.Sprintf("checks: %q appears in both required and optional", name))
+		}
+		if seenOptional[name] {
+			problems = append(problems, fmt.Sprintf("checks.optional lists %q more than once", name))
+		}
+		seenOptional[name] = true
+	}
+	return problems
 }

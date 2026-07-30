@@ -43,6 +43,9 @@ budgets:
   ask_to_edit: 2
 tiers:
   default: fast
+checks:
+  required: [build]          # mandatory for this pack; name must exist in .agentum.yaml
+  optional: [lint]           # runs but does not block delivery
 entry: spec
 stages:
   spec:
@@ -89,6 +92,7 @@ stages:
 | `budgets.fix_cycles` | int | Per-pipeline fix-loop cap, ≥ 0. Replaces a hardcoded cycle count. |
 | `budgets.ask_to_edit` | int | Per-pipeline scoped-edit recursion cap, ≥ 0. |
 | `tiers.default` | string | Fallback tier name. Resolves to a concrete model id via the BYO-models config (not yet wired). |
+| `checks` | object | Optional. Adds project checks to every run of this pack **by name only** — `required` makes a check mandatory (failure blocks delivery), `optional` runs it without blocking. Names must exist in the project registry (`.agentum.yaml`); `checks.Resolve` rejects unknown names at run time. A pack can never supply a command, remove a baseline check, or weaken an already-mandatory check. |
 | `entry` | string | The stage the run starts at. Must be defined in `stages`. |
 | `stages` | map | Named map of stage id → stage definition. See below. |
 

@@ -183,7 +183,6 @@ func (runner *Runner) recordInitialEvidence(
 	}
 	missing := []string{
 		"memory",       // Epic 1 — project memory not wired yet
-		"checks",       // project checks not wired yet
 		"capabilities", // capability enforcement inert at MVP
 		"human_gates",  // no decisions recorded yet
 	}

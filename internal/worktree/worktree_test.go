@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -175,4 +176,78 @@ type setupError struct {
 
 func (setupErr *setupError) Error() string {
 	return "git " + setupErr.args[0] + ": " + setupErr.err.Error() + " (" + string(setupErr.out) + ")"
+}
+
+// TestManager_FileAtCommit proves a file is read exactly as it existed at a
+// commit, independently of later edits. This is the agent-immutability seam for
+// the project checks registry: an agent that edits .agentum.yaml inside a
+// worktree cannot change what FileAtCommit returns for the lineage anchor.
+func TestManager_FileAtCommit(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// Commit a registry file, capturing that commit's SHA.
+	original := []byte("api: agentum/v1\nchecks: []\n")
+	if err := os.WriteFile(filepath.Join(repo, ".agentum.yaml"), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitInRepo(repo, "add", ".agentum.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitInRepo(repo, "commit", "--quiet", "-m", "add registry"); err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := headOf(repo)
+	if err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+
+	// Now modify the file on top of the anchor and commit — simulate an agent
+	// weakening the registry.
+	if err := os.WriteFile(filepath.Join(repo, ".agentum.yaml"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitInRepo(repo, "add", ".agentum.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitInRepo(repo, "commit", "--quiet", "-m", "weaken"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := New()
+	got, err := manager.FileAtCommit(t.Context(), repo, anchor, ".agentum.yaml")
+	if err != nil {
+		t.Fatalf("FileAtCommit: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("FileAtCommit must return the anchor's content, not a later edit; got %q", got)
+	}
+
+	// A path absent at the commit is reported as os.ErrNotExist, not a hard
+	// failure. errors.Is traverses the %w wrap; os.IsNotExist is not reliable
+	// across wrapped errors.
+	if _, err := manager.FileAtCommit(t.Context(), repo, anchor, "never-existed.yaml"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist for absent path, got %v", err)
+	}
+}
+
+func gitInRepo(dir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return &setupError{args: args, out: out, err: err}
+	}
+	return nil
+}
+
+func headOf(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

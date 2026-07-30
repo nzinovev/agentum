@@ -16,6 +16,7 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
@@ -80,6 +81,9 @@ type Runner struct {
 	// mfst is the evidence manifest service. nil in unit tests; manifest
 	// operations are no-ops then.
 	mfst *manifest.Service
+	// checkExec runs the orchestrator-owned project checks at the delivery
+	// boundary. nil in unit tests; project checks are skipped then.
+	checkExec *checks.Executor
 }
 
 // Deps bundles Runner construction. AgentName is the adapter's identity for
@@ -107,6 +111,13 @@ type Deps struct {
 	// Manifest is the evidence manifest service. May be nil in unit tests;
 	// manifest operations become no-ops then.
 	Manifest *manifest.Service
+
+	// CheckExec runs the orchestrator-owned project checks at the delivery
+	// boundary. May be nil in unit tests; project checks are skipped then. When
+	// set, the runner enforces the project baseline (plus pack/task requests)
+	// after the final-stage checkpoint and before the task reaches the review
+	// gate; a mandatory failure blocks delivery by failing the task.
+	CheckExec *checks.Executor
 
 	// HardTimeout / IdleTimeout are the per-invocation caps applied to every
 	// stage invocation (zero = no cap). Sourced from config; carried by the
@@ -140,6 +151,7 @@ func New(deps Deps) *Runner {
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
 		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
+		checkExec: deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
 }
@@ -517,10 +529,15 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	}
 
 	// A terminal stage (no transitions) is an engine marker, not an agent
-	// invocation: reaching it means the pipeline is complete. Fire the final
-	// gate directly, without invoking the adapter (terminal stages omit a
-	// prompt by the pack convention).
+	// invocation: reaching it means the pipeline is complete. Enforce the
+	// orchestrator-owned project checks first (against the last post-stage
+	// checkpoint, i.e. the worktree HEAD), then fire the final gate. A mandatory
+	// check failure blocks delivery: the task fails rather than reaching the
+	// review gate, and the check evidence in the manifest is the record.
 	if stage.Terminal() {
+		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+			return stageOutcome{}, err
+		}
 		if err := runner.reachTerminalStage(ctx, run.task, stageID); err != nil {
 			return stageOutcome{}, err
 		}
@@ -576,6 +593,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	case ActionPause:
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
 	case ActionFinal:
+		// Defensive double-enforcement: eval only returns ActionFinal for a
+		// terminal stage, and terminal stages short-circuit to the branch above
+		// before invoking the adapter. Should the final outcome arise here
+		// anyway, the project checks still gate delivery.
+		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+			return stageOutcome{}, err
+		}
 		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, stageID)
 	}
 	return stageOutcome{}, fmt.Errorf("runner: unknown decision action %d", decision.Action)
@@ -852,6 +876,11 @@ const (
 	// this run do" from it.
 	EvCapabilityEnforced = "stage.capability_enforced"
 	EvRevisionsSynced    = "task.revisions_synced"
+	// EvProjectChecksRun records the orchestrator-owned project-check outcome at
+	// the delivery boundary. The manifest body carries the full per-check
+	// results; this event is the durable signal that Agentum ran its own checks
+	// (not the agent's claim) against the checkpoint commit.
+	EvProjectChecksRun = "task.project_checks_run"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

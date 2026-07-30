@@ -291,3 +291,65 @@ func replace(s, old, new string) string {
 	}
 	return strings.Replace(s, old, new, 1)
 }
+
+func TestValidate_CheckPolicy(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		checks     string
+		wantSubstr string
+	}{
+		{
+			name: "valid required and optional",
+			checks: `
+checks:
+  required: [build]
+  optional: [lint]`,
+		},
+		{
+			name: "empty required name",
+			checks: `
+checks:
+  required: [""]`,
+			wantSubstr: "checks.required",
+		},
+		{
+			name: "duplicate optional name",
+			checks: `
+checks:
+  optional: [lint, lint]`,
+			wantSubstr: "lists \"lint\" more than once",
+		},
+		{
+			name: "name in both required and optional",
+			checks: `
+checks:
+  required: [build]
+  optional: [build]`,
+			wantSubstr: "both required and optional",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := validManifest + tc.checks
+			dir := writePack(t, manifest, validPrompts())
+			packResult, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			err = packResult.Validate()
+			if tc.wantSubstr == "" {
+				if err != nil {
+					t.Fatalf("expected clean validation, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Fatalf("expected error containing %q, got %q", tc.wantSubstr, err.Error())
+			}
+		})
+	}
+}
