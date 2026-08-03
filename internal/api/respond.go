@@ -43,13 +43,15 @@ type errorInfo struct {
 
 // Stable error codes. Add as the surface grows.
 const (
-	codeNotFound          = "not_found"
-	codeIllegalTransition = "illegal_transition" // a task-FSM violation
-	codeBadInput          = "bad_input"
-	codeUnauthorized      = "unauthorized"
-	codeForbidden         = "forbidden"
-	codeNotImplemented    = "not_implemented"
-	codeInternal          = "internal"
+	codeNotFound            = "not_found"
+	codeIllegalTransition   = "illegal_transition" // a task-FSM violation
+	codeBadInput            = "bad_input"
+	codeUnauthorized        = "unauthorized"
+	codeForbidden           = "forbidden"
+	codeNotImplemented      = "not_implemented"
+	codeInternal            = "internal"
+	codeConflict            = "conflict"             // an optimistic-concurrency / state collision
+	codePreconditionMissing = "precondition_missing" // a required If-Match-style precondition was absent
 )
 
 // writeError emits a structured error response.

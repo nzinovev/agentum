@@ -147,8 +147,28 @@ Two surfaces: the legacy stubs under `/tasks/{id}/invocations/{iid}/artifacts/{n
 | `GET` | `/tasks/{id}/artifacts` | ✅ | list revisions for a task. `?current=true` narrows to current revisions. |
 | `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
 | `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
-| `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | stub | fetch an artifact. Epic 2 |
-| `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | stub | edit-and-approve via artifact write. Epic 2 |
+| `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | ✅ | current revision of `(task, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
+| `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
+
+#### Artifact edit request
+
+```json
+{ "content": "…", "kind": "spec", "expected_revision_id": "uuid" }
+```
+
+`kind` is optional (defaults to the prior revision's kind, or `file` for a
+create). `expected_revision_id` is the optimistic-concurrency precondition:
+**required when the artifact already has a current revision** (the value from a
+prior GET's `X-Revision-Id`), so two editors racing produce a 409 for the loser
+rather than a silent lost update. A first create (no current revision) omits it.
+
+| Store outcome | Status | Code |
+|---|---|---|
+| revision created | `200` artifact revision | — |
+| `ErrRevisionConflict` (precondition failed, or two creates raced) | `409` | `conflict` |
+| `ErrSecretDetected` (reject-on-secret policy refused the content) | `422` | `bad_input` |
+| `ErrNoCurrentRevision` (GET on an artifact with no revision yet) | `404` | `not_found` |
+| current revision exists but `expected_revision_id` was omitted | `428` | `precondition_missing` |
 
 The revisions store is content-addressed and lives outside any worktree. Each
 edit creates a new immutable revision that chains to the prior one; the
@@ -210,7 +230,7 @@ sealed row is never edited.
   "memory":           { "scope": "project", "hashes": [], "entries": 0 },
   "artifacts":        { "inputs": [], "outputs": [] },
   "checks":           { "set_version": "", "results": [] },
-  "human_gates":      [{ "stage": "…", "gate": "…", "decision": "…", "actor": "…", "timestamp": "…" }],
+  "human_gates":      [{ "stage": "…", "gate": "…", "decision": "approved | rejected | edited | continued", "actor": "…", "timestamp": "…" }],
   "git":              { "branch": "agentum/…", "base_commit": "…", "result_commit": "…", "checkpoints": [] },
   "execution_coordinate": { "delivery_step": "", "execution_unit": "", "phase": "" },
   "missing":          ["memory", "checks", "capabilities", "human_gates"]
