@@ -28,8 +28,19 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # The agent adapter reaches for OS process-group primitives, which differ
+      # per platform. CI runs on Linux, so without an explicit cross-build a
+      # Windows or macOS contributor discovers the breakage on their own
+      # machine instead of in review.
+      - name: Cross-build (windows, darwin)
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+
       - name: Vet
-        run: go vet ./...
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
 
       - name: Test
         run: go test ./... -race

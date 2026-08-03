@@ -285,10 +285,24 @@ func TestPrepareEnforcement_WritesScopedConfig(t *testing.T) {
 			t.Errorf("audit grant still has placeholder: %q", granted)
 		}
 	}
-	// The rendered config references the worktree path for fs.write.
-	if !strings.Contains(string(plan.config), workdir) {
+	// The rendered config references the worktree path for fs.write. Compared
+	// against the JSON-encoded form: on Windows the path separators are escaped
+	// inside the rendered config, so a raw-string comparison fails there for a
+	// config that is in fact correct.
+	if !strings.Contains(string(plan.config), jsonPath(t, workdir)) {
 		t.Errorf("rendered config does not reference the worktree path: %s", plan.config)
 	}
+}
+
+// jsonPath renders a filesystem path the way it appears inside JSON, so path
+// assertions hold on every host the adapter builds for.
+func jsonPath(t *testing.T, path string) string {
+	t.Helper()
+	encoded, err := json.Marshal(path)
+	if err != nil {
+		t.Fatalf("encode path %q: %v", path, err)
+	}
+	return strings.Trim(string(encoded), `"`)
 }
 
 // TestApplyTimeouts_HardTimeoutWrapsCtx: a non-zero HardTimeout wraps ctx with
