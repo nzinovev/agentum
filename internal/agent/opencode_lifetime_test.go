@@ -251,3 +251,47 @@ func TestInvoke_CallerCancellationStopsRun(t *testing.T) {
 		t.Errorf("run took %s; cancellation did not terminate the process tree", elapsed)
 	}
 }
+
+// TestInvoke_CleansUpConfigAfterRun: the per-invocation config directory is
+// released once the run ends — but not before, since it backs the child's
+// permissions for as long as the child lives.
+func TestInvoke_CleansUpConfigAfterRun(t *testing.T) {
+	adapter, invocation := fakeInvocation(t, fakeWorks, 50*time.Millisecond, caps.Profile{})
+
+	plan, err := prepareEnforcement(invocation)
+	if err != nil {
+		t.Fatalf("prepareEnforcement: %v", err)
+	}
+	configRoot := filepath.Dir(plan.configDir)
+	plan.cleanup()
+	before := countAdapterConfigDirs(t, configRoot)
+
+	events, invokeErr := adapter.Invoke(context.Background(), invocation)
+	if invokeErr != nil {
+		t.Fatalf("Invoke: %v", invokeErr)
+	}
+	if _, failed := drain(t, events); failed != nil {
+		t.Fatalf("run failed: %v", failed)
+	}
+
+	if after := countAdapterConfigDirs(t, configRoot); after != before {
+		t.Errorf("config dirs before=%d after=%d; the run leaked its config directory", before, after)
+	}
+}
+
+// countAdapterConfigDirs counts the adapter's per-invocation config directories
+// under root.
+func countAdapterConfigDirs(t *testing.T, root string) int {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "agentum-opencode-") {
+			count++
+		}
+	}
+	return count
+}
