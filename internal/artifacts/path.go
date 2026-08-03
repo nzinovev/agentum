@@ -47,11 +47,14 @@ type DeclaredPath struct {
 // OS's and is performed as part of the open itself — which also closes the gap
 // between checking a path and using it.
 //
-// One asymmetry follows from that choice: os.Root traverses a symlink that
-// stays inside the root, but refuses a Windows junction wherever it points.
-// Erring that way costs an artifact in a case git does not produce, where the
-// alternative would be re-deriving containment in code that has already been
-// shown not to work.
+// Delegating to the OS means accepting its refusals, and os.Root refuses two
+// things beyond a plain escape. It will not traverse a Windows junction
+// wherever it points, and it will not follow a symlink whose target is
+// absolute, even when that target is inside the root — an absolute target
+// cannot be resolved within the component-by-component walk that makes the
+// check sound. Both cost an artifact in a shape git does not produce, and the
+// alternative is re-deriving containment in code that has already been shown
+// not to work.
 type Container struct {
 	root *os.Root
 	dir  string

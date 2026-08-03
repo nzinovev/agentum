@@ -499,11 +499,18 @@ the path and reason, and the task pauses for review. A declared path that
 simply was not written is a different thing: a contract gap, logged and
 skipped, with the run continuing.
 
-One asymmetry follows from using `os.Root`: it traverses a symlink that stays
-inside the root, but refuses a Windows junction wherever it points. Git does
-not produce junctions inside a worktree, so the cost is theoretical and the
-alternative is re-deriving containment in code that has already been shown not
-to work.
+Delegating to the OS means accepting its refusals. `os.Root` follows a symlink
+that stays inside the root, but rejects two shapes beyond a plain escape:
+
+- a **Windows junction**, wherever it points — Go will not traverse one at all;
+- a symlink whose **target is absolute**, even when that target is inside the
+  root, because an absolute target cannot be resolved within the
+  component-by-component walk that makes the check sound.
+
+Both cost an artifact in a shape git does not produce inside a worktree, and
+the alternative is re-deriving containment in code that has already been shown
+not to work. An agent that reaches an in-tree file through an absolute symlink
+gets `artifact_rejected`; declaring the file's own path works.
 
 ### Secret scanning
 

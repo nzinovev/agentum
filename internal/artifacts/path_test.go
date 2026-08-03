@@ -99,72 +99,92 @@ func TestContainer_ResolveRejectsEscapes(t *testing.T) {
 // plant a link and declare it — the resolved target is what the orchestrator
 // would actually read.
 //
-// The link is a symlink where the platform allows one and a directory junction
-// on Windows, where creating a symlink needs a privilege CI does not have.
-// Junctions matter in their own right: filepath.EvalSymlinks does not follow
-// them, so a containment check written by hand around EvalSymlinks reports a
-// junction escape as contained. Only the OS-level check in os.Root catches it.
+// Both link shapes are covered, because os.Root refuses them for different
+// reasons and only one of them tests the interesting machinery: an absolute
+// target is rejected on sight, while a relative one is resolved component by
+// component and rejected when the walk leaves the root. Testing only the
+// absolute form would leave the traversal path unexercised.
 func TestContainer_ResolveRejectsLinkEscape(t *testing.T) {
 	t.Parallel()
-	parent := t.TempDir()
-	root := filepath.Join(parent, "worktree")
-	outside := filepath.Join(parent, "outside")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir root: %v", err)
+	cases := []struct {
+		name string
+		// target is the symlink target; empty means "the absolute path of the
+		// outside directory", filled in per-subtest.
+		relativeTarget string
+	}{
+		{name: "relative link target", relativeTarget: "../outside"},
+		{name: "absolute link target"},
 	}
-	writeFile(t, filepath.Join(outside, "secret.txt"), "host secret")
+	for _, table := range cases {
+		t.Run(table.name, func(t *testing.T) {
+			t.Parallel()
+			parent := t.TempDir()
+			root := filepath.Join(parent, "worktree")
+			outside := filepath.Join(parent, "outside")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("mkdir root: %v", err)
+			}
+			writeFile(t, filepath.Join(outside, "secret.txt"), "host secret")
 
-	declared := linkOutOfTree(t, root, outside)
-	container := openContainer(t, root)
+			target := table.relativeTarget
+			if target == "" {
+				target = outside
+			}
+			plantLinkOrSkip(t, filepath.Join(root, "escape"), target, table.relativeTarget != "")
 
-	// Control: the file really is reachable through the link, so a rejection
-	// below is the guard working rather than a missing file.
-	if _, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(declared))); err != nil {
-		t.Fatalf("control read through the link failed: %v", err)
-	}
+			const declared = "escape/secret.txt"
+			// Control: the file really is reachable through the link, so a
+			// rejection below is the guard working, not a missing file.
+			if _, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(declared))); err != nil {
+				t.Fatalf("control read through the link failed: %v", err)
+			}
 
-	resolved, err := container.Resolve(declared)
-	if !errors.Is(err, ErrPathEscapesRoot) {
-		t.Fatalf("Resolve(%q) through a link = (%+v, %v), want ErrPathEscapesRoot", declared, resolved, err)
-	}
-	if _, err := container.ReadFile(declared); !errors.Is(err, ErrPathEscapesRoot) {
-		t.Fatalf("ReadFile(%q) through a link = %v, want ErrPathEscapesRoot", declared, err)
+			container := openContainer(t, root)
+			resolved, err := container.Resolve(declared)
+			if !errors.Is(err, ErrPathEscapesRoot) {
+				t.Fatalf("Resolve(%q) through a link = (%+v, %v), want ErrPathEscapesRoot", declared, resolved, err)
+			}
+			if _, err := container.ReadFile(declared); !errors.Is(err, ErrPathEscapesRoot) {
+				t.Fatalf("ReadFile(%q) through a link = %v, want ErrPathEscapesRoot", declared, err)
+			}
+		})
 	}
 }
 
-// linkOutOfTree plants a link inside root pointing at outside and returns the
-// declared path (relative to root) that reaches through it. Skips the test when
-// the platform will not create either kind of link.
-func linkOutOfTree(t *testing.T, root, outside string) string {
+// plantLinkOrSkip creates a link at linkPath pointing at target, skipping the
+// test when the platform will not make one.
+//
+// Unprivileged symlink creation is off by default on Windows, so an absolute
+// target falls back to a directory junction — which is worth having in its own
+// right, since filepath.EvalSymlinks does not follow junctions and a
+// containment check built around it would report a junction escape as
+// contained. A junction target must be absolute, so the relative case has no
+// Windows fallback and skips there.
+func plantLinkOrSkip(t *testing.T, linkPath, target string, targetIsRelative bool) {
 	t.Helper()
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err == nil {
-		return "escape/secret.txt"
+	if err := os.Symlink(target, linkPath); err == nil {
+		return
+	} else if runtime.GOOS != "windows" {
+		t.Skipf("cannot create a symlink: %v", err)
 	}
-	if runtime.GOOS != "windows" {
-		t.Skip("cannot create a symlink on this platform")
+	if targetIsRelative {
+		t.Skip("no unprivileged Windows equivalent of a relative symlink")
 	}
-	// Unprivileged symlink creation is off by default on Windows; a directory
-	// junction needs no privilege and is the more interesting case anyway.
-	link := filepath.Join(root, "escape")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", linkPath, target).CombinedOutput(); err != nil {
 		t.Skipf("cannot create a junction: %v (%s)", err, out)
 	}
-	return "escape/secret.txt"
 }
 
 // TestContainer_AllowsSymlinkInsideTheRoot: containment, not a blanket link
 // ban. A symlink that stays in the tree is ordinary and must resolve.
 //
-// Symlinks only — Windows junctions are refused wherever they point, because
-// os.Root will not traverse one at all. That is a deliberate asymmetry on the
-// safe side: a junction inside a worktree is not something git produces, and
-// refusing it costs an artifact where accepting it would need us to re-derive
-// containment ourselves.
+// The target must be relative — see
+// TestContainer_RefusesAbsoluteSymlinkTargetInsideTheRoot for why.
 func TestContainer_AllowsSymlinkInsideTheRoot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "real", "content.md"), "content")
-	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "alias")); err != nil {
+	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	container := openContainer(t, root)
@@ -184,6 +204,29 @@ func TestContainer_AllowsSymlinkInsideTheRoot(t *testing.T) {
 	}
 	if string(bytes) != "content" {
 		t.Errorf("content = %q, want %q", bytes, "content")
+	}
+}
+
+// TestContainer_RefusesAbsoluteSymlinkTargetInsideTheRoot pins a refusal that
+// is broader than "escapes the root", so that it stays a decision rather than a
+// surprise: os.Root rejects any symlink whose target is absolute, wherever it
+// points, because an absolute target cannot be resolved within the root's
+// component-by-component walk.
+//
+// The cost is an artifact that an agent chose to reach through an absolute
+// in-tree link; the alternative is re-deriving containment outside the OS,
+// which is exactly the approach that misses Windows junctions.
+func TestContainer_RefusesAbsoluteSymlinkTargetInsideTheRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "real", "content.md"), "content")
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "alias")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	container := openContainer(t, root)
+
+	if _, err := container.Resolve("alias/content.md"); !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("Resolve through an absolute in-tree link = %v, want ErrPathEscapesRoot", err)
 	}
 }
 

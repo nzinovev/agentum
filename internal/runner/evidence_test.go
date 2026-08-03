@@ -250,14 +250,19 @@ func TestCaptureStageOutputs_MissingFileIsNotABreach(t *testing.T) {
 
 // TestCaptureStageOutputs_RejectsLinkEscape closes the escape a lexical check
 // cannot see: the agent has write access inside its own worktree, so it can
-// plant a link and declare the link. A symlink where the platform allows one, a
-// directory junction on Windows, where creating a symlink needs a privilege CI
-// does not have.
+// plant a link and declare the link.
+//
+// The link target is relative, which is the shape that actually exercises the
+// containment walk — an absolute target is refused on sight, so it would pass
+// this test without proving the traversal is checked. On Windows, where
+// unprivileged symlink creation is off, the fallback is a directory junction,
+// whose target must be absolute; that case is worth having anyway, since
+// filepath.EvalSymlinks does not follow junctions at all.
 func TestCaptureStageOutputs_RejectsLinkEscape(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 	link := filepath.Join(fixture.worktreeDir, "escape")
-	if err := os.Symlink(fixture.outsideDir, link); err != nil {
+	if err := os.Symlink("../outside", link); err != nil {
 		if runtime.GOOS != "windows" {
 			t.Skipf("cannot create symlink: %v", err)
 		}
