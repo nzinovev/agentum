@@ -100,6 +100,23 @@ func (service *Service) Init(ctx context.Context, tenantID, userID, taskID strin
 	return nil
 }
 
+// RecordGap records that an evidence write the orchestrator attempted failed,
+// so the fact is carried on the sealed manifest rather than swallowed. It is
+// itself best-effort: a failure here is returned to the caller, which logs and
+// moves on rather than recursing — the gap is recorded when it can be, and the
+// absence of a gap row does not imply the evidence succeeded. Sealed manifests
+// refuse the gap (it would mutate an immutable body); the caller drops it.
+func (service *Service) RecordGap(ctx context.Context, tenantID, taskID string, gap EvidenceGap) error {
+	patch := Body{EvidenceGaps: []EvidenceGap{gap}}
+	if err := service.AddEvidence(ctx, tenantID, taskID, patch); err != nil {
+		if errors.Is(err, ErrSealed) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // AddEvidence merges a patch into the manifest body. Append-only: arrays in the
 // patch are appended to existing arrays; scalars are set once and refused on a
 // second set (the caller constructs patches that respect this). Refuses to
@@ -200,18 +217,18 @@ func mergeIntoLocked(locked []byte, patch Body) ([]byte, error) {
 	return encodeBody(merged)
 }
 
-// Seal finalizes the manifest. Sets sealed_at + seal_reason + sealed_by. After
-// sealing the body is immutable; corrections land via Correct. Idempotent: a
-// second Seal is a no-op.
+// Seal finalizes the manifest. Sets sealed_at + seal_reason + sealed_by, and
+// rewrites the body so the seal carries the derived `missing` list and an
+// `evidence_complete` flag computed from the body as it actually is at seal
+// time — not the list asserted once at init, which could grow stale (and did:
+// `capabilities` was listed missing on bodies that carried a populated
+// capabilities section). After sealing the body is immutable; corrections land
+// via Correct. Idempotent: a second Seal is a no-op.
 func (service *Service) Seal(
 	ctx context.Context,
 	tenantID, userID, taskID string,
 	reason SealReason,
 ) error {
-	// Pin the git lineage (base_commit, branch, checkpoints, result_commit) at
-	// seal time — these may have been recorded late by the runner. The merge is
-	// a no-op when nothing new is provided; the seal itself is the
-	// authoritative freeze.
 	tx, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("manifest: begin seal tx: %w", err)
@@ -230,6 +247,27 @@ func (service *Service) Seal(
 	}
 	if locked.SealedAt.Valid {
 		return nil // already sealed — idempotent
+	}
+
+	// Derive the missing list and the completeness flag from the body under the
+	// seal lock, then write them as part of the same seal transaction. The
+	// completeness flag is false when any section is degraded (an evidence gap
+	// was recorded) OR when a section the run should have produced is absent.
+	body, err := decodeBody(locked.Body)
+	if err != nil {
+		return fmt.Errorf("manifest: decode body for seal: %w", err)
+	}
+	body.Missing = body.MissingSections()
+	complete := len(body.EvidenceGaps) == 0 && len(body.Missing) == 0
+	body.EvidenceComplete = &complete
+	sealedBody, err := encodeBody(body)
+	if err != nil {
+		return fmt.Errorf("manifest: encode sealed body: %w", err)
+	}
+	if _, err := qtx.AddManifestEvidence(ctx, sqlc.AddManifestEvidenceParams{
+		ID: locked.ID, TenantID: tenantID, Body: sealedBody,
+	}); err != nil {
+		return fmt.Errorf("manifest: write derived missing at seal: %w", err)
 	}
 
 	if _, err := qtx.SealManifest(ctx, sqlc.SealManifestParams{

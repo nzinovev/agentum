@@ -31,7 +31,9 @@ const schemaVersion = "1"
 //   - HumanGates    — human gate decisions
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
-//   - Missing       — subsystems that did not contribute (explicit)
+//   - Missing       — subsystems that did not contribute (derived at seal)
+//   - EvidenceGaps  — evidence the orchestrator tried and failed to write
+//   - EvidenceComplete — set at seal: false when any section is degraded
 type Body struct {
 	Schema              string               `json:"schema_version"`
 	Input               *InputEvidence       `json:"input,omitempty"`
@@ -48,6 +50,20 @@ type Body struct {
 	Git                 *GitEvidence         `json:"git,omitempty"`
 	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
 	Missing             []string             `json:"missing,omitempty"`
+	EvidenceGaps        []EvidenceGap        `json:"evidence_gaps,omitempty"`
+	EvidenceComplete    *bool                `json:"evidence_complete,omitempty"`
+}
+
+// EvidenceGap records one evidence write the orchestrator attempted and failed.
+// A sealed manifest carries the gaps so a reviewer can tell a section that was
+// never produced from one that was attempted and degraded — the two are
+// indistinguishable without this, and a silently degraded manifest is worse
+// than an absent one because the reviewer has no way to know to distrust it.
+type EvidenceGap struct {
+	Section string    `json:"section"`
+	Stage   string    `json:"stage,omitempty"`
+	Reason  string    `json:"reason"`
+	At      time.Time `json:"at"`
 }
 
 // newEmptyBody returns a Body with the schema version set and nothing else.
@@ -224,6 +240,39 @@ type ExecutionCoordinate struct {
 	Phase         string `json:"phase,omitempty"`
 }
 
+// MissingSections reports the evidence sections that are absent in this body.
+// Derived from the body's actual shape rather than asserted once at init, so a
+// stale claim (e.g. "capabilities missing" on a body that carries a populated
+// capabilities section) cannot survive to seal time. The sections covered are
+// the ones the run is expected to produce; Input / Project / Pack / Adapter /
+// Git are written once at init and their absence is a gap, not a "missing
+// subsystem," so they are not reported here.
+//
+// Note that memory is genuinely absent until Epic 1 wires it; a derived missing
+// list keeps reporting it, correctly, rather than hiding it.
+func (body Body) MissingSections() []string {
+	missing := make([]string, 0, 8)
+	if body.Memory == nil {
+		missing = append(missing, "memory")
+	}
+	if len(body.HumanGates) == 0 {
+		missing = append(missing, "human_gates")
+	}
+	if body.Artifacts == nil {
+		missing = append(missing, "artifacts")
+	}
+	if body.Checks == nil {
+		missing = append(missing, "checks")
+	}
+	if body.Capabilities == nil {
+		missing = append(missing, "capabilities")
+	}
+	if len(body.Prompts) == 0 {
+		missing = append(missing, "prompts")
+	}
+	return missing
+}
+
 // encodeBody marshals a Body to canonical JSON. Used by AddEvidence and Seal.
 // The map ordering produced by encoding/json is stable for our shape (struct
 // fields are encoded in declaration order), so two callers with the same Body
@@ -308,7 +357,38 @@ func mergeBodies(existing Body, patch Body) Body {
 	if len(patch.Missing) > 0 {
 		merged.Missing = appendUniqueString(merged.Missing, patch.Missing)
 	}
+	if len(patch.EvidenceGaps) > 0 {
+		merged.EvidenceGaps = appendUniqueEvidenceGap(merged.EvidenceGaps, patch.EvidenceGaps)
+	}
+	// EvidenceComplete is intentionally NOT merged from patches: it is a seal-
+	// time assertion the seal transaction sets once, against the body as it
+	// then exists. A patch carrying it would be a caller overstepping; leaving
+	// it unset keeps "not yet sealed" distinguishable from "sealed and
+	// incomplete", which a pointer (rather than a bool) exists to express.
 	return merged
+}
+
+// appendUniqueEvidenceGap appends gaps not already in base, matched by
+// (Section, Stage, Reason) so the same failure recorded twice (a retry that
+// failed the same way) does not duplicate. At is taken from the addition so
+// the latest occurrence is kept on a duplicate.
+func appendUniqueEvidenceGap(base []EvidenceGap, additions []EvidenceGap) []EvidenceGap {
+	out := make([]EvidenceGap, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		found := false
+		for index, present := range out {
+			if present.Section == addition.Section && present.Stage == addition.Stage && present.Reason == addition.Reason {
+				out[index].At = addition.At
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
 }
 
 // appendUniquePrompt appends prompts from additions that are not already in

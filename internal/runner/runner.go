@@ -79,11 +79,36 @@ type Runner struct {
 	// nil when art is nil.
 	syncer *artifacts.Syncer
 	// mfst is the evidence manifest service. nil in unit tests; manifest
-	// operations are no-ops then.
-	mfst *manifest.Service
+	// operations are no-ops then. Typed as manifestService (a runner-local
+	// interface) so unit tests can inject a fake without a database; the
+	// production *manifest.Service satisfies it.
+	mfst manifestService
 	// checkExec runs the orchestrator-owned project checks at the delivery
 	// boundary. nil in unit tests; project checks are skipped then.
 	checkExec *checks.Executor
+}
+
+// manifestService is the subset of the manifest.Service surface the runner
+// uses. Extracted as an interface so unit tests can substitute a fake that
+// records calls or fails on demand; the production *manifest.Service satisfies
+// it without changes.
+type manifestService interface {
+	AddEvidence(ctx context.Context, tenantID, taskID string, patch manifest.Body) error
+	Seal(ctx context.Context, tenantID, userID, taskID string, reason manifest.SealReason) error
+	RecordGap(ctx context.Context, tenantID, taskID string, gap manifest.EvidenceGap) error
+}
+
+// manifestServiceOrNil returns service as a manifestService, or nil when
+// service is a nil *manifest.Service. This dodges the typed-nil-in-interface
+// trap: assigning a nil *manifest.Service to an interface value yields a
+// non-nil interface holding a nil pointer, so the `mfst == nil` guards the
+// runner relies on would stop firing. The nil-pointer concrete type never
+// reaches the interface here.
+func manifestServiceOrNil(service *manifest.Service) manifestService {
+	if service == nil {
+		return nil
+	}
+	return service
 }
 
 // Deps bundles Runner construction. AgentName is the adapter's identity for
@@ -150,7 +175,7 @@ func New(deps Deps) *Runner {
 		store: deps.Store, packs: deps.Packs, adapter: deps.Adapter, models: deps.Models,
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
 		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
-		art: deps.Artifacts, syncer: syncer, mfst: deps.Manifest,
+		art: deps.Artifacts, syncer: syncer, mfst: manifestServiceOrNil(deps.Manifest),
 		checkExec:   deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
@@ -322,9 +347,13 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	})
 
 	// Record the initial manifest evidence (input, project, pack, declared
-	// capabilities, adapter) once the lineage anchor is set. Best-effort: a
-	// failure here is logged inside the helper and does not fail the run.
-	runner.recordInitialEvidence(ctx, task, project, taskPack)
+	// capabilities, adapter) once the lineage anchor is set. This is the run's
+	// provenance root — a failure here fails the run, because every later
+	// piece of evidence chains off it and a silent gap at the root would
+	// orphan everything that follows.
+	if evidenceErr := runner.recordInitialEvidence(ctx, task, project, taskPack); evidenceErr != nil {
+		return runner.failTask(ctx, task, evidenceErr)
+	}
 	runner.recordGitEvidence(ctx, task)
 
 	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)

@@ -150,6 +150,7 @@ func (runner *Runner) recordCheckEvidence(ctx context.Context, task sqlc.Task, r
 			return
 		}
 		runner.log.Warn("record check evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "checks", "", err)
 	}
 }
 

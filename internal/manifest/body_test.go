@@ -199,6 +199,113 @@ func parseTestTime(t *testing.T, value string) (ts time.Time) {
 	return ts
 }
 
+// TestMissingSections_DerivesFromBody is the D6 fix: `missing` must describe
+// the body as it actually is, not a list asserted once at init. The stale case
+// — a body with a populated capabilities section that the old hardcoded list
+// still called "missing" — is the specific regression this pins.
+func TestMissingSections_DerivesFromBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body Body
+		want []string
+	}{
+		{
+			name: "empty body reports every expected section missing",
+			body: Body{Schema: "1"},
+			want: []string{"memory", "human_gates", "artifacts", "checks", "capabilities", "prompts"},
+		},
+		{
+			name: "fully populated body reports nothing missing",
+			body: Body{
+				Memory:       &MemorySlice{Entries: 1},
+				HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+				Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+				Checks:       &CheckEvidence{SetVersion: "v1"},
+				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+			},
+			want: nil,
+		},
+		{
+			name: "populated capabilities is not reported missing (stale-list regression)",
+			body: Body{
+				Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{Stage: "spec"}}},
+				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+			},
+			want: []string{"memory", "human_gates", "artifacts", "checks"},
+		},
+	}
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := testCase.body.MissingSections()
+			if !equalStringSet(got, testCase.want) {
+				t.Errorf("MissingSections = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestMergeBodies_EvidenceGapsAppendDedup is the D5 merge: a failed evidence
+// write appends a gap, and the same failure recorded twice (a retry that
+// failed identically) de-duplicates rather than growing the list.
+func TestMergeBodies_EvidenceGapsAppendDedup(t *testing.T) {
+	t.Parallel()
+	at1 := parseTestTime(t, "2026-01-01T00:00:00Z")
+	at2 := parseTestTime(t, "2026-01-02T00:00:00Z")
+	base := Body{EvidenceGaps: []EvidenceGap{
+		{Section: "prompts_model_capabilities", Stage: "spec", Reason: "db down", At: at1},
+	}}
+	// Same (Section, Stage, Reason) → dedup, keeping the later At.
+	patch := Body{EvidenceGaps: []EvidenceGap{
+		{Section: "prompts_model_capabilities", Stage: "spec", Reason: "db down", At: at2},
+		{Section: "git", Stage: "", Reason: "checkpoint list failed", At: at2},
+	}}
+	merged := mergeBodies(base, patch)
+	if len(merged.EvidenceGaps) != 2 {
+		t.Fatalf("EvidenceGaps = %d, want 2 (deduped): %+v", len(merged.EvidenceGaps), merged.EvidenceGaps)
+	}
+	for _, gap := range merged.EvidenceGaps {
+		if gap.Section == "prompts_model_capabilities" && !gap.At.Equal(at2) {
+			t.Errorf("dedup did not keep the later At: %+v", gap)
+		}
+	}
+}
+
+// TestMergeBodies_DoesNotCarryEvidenceCompleteFromPatch guards the seal-time
+// invariant: EvidenceComplete is set by the seal transaction, never by a patch.
+// A patch carrying it would let a caller assert completeness out of band; the
+// merge must ignore it so "not yet sealed" stays distinguishable from "sealed
+// and incomplete".
+func TestMergeBodies_DoesNotCarryEvidenceCompleteFromPatch(t *testing.T) {
+	t.Parallel()
+	base := Body{Schema: "1"}
+	complete := true
+	patch := Body{EvidenceComplete: &complete}
+	merged := mergeBodies(base, patch)
+	if merged.EvidenceComplete != nil {
+		t.Errorf("merge accepted EvidenceComplete from a patch: %+v", merged.EvidenceComplete)
+	}
+}
+
+func equalStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, value := range a {
+		seen[value] = true
+	}
+	for _, value := range b {
+		if !seen[value] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 	t.Parallel()
 	base := Body{Checks: &CheckEvidence{

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
@@ -288,6 +289,7 @@ func (runner *Runner) recordStageEvidence(
 			return
 		}
 		runner.log.Warn("record evidence", "task", run.task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.task, "prompts_model_capabilities", stageID, err)
 	}
 }
 
@@ -303,29 +305,28 @@ func (runner *Runner) adapterEvidence() *manifest.AdapterEvidence {
 // recordInitialEvidence seeds the manifest with the task / project / pack /
 // git lineage evidence at run start. Idempotent — AddEvidence merges by
 // section. Called once at the start of drive(). No-op when the manifest
-// service is nil.
+// service is nil (unit tests). Unlike the per-stage evidence helpers, a
+// failure here is returned: this is the run's provenance root (input, project,
+// pack, base commit), and a run whose provenance was never recorded should
+// fail rather than proceed — every later piece of evidence chains off this, so
+// a silent gap at the root would orphan everything that follows.
 func (runner *Runner) recordInitialEvidence(
 	ctx context.Context,
 	task sqlc.Task,
 	project sqlc.Project,
 	taskPack *pack.Pack,
-) {
+) error {
 	if runner.mfst == nil {
-		return
+		return nil
 	}
 	packHash := ""
 	if taskPack.Dir != "" {
 		// Best-effort hash of the resolved pack. Empty when the pack was built
-		// in memory (override resolver) — the manifest's Missing section
+		// in memory (override resolver) — the derived `missing` at seal time
 		// records the gap if it matters.
 		if hash, err := hashDir(taskPack.Dir); err == nil {
 			packHash = hash
 		}
-	}
-	missing := []string{
-		"memory",       // Epic 1 — project memory not wired yet
-		"capabilities", // capability enforcement inert at MVP
-		"human_gates",  // no decisions recorded yet
 	}
 	patch := manifest.Body{
 		Input: &manifest.InputEvidence{
@@ -352,12 +353,12 @@ func (runner *Runner) recordInitialEvidence(
 		Capabilities: &manifest.CapabilityProfile{
 			Declared: taskPack.Capabilities,
 		},
-		Missing: missing,
 		Adapter: runner.adapterEvidence(),
 	}
 	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
-		runner.log.Warn("record initial evidence", "task", task.ID, "error", err)
+		return fmt.Errorf("record initial evidence: %w", err)
 	}
+	return nil
 }
 
 // recordGitEvidence adds the current git lineage (branch, base_commit, latest
@@ -391,12 +392,14 @@ func (runner *Runner) recordGitEvidence(ctx context.Context, task sqlc.Task) {
 	}
 	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
 		// Sealed manifest means the terminal seal already ran; subsequent
-		// git evidence is recorded via Correct, not AddEvidence. Logged at
-		// debug since the seal path handles this.
+		// git evidence is recorded via Correct, not AddEvidence. The gap is
+		// not recorded in that case — the seal refused it, which is the
+		// expected post-seal path, not a degraded write.
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
 		runner.log.Warn("record git evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "git", "", err)
 	}
 }
 
@@ -514,6 +517,7 @@ func (runner *Runner) recordArtifactInputs(ctx context.Context, run stageRun, st
 			return
 		}
 		runner.log.Warn("record artifact inputs evidence", "task", run.task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.task, "artifacts", stageID, err)
 	}
 }
 
@@ -524,6 +528,27 @@ func (runner *Runner) currentRevisionList(ctx context.Context, tenantID, taskID 
 		return nil, nil
 	}
 	return runner.art.ListCurrent(ctx, tenantID, taskID)
+}
+
+// recordEvidenceGap records that an evidence write failed, so the fact is
+// carried on the sealed manifest instead of swallowed. Best-effort: a failure
+// to record the gap is logged and dropped — it does not recurse. A nil
+// manifest service (unit tests) is a no-op. Sealed manifests refuse the gap,
+// which is expected for the post-seal git-evidence flush and is dropped
+// silently (the seal already froze the body).
+func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, section, stage string, cause error) {
+	if runner.mfst == nil {
+		return
+	}
+	gap := manifest.EvidenceGap{
+		Section: section,
+		Stage:   stage,
+		Reason:  cause.Error(),
+		At:      time.Now().UTC(),
+	}
+	if err := runner.mfst.RecordGap(ctx, task.TenantID, task.ID, gap); err != nil {
+		runner.log.Warn("record evidence gap", "task", task.ID, "section", section, "cause", cause, "gap_error", err)
+	}
 }
 
 // hashForEvidence returns the sha256 hex of the bytes of the prompt text.

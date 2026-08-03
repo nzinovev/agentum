@@ -15,7 +15,9 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
@@ -416,5 +418,102 @@ func writeInWorktree(t *testing.T, root, relPath, content string) {
 	}
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", full, err)
+	}
+}
+
+// fakeManifestService is a manifestService that records calls and can be told
+// to fail. Used to exercise the evidence-gap path (D5) without a database.
+type fakeManifestService struct {
+	mu          sync.Mutex
+	addEvidence []manifest.Body
+	gaps        []manifest.EvidenceGap
+	sealed      bool
+	// addErr, when set, is returned from AddEvidence.
+	addErr error
+}
+
+func (service *fakeManifestService) AddEvidence(_ context.Context, _, _ string, patch manifest.Body) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.addErr != nil {
+		return service.addErr
+	}
+	service.addEvidence = append(service.addEvidence, patch)
+	return nil
+}
+
+func (service *fakeManifestService) Seal(_ context.Context, _, _, _ string, _ manifest.SealReason) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.sealed = true
+	return nil
+}
+
+func (service *fakeManifestService) RecordGap(_ context.Context, _, _ string, gap manifest.EvidenceGap) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.gaps = append(service.gaps, gap)
+	return nil
+}
+
+func (service *fakeManifestService) gapSections() []string {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	out := make([]string, 0, len(service.gaps))
+	for _, gap := range service.gaps {
+		out = append(out, gap.Section)
+	}
+	return out
+}
+
+// TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5: when
+// AddEvidence fails mid-run, the runner must record the failure as an
+// EvidenceGap on the manifest rather than swallow it, and the stage must
+// survive. A sealed manifest that swallows the failure (degrading silently) is
+// worse than an absent record because a reviewer cannot tell the two apart.
+func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fake := &fakeManifestService{addErr: errors.New("db connection lost")}
+	fixture.runner.mfst = fake
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+	run := stageRun{task: task, taskPack: taskPack}
+	stage := taskPack.Stages[fixtureStage]
+
+	// Must not panic or fail the stage; the run continues.
+	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, stage, "model-x", caps.Profile{}, nil)
+
+	gaps := fake.gapSections()
+	if len(gaps) != 1 {
+		t.Fatalf("AddEvidence failure recorded %d gaps, want 1: %v", len(gaps), gaps)
+	}
+	if gaps[0] != "prompts_model_capabilities" {
+		t.Errorf("gap section = %q, want prompts_model_capabilities", gaps[0])
+	}
+}
+
+// TestRecordInitialEvidence_FailureFailsTheTask is D5's exception: the initial
+// evidence is the run's provenance root, so a failure there must propagate
+// (the caller fails the task through failTask) rather than degrade.
+// recordInitialEvidence returns the error; this test pins that it does, so the
+// caller can fail the run.
+func TestRecordInitialEvidence_FailureFailsTheTask(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fixture.runner.mfst = &fakeManifestService{addErr: errors.New("db connection lost")}
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	project := sqlc.Project{ID: "proj-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+
+	err := fixture.runner.recordInitialEvidence(context.Background(), task, project, taskPack)
+	if err == nil {
+		t.Fatal("recordInitialEvidence with a failing manifest service returned nil; the provenance root must fail rather than degrade")
 	}
 }
