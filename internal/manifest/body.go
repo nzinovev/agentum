@@ -119,8 +119,23 @@ type AdapterEvidence struct {
 	DeclaredCapabilities []string `json:"declared_capabilities,omitempty"`
 }
 
-// ModelEvidence records the model + tier the invocation used.
+// ModelEvidence records the model + tier the invocation used. The scalar
+// fields are the run-level summary (the last stage's model) and are what the
+// cross-run diff compares, since two runs differing only in a mid-pipeline
+// stage's model are still comparable on their primary model. PerStage records
+// which model served each stage, so "which model wrote this code" is
+// answerable per stage rather than only for whichever stage ran last.
 type ModelEvidence struct {
+	Tier      string       `json:"tier"`
+	Model     string       `json:"model"`
+	AgentName string       `json:"agent_name,omitempty"`
+	PerStage  []StageModel `json:"per_stage,omitempty"`
+}
+
+// StageModel is the model + tier that served one stage. A stage re-run after
+// resume supersedes the prior entry rather than appending a duplicate.
+type StageModel struct {
+	Stage     string `json:"stage"`
 	Tier      string `json:"tier"`
 	Model     string `json:"model"`
 	AgentName string `json:"agent_name,omitempty"`
@@ -331,7 +346,7 @@ func mergeBodies(existing Body, patch Body) Body {
 		merged.Adapter = patch.Adapter
 	}
 	if patch.Model != nil {
-		merged.Model = patch.Model
+		merged.Model = mergeModelEvidence(merged.Model, patch.Model)
 	}
 	if patch.Capabilities != nil {
 		merged.Capabilities = mergeCapabilityProfile(merged.Capabilities, patch.Capabilities)
@@ -515,6 +530,57 @@ func appendUniqueCheckpoint(base []CheckpointRef, additions []CheckpointRef) []C
 			}
 		}
 		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// mergeModelEvidence combines two ModelEvidence. The scalars (Tier, Model,
+// AgentName) take the patch's value when set — they are the run-level summary
+// the last stage's model wrote, and the diff compares them. PerStage appends,
+// de-duplicating by Stage so a stage re-run after resume supersedes its prior
+// entry rather than leaving a duplicate. This mirrors mergeCapabilityProfile's
+// treatment of Effective.
+func mergeModelEvidence(existing *ModelEvidence, patch *ModelEvidence) *ModelEvidence {
+	if existing == nil {
+		return patch
+	}
+	merged := &ModelEvidence{
+		Tier:      existing.Tier,
+		Model:     existing.Model,
+		AgentName: existing.AgentName,
+		PerStage:  append([]StageModel(nil), existing.PerStage...),
+	}
+	if patch.Tier != "" {
+		merged.Tier = patch.Tier
+	}
+	if patch.Model != "" {
+		merged.Model = patch.Model
+	}
+	if patch.AgentName != "" {
+		merged.AgentName = patch.AgentName
+	}
+	merged.PerStage = appendUniqueStageModel(merged.PerStage, patch.PerStage)
+	return merged
+}
+
+// appendUniqueStageModel appends entries whose Stage is not already present; a
+// re-run of the same stage replaces the prior snapshot — the latest invocation's
+// model is the authoritative one for that stage.
+func appendUniqueStageModel(base []StageModel, additions []StageModel) []StageModel {
+	out := make([]StageModel, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		replaced := false
+		for index, present := range out {
+			if present.Stage == addition.Stage {
+				out[index] = addition
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
 			out = append(out, addition)
 		}
 	}

@@ -267,6 +267,9 @@ func (runner *Runner) recordStageEvidence(
 		Prompts: []manifest.PromptRevision{{StageID: stageID, Hash: promptHash}},
 		Model: &manifest.ModelEvidence{
 			Tier: tier, Model: model, AgentName: runner.agentName,
+			PerStage: []manifest.StageModel{{
+				Stage: stageID, Tier: tier, Model: model, AgentName: runner.agentName,
+			}},
 		},
 		Adapter: runner.adapterEvidence(),
 		Capabilities: &manifest.CapabilityProfile{

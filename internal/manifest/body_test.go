@@ -306,6 +306,63 @@ func equalStringSet(a, b []string) bool {
 	return true
 }
 
+// TestMergeBodies_PerStageModelAccumulates is D8: each stage's model must
+// accumulate into Model.PerStage, not overwrite the run-level Model pointer. A
+// pipeline that runs different tiers per stage (cheap for analysis, expensive
+// for implementation) must record which model served each stage; the scalar
+// alone recorded only whichever stage ran last.
+func TestMergeBodies_PerStageModelAccumulates(t *testing.T) {
+	t.Parallel()
+	base := Body{Model: &ModelEvidence{
+		Tier: "fast", Model: "model-fast", AgentName: "opencode",
+		PerStage: []StageModel{{Stage: "spec", Tier: "fast", Model: "model-fast", AgentName: "opencode"}},
+	}}
+	patch := Body{Model: &ModelEvidence{
+		Tier: "strong", Model: "model-strong", AgentName: "opencode",
+		PerStage: []StageModel{{Stage: "impl", Tier: "strong", Model: "model-strong", AgentName: "opencode"}},
+	}}
+	merged := mergeBodies(base, patch)
+
+	// Scalars take the patch's value (the run-level summary is the last stage).
+	if merged.Model.Tier != "strong" || merged.Model.Model != "model-strong" {
+		t.Errorf("scalars = %s/%s, want strong/model-strong", merged.Model.Tier, merged.Model.Model)
+	}
+	// PerStage accumulates both stages.
+	if len(merged.Model.PerStage) != 2 {
+		t.Fatalf("PerStage = %d entries, want 2: %+v", len(merged.Model.PerStage), merged.Model.PerStage)
+	}
+	stages := make(map[string]StageModel, len(merged.Model.PerStage))
+	for _, entry := range merged.Model.PerStage {
+		stages[entry.Stage] = entry
+	}
+	if stages["spec"].Model != "model-fast" {
+		t.Errorf("spec stage model lost: %+v", stages["spec"])
+	}
+	if stages["impl"].Model != "model-strong" {
+		t.Errorf("impl stage model lost: %+v", stages["impl"])
+	}
+}
+
+// TestMergeBodies_PerStageModelReRunReplaces covers the resume case: a stage
+// re-run after resume supersedes its prior entry rather than appending a
+// duplicate, matching how the capability section handles a re-run.
+func TestMergeBodies_PerStageModelReRunReplaces(t *testing.T) {
+	t.Parallel()
+	base := Body{Model: &ModelEvidence{
+		PerStage: []StageModel{{Stage: "spec", Tier: "fast", Model: "model-fast-v1"}},
+	}}
+	patch := Body{Model: &ModelEvidence{
+		PerStage: []StageModel{{Stage: "spec", Tier: "strong", Model: "model-strong-v2"}},
+	}}
+	merged := mergeBodies(base, patch)
+	if len(merged.Model.PerStage) != 1 {
+		t.Fatalf("PerStage = %d entries, want 1 (replaced, not duplicated): %+v", len(merged.Model.PerStage), merged.Model.PerStage)
+	}
+	if merged.Model.PerStage[0].Model != "model-strong-v2" {
+		t.Errorf("spec stage not superseded: %+v", merged.Model.PerStage[0])
+	}
+}
+
 func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 	t.Parallel()
 	base := Body{Checks: &CheckEvidence{
