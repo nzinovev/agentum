@@ -576,13 +576,44 @@ race whatever the bytes say.
 | Phase | Action | Who |
 |---|---|---|
 | Init | `POST /tasks` creates a manifest row (empty body) | API |
-| Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage | runner |
-| Seal | At terminal state, `Seal(reason)` freezes the body. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failTask`) |
-| Correct | `POST /tasks/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot | API |
+| Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage / human-gate decisions. The merge base is the body read under the row lock inside the write transaction, so two concurrent writes cannot lose each other's contribution. | runner / API |
+| Seal | At terminal state, `Seal(reason)` derives `body.missing` and `body.evidence_complete` from the body under the row lock and freezes it. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failTask`) |
+| Correct | `POST /tasks/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot. Corrections chain: correction N's body is correction N-1's body with the patch merged in, so the newest correction is the authoritative state by construction. | API |
 
-Subsystems not yet wired (project memory, capability enforcement, project
-checks) are listed explicitly under `body.missing` — the manifest never hides
-an absent input, it surfaces it.
+**Concurrency.** `AddEvidence` computes its merge from the body read under the
+row lock (`GetManifestForUpdate`) inside the write transaction itself — not a
+pre-transaction snapshot. The SQL is a full body replacement, not a JSONB
+merge, because the deep merge happens once in Go against the locked bytes; a
+SQL-level `||` would be a second, shallow merge whose top-level-key-only
+semantics silently drop nested evidence a concurrent writer just committed.
+`AddEvidenceTx` exposes the tx-scoped write so a human-gate decision can commit
+atomically with the FSM transition it describes.
+
+**Corrections chain.** Each correction chains onto the prior one (the latest
+correction is the merge base, falling back to the sealed body for the first
+correction). The parent manifest row is the lock target, which serializes
+concurrent corrections even though there is no correction row to lock for the
+first one.
+
+**Evidence gaps and completeness.** A failed evidence write is itself recorded
+as an `EvidenceGap` (section, stage, reason, time) on the body — a sealed
+manifest that degraded silently is worse than one that is absent, because a
+reviewer cannot tell the two apart. At seal time the manifest carries an
+`evidence_complete` flag: false when any section is absent or degraded. The one
+exception is the initial evidence (input, project, pack, base commit): a failure
+there fails the run, because it is the provenance root every later piece of
+evidence chains off.
+
+**Derived missing.** `body.missing` is derived from the body at seal time
+(`Body.MissingSections()`), not asserted once at init. A stale claim (e.g.
+`capabilities` listed missing on a body that carries a populated capabilities
+section) therefore cannot survive to seal time. `memory` stays reported as
+missing because the memory subsystem is genuinely not wired yet.
+
+**Per-stage model.** `body.model.per_stage` records which model served each
+stage, so "which model wrote this code" is answerable per stage rather than only
+for whichever stage ran last. The scalar `model` / `tier` remain the run-level
+summary that the cross-run diff compares.
 
 ### Comparing two runs
 

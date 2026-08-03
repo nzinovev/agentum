@@ -276,6 +276,69 @@ Once tagged releases begin, this project adheres to
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
+- **Concurrent manifest evidence writes silently lost each other**: `AddEvidence`
+  computed its merge from a pre-transaction read and then took the row lock only
+  to re-check the seal, discarding the locked body. Two stages finishing close
+  together each merged onto the same stale base, and the SQL `||` (a
+  top-level-key-only JSONB merge) let the second writer's body replace the
+  first's at every top-level key — a spec stage's prompt hash could be erased by
+  a review stage finishing behind it, with nothing recording the loss. The merge
+  base is now the body read under the row lock inside the write transaction, and
+  the SQL is a full body replacement so the deep merge happens once, in Go.
+- **The second correction to a sealed manifest erased the first**: each
+  correction merged onto the sealed body rather than the latest correction, so
+  correction 2's snapshot dropped correction 1's changes, and the loss was
+  invisible because both correction rows still existed. Corrections now chain —
+  correction N's body is correction N-1's body with patch N merged in — under
+  the parent manifest row's lock, with an id DESC tiebreak on the
+  latest-correction lookup so the ordering is stable at transaction-clock
+  resolution.
+- **The manifest never recorded which artifact revisions a run produced or
+  consumed**: `captureStageOutputs` wrote each artifact into the revisions store
+  and threw away the `Revision` the Put returned, so the manifest's
+  `artifacts.outputs` was always empty and `GET /tasks/{id}/manifest/diff`
+  compared input artifacts between two runs by reading two nils. The revisions a
+  stage actually stored now accumulate as `ArtifactRef`s (revision id, content
+  hash, name, kind, stage) folded into the per-stage evidence write, and the
+  revisions materialized into the worktree on resume are recorded as
+  `artifacts.inputs`.
+- **Human gate decisions were never recorded**: every gate action transitioned
+  the FSM and enqueued a job but wrote no `HumanDecision`, so the manifest
+  section answering "who approved this, and when" was always empty — a pipeline
+  whose whole justification is human gates before delivery could not show that
+  any human passed any gate. The decision now commits atomically with the
+  transition it describes (via `AddEvidenceTx` in the handler's `runInTx`);
+  advance/approve/continue fail the request if the decision cannot be recorded,
+  while cancel tolerates a sealed/missing manifest.
+- **Evidence write failures were swallowed and the manifest still sealed as
+  complete**: every failed evidence write was `log.Warn`'d and the run
+  continued, so a task could reach `done` with a sealed manifest missing the
+  evidence for the stage that produced the delivered result, and the manifest
+  asserted nothing about the gap. A failed write is now itself recorded as an
+  `EvidenceGap`, and seal time derives a `missing` list and an
+  `evidence_complete` flag from the body as it actually is. The initial evidence
+  (input, project, pack, base commit) is the exception: a failure there now
+  fails the run, because it is the provenance root every later piece chains off.
+- **The manifest's `missing` list went stale**: it was written once at run start
+  and never revisited, so `capabilities` was listed missing on bodies that
+  carried a populated capabilities section (Epic 6 landed and the list never
+  moved), and `human_gates` would have gone stale the same way. `missing` is now
+  derived from the body at seal time via `Body.MissingSections()`.
+- **The manifest recorded only the last stage's model**: `Model` was a single
+  pointer each stage overwrote, so a pipeline running different tiers per stage
+  (cheap for analysis, expensive for implementation) recorded only whichever
+  stage ran last. `ModelEvidence.PerStage` now accumulates the model that served
+  each stage, replacing a stage's prior entry on a resume re-run; the scalar
+  remains the run-level summary the cross-run diff compares.
+- **The human artifact edit endpoint was a 501 stub**: `GET`/`PUT`
+  `/tasks/{id}/invocations/{iid}/artifacts/{name}` did not exist, so the
+  `human_edit` gate had no edit path, and PR C's optimistic-concurrency
+  preconditions (`ErrRevisionConflict`, `ErrSecretDetected`) had no HTTP mapping
+  and would have surfaced as 500s. The handlers now create a human-actor
+  revision with no source invocation, map the store errors to 409/422/404,
+  require `expected_revision_id` when a current revision exists (428 otherwise),
+  and record a `HumanDecision{decision: "edited"}` because the edit is the
+  approval.
 - **An agent could exfiltrate host files into the evidence store**: artifact
   paths in `result.json` are declared by the agent, and the runner resolved them
   by joining or — for an absolute path — using them verbatim, with no
