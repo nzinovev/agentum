@@ -72,13 +72,16 @@ Once tagged releases begin, this project adheres to
     `IdleTimeout` profile fields.
   - **Opencode adapter enforcement** (`internal/agent/enforce.go`): before the
     subprocess starts, the adapter confirms the profile is enforceable
-    (`EnforceableBy`), writes a per-invocation deny-by-default opencode
-    permission config (`<worktree>/.opencode/opencode.json`), scrubs
-    credential-bearing env vars (re-added only for granted `secret.<name>`),
-    applies deny patterns for delivery-ref mutation (`git push`, `git reset
-    --hard`, `git branch -D`, `git update-ref`, `git rebase`, …), and wraps ctx
-    with the hard/idle timeouts. An unenforceable profile refuses to start with
-    `stop_reason=capability_unenforceable`.
+    (`EnforceableBy`), renders a per-invocation deny-by-default opencode
+    permission config, scrubs credential-bearing env vars (re-added only for
+    granted `secret.<name>`), applies deny patterns for delivery-ref mutation
+    (`git push*`, `git reset --hard*`, `git branch -D*`, `git update-ref*`,
+    `git rebase*`, …), and wraps ctx with the hard/idle timeouts. An
+    unenforceable profile refuses to start with
+    `stop_reason=capability_unenforceable`. The config's shape, delivery, and
+    verification against a real opencode landed in the follow-up under *Fixed*;
+    `mcp.<server>` remains part of the capability vocabulary but is not
+    enforceable by this adapter and is refused rather than silently accepted.
   - **Pack role + stage capabilities**: optional `stage.role` (one of analyst /
     reviewer / implementer / fixer; defaults to a convention derived from the
     stage id) and optional `stage.capabilities` (a per-stage subset that
@@ -268,4 +271,78 @@ Once tagged releases begin, this project adheres to
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
+- **Capability profiles are now enforced by opencode, not merely rendered for
+  it**: the generated permission config was a boundary in name only. Five
+  independent defects, each confirmed against a real opencode 1.18.10 rather
+  than inferred from its documentation.
+  - **Path scopes were absolute, and absolute patterns never match.** opencode
+    normalises a tool's target path to a project-root-relative form before
+    matching, so every scoped rule was dead. The failure was silent: the deny
+    baseline refused the write while the config still read correctly, which
+    meant an analyst or reviewer could not produce `result.json` at all —
+    analytical stages of any pipeline could not complete. Scopes are now emitted
+    relative to the worktree (`${worktree}/**` → `**`, an artifact scope →
+    `.agentum/<task>/.ag-artifacts/<stage>/**`), and a scope that cannot be
+    expressed relative to the worktree is an error rather than a silently
+    dropped grant. The audit profile keeps absolute paths — it is evidence, not
+    configuration.
+  - **`write` is not an opencode permission key** (write and patch are governed
+    by `edit`), and eleven documented keys were never set at all. Since opencode
+    merges config sources and overrides only conflicting keys, every omitted key
+    fell through to the operator's global config or the repository's own
+    `opencode.json` — and `--auto` approves whatever is not explicitly denied.
+    The config now opens with a `"*": "deny"` catch-all and sets every
+    documented key, including `external_directory`, `task`, `skill`, `websearch`
+    and `lsp`.
+  - **The config could be overridden by the repository under test.** It was
+    written to `<worktree>/.opencode/opencode.json`: editable by the very agent
+    it constrains, and below a project's own `opencode.json` in precedence. It
+    now renders to a per-invocation directory outside the worktree (as
+    `OPENCODE_CONFIG`, for the audit trail) and is inlined into
+    `OPENCODE_CONFIG_CONTENT`, which loads above every project source; ambient
+    `OPENCODE_CONFIG*` variables are dropped from the child environment. As a
+    side effect the worktree is no longer dirtied on every run — which had made
+    `isClean()` permanently false and the `auto_if_clean` gate unreachable.
+  - **Every bash deny pattern was inert.** opencode matches bash rules as
+    wildcard patterns against the parsed command, not as substrings, so
+    `"git push"` matched only the argument-less command and `git push origin
+    HEAD` passed. All patterns now end in `*`; the common network clients are
+    additionally denied when `net.fetch` is not granted.
+  - **Rule order was correct by coincidence.** opencode resolves rules with the
+    last match winning, and the rendering used a Go map, which `encoding/json`
+    sorts. Rules are now an ordered list with an explicit deny-first invariant.
+  - `mcp` is removed from `adapter.Supported()`: opencode addresses MCP tools by
+    per-tool permission names this adapter cannot enumerate for an arbitrary
+    server, so "this server and nothing else" is not expressible. An `mcp.*`
+    grant now refuses the invocation instead of shipping a config that looks
+    like an allowlist and is not.
+  - Verified at two levels: `TestPermissionScope_*` pins the relative-scope rule
+    against a port of opencode's matcher (deterministic, no model in the loop),
+    and the opt-in `TestOpencodeLive_*` suite drives the real binary — an
+    analyst writes its own artifact, an analyst is refused a source edit, an
+    implementer is permitted one — asserting on the bytes on disk rather than on
+    the agent's account of what it did. `docs/capabilities.md` records the
+    version that passed.
+- **Agent invocations could not complete** (#19): the adapter created the run
+  context in `Invoke` and released it with a deferred cancel in the same
+  function. `Invoke` returns as soon as the subprocess starts, so the cancel
+  fired milliseconds into the agent's work and `exec.CommandContext` killed it —
+  every real run ended in "cancelled" regardless of the configured timeout.
+  Ownership now transfers to the goroutine draining the stream. Two adjacent
+  defects went with it: `cmd.Wait` was called twice (unsafe, and the async call
+  raced the stdout reads it must follow), and the idle watcher killed the
+  process without cancelling the context, surfacing an idle stop as a confusing
+  parse failure. Termination now escalates SIGTERM → SIGKILL after a grace
+  period. Pinned by subprocess tests that re-exec the test binary as a fake
+  agent, so they run in ordinary CI with no opencode binary.
+- **The repository did not build on Windows** (#19): the adapter's process-group
+  calls used POSIX-only `syscall` members, and CI runs on Linux, so nothing
+  caught it. They now sit behind per-GOOS implementations, and CI cross-builds
+  windows and darwin. This also exposed a Windows-only test failure that had
+  never been runnable there (a rendered-config assertion compared against a raw
+  path, while the path is backslash-escaped inside JSON).
+- **Contract failures now report what the agent did**: a missing `result.json`
+  used to say only that the file was absent. "The write was refused" and "the
+  agent never attempted it" need opposite fixes, and the agent's prose is not
+  evidence for either, so the error now carries the observed tool calls.
 - `store.Close` and SSE write errors are no longer silently dropped (#1).
