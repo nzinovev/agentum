@@ -555,7 +555,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	run.task = updatedTask
 	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
 
-	result, adapterErr, parseErr := runner.invokeStage(ctx, run, stageID, stage, resumeSession)
+	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession)
 
 	// If the run was cancelled (the cancel handler aborts it via the registry),
 	// bow out without touching the FSM — the handler owns the transition to
@@ -567,8 +567,8 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// A successful stage invocation crossed a boundary: capture the worktree's
 	// HEAD as an orchestrator-owned checkpoint so a later crash can restore to
 	// this point rather than blindly replaying the next side-effectful stage.
-	// Skipped on adapter/parse error — there is no trustworthy commit to record.
-	if result != nil && !adapterErr && !parseErr {
+	// Skipped on any failure flag — there is no trustworthy commit to record.
+	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
 		runner.recordStageCheckpoint(ctx, run, stageID)
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
 		// the manifest service is nil in unit tests.
@@ -576,12 +576,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	}
 
 	decision, err := Evaluate(StageInput{
-		Result:       result,
-		Stage:        stage,
-		StageID:      stageID,
-		Clean:        runner.isClean(run.project.RepoPath, run.task.ID),
-		AdapterError: adapterErr,
-		ParseError:   parseErr,
+		Result:           outcome.result,
+		Stage:            stage,
+		StageID:          stageID,
+		Clean:            runner.isClean(run.project.RepoPath, run.task.ID),
+		AdapterError:     outcome.adapterErr,
+		ParseError:       outcome.parseErr,
+		ArtifactRejected: outcome.rejected,
 	})
 	if err != nil {
 		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("evaluate stage %q: %w", stageID, err))
@@ -655,16 +656,29 @@ func (runner *Runner) transitionToFinalState(ctx context.Context, task sqlc.Task
 	return nil
 }
 
+// invocationOutcome is invokeStage's verdict for one adapter run. The three
+// failure flags are mutually exclusive and map one-to-one onto the evaluator's
+// stop reasons; result is nil unless the run produced a usable result.json that
+// the orchestrator was willing to act on.
+type invocationOutcome struct {
+	result     *agent.ResultJSON
+	adapterErr bool
+	parseErr   bool
+	// rejected is set when the agent declared an artifact path outside its
+	// worktree. The run itself succeeded; its output did not survive
+	// containment checking.
+	rejected bool
+}
+
 // invokeStage runs one stage through the adapter and records the outcome. It
 // creates the stage_invocation row at start (so a crash leaves a partial
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
-// row with session_id / stop_reason / parsed result. Returns the parsed result
-// (or nil) plus adapter-error / parse-error flags for the evaluator.
-func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string) (*agent.ResultJSON, bool, bool) {
+// row with session_id / stop_reason / parsed result.
+func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		runner.log.Error("create artifact dir", "dir", artifactDir, "error", err)
-		return nil, true, false
+		return invocationOutcome{adapterErr: true}
 	}
 
 	tier := stage.Tier
@@ -702,7 +716,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	})
 	if err != nil {
 		runner.log.Error("create stage invocation", "task", run.task.ID, "stage", stageID, "error", err)
-		return nil, true, false
+		return invocationOutcome{adapterErr: true}
 	}
 
 	// Record the effective profile as audit evidence before the run starts. A
@@ -729,7 +743,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		}
 		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
 		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
-		return nil, true, false
+		return invocationOutcome{adapterErr: true}
 	}
 
 	var (
@@ -744,13 +758,19 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	if terminal != nil {
 		sessionID = terminal.SessionID
 		telemetry = terminal.Telemetry
+		// Capture produced artifacts (result.json + the agent-declared artifact
+		// paths) into the durable revisions store. This runs before the
+		// invocation is finalized as successful, because a declared path that
+		// escapes the worktree is a terminal outcome for the stage: the
+		// orchestrator refuses to read it, so the stage did not produce the
+		// output it claims and must not be recorded as though it had.
+		if captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON); captureErr != nil {
+			runner.finalize(ctx, invocation, run.task, sessionID, "artifact_rejected", nil)
+			runner.log.Error("stage output rejected",
+				"task", run.task.ID, "stage", stageID, "error", captureErr)
+			return invocationOutcome{rejected: true}
+		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
-		// Capture produced artifacts (result.json + the agent-declared
-		// artifact paths) into the durable revisions store. Best-effort: a
-		// capture failure is logged and the run continues — the parsed result
-		// is already on the invocation row, and the manifest's "missing"
-		// section will record the gap.
-		runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
 		// Record evidence of the prompt + model + effective capability profile
 		// the adapter saw. The manifest service is nil in unit tests;
 		// AddEvidence is a no-op then.
@@ -759,14 +779,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,
 		})
-		return &terminal.ResultJSON, false, false
+		return invocationOutcome{result: &terminal.ResultJSON}
 	}
 	// EventError: classify. A result.json read/parse failure is a parse error
 	// (the agent ran but its output was unusable); anything else is an adapter
 	// error (crash, stream failure, cancellation).
 	reason := classifyAdapterFailure(terminalEr)
 	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
-	return nil, reason == "adapter_error", reason == "parse_error"
+	return invocationOutcome{
+		adapterErr: reason == "adapter_error",
+		parseErr:   reason == "parse_error",
+	}
 }
 
 // observeEvent folds one adapter stream event into the accumulator the drain
@@ -897,6 +920,13 @@ const (
 	// this run do" from it.
 	EvCapabilityEnforced = "stage.capability_enforced"
 	EvRevisionsSynced    = "task.revisions_synced"
+	// EvArtifactRejected records that the orchestrator refused to ingest an
+	// artifact the agent declared — because the path resolved outside the
+	// worktree, or because the artifact scanner found credential-shaped content
+	// under a reject policy. The event is the durable record that a declared
+	// output is deliberately absent from the store, which a missing revision
+	// alone cannot express.
+	EvArtifactRejected = "stage.artifact_rejected"
 	// EvProjectChecksRun records the orchestrator-owned project-check outcome at
 	// the delivery boundary. The manifest body carries the full per-check
 	// results; this event is the durable signal that Agentum ran its own checks

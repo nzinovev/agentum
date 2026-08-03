@@ -263,6 +263,11 @@ Once tagged releases begin, this project adheres to
   yet — that is PR3.
 
 ### Changed
+- **Blob storage sits behind an `artifacts.ObjectStore` interface** instead of
+  the concrete `*BlobStore`. The revisions index and the byte store were welded
+  together through a struct field, which pinned the durable layer to the local
+  filesystem; a deployment where the orchestrator is not the only reader of the
+  blobs needs an object-storage backend, and that is now a drop-in.
 - Postgres tables live in a dedicated `agentum` schema (created on boot before
   migrations run) instead of the default `public` schema (#1).
 - **Error responses are now structured**: `{"error":{"code":"...","message":"..."}}`
@@ -271,6 +276,62 @@ Once tagged releases begin, this project adheres to
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
+- **An agent could exfiltrate host files into the evidence store**: artifact
+  paths in `result.json` are declared by the agent, and the runner resolved them
+  by joining or — for an absolute path — using them verbatim, with no
+  containment check. `{"path": "/etc/passwd"}` or `{"path": "../../.ssh/id_rsa"}`
+  made the orchestrator read the file with its own privileges and store it as a
+  durable, API-readable artifact revision attributed to the task. All worktree
+  file access now goes through `artifacts.Container`, an `os.Root`-backed handle
+  that confines reads and writes to one tree.
+  - **A link the agent planted is an escape a path comparison cannot see**, and
+    resolving the path by hand does not close it either: `filepath.EvalSymlinks`
+    follows POSIX symlinks but returns Windows junctions unresolved, so a
+    junction inside a worktree reads as contained. Delegating to `os.Root` makes
+    the containment check the OS's, performed as part of the open — which also
+    removes the window between validating a path and using it.
+  - **The write side had the same hole.** `artifacts.Syncer` materializes
+    revisions back into a worktree the agent had write access to, guarded only
+    by a lexical check, so a planted link turned a sync into an overwrite of a
+    host file. It writes through the same container now.
+  - **Fail-closed, not skip-and-continue.** A declared path that escapes fails
+    the stage: the capture is all-or-nothing, the invocation is finalized with
+    `stop_reason = artifact_rejected`, a `stage.artifact_rejected` event records
+    the path and reason, and the task pauses for review. Recording the stage as
+    complete would have meant accepting output the orchestrator refused to read.
+    A declared-but-unwritten file remains an ordinary contract gap.
+- **Concurrent artifact writes could fork the revision chain**: the current
+  revision was read *before* the transaction that demoted it, so two writers for
+  the same `(task, name)` could both read revision N and chain two siblings off
+  it — the partial unique index then rejected one at random, after both had
+  written blobs. The read now happens inside the transaction under a row lock,
+  and the demotion targets that exact revision id so a zero-row update is a
+  conflict rather than a silent no-op. Two racing first-creates have no row to
+  lock; the index still serializes them, and the loser's constraint violation
+  now surfaces as `ErrRevisionConflict` instead of an opaque driver error.
+  - A related swallow is gone: `lookupCurrent` returned "no current revision" for
+    *any* store error, so a transient DB failure turned an edit into a create
+    that silently orphaned the existing chain.
+  - `PutParams.ExpectedCurrentRevision` adds an optimistic-concurrency
+    precondition for callers that composed an edit against a revision they were
+    looking at — the seam the human-edit API needs to answer 409 rather than
+    losing an update. Checked before the identical-content shortcut: a caller
+    whose pinned revision is gone has lost the race whatever the bytes say.
+- **Secret scanning had three gaps** (`artifacts.Scanner`, formerly `Redactor`):
+  - **Binary artifacts were not scanned at all**, so a credential inside one
+    entered the store unnoticed. They are now matched against the context-free
+    rules (AKIA, `ghp_`, PEM headers) but never rewritten — substituting a
+    placeholder would change the blob's length and corrupt it — so detection is
+    reported and `reject` is what actually stops the write.
+  - **There was no policy knob**: findings were always redacted, which is the
+    wrong default for a deployment where a credential in an artifact is an
+    incident. `AGENTUM_ARTIFACT_SCAN_POLICY` selects `redact` (default) or
+    `reject`; an unrecognized value fails at startup rather than falling back, so
+    an operator who asked for rejection never silently gets redaction.
+  - **A credential-shaped *name* was accepted.** `.ssh/id_rsa`,
+    `.aws/credentials`, `.env`, `.netrc`, `*.pem` and similar are now refused
+    under every policy — a path has nothing to redact. `.env.example` and its
+    siblings stay allowed.
 - **Capability profiles are now enforced by opencode, not merely rendered for
   it**: the generated permission config was a boundary in name only. Five
   independent defects, each confirmed against a real opencode 1.18.10 rather

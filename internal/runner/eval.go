@@ -70,6 +70,12 @@ type StageInput struct {
 	// Distinct from AdapterError: the agent ran and exited, but its output was
 	// unusable.
 	ParseError bool
+
+	// ArtifactRejected is set when the agent declared an artifact path that the
+	// orchestrator refused to read (it resolved outside the worktree). Distinct
+	// from ParseError: result.json parsed fine, but acting on it would have
+	// meant reading outside the task's own tree.
+	ArtifactRejected bool
 }
 
 // Evaluate maps a stage's outcome to a Decision. It is pure and table-tested.
@@ -86,6 +92,14 @@ func Evaluate(input StageInput) (Decision, error) {
 	// retryable shape; the user reviews the worktree and retries.
 	if input.ParseError {
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "parse_error"}, nil
+	}
+	// Containment breach: result.json parsed, but it declared an artifact
+	// outside the worktree and the orchestrator refused to read it. Checked
+	// before the result is consulted at all — a declared status of "complete"
+	// carries no weight when the output it points at was rejected. Its own stop
+	// reason, so a reviewer sees why the stage stopped without reading the log.
+	if input.ArtifactRejected {
+		return Decision{Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "artifact_rejected"}, nil
 	}
 	if input.Result == nil {
 		// Defensive: no error flag and no result is a programming error.

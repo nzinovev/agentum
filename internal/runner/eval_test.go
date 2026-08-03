@@ -138,6 +138,27 @@ func TestEvaluate(t *testing.T) {
 			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "adapter_error",
 		},
 		{
+			name: "rejected artifact → retryable pause with its own stop reason",
+			input: StageInput{
+				Result:           &agent.ResultJSON{Status: agent.StatusComplete},
+				Stage:            nextStage("impl"),
+				ArtifactRejected: true,
+			},
+			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "artifact_rejected",
+		},
+		{
+			name: "a rejected artifact outranks the agent's own claim of completion",
+			input: StageInput{
+				// The gate would auto-advance this stage. It must not: the
+				// output the result points at was refused, so "complete" is a
+				// claim about work the orchestrator declined to accept.
+				Result:           &agent.ResultJSON{Status: agent.StatusComplete},
+				Stage:            pack.Stage{Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "review"}}},
+				ArtifactRejected: true,
+			},
+			wantAction: ActionPause, wantEvent: engine.EventStopUser, wantStop: "artifact_rejected",
+		},
+		{
 			name:    "no result and no error → programming error",
 			input:   StageInput{Stage: nextStage("impl")},
 			wantErr: true,
@@ -204,13 +225,14 @@ func TestEvaluate_StopReasonsAreDistinct(t *testing.T) {
 	// not collide. Enumerate the values Evaluate can emit.
 	want := map[string]bool{
 		"open_questions": false, "gate": false,
-		"adapter_error": false, "parse_error": false,
+		"adapter_error": false, "parse_error": false, "artifact_rejected": false,
 	}
 	cases := []StageInput{
 		{Result: &agent.ResultJSON{Status: agent.StatusBlocked, OpenQuestions: []string{"q"}}, Stage: nextStage("i")},
 		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: pack.Stage{Gate: pack.GateHumanApproval, Transitions: []pack.Transition{{To: "r"}}}},
 		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: nextStage("i"), AdapterError: true},
 		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: nextStage("i"), ParseError: true},
+		{Result: &agent.ResultJSON{Status: agent.StatusComplete}, Stage: nextStage("i"), ArtifactRejected: true},
 	}
 	for _, caseInput := range cases {
 		decision, _ := Evaluate(caseInput)

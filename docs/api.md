@@ -285,6 +285,7 @@ data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
 | `stage.tool` | `{task_id, invocation_id, tool, target, status}` | adapter (tool activity) |
 | `stage.stopped` | `{task_id, invocation_id, stop_reason}` | runner at a stop point |
 | `stage.result` | `{task_id, invocation_id, status, open_questions, ...}` | runner after result.json |
+| `stage.artifact_rejected` | `{task_id, stage, path, reason}` | runner when a declared artifact is refused (`reason` ∈ `escapes_worktree`, `unresolvable`, `secret_detected`) |
 | `memory.committed` | `{task_id, entries:[...]}` | memory layer at final approval |
 | `run.log` | `{task_id, level, message}` | runner / adapter diagnostics |
 

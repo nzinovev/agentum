@@ -50,6 +50,10 @@ type BlobStore struct {
 	Root string
 }
 
+// BlobStore is the only production ObjectStore. The assertion keeps the
+// interface and the implementation from drifting apart silently.
+var _ ObjectStore = (*BlobStore)(nil)
+
 // NewBlobStore returns a BlobStore rooted at root. The directory is not
 // touched until the first Put; MkdirAll handles parent creation.
 func NewBlobStore(root string) *BlobStore { return &BlobStore{Root: root} }
