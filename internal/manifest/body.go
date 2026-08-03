@@ -187,11 +187,14 @@ type CheckResult struct {
 	Source             string `json:"source,omitempty"`
 }
 
-// HumanDecision is one human gate decision.
+// HumanDecision is one human gate decision. Decision is one of: approved (a
+// gate was passed), rejected (the run was cancelled), edited (a human edit at a
+// human_edit gate — the edit is the approval), continued (a paused run was
+// resumed past an open_questions or user_stop pause).
 type HumanDecision struct {
 	Stage     string    `json:"stage"`
 	Gate      string    `json:"gate"`
-	Decision  string    `json:"decision"` // approved | rejected | edited
+	Decision  string    `json:"decision"` // approved | rejected | edited | continued
 	Actor     string    `json:"actor"`
 	Timestamp time.Time `json:"timestamp"`
 }

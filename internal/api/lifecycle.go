@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -19,7 +21,8 @@ const msgTaskNotFound = "task not found"
 // Resume after open_questions / user_stop (session-id resume). The body carries
 // optional answers/context appended to the resumed session.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requirePrincipal(w, r); !ok {
+	principal, ok := requirePrincipal(w, r)
+	if !ok {
 		return
 	}
 	// Continue is valid from either open-questions or user-stop pause.
@@ -34,9 +37,14 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var event engine.TaskEvent
+	var gate string
 	switch engine.TaskState(task.State) {
-	case engine.StatePausedOpenQuestions, engine.StatePausedUserStop:
+	case engine.StatePausedOpenQuestions:
 		event = engine.EventContinue
+		gate = gateOpenQuestions
+	case engine.StatePausedUserStop:
+		event = engine.EventContinue
+		gate = gateUserStop
 	default:
 		writeError(w, http.StatusConflict, codeIllegalTransition,
 			"continue requires paused_open_questions or paused_user_stop; task is "+task.State)
@@ -46,8 +54,16 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 	_ = json.NewDecoder(r.Body).Decode(&body) // optional; ignored at MVP
 	payload, _ := json.Marshal(body)
 
-	updated, err := api.applyResume(r, task, event, "continue", payload)
+	updated, err := api.applyResume(r, task, event, "continue", payload, humanDecisionPatch(
+		currentStageOr(task.CurrentStage, ""), gate, decisionContinued,
+		principal.UserID, time.Now().UTC(),
+	))
 	if err != nil {
+		if isHumanDecisionRecordFailure(err) {
+			writeError(w, http.StatusInternalServerError, codeInternal,
+				"could not record the continue decision; the task was not resumed")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
@@ -99,9 +115,16 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
 	}
-	// Transactional outbox: the done transition and the teardown-job enqueue
-	// commit atomically. result_commit capture happens inside the teardown job
-	// (the runner owns the worktree manager) before the worktree is removed.
+	// Transactional outbox: the done transition, the teardown-job enqueue, and
+	// the human-decision evidence commit atomically. result_commit capture
+	// happens inside the teardown job (the runner owns the worktree manager)
+	// before the worktree is removed. The approval decision rides in the same
+	// tx as the transition it gates: a crash between them cannot leave a task
+	// that advanced past final approval with no record of who let it through.
+	decision := humanDecisionPatch(
+		currentStageOr(task.CurrentStage, ""), gateFinal, decisionApproved,
+		principal.UserID, time.Now().UTC(),
+	)
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
@@ -115,9 +138,17 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+			return err
+		}
 		updated = transitioned
 		return nil
 	}); err != nil {
+		if isHumanDecisionRecordFailure(err) {
+			writeError(w, http.StatusInternalServerError, codeInternal,
+				"could not record the approval decision; the task was not advanced")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
@@ -167,7 +198,15 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
 	}
-	// Transactional outbox: abort transition + teardown enqueue in one tx.
+	// Transactional outbox: abort transition + teardown enqueue in one tx. The
+	// cancel decision rides in the same tx, but a cancel on a task whose
+	// manifest sealed during a crash is legitimate — a sealed/missing manifest
+	// is non-fatal here (unlike approve/advance, where failing to record the
+	// decision must fail the request).
+	decision := humanDecisionPatch(
+		currentStageOr(task.CurrentStage, ""), gateCancel, decisionRejected,
+		principal.UserID, time.Now().UTC(),
+	)
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
@@ -181,6 +220,9 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+			return err
+		}
 		updated = transitioned
 		return nil
 	}); err != nil {
@@ -193,9 +235,10 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 
 // applyResume runs the FSM transition and enqueues the driving job, carrying an
 // optional payload (continue's answers/context). Shared by continue/advance.
-// Transactional outbox (F.6.1 AC #6): the transition and the enqueue commit in
-// one tx, so a resume can never leave the task running with no driver job.
-func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEvent, kind string, payload []byte) (sqlc.Task, error) {
+// Transactional outbox (F.6.1 AC #6): the transition, the enqueue, and the
+// human-decision evidence commit in one tx, so a resume can never leave the
+// task running with no driver job and no record of who resumed it.
+func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEvent, kind string, payload []byte, decision manifest.Body) (sqlc.Task, error) {
 	principal, _ := authz.PrincipalFrom(r.Context())
 	next, err := engine.Next(engine.TaskState(task.State), event)
 	if err != nil {
@@ -217,6 +260,9 @@ func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEv
 			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: kind, Payload: jobPayload,
 		}); enqueueErr != nil {
 			return enqueueErr
+		}
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+			return err
 		}
 		updated = transitioned
 		return nil
@@ -250,8 +296,16 @@ func (api *API) resumeFromPauseRead(w http.ResponseWriter, r *http.Request, want
 			string(event)+" requires "+string(want)+"; task is "+task.State)
 		return sqlc.Task{}, false
 	}
-	updated, err := api.applyResume(r, task, event, kind, nil)
+	updated, err := api.applyResume(r, task, event, kind, nil, humanDecisionPatch(
+		currentStageOr(task.CurrentStage, ""), gateAdvance, decisionApproved,
+		principal.UserID, time.Now().UTC(),
+	))
 	if err != nil {
+		if isHumanDecisionRecordFailure(err) {
+			writeError(w, http.StatusInternalServerError, codeInternal,
+				"could not record the advance decision; the task was not advanced")
+			return sqlc.Task{}, false
+		}
 		statusForTransition(w, err)
 		return sqlc.Task{}, false
 	}
