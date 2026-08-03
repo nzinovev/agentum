@@ -127,24 +127,32 @@ func (q *Queries) CurrentArtifactRevisionForName(ctx context.Context, arg Curren
 	return i, err
 }
 
-const demoteArtifactRevision = `-- name: DemoteArtifactRevision :exec
+const demoteArtifactRevisionIfCurrent = `-- name: DemoteArtifactRevisionIfCurrent :execrows
 UPDATE artifact_revisions SET is_current = false
-WHERE task_id = $1 AND name = $2 AND is_current = true
+WHERE task_id = $1 AND name = $2 AND id = $3 AND is_current = true
 `
 
-type DemoteArtifactRevisionParams struct {
+type DemoteArtifactRevisionIfCurrentParams struct {
 	TaskID string `json:"task_id"`
 	Name   string `json:"name"`
+	ID     string `json:"id"`
 }
 
-// Flip the prior current revision of (task_id, name) to is_current=false. Run
-// inside the same transaction as CreateArtifactRevision so the
-// idx_artifact_rev_current unique partial index never sees two currents at
-// once. The WHERE keeps it a no-op when there is no prior current revision
-// (first create).
-func (q *Queries) DemoteArtifactRevision(ctx context.Context, arg DemoteArtifactRevisionParams) error {
-	_, err := q.db.ExecContext(ctx, demoteArtifactRevision, arg.TaskID, arg.Name)
-	return err
+// Flip one specific revision of (task_id, name) from current to superseded.
+// Pinning the id (rather than "whatever is current") is what makes the write
+// safe under concurrency: the caller read that id inside this transaction, so
+// an affected-row count of 0 means another writer moved the chain in between
+// and the caller must abort with ErrRevisionConflict rather than chain onto a
+// revision that is no longer current.
+//
+// Runs in the same transaction as CreateArtifactRevision so the
+// idx_artifact_rev_current unique partial index never sees two currents at once.
+func (q *Queries) DemoteArtifactRevisionIfCurrent(ctx context.Context, arg DemoteArtifactRevisionIfCurrentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, demoteArtifactRevisionIfCurrent, arg.TaskID, arg.Name, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getArtifactRevision = `-- name: GetArtifactRevision :one
@@ -340,4 +348,50 @@ func (q *Queries) ListCurrentArtifactRevisionsForTask(ctx context.Context, arg L
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockCurrentArtifactRevisionForName = `-- name: LockCurrentArtifactRevisionForName :one
+SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+WHERE task_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
+FOR UPDATE
+`
+
+type LockCurrentArtifactRevisionForNameParams struct {
+	TaskID   string `json:"task_id"`
+	TenantID string `json:"tenant_id"`
+	Name     string `json:"name"`
+}
+
+// The same lookup as CurrentArtifactRevisionForName, but taking a row lock so
+// the read-decide-write sequence in artifacts.SQLStore.Put is serialized
+// against concurrent writers to the same (task_id, name). Must be called inside
+// a transaction; a second writer blocks here until the first commits and then
+// observes the new current revision.
+//
+// No row to lock means no current revision, which is the "first create" case:
+// two racing first-creates are caught instead by the idx_artifact_rev_current
+// unique partial index, and the loser's insert fails.
+func (q *Queries) LockCurrentArtifactRevisionForName(ctx context.Context, arg LockCurrentArtifactRevisionForNameParams) (ArtifactRevision, error) {
+	row := q.db.QueryRowContext(ctx, lockCurrentArtifactRevisionForName, arg.TaskID, arg.TenantID, arg.Name)
+	var i ArtifactRevision
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.TaskID,
+		&i.Name,
+		&i.Kind,
+		&i.ContentHash,
+		&i.ContentSize,
+		&i.ActionType,
+		&i.PrevRevisionID,
+		&i.SourceInvocationID,
+		&i.DeliveryStep,
+		&i.ExecutionUnit,
+		&i.Phase,
+		&i.Actor,
+		&i.CreatedAt,
+		&i.IsCurrent,
+	)
+	return i, err
 }

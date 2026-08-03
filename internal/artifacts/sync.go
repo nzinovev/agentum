@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -30,7 +27,7 @@ type revisionIndex interface {
 // the worktree FS — it never touches the index, never creates revisions.
 type Syncer struct {
 	index revisionIndex
-	blobs *BlobStore
+	blobs ObjectStore
 }
 
 // NewSyncer returns a Syncer backed by the given SQLStore. The Syncer reaches
@@ -40,10 +37,10 @@ func NewSyncer(store *SQLStore) *Syncer {
 }
 
 // newSyncerForTest is the test-only constructor that wires an arbitrary
-// revisionIndex + BlobStore. Lives in the production file (not _test.go)
+// revisionIndex + ObjectStore. Lives in the production file (not _test.go)
 // because the test that needs it lives in the same package; the unexported
 // name keeps it out of the public API.
-func newSyncerForTest(index revisionIndex, blobs *BlobStore) *Syncer {
+func newSyncerForTest(index revisionIndex, blobs ObjectStore) *Syncer {
 	return &Syncer{index: index, blobs: blobs}
 }
 
@@ -73,6 +70,12 @@ type SyncResult struct {
 // It overwrites the file at Path. Skips (with Skipped=true) when the name has
 // no current revision and RevisionID is empty. Returns one SyncResult per
 // target, in order.
+//
+// Every write goes through a Container rooted at rootDir. The write side needs
+// the same containment as the read side: a revision name is durable state that
+// an earlier stage influenced, and the worktree it is written back into is a
+// tree the agent had write access to — so an unchecked write could follow a
+// planted link out of the worktree and overwrite a host file.
 func (syncer *Syncer) Sync(
 	ctx context.Context,
 	tenantID, taskID string,
@@ -80,36 +83,35 @@ func (syncer *Syncer) Sync(
 	targets []SyncTarget,
 ) ([]SyncResult, error) {
 	results := make([]SyncResult, 0, len(targets))
+	container, err := OpenContainer(rootDir)
+	if err != nil {
+		return results, err
+	}
+	defer func() { _ = container.Close() }()
+
 	for _, target := range targets {
 		result := SyncResult{Target: target}
-		revision, found, err := syncer.resolveRevision(ctx, tenantID, taskID, target)
-		if err != nil {
-			return results, err
+		revision, found, resolveErr := syncer.resolveRevision(ctx, tenantID, taskID, target)
+		if resolveErr != nil {
+			return results, resolveErr
 		}
 		if !found {
 			result.Skipped = true
 			results = append(results, result)
 			continue
 		}
-		bytes, err := syncer.blobs.Get(revision.ContentHash)
-		if err != nil {
-			return results, fmt.Errorf("artifacts: sync %q: read blob: %w", target.Name, err)
+		// Resolve the destination before reading the blob: a target that fails
+		// containment should cost nothing.
+		destination, pathErr := container.Resolve(target.Path)
+		if pathErr != nil {
+			return results, fmt.Errorf("artifacts: sync %q: %w", target.Name, pathErr)
 		}
-		absPath := target.Path
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(rootDir, absPath)
+		bytes, blobErr := syncer.blobs.Get(revision.ContentHash)
+		if blobErr != nil {
+			return results, fmt.Errorf("artifacts: sync %q: read blob: %w", target.Name, blobErr)
 		}
-		// Sanitize: the resolved path must stay under rootDir. An absolute
-		// target.Path outside rootDir is rejected; a relative path with ../
-		// escapes is rejected after Join.
-		if err := ensureInside(rootDir, absPath); err != nil {
-			return results, fmt.Errorf("artifacts: sync %q: %w", target.Name, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-			return results, fmt.Errorf("artifacts: sync %q: mkdir: %w", target.Name, err)
-		}
-		if err := os.WriteFile(absPath, bytes, 0o644); err != nil {
-			return results, fmt.Errorf("artifacts: sync %q: write: %w", target.Name, err)
+		if writeErr := container.WriteFile(destination.Name, bytes, 0o644); writeErr != nil {
+			return results, fmt.Errorf("artifacts: sync %q: %w", target.Name, writeErr)
 		}
 		result.RevisionID = revision.ID
 		result.Hash = revision.ContentHash
@@ -142,18 +144,4 @@ func (syncer *Syncer) resolveRevision(
 		return sqlc.ArtifactRevision{}, false, err
 	}
 	return row, true, nil
-}
-
-// ensureInside verifies absPath is contained by rootDir. Both must be absolute.
-// Returns an error when the path escapes via ../ or by being absolute outside
-// the root.
-func ensureInside(rootDir, absPath string) error {
-	rel, err := filepath.Rel(rootDir, absPath)
-	if err != nil {
-		return fmt.Errorf("resolve %q under %q: %w", absPath, rootDir, err)
-	}
-	if strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("path %q escapes root %q", absPath, rootDir)
-	}
-	return nil
 }

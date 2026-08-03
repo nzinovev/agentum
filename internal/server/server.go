@@ -53,10 +53,11 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 	packs := pack.NewDirSource(cfg.PacksDir)
 	adapter := agent.NewOpencodeAdapter(cfg.OpencodeBinary)
 	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
-		DB:      dataStore.DB,
-		Queries: queries,
-		Blobs:   artifacts.NewBlobStore(cfg.ArtifactRoot),
-		Log:     log,
+		DB:         dataStore.DB,
+		Queries:    queries,
+		Blobs:      artifacts.NewBlobStore(cfg.ArtifactRoot),
+		ScanPolicy: artifacts.ScanPolicy(cfg.ArtifactScanPolicy),
+		Log:        log,
 	})
 	manifestService := manifest.New(manifest.Deps{
 		DB:      dataStore.DB,

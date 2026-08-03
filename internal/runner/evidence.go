@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
@@ -21,75 +20,145 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
+// ErrArtifactEscapesWorktree is returned by captureStageOutputs when the agent
+// declared an artifact path that resolves outside its own worktree. It is a
+// distinct terminal outcome, not a warning: see captureStageOutputs.
+var ErrArtifactEscapesWorktree = errors.New("runner: declared artifact escapes the worktree")
+
 // captureStageOutputs reads the artifacts the agent declared in result.json,
 // plus result.json itself, and ingests each into the durable revisions store.
-// Best-effort: a missing file is logged and skipped; the manifest's "missing"
-// section records the gap. Each captured artifact becomes a new immutable
-// revision chained to the prior current revision of its (task, name). The
-// source invocation id is recorded so the manifest can resolve "what did this
-// invocation produce."
+// Each captured artifact becomes a new immutable revision chained to the prior
+// current revision of its (task, name). The source invocation id is recorded so
+// the manifest can resolve "what did this invocation produce."
+//
+// Two failure modes, deliberately different:
+//
+//   - A declared file that was never written is a contract gap. Logged and
+//     skipped; the manifest's "missing" section records it and the run goes on.
+//   - A declared path that resolves outside the worktree is a containment
+//     breach, and it fails the stage. The path in result.json is untrusted
+//     input, and the orchestrator reads it with its own privileges — honouring
+//     "/etc/passwd" or a link the agent planted itself would copy host files
+//     into a durable, API-readable evidence store. Nothing is read, the whole
+//     capture aborts, and the caller pauses the task for review rather than
+//     recording a success built on output it refused to accept.
 func (runner *Runner) captureStageOutputs(
 	ctx context.Context,
 	run stageRun,
 	stageID, invocationID, artifactDir string,
 	result *agent.ResultJSON,
-) {
+) error {
 	if runner.art == nil {
-		return
+		return nil
+	}
+	container, err := artifacts.OpenContainer(run.worktree.Root)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrArtifactEscapesWorktree, err)
+	}
+	defer func() { _ = container.Close() }()
+
+	// The declared paths are validated up front, before anything is ingested:
+	// a breach must not leave half the stage's output in the store.
+	declared, err := runner.resolveDeclaredArtifacts(ctx, container, run, stageID, result)
+	if err != nil {
+		return err
 	}
 	// Always capture result.json itself — it is the contract-shaped output of
 	// the invocation, and the canonical artifact the next stage reads by path.
+	// The artifact dir is orchestrator-constructed, so it needs no containment
+	// check of its own.
 	runner.captureFile(ctx, run, stageID, invocationID, artifactDir, "result.json", "result_json")
-	if result == nil {
-		return
-	}
-	for _, declared := range result.Artifacts {
-		// Agent-declared paths may be relative to the worktree root or
-		// absolute within it. Resolve relative to the worktree root so we read
-		// what the agent actually wrote, not the artifact-dir.
-		path := declared.Path
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(run.worktree.Root, path)
+	for _, artifact := range declared {
+		bytes, readErr := container.ReadFile(artifact.name)
+		if readErr != nil {
+			if !errors.Is(readErr, os.ErrNotExist) {
+				runner.log.Warn("capture artifact: read",
+					"task", run.task.ID, "name", artifact.name, "error", readErr)
+			}
+			continue
 		}
-		// The name in the revisions index is the worktree-relative path. Use
-		// the agent-declared Path verbatim — that is the contract-shaped name
-		// the next stage will look up.
-		name := strings.TrimPrefix(declared.Path, "/")
+		runner.ingest(ctx, run, stageID, invocationID, artifact.name, artifact.kind, bytes)
+	}
+	return nil
+}
+
+// declaredArtifact is one agent-declared artifact after containment checking:
+// the worktree-relative name it is read and indexed under, plus its kind.
+type declaredArtifact struct {
+	name string
+	kind string
+}
+
+// resolveDeclaredArtifacts validates every path the agent declared against the
+// worktree container. Returns ErrArtifactEscapesWorktree on the first path that
+// leaves the worktree — all-or-nothing, so a breach cannot partially land.
+func (runner *Runner) resolveDeclaredArtifacts(
+	ctx context.Context,
+	container *artifacts.Container,
+	run stageRun,
+	stageID string,
+	result *agent.ResultJSON,
+) ([]declaredArtifact, error) {
+	if result == nil {
+		return nil, nil
+	}
+	resolved := make([]declaredArtifact, 0, len(result.Artifacts))
+	for _, declared := range result.Artifacts {
+		target, err := container.Resolve(declared.Path)
+		if err != nil {
+			// A malformed declaration (empty path, unreadable link) is refused
+			// alongside an outright escape: both are output the orchestrator
+			// cannot safely act on, and guessing at the intent is what let the
+			// escape through in the first place.
+			reason := "unresolvable"
+			if errors.Is(err, artifacts.ErrPathEscapesRoot) {
+				reason = "escapes_worktree"
+			}
+			runner.emit(ctx, run.task, EvArtifactRejected, map[string]any{
+				"stage": stageID, "path": declared.Path, "reason": reason,
+			})
+			return nil, fmt.Errorf("%w: %q: %w", ErrArtifactEscapesWorktree, declared.Path, err)
+		}
 		kind := declared.Kind
 		if kind == "" {
 			kind = "file"
 		}
-		runner.captureFilePath(ctx, run, stageID, invocationID, path, name, kind)
+		resolved = append(resolved, declaredArtifact{name: target.Name, kind: kind})
 	}
+	return resolved, nil
 }
 
-// captureFile reads artifactDir/name and ingests it. Used for result.json and
-// for any other well-known per-stage output that lives under artifactDir.
+// captureFile reads artifactDir/name and ingests it under "<stage>/<name>".
+// Used for result.json and for any other well-known per-stage output that lives
+// under the orchestrator-constructed artifact dir — a trusted path, unlike the
+// agent-declared ones, which go through the container.
 func (runner *Runner) captureFile(
 	ctx context.Context,
 	run stageRun,
 	stageID, invocationID, artifactDir, name, kind string,
 ) {
-	fullPath := filepath.Join(artifactDir, name)
-	revisionName := stageID + "/" + name
-	runner.captureFilePath(ctx, run, stageID, invocationID, fullPath, revisionName, kind)
-}
-
-// captureFilePath reads the file at fullPath and ingests it under revisionName.
-// Missing file is logged and skipped — the agent may have declared a target it
-// did not end up writing, and that is a contract gap the manifest records.
-func (runner *Runner) captureFilePath(
-	ctx context.Context,
-	run stageRun,
-	stageID, invocationID, fullPath, revisionName, kind string,
-) {
-	bytes, err := os.ReadFile(fullPath)
+	bytes, err := os.ReadFile(filepath.Join(artifactDir, name))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			runner.log.Warn("capture artifact: read", "task", run.task.ID, "name", revisionName, "error", err)
+			runner.log.Warn("capture artifact: read", "task", run.task.ID, "name", name, "error", err)
 		}
 		return
 	}
+	runner.ingest(ctx, run, stageID, invocationID, stageID+"/"+name, kind, bytes)
+}
+
+// ingest writes one artifact into the durable revisions store.
+//
+// A Put the store refuses (a credential-shaped artifact, a revision conflict)
+// is logged and skipped rather than failing the stage: unlike a containment
+// breach, nothing was read that should not have been, and the gap is visible in
+// the revisions list. The store's own log line names the rule that fired.
+func (runner *Runner) ingest(
+	ctx context.Context,
+	run stageRun,
+	stageID, invocationID, revisionName, kind string,
+	bytes []byte,
+) {
 	if _, putErr := runner.art.Put(ctx, artifacts.PutParams{
 		TenantID: run.task.TenantID,
 		UserID:   run.task.UserID,
@@ -100,7 +169,16 @@ func (runner *Runner) captureFilePath(
 		Source:   invocationID,
 		Actor:    artifacts.ActorAgent,
 	}); putErr != nil {
-		runner.log.Warn("capture artifact: put", "task", run.task.ID, "name", revisionName, "error", putErr)
+		runner.log.Warn("capture artifact: put",
+			"task", run.task.ID, "stage", stageID, "name", revisionName, "error", putErr)
+		if errors.Is(putErr, artifacts.ErrSecretDetected) {
+			// The operator configured reject-on-secret and the store enforced
+			// it. Surface it on the event stream: a silently absent artifact is
+			// indistinguishable from one the agent never wrote.
+			runner.emit(ctx, run.task, EvArtifactRejected, map[string]any{
+				"stage": stageID, "path": revisionName, "reason": "secret_detected",
+			})
+		}
 	}
 }
 

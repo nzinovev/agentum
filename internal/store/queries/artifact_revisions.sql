@@ -18,14 +18,18 @@ INSERT INTO artifact_revisions (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true)
 RETURNING *;
 
--- name: DemoteArtifactRevision :exec
--- Flip the prior current revision of (task_id, name) to is_current=false. Run
--- inside the same transaction as CreateArtifactRevision so the
--- idx_artifact_rev_current unique partial index never sees two currents at
--- once. The WHERE keeps it a no-op when there is no prior current revision
--- (first create).
+-- name: DemoteArtifactRevisionIfCurrent :execrows
+-- Flip one specific revision of (task_id, name) from current to superseded.
+-- Pinning the id (rather than "whatever is current") is what makes the write
+-- safe under concurrency: the caller read that id inside this transaction, so
+-- an affected-row count of 0 means another writer moved the chain in between
+-- and the caller must abort with ErrRevisionConflict rather than chain onto a
+-- revision that is no longer current.
+--
+-- Runs in the same transaction as CreateArtifactRevision so the
+-- idx_artifact_rev_current unique partial index never sees two currents at once.
 UPDATE artifact_revisions SET is_current = false
-WHERE task_id = $1 AND name = $2 AND is_current = true;
+WHERE task_id = $1 AND name = $2 AND id = $3 AND is_current = true;
 
 -- name: GetArtifactRevision :one
 SELECT * FROM artifact_revisions WHERE id = $1 AND tenant_id = $2;
@@ -36,6 +40,20 @@ SELECT * FROM artifact_revisions WHERE id = $1 AND tenant_id = $2;
 -- max. Returns no rows when the task has no revision of that name yet.
 SELECT * FROM artifact_revisions
 WHERE task_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true;
+
+-- name: LockCurrentArtifactRevisionForName :one
+-- The same lookup as CurrentArtifactRevisionForName, but taking a row lock so
+-- the read-decide-write sequence in artifacts.SQLStore.Put is serialized
+-- against concurrent writers to the same (task_id, name). Must be called inside
+-- a transaction; a second writer blocks here until the first commits and then
+-- observes the new current revision.
+--
+-- No row to lock means no current revision, which is the "first create" case:
+-- two racing first-creates are caught instead by the idx_artifact_rev_current
+-- unique partial index, and the loser's insert fails.
+SELECT * FROM artifact_revisions
+WHERE task_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
+FOR UPDATE;
 
 -- name: ListArtifactRevisionsForTask :many
 -- All revisions for a task, newest first. Includes prior, non-current

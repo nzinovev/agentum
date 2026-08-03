@@ -112,6 +112,7 @@ happened (`04 §7.1.6`).
 | final stage + final gate reached | `reach_final_gate` | `awaiting_memory_commit` | — |
 | `result.json` missing / invalid | `stop_user` | `paused_user_stop` | `parse_error` |
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
+| declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
 Multi-branch transitions are unconditional in F.6 (a stage declares one
@@ -472,14 +473,96 @@ artifact_revisions(
   optional and inert when NULL. Single-unit runs leave it empty; Epic 8
   populates it.
 
-### Secret redaction
+### Artifact containment
 
-Before bytes enter the store, `artifacts.DefaultRedactor` scans text-kind
-content for high-entropy token patterns (Authorization / Bearer headers, AWS
-AKIA keys, GitHub PATs, generic `token|secret|password|api_key`-labeled
-values, PEM private key blocks) and substitutes `[REDACTED]` for matches.
-Binary content is passed through. The redactor is best-effort, not a security
-boundary — operators remain responsible for what their agents emit.
+Artifact paths in `result.json` are declared by the agent, which makes them
+untrusted input the orchestrator then reads with its own privileges. Every
+read and write against a worktree goes through `artifacts.Container`, an
+`os.Root`-backed handle that confines file access to one tree. Three escapes
+are closed:
+
+| Escape | Shape | Closed by |
+|---|---|---|
+| Absolute | `/etc/passwd` | lexical check before the open |
+| Traversal | `../../.ssh/id_rsa` | lexical check after `Join` + `Clean` |
+| Reparse point | a symlink or junction the agent planted in its own worktree | the `os.Root` open itself |
+
+The third is why the check is not a path comparison: `filepath.EvalSymlinks`
+follows POSIX symlinks but returns Windows junctions unresolved, so a junction
+inside the worktree reads as contained. Performing the check as part of the
+open also removes the window between validating a path and using it.
+
+A declared path that escapes **fails the stage**. The capture is
+all-or-nothing — nothing is ingested — the invocation is finalized with
+`stop_reason = artifact_rejected`, a `stage.artifact_rejected` event records
+the path and reason, and the task pauses for review. A declared path that
+simply was not written is a different thing: a contract gap, logged and
+skipped, with the run continuing.
+
+One asymmetry follows from using `os.Root`: it traverses a symlink that stays
+inside the root, but refuses a Windows junction wherever it points. Git does
+not produce junctions inside a worktree, so the cost is theoretical and the
+alternative is re-deriving containment in code that has already been shown not
+to work.
+
+### Secret scanning
+
+Before bytes enter the store, `artifacts.DefaultScanner` inspects both the
+artifact's name and its content.
+
+**Content.** Text is scanned for token patterns (Authorization / Bearer
+headers, AWS AKIA keys, GitHub PATs, generic
+`token|secret|password|api_key`-labeled values, PEM private key blocks).
+Binary content is scanned too, but only against the context-free rules (AKIA,
+`ghp_`, PEM headers) — a `token:` label is meaningless in a binary stream —
+and it is **never rewritten**, because substituting a placeholder would change
+its length and corrupt the blob.
+
+**Name.** An artifact named `.ssh/id_rsa`, `.aws/credentials`, `.env`,
+`.netrc`, `*.pem` and similar is refused under every policy: a path has
+nothing to redact, and storing the bytes under a different name would only
+hide where they came from. `.env.example` and its siblings are allowed —
+templates are ordinary stage output.
+
+`AGENTUM_ARTIFACT_SCAN_POLICY` decides what a finding does:
+
+| Value | Effect |
+|---|---|
+| `redact` (default) | substitute `[REDACTED]` in text and store the result; report binary findings without altering them |
+| `reject` | refuse the write with `ErrSecretDetected` — nothing is stored |
+
+`reject` is the fail-closed choice and the only one that stops a credential
+inside a binary artifact. An unrecognized value fails at startup rather than
+falling back, so an operator who asked for rejection never silently gets
+redaction. A refused write does not fail the stage — nothing was read that
+should not have been — but it does emit `stage.artifact_rejected`, since an
+absent revision alone is indistinguishable from an artifact the agent never
+wrote.
+
+The scanner is best-effort, not a security boundary — operators remain
+responsible for what their agents emit.
+
+### Concurrent revision writes
+
+A revision write is `read current → demote it → insert the new one`, and all
+three steps run in one transaction. The read takes a row lock
+(`LockCurrentArtifactRevisionForName`), so a second writer for the same
+`(task, name)` blocks until the first commits and then observes the new
+current revision rather than chaining a sibling off the one it already read.
+The demotion targets that exact revision id, so an affected-row count of zero
+is a conflict rather than a silent no-op. Two racing *first* creates have no
+row to lock; the partial unique index `idx_artifact_rev_current` serializes
+them and the loser's constraint violation surfaces as a conflict too.
+
+`PutParams.ExpectedCurrentRevision` adds an optimistic-concurrency
+precondition on top. When set, the write commits only if that revision is
+still current; otherwise it fails with `ErrRevisionConflict` and stores
+nothing. A stage capture leaves it empty (the runner is the only writer for
+the duration of an invocation); a human edit composed against a revision the
+user was looking at should set it, so two editors racing produce a conflict
+instead of a lost update. The precondition is checked before the
+identical-content shortcut: a caller whose pinned revision is gone has lost the
+race whatever the bytes say.
 
 ### Manifest lifecycle
 

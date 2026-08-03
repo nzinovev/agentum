@@ -41,6 +41,13 @@ type Config struct {
 	// per-stage artifact dir is separate and disposable — this root survives
 	// worktree teardown so revisions remain readable for review / comparison.
 	ArtifactRoot string
+
+	// ArtifactScanPolicy decides what happens when the artifact scanner finds
+	// credential-shaped content: "redact" (default) substitutes [REDACTED] in
+	// text and stores the result; "reject" refuses the write outright. Reject is
+	// the fail-closed choice, and the only one that stops a credential inside a
+	// binary artifact, which cannot be rewritten without corrupting it.
+	ArtifactScanPolicy string
 }
 
 func Load() (Config, error) {
@@ -57,6 +64,8 @@ func Load() (Config, error) {
 		OpencodeBinary: getenv("AGENTUM_OPENCODE_BINARY", "opencode"),
 		ArtifactRoot:   getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
 
+		ArtifactScanPolicy: getenv("AGENTUM_ARTIFACT_SCAN_POLICY", "redact"),
+
 		HardTimeoutSeconds: getenvInt("AGENTUM_HARD_TIMEOUT_SECONDS", 0),
 		IdleTimeoutSeconds: getenvInt("AGENTUM_IDLE_TIMEOUT_SECONDS", 0),
 
@@ -65,6 +74,13 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
+	}
+	switch cfg.ArtifactScanPolicy {
+	case "redact", "reject":
+	default:
+		// Fail at load rather than silently falling back: an operator who set
+		// "fail" expecting rejection must not get redaction instead.
+		return cfg, fmt.Errorf("AGENTUM_ARTIFACT_SCAN_POLICY must be \"redact\" or \"reject\", got %q", cfg.ArtifactScanPolicy)
 	}
 	return cfg, nil
 }

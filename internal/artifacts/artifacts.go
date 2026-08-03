@@ -16,11 +16,18 @@
 //     phase) rides along as provenance. It is inert unless Epic 8 fills it;
 //     single-unit runs leave it NULL and behavior is unchanged.
 //
-// Secrets / credentials: the secret redactor strips obvious high-entropy
-// tokens from text-kind artifacts before they are written. It is a best-effort
-// guard, not a security boundary — operators remain responsible for what their
-// agents emit. The redactor never modifies the bytes the agent wrote; it only
+// Secrets / credentials: the Scanner inspects both the artifact's name and its
+// bytes before they are written. Text content is redacted (or the write is
+// rejected, per ScanPolicy); binary content is reported but never rewritten,
+// since rewriting it would corrupt the blob; a credential-shaped name is always
+// refused, because a path has nothing to redact. It is a best-effort guard, not
+// a security boundary — operators remain responsible for what their agents
+// emit. The scanner never modifies the bytes on disk in the worktree; it only
 // gates what enters the durable store.
+//
+// Containment: agent-declared artifact paths are untrusted input that the
+// orchestrator reads with its own privileges. ResolveDeclared is the single
+// gate — see path.go for the three escapes it closes.
 package artifacts
 
 import (
@@ -106,6 +113,18 @@ type PutParams struct {
 	Source   string // invocation id; empty for human edits
 	Actor    Actor
 	Coordinate
+
+	// ExpectedCurrentRevision is an optimistic-concurrency precondition. When
+	// set, Put commits only if that revision is still the current one for
+	// (task, name) at the moment of the write; otherwise it fails with
+	// ErrRevisionConflict and writes nothing.
+	//
+	// Empty means "no precondition": the write chains onto whatever is current,
+	// which is what a stage capture wants (the runner is the only writer for
+	// the duration of an invocation). A human edit that was composed against a
+	// revision the user has seen should set it, so two editors racing on the
+	// same artifact produce a conflict instead of a silent lost update.
+	ExpectedCurrentRevision string
 }
 
 // Store is the durable artifact revisions store. Implementations keep the FS
@@ -153,6 +172,35 @@ type Store interface {
 // ErrNoCurrentRevision is returned by Store.Current when the task has no
 // revision of the given name yet (e.g. a fresh task before any stage runs).
 var ErrNoCurrentRevision = errors.New("artifacts: no current revision for name")
+
+// ErrRevisionConflict is returned by Store.Put when the revision chain moved
+// under the caller: either PutParams.ExpectedCurrentRevision no longer names
+// the current revision, or a concurrent writer committed between this call's
+// read and its write. The write is rolled back in full — no blob is orphaned in
+// the index and no revision row is created. HTTP callers map it to 409.
+var ErrRevisionConflict = errors.New("artifacts: revision conflict")
+
+// ObjectStore is the content-addressed byte store behind the revisions index.
+// A revision row references a blob by hash; the blob itself carries no
+// metadata, so the two layers compose without either knowing the other's
+// schema.
+//
+// The interface exists so the durable layer is not welded to the local
+// filesystem: an S3/GCS-backed implementation is a drop-in for a deployment
+// where the orchestrator is not the only reader of the blobs. *BlobStore is the
+// only implementation today.
+type ObjectStore interface {
+	// Put writes the bytes under the hash-derived address if absent.
+	// Idempotent on the hash: writing the same content twice is one write.
+	Put(contentHash string, bytes []byte) error
+	// Get returns the bytes for a content hash.
+	Get(contentHash string) ([]byte, error)
+	// CopyTo streams the bytes for a content hash to writer, returning the
+	// count. Preferred over Get for large objects.
+	CopyTo(contentHash string, writer io.Writer) (int64, error)
+	// Reader returns a streaming reader over the bytes. The caller owns Close.
+	Reader(contentHash string) (io.ReadCloser, error)
+}
 
 // errStore is a typed wrapper for store errors that callers may branch on.
 type errStore struct{ cause error }
@@ -210,20 +258,73 @@ func nullStringOr(value sql.NullString) string {
 	return ""
 }
 
-// Redactor strips secret-shaped substrings from text-kind artifact bytes
-// before they are stored. The default implementation (NewDefaultRedactor)
-// matches common token patterns (Bearer headers, long hex / base64 runs,
-// AKIA-style AWS keys). It never modifies the bytes the agent wrote; it only
-// gates what enters the durable store. A nil Redactor skips redaction.
-type Redactor interface {
-	// Redact returns the bytes to store and a non-nil error if redaction is
-	// mandatory and the input cannot be cleaned (the default impl never errors).
-	Redact(name, kind string, bytes []byte) ([]byte, error)
+// ErrSecretDetected is returned by Store.Put when the scanner found
+// credential-shaped content and the configured policy is PolicyReject. Nothing
+// is written: no blob, no revision row.
+var ErrSecretDetected = errors.New("artifacts: credential-shaped content rejected")
+
+// ScanPolicy decides what happens when the scanner finds something.
+type ScanPolicy string
+
+const (
+	// PolicyRedact substitutes [REDACTED] for each match in text content and
+	// stores the result. Binary content cannot be rewritten without corrupting
+	// it, so a binary finding is reported and the bytes are stored as-is —
+	// PolicyReject is the only policy that actually stops a binary leak.
+	PolicyRedact ScanPolicy = "redact"
+	// PolicyReject refuses the write outright with ErrSecretDetected. The
+	// fail-closed choice for deployments where an artifact carrying a
+	// credential is an incident rather than a nuisance.
+	PolicyReject ScanPolicy = "reject"
+)
+
+// ScanResult is what a Scanner reports about one artifact.
+type ScanResult struct {
+	// Bytes are the bytes to store. Equal to the input when nothing matched, or
+	// when the content is binary (which is never rewritten).
+	Bytes []byte
+	// Findings names the rules that matched, in rule order, deduplicated. Empty
+	// when the content is clean. Callers log it — an operator needs to know an
+	// artifact was altered, and which rule did it.
+	Findings []string
+	// Rewritten reports whether Bytes differ from the input.
+	Rewritten bool
 }
 
-// NoRedaction is a Redactor that does nothing. Used in tests where the
-// redactor would obscure intentional content.
-type NoRedaction struct{}
+// Clean reports whether the scan found nothing.
+func (result ScanResult) Clean() bool { return len(result.Findings) == 0 }
 
-// Redact implements Redactor.
-func (NoRedaction) Redact(string, string, []byte) ([]byte, error) { return nil, nil }
+// Scanner inspects artifact bytes and names before they enter the durable
+// store. It is a containment guard, not a security boundary: it catches the
+// credential shapes that show up in real configs and logs, and operators remain
+// responsible for what their agents emit.
+//
+// Two things are scanned, and they fail differently:
+//
+//	content   secret-shaped bytes    → redacted or rejected, per ScanPolicy
+//	name      credential-shaped path → always rejected; a path cannot be redacted
+//
+// A nil Scanner on SQLStoreDeps means "use the default"; use NoScan to disable
+// scanning in tests where it would obscure intentional content.
+type Scanner interface {
+	// ScanName reports whether the artifact name itself is credential-shaped
+	// (".ssh/id_rsa", ".aws/credentials", ".env"). Returns an
+	// ErrSecretDetected-wrapping error when it is.
+	ScanName(name string) error
+	// Scan inspects the bytes and returns what to store. Returns an
+	// ErrSecretDetected-wrapping error when the policy is PolicyReject and
+	// something matched.
+	Scan(name, kind string, bytes []byte) (ScanResult, error)
+}
+
+// NoScan is a Scanner that inspects nothing. Used in tests where scanning would
+// obscure intentional content.
+type NoScan struct{}
+
+// ScanName implements Scanner.
+func (NoScan) ScanName(string) error { return nil }
+
+// Scan implements Scanner.
+func (NoScan) Scan(_ string, _ string, bytes []byte) (ScanResult, error) {
+	return ScanResult{Bytes: bytes}, nil
+}
