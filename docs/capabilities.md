@@ -34,15 +34,21 @@ A **capability** is one of:
 
 | Category | Meaning | Enforcement (opencode) |
 |---|---|---|
-| `fs.read` | Read files in the worktree | opencode `read` permission rule |
+| `fs.read` | Read files in the worktree | opencode `read` / `glob` / `grep` / `list` / `lsp` rules, bounded by `external_directory: deny` |
 | `fs.write` | Write/edit source (scoped to the worktree) | opencode `edit` permission rule, scoped |
-| `artifact.write` | Write the per-stage artifact dir (`result.json` + declared artifacts) | opencode `write` rule, scoped to the artifact dir |
+| `artifact.write` | Write the per-stage artifact dir (`result.json` + declared artifacts) | opencode `edit` rule, scoped to the artifact dir — opencode has **no** separate `write` permission; write and patch are both governed by `edit` |
 | `exec.bash` | Run shell commands | opencode `bash` rule + deny patterns for delivery-ref mutation |
 | `git.read` | Inspect git state (log, status, diff) | Routed through `exec.bash` deny-pattern gate |
 | `git.write` | Mutate git inside the worktree (commit to the task branch) | Same as `exec.bash`; scoped to the worktree |
-| `net.fetch` | Outbound HTTP (web research) | opencode `webfetch` permission rule + credential scrub |
+| `net.fetch` | Outbound HTTP (web research) | opencode `webfetch` + `websearch` rules; without the grant the common network clients are also denied in `bash` |
 | `secret.<name>` | Access a named credential | env scrub: the var is dropped unless the grant un-redacts it |
-| `mcp.<server>` | Use a named MCP server | opencode `mcp` config lists only granted servers |
+
+`mcp.<server>` is **not enforceable in v1.** opencode addresses MCP tools by
+per-tool permission names this adapter cannot enumerate for an arbitrary
+server, so it cannot express "this server and nothing else". Rather than emit a
+config that looks like enforcement and is not, `mcp` is absent from
+`adapter.Supported()`: a profile carrying an `mcp.*` grant is unenforceable and
+the invocation refuses to start.
 
 Two capabilities are **never granted to an agent**:
 
@@ -92,14 +98,50 @@ per-invocation grant that survives the full intersection.
 Before the opencode subprocess starts, the adapter materializes the effective
 profile into four concrete controls:
 
-1. **A per-invocation opencode permission config** is written to
-   `<worktree>/.opencode/opencode.json`. Every tool resolves to `allow` or
-   `deny` based on the profile, with the role's scopes encoded as per-path /
-   per-command rules. The bash rule map includes **deny patterns** for every
-   command that would mutate a delivery ref (`git push`, `git reset --hard`,
-   `git branch -D`, `git update-ref`, `git rebase`, `git checkout agentum/`,
-   `git config credential`, `git config --global`). Because the agent runs with
-   `--dir <worktree>`, this config is the authoritative one for the run.
+1. **A per-invocation opencode permission config.** Five properties make it a
+   boundary rather than a suggestion. Each was verified against a real opencode
+   binary, because each was wrong at least once when derived from the docs
+   alone:
+
+   - **Path scopes are relative to the project root.** opencode normalises a
+     tool's target path to a project-root-relative form *before* matching, so an
+     absolute pattern never matches anything. The failure mode is silent: the
+     deny baseline refuses every write while the config still reads correctly,
+     and an analyst simply cannot produce `result.json`. An implementer's
+     `fs.write:${worktree}/**` becomes `**`; an analyst's artifact scope becomes
+     `.agentum/<task>/.ag-artifacts/<stage>/**`. A scope that cannot be
+     expressed relative to the worktree is an error, not a dropped grant — the
+     invocation refuses to start. The absolute paths remain in the *audit*
+     profile, which is evidence rather than configuration.
+   - **Deny by default.** The config opens with the `"*": "deny"` catch-all,
+     which overrides opencode's own built-in `{permission:"*", pattern:"*",
+     action:"allow"}`, so a tool this adapter does not model — a future opencode
+     tool, an MCP tool — is refused rather than inherited. Every documented
+     permission key is then set explicitly: opencode *merges* config sources and
+     overrides only conflicting keys, so any key left unset would fall through
+     to the operator's global config or the repository's own `opencode.json`.
+   - **Delivered where the repository cannot override it.** The config is
+     rendered to a per-invocation temp directory outside the worktree (passed as
+     `OPENCODE_CONFIG` for the audit trail) *and* inlined into
+     `OPENCODE_CONFIG_CONTENT`. The inline copy is what enforces: opencode loads
+     `OPENCODE_CONFIG` **below** a project's own `opencode.json`, so a repo
+     shipping its own permissions would otherwise win. Keeping the file out of
+     the worktree also means the agent it constrains cannot edit it, and that it
+     never shows up in `git status` — which drives the `auto_if_clean` gate and
+     would otherwise leak into the delivery diff.
+   - **Rule order is explicit.** opencode resolves permission rules with the
+     **last match winning**, so every scoped rule list emits its `deny` baseline
+     first and the granted scopes after. The rendering uses an ordered list, not
+     a Go map, because `encoding/json` sorts map keys.
+   - **Bash denies are patterns, not substrings.** opencode matches bash rules
+     as wildcard patterns against the parsed command, so every delivery-ref deny
+     ends in `*` (`git push*`, `git reset --hard*`, `git branch -D*`,
+     `git update-ref*`, `git rebase*`, `git worktree*`, `git checkout agentum/*`,
+     `git config credential*`, `git config --global*`). A bare `git push` would
+     match only the argument-less command and let `git push origin HEAD`
+     through. Without `net.fetch`, the common network clients (`curl*`, `wget*`,
+     `ssh*`, `scp*`, `nc*`) are denied too, so `bash: allow` does not hand back
+     the network the `webfetch` deny just took away.
 2. **Credential-scrubbed environment.** The child process receives an
    environment built from the parent minus a deny list of credential-bearing
    variables (`AWS_*`, `GITHUB_*`, `ANTHROPIC_*`, `*_TOKEN`, `*_API_KEY`,
@@ -116,15 +158,58 @@ category the adapter cannot technically enforce, `Invoke` returns an error and
 the subprocess never spawns. The runner records
 `stop_reason=capability_unenforceable` on the invocation row.
 
+### Provider credentials
+
+The credential scrub removes `ANTHROPIC_*`, `OPENAI_*`, and friends from the
+agent's environment — including the key the model provider needs. That is
+deliberate, and it has an operating consequence:
+
+> **opencode must be authenticated through its own credential store
+> (`opencode auth login`), not through provider environment variables.**
+
+An install relying on `ANTHROPIC_API_KEY` in the shell will see every
+invocation fail to reach a model — and it fails *silently*: an unauthenticated
+`opencode run` blocks indefinitely without writing a byte to stdout or stderr.
+The profile's idle cap is what turns that into a named failure instead of a
+hung stage.
+
+Widening this is a deliberate decision, not an oversight to patch quietly: the
+same process runs the model client and the agent's bash tool, so a key the
+runtime can read is a key the agent can `echo`.
+
+### Proving it
+
+Two test layers keep the claims above honest:
+
+- **Subprocess contract tests** (`internal/agent/opencode_lifetime_test.go`) run
+  in normal CI. They re-exec the test binary as a fake agent and pin the
+  properties no unit test over rendered structs can reach: the run outlives
+  `Invoke`, the hard timeout and idle cap terminate the process tree, caller
+  cancellation terminates it, and the per-invocation config directory does not
+  leak. `TestPermissionScope_*` additionally pins the pattern-generation rule
+  against a port of opencode's matcher — deterministic, no model in the loop.
+- **The enforcement contract** (`TestOpencodeLive_*`, build tag `integration`)
+  runs against a real, pinned opencode: config discovery, an analyst writing its
+  own artifact, an analyst refused a source edit, and an implementer permitted
+  one — each asserted on the bytes on disk, not on what the agent reports. It is
+  the opt-in `enforcement-contract` CI job, and it is the only evidence that the
+  config this adapter writes is actually obeyed. **Run it whenever the config
+  rendering or the profile model changes, and record the version that passed.**
+
+| Verified against opencode | Date | Result |
+|---|---|---|
+| 1.18.10 | 2026-08-03 | All four live contracts pass (stream/resume, artifact allow, source deny, implementer allow) |
+
 ## What is saved as audit evidence
 
 Every invocation carries its effective profile as evidence in three places:
 
 1. **`stage_invocations.capability_profile`** (migration `0007`) — the
    authoritative per-invocation record. NULL when the profile was empty.
-2. **`stage.capability_enforced` event** — emitted before the adapter is
-   invoked, carrying the profile (grants + role + source inputs) in the event
-   payload.
+2. **`stage.capability_enforced` event** — carrying the profile (grants +
+   role + source inputs) in the event payload. Note it is emitted *before* the
+   adapter is invoked; separating requested from enforced is tracked as a
+   follow-up.
 3. **Manifest `body.capabilities.effective`** — a per-stage snapshot merged
    into the evidence manifest, so a cross-run diff (`manifest/diff`) surfaces a
    changed capability set as an input-level difference.
@@ -137,9 +222,9 @@ Every invocation carries its effective profile as evidence in three places:
 | Analytical stage cannot change source | analyst role omits `fs.write`; intersection drops it |
 | Reviewer cannot change tracked source or delivery refs | reviewer role = analyst set; `git.delivery` never in an agent role |
 | Implementer works only in its worktree | `fs.write` and `git.write` carry the `${worktree}` scope |
-| No undeclared credentials / network / commands / MCP / host paths | deny-by-default: secret/mcp/net absent from the role and ungranted by the invocation |
+| No undeclared credentials / network / commands / MCP / host paths | deny-by-default: the `"*": "deny"` baseline plus explicit `external_directory` / `task` / `skill` / `websearch` denials; `mcp.*` is refused outright |
 | Forbidden actions blocked + reflected in audit | opencode permission rules + bash deny patterns; profile + event + manifest columns record what was granted |
-| Allowed actions keep working | granted tools resolve to `allow` in the generated config |
+| Allowed actions keep working | granted tools resolve to `allow` in the generated config, proven by the live enforcement contract |
 | Unattended invocation never starts with unrestricted host perms | the generated config is deny-by-default; an empty profile denies every tool |
 | v1 limits + escape paths documented | this document |
 
@@ -150,20 +235,32 @@ profile, and why v1 accepts them:
 
 - **Bash filesystem access.** The bash tool can `cat` files outside the
   `fs.read` scope and write outside the `fs.write` scope. The permission rules
-  cover opencode's `read`/`edit`/`write` tools, not arbitrary shell IO. v1
-  accepts this: the worktree is the working boundary, and the credential scrub
-  keeps anything valuable out of the env. A follow-up can run the agent under a
-  stricter filesystem view.
-- **Bash network access.** `curl` / `wget` are not blocked by `net.fetch`
-  denial. v1 makes bash network useless by stripping credentials; a
-  network-isolated runtime (network namespace, egress proxy) is a later
-  concern.
-- **Global MCP config.** opencode loads the operator's global MCP config in
-  addition to the per-invocation one we write. v1 cannot disable a global
-  server it does not know about; the per-invocation config is an allowlist of
-  what the *pack* declared, and an undeclared global server is the documented
-  gap. Operators running unattended agents should keep global MCP servers
-  scoped to what every invocation may use.
+  cover opencode's own tools, not arbitrary shell IO. v1 accepts this: the
+  worktree is the working boundary, and the credential scrub keeps anything
+  valuable out of the env. A follow-up can run the agent under a stricter
+  filesystem view.
+- **Bash network access.** The deny patterns cover the common clients
+  (`curl`, `wget`, `ssh`, `scp`, `nc`) when `net.fetch` is not granted, but they
+  are name patterns: a script, an interpreter one-liner, or a differently-named
+  client still reaches the network. A network-isolated runtime (namespace,
+  egress proxy) is the real answer and is a later concern.
+- **Managed / MDM config.** opencode loads system-managed configuration *above*
+  `OPENCODE_CONFIG_CONTENT`. On a machine with managed opencode settings the
+  operator's policy outranks the profile. That is the correct precedence for a
+  managed fleet and it is the operator's own decision — but it is not a boundary
+  Agentum controls.
+- **Contract adherence is not enforced.** A capability profile controls what the
+  agent *may* do, not what it *does*. Observed with a real model: an agent
+  refused a source edit then ended the run without writing `result.json` at all,
+  and another wrote its artifact under a name of its own choosing. The
+  orchestrator sees both as "the agent did not produce the required contract
+  file". Making a denial surface as `status: blocked` rather than an
+  indistinguishable failure belongs to the pack prompts and the runner's outcome
+  classification, not to the permission config.
+- **Intermittent silent stalls.** `opencode run` occasionally produces nothing
+  on either stream and never exits — reproduced with an unauthenticated install,
+  and again on a prompt combining a denied action with an allowed one. The
+  profile's idle cap is the only thing that ends such a run.
 - **Subprocesses spawned by the agent.** A bash command can spawn a long-lived
   helper that outlives the profile's timeouts. The process-group kill on cancel
   covers the common case; a privileged orphan is the residual gap.

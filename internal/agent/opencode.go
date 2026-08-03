@@ -39,10 +39,11 @@ func NewOpencodeAdapter(binary string) *OpencodeAdapter {
 // emits EventError.
 //
 // Enforcement is applied before the subprocess starts: the effective profile is
-// confirmed enforceable, a per-invocation opencode permission config is written
-// into the worktree, the child environment is credential-scrubbed, and the
-// profile's hard/idle timeouts wrap ctx. A profile that grants a capability the
-// adapter cannot enforce returns an error here — the invocation does not start.
+// confirmed enforceable, a per-invocation opencode permission config is
+// rendered outside the worktree and handed to the child through its
+// environment, the environment is credential-scrubbed, and the profile's
+// hard/idle timeouts wrap ctx. A profile that grants a capability the adapter
+// cannot enforce returns an error here — the invocation does not start.
 func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
 	if err := validateInvocation(inv); err != nil {
 		return nil, err
@@ -53,6 +54,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	}
 	bin, err := exec.LookPath(a.binary)
 	if err != nil {
+		plan.cleanup()
 		return nil, fmt.Errorf("opencode adapter: binary %q not found: %w", a.binary, err)
 	}
 
@@ -77,6 +79,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		control.release()
+		plan.cleanup()
 		return nil, fmt.Errorf("opencode adapter: stdout pipe: %w", err)
 	}
 	// stderr is discarded for MVP; the print-logs flag is the debug path later.
@@ -84,6 +87,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 
 	if err := cmd.Start(); err != nil {
 		control.release()
+		plan.cleanup()
 		return nil, fmt.Errorf("opencode adapter: start: %w", err)
 	}
 
@@ -143,10 +147,12 @@ func (a *OpencodeAdapter) Supported() []caps.Category {
 }
 
 func (a *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
-	// Ownership of the run context transfers here from Invoke: it is released
-	// only after the process is reaped, because it is what keeps the child
-	// alive at all.
+	// Ownership of the run context and of the materialized enforcement plan
+	// transfers here from Invoke. Both are released only after the process is
+	// reaped: the rendered config backs the child's permission set for as long
+	// as it runs, and the context is what keeps the child alive at all.
 	defer close(ch)
+	defer plan.cleanup()
 	defer control.release()
 
 	state := &invokeState{}

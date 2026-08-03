@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      opencode_version:
+        description: "opencode version to pin for the enforcement contract job"
+        required: false
+        default: "latest"
+      opencode_auth_path:
+        description: "Where the pinned opencode keeps its auth store (version-dependent)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -53,3 +63,53 @@ jobs:
             echo "$out"
             exit 1
           fi
+
+  enforcement-contract:
+    name: opencode enforcement contract (opt-in)
+    # Manual only: it needs a real opencode binary and a real credential store,
+    # so it cannot gate every PR — but the capability profiles are only as true
+    # as this job says they are. Run it whenever the adapter's config rendering
+    # or the profile model changes, and record the version that passed in
+    # docs/capabilities.md.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install opencode
+        run: |
+          npm install -g "opencode-ai@${{ inputs.opencode_version || 'latest' }}"
+          opencode --version
+
+      # Agentum scrubs provider credentials out of the agent environment by
+      # design, so this job cannot be fed ANTHROPIC_API_KEY & co — the child
+      # would never see them. opencode must be authenticated through its own
+      # credential store, exactly as an operator does locally
+      # (docs/capabilities.md, "Provider credentials").
+      #
+      # The default store path below is version-dependent. Confirm it against
+      # the pinned opencode before trusting a green run: an auth file written to
+      # the wrong place makes the run stall, not fail loudly.
+      - name: Provision opencode credentials
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+          AUTH_PATH: ${{ inputs.opencode_auth_path }}
+        run: |
+          if [ -z "$OPENCODE_AUTH_JSON" ]; then
+            echo "OPENCODE_AUTH_JSON secret is not set." >&2
+            echo "Produce it locally with 'opencode auth login' and copy the resulting auth.json." >&2
+            exit 1
+          fi
+          path="${AUTH_PATH:-$HOME/.local/share/opencode/auth.json}"
+          mkdir -p "$(dirname "$path")"
+          printf '%s' "$OPENCODE_AUTH_JSON" > "$path"
+          chmod 600 "$path"
+
+      - name: Enforcement contract
+        run: go test -tags integration ./internal/agent/ -run TestOpencodeLive -v -timeout 20m
