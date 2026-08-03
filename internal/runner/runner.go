@@ -764,7 +764,8 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		// escapes the worktree is a terminal outcome for the stage: the
 		// orchestrator refuses to read it, so the stage did not produce the
 		// output it claims and must not be recorded as though it had.
-		if captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON); captureErr != nil {
+		artifactOutputs, captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
+		if captureErr != nil {
 			runner.finalize(ctx, invocation, run.task, sessionID, "artifact_rejected", nil)
 			runner.log.Error("stage output rejected",
 				"task", run.task.ID, "stage", stageID, "error", captureErr)
@@ -772,9 +773,9 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
 		// Record evidence of the prompt + model + effective capability profile
-		// the adapter saw. The manifest service is nil in unit tests;
-		// AddEvidence is a no-op then.
-		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile)
+		// the adapter saw, plus the artifact revisions this stage produced. The
+		// manifest service is nil in unit tests; AddEvidence is a no-op then.
+		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile, artifactOutputs)
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,

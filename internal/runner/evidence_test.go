@@ -15,6 +15,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
@@ -36,7 +37,14 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 		return artifacts.Revision{}, store.failWith
 	}
 	store.puts = append(store.puts, params)
-	return artifacts.Revision{ID: "rev", Name: params.Name}, nil
+	// A stable, distinct id + content hash per ingest so the manifest-ref
+	// assertions can distinguish revisions by more than name. Hash mirrors the
+	// real store: the bytes determine the hash.
+	return artifacts.Revision{
+		ID:          "rev-" + params.Name,
+		Name:        params.Name,
+		ContentHash: artifacts.Hash(params.Bytes),
+	}, nil
 }
 
 func (store *recordingArtifactStore) names() []string {
@@ -136,7 +144,7 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 }
 
 // capture runs captureStageOutputs for a result declaring the given artifacts.
-func (fixture *captureFixture) capture(t *testing.T, declared ...agent.Artifact) error {
+func (fixture *captureFixture) capture(t *testing.T, declared ...agent.Artifact) ([]manifest.ArtifactRef, error) {
 	t.Helper()
 	return fixture.runner.captureStageOutputs(
 		context.Background(), fixture.run, fixtureStage, "inv-1", fixture.artifactDir,
@@ -165,7 +173,7 @@ func TestCaptureStageOutputs_IngestsDeclaredArtifacts(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
 
-	if err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"}); err != nil {
 		t.Fatalf("captureStageOutputs: %v", err)
 	}
 	got := fixture.store.names()
@@ -189,7 +197,7 @@ func TestCaptureStageOutputs_RejectsPathOutsideTheWorktree(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	outside := filepath.Join(fixture.outsideDir, "secret.txt")
 
-	err := fixture.capture(t, agent.Artifact{Path: outside, Kind: "spec"})
+	_, err := fixture.capture(t, agent.Artifact{Path: outside, Kind: "spec"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -204,7 +212,7 @@ func TestCaptureStageOutputs_RejectsTraversal(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 
-	err := fixture.capture(t, agent.Artifact{Path: "../outside/secret.txt"})
+	_, err := fixture.capture(t, agent.Artifact{Path: "../outside/secret.txt"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -220,7 +228,7 @@ func TestCaptureStageOutputs_RejectionIsAllOrNothing(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
 
-	err := fixture.capture(t,
+	_, err := fixture.capture(t,
 		agent.Artifact{Path: "docs/spec.md", Kind: "spec"},
 		agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")},
 	)
@@ -239,7 +247,7 @@ func TestCaptureStageOutputs_MissingFileIsNotABreach(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 
-	if err := fixture.capture(t, agent.Artifact{Path: "docs/never-written.md"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "docs/never-written.md"}); err != nil {
 		t.Fatalf("captureStageOutputs = %v, want nil for a declared-but-absent file", err)
 	}
 	names := fixture.store.names()
@@ -276,7 +284,7 @@ func TestCaptureStageOutputs_RejectsLinkEscape(t *testing.T) {
 		t.Fatalf("control read through the link failed: %v", err)
 	}
 
-	err := fixture.capture(t, agent.Artifact{Path: "escape/secret.txt"})
+	_, err := fixture.capture(t, agent.Artifact{Path: "escape/secret.txt"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -294,7 +302,7 @@ func TestCaptureStageOutputs_RefusedPutDoesNotFailTheStage(t *testing.T) {
 	fixture.store.failWith = artifacts.ErrSecretDetected
 	writeInWorktree(t, fixture.worktreeDir, "config.yaml", "token: ghp_x")
 
-	if err := fixture.capture(t, agent.Artifact{Path: "config.yaml"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "config.yaml"}); err != nil {
 		t.Fatalf("captureStageOutputs = %v, want nil for a refused Put", err)
 	}
 	reasons := fixture.emittedReasons()
@@ -315,8 +323,75 @@ func TestCaptureStageOutputs_NilStoreIsANoop(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	fixture.runner.art = nil
 
-	if err := fixture.capture(t, agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")}); err != nil {
 		t.Fatalf("captureStageOutputs with a nil store = %v, want nil", err)
+	}
+}
+
+// TestCaptureStageOutputs_RecordsOutputRefsForStoredRevisions is D3: a stage
+// that captures two artifacts must yield two manifest refs carrying the
+// revision id and content hash the store returned, plus result.json's own ref.
+// Before D3 the revision returned by Put was discarded, so the manifest's
+// artifacts.outputs was always empty and the diff endpoint always reported no
+// difference between runs.
+func TestCaptureStageOutputs_RecordsOutputRefsForStoredRevisions(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
+	writeInWorktree(t, fixture.worktreeDir, "src/main.go", "package main")
+
+	refs, err := fixture.capture(t,
+		agent.Artifact{Path: "docs/spec.md", Kind: "spec"},
+		agent.Artifact{Path: "src/main.go", Kind: "code"},
+	)
+	if err != nil {
+		t.Fatalf("captureStageOutputs: %v", err)
+	}
+	// result.json + the two declared artifacts.
+	if len(refs) != 3 {
+		t.Fatalf("captured %d refs, want 3 (result.json + 2 declared): %+v", len(refs), refs)
+	}
+	byName := make(map[string]manifest.ArtifactRef, len(refs))
+	for _, ref := range refs {
+		byName[ref.Name] = ref
+	}
+	for _, name := range []string{fixtureStage + "/result.json", "docs/spec.md", "src/main.go"} {
+		ref, ok := byName[name]
+		if !ok {
+			t.Errorf("missing ref for %q", name)
+			continue
+		}
+		if ref.RevisionID == "" {
+			t.Errorf("ref %q has empty revision id; the manifest would point at nothing", name)
+		}
+		if ref.ContentHash == "" {
+			t.Errorf("ref %q has empty content hash; the manifest could not verify the bytes", name)
+		}
+		if ref.Stage != fixtureStage {
+			t.Errorf("ref %q stage = %q, want %q", name, ref.Stage, fixtureStage)
+		}
+	}
+}
+
+// TestCaptureStageOutputs_ReflectedPutRecordsNoRef guards the input side of D3:
+// a Put the store refuses (here, a secret-shaped artifact under reject policy)
+// must not produce a manifest ref, because the revision it would reference was
+// never stored. The stage still succeeds — the gap is on the event stream — but
+// the manifest records only revisions that actually exist.
+func TestCaptureStageOutputs_RefusedPutRecordsNoRef(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fixture.store.failWith = artifacts.ErrSecretDetected
+	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
+
+	refs, err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"})
+	if err != nil {
+		t.Fatalf("captureStageOutputs: %v, want nil for a refused Put", err)
+	}
+	for _, ref := range refs {
+		if ref.Name == "docs/spec.md" {
+			t.Errorf("refused Put produced a manifest ref %+v; the revision was never stored", ref)
+		}
 	}
 }
 

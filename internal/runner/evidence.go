@@ -47,13 +47,13 @@ func (runner *Runner) captureStageOutputs(
 	run stageRun,
 	stageID, invocationID, artifactDir string,
 	result *agent.ResultJSON,
-) error {
+) ([]manifest.ArtifactRef, error) {
 	if runner.art == nil {
-		return nil
+		return nil, nil
 	}
 	container, err := artifacts.OpenContainer(run.worktree.Root)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrArtifactEscapesWorktree, err)
+		return nil, fmt.Errorf("%w: %w", ErrArtifactEscapesWorktree, err)
 	}
 	defer func() { _ = container.Close() }()
 
@@ -61,13 +61,18 @@ func (runner *Runner) captureStageOutputs(
 	// a breach must not leave half the stage's output in the store.
 	declared, err := runner.resolveDeclaredArtifacts(ctx, container, run, stageID, result)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	// One ref per revision this stage actually stored, accumulated so the
+	// caller can fold them into the per-stage manifest write. A refused or
+	// skipped ingest contributes no ref — the manifest records only revisions
+	// that exist in the store, never a reference to bytes that were not kept.
+	outputs := make([]manifest.ArtifactRef, 0)
 	// Always capture result.json itself — it is the contract-shaped output of
 	// the invocation, and the canonical artifact the next stage reads by path.
 	// The artifact dir is orchestrator-constructed, so it needs no containment
 	// check of its own.
-	runner.captureFile(ctx, run, stageID, invocationID, artifactDir, "result.json", "result_json")
+	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, "result.json", "result_json", outputs)
 	for _, artifact := range declared {
 		bytes, readErr := container.ReadFile(artifact.name)
 		if readErr != nil {
@@ -77,9 +82,33 @@ func (runner *Runner) captureStageOutputs(
 			}
 			continue
 		}
-		runner.ingest(ctx, run, stageID, invocationID, artifact.name, artifact.kind, bytes)
+		outputs = runner.captureIngest(ctx, run, stageID, invocationID, artifact.name, artifact.kind, bytes, outputs)
 	}
-	return nil
+	return outputs, nil
+}
+
+// captureIngest ingests one agent-declared artifact and, when the store kept
+// it, appends an ArtifactRef to outputs. The ref carries the revision id and
+// content hash the store returned, so the manifest references exactly the
+// revision that holds the agent's bytes rather than a name-only pointer.
+func (runner *Runner) captureIngest(
+	ctx context.Context,
+	run stageRun,
+	stageID, invocationID, revisionName, kind string,
+	bytes []byte,
+	outputs []manifest.ArtifactRef,
+) []manifest.ArtifactRef {
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	if !stored {
+		return outputs
+	}
+	return append(outputs, manifest.ArtifactRef{
+		Name:        revisionName,
+		Kind:        kind,
+		RevisionID:  revision.ID,
+		ContentHash: revision.ContentHash,
+		Stage:       stageID,
+	})
 }
 
 // declaredArtifact is one agent-declared artifact after containment checking:
@@ -131,35 +160,57 @@ func (runner *Runner) resolveDeclaredArtifacts(
 // captureFile reads artifactDir/name and ingests it under "<stage>/<name>".
 // Used for result.json and for any other well-known per-stage output that lives
 // under the orchestrator-constructed artifact dir — a trusted path, unlike the
-// agent-declared ones, which go through the container.
+// agent-declared ones, which go through the container. When the store kept the
+// artifact, a ref is appended to outputs so the manifest records it.
 func (runner *Runner) captureFile(
 	ctx context.Context,
 	run stageRun,
 	stageID, invocationID, artifactDir, name, kind string,
-) {
+	outputs []manifest.ArtifactRef,
+) []manifest.ArtifactRef {
 	bytes, err := os.ReadFile(filepath.Join(artifactDir, name))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			runner.log.Warn("capture artifact: read", "task", run.task.ID, "name", name, "error", err)
 		}
-		return
+		return outputs
 	}
-	runner.ingest(ctx, run, stageID, invocationID, stageID+"/"+name, kind, bytes)
+	revisionName := stageID + "/" + name
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	if !stored {
+		return outputs
+	}
+	return append(outputs, manifest.ArtifactRef{
+		Name:        revisionName,
+		Kind:        kind,
+		RevisionID:  revision.ID,
+		ContentHash: revision.ContentHash,
+		Stage:       stageID,
+	})
 }
 
-// ingest writes one artifact into the durable revisions store.
+// ingest writes one artifact into the durable revisions store and returns the
+// revision that was stored plus whether anything was actually written.
 //
 // A Put the store refuses (a credential-shaped artifact, a revision conflict)
 // is logged and skipped rather than failing the stage: unlike a containment
 // breach, nothing was read that should not have been, and the gap is visible in
-// the revisions list. The store's own log line names the rule that fired.
+// the revisions list. The store's own log line names the rule that fired. The
+// returned (zero, false) tells the caller that no revision reference should
+// enter the manifest for this artifact — recording a ref to a revision that was
+// never stored would point the manifest at bytes that do not exist.
+//
+// A no-op Put (identical content to the current revision) returns the existing
+// row with stored=true, which is correct: the revision is real, the agent's
+// output is referenced by it, and the manifest should carry that reference even
+// though no new chain link was added.
 func (runner *Runner) ingest(
 	ctx context.Context,
 	run stageRun,
 	stageID, invocationID, revisionName, kind string,
 	bytes []byte,
-) {
-	if _, putErr := runner.art.Put(ctx, artifacts.PutParams{
+) (artifacts.Revision, bool) {
+	revision, putErr := runner.art.Put(ctx, artifacts.PutParams{
 		TenantID: run.task.TenantID,
 		UserID:   run.task.UserID,
 		TaskID:   run.task.ID,
@@ -168,7 +219,8 @@ func (runner *Runner) ingest(
 		Bytes:    bytes,
 		Source:   invocationID,
 		Actor:    artifacts.ActorAgent,
-	}); putErr != nil {
+	})
+	if putErr != nil {
 		runner.log.Warn("capture artifact: put",
 			"task", run.task.ID, "stage", stageID, "name", revisionName, "error", putErr)
 		if errors.Is(putErr, artifacts.ErrSecretDetected) {
@@ -179,12 +231,19 @@ func (runner *Runner) ingest(
 				"stage": stageID, "path": revisionName, "reason": "secret_detected",
 			})
 		}
+		return artifacts.Revision{}, false
 	}
+	return revision, true
 }
 
 // recordStageEvidence adds the prompt + model + adapter + effective-capability
-// evidence for one stage to the manifest. Called after a successful stage
-// invocation. No-op when the manifest service is nil (unit tests).
+// + output-artifact evidence for one stage to the manifest. Called after a
+// successful stage invocation. No-op when the manifest service is nil (unit
+// tests). The artifact refs the stage captured are folded into this same patch
+// rather than written in a second AddEvidence round-trip: one manifest write
+// per stage keeps the per-stage evidence atomic (the prompt hash and the
+// artifact revisions that evidence it describe the same invocation) and avoids
+// doubling the write load.
 func (runner *Runner) recordStageEvidence(
 	ctx context.Context,
 	run stageRun,
@@ -192,6 +251,7 @@ func (runner *Runner) recordStageEvidence(
 	stage pack.Stage,
 	model string,
 	profile caps.Profile,
+	artifactOutputs []manifest.ArtifactRef,
 ) {
 	if runner.mfst == nil {
 		return
@@ -216,10 +276,13 @@ func (runner *Runner) recordStageEvidence(
 			}},
 		},
 	}
+	if len(artifactOutputs) > 0 {
+		patch.Artifacts = &manifest.ArtifactEvidence{Outputs: artifactOutputs}
+	}
 	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
 		// Sealed manifest is unexpected mid-run; logged but not fatal — the
-		// run continues and the missing evidence shows up under the
-		// manifest's Missing section.
+		// run continues and the gap is recorded in the manifest's evidence
+		// gaps at seal time.
 		if errors.Is(err, manifest.ErrSealed) {
 			runner.log.Warn("record evidence: manifest sealed", "task", run.task.ID)
 			return
@@ -363,6 +426,11 @@ func (runner *Runner) sealManifestAtTerminal(ctx context.Context, task sqlc.Task
 // the upcoming stage will read back into the worktree before the agent runs.
 // Used on resume / advance to honor "the chosen revision syncs into the
 // agent's working environment." No-op when the syncer is nil.
+//
+// The revisions actually materialized (not skipped) are recorded as the
+// manifest's artifacts.inputs — the record of what the next stage was handed
+// to read. This is the input-side counterpart of the output refs captured at
+// stage completion.
 func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRun, stageID string) {
 	if runner.syncer == nil {
 		return
@@ -376,6 +444,7 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 		return
 	}
 	targets := make([]artifacts.SyncTarget, 0, len(currentRevisions))
+	revisionByName := make(map[string]artifacts.Revision, len(currentRevisions))
 	for _, revision := range currentRevisions {
 		// Skip the per-stage result_json blobs — those live under
 		// .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper. The
@@ -391,6 +460,7 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 		targets = append(targets, artifacts.SyncTarget{
 			Path: targetPath, Name: revision.Name,
 		})
+		revisionByName[revision.Name] = revision
 	}
 	if len(targets) == 0 {
 		return
@@ -401,15 +471,49 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 		return
 	}
 	synced := 0
+	inputs := make([]manifest.ArtifactRef, 0)
 	for _, result := range results {
-		if !result.Skipped {
-			synced++
+		if result.Skipped {
+			continue
 		}
+		synced++
+		revision, found := revisionByName[result.Target.Name]
+		if !found {
+			continue
+		}
+		inputs = append(inputs, manifest.ArtifactRef{
+			Name:        revision.Name,
+			Kind:        revision.Kind,
+			RevisionID:  revision.ID,
+			ContentHash: revision.ContentHash,
+			Stage:       stageID,
+		})
 	}
 	if synced > 0 {
 		runner.emit(ctx, run.task, EvRevisionsSynced, map[string]any{
 			"stage": stageID, "synced": synced,
 		})
+	}
+	if len(inputs) > 0 {
+		runner.recordArtifactInputs(ctx, run, stageID, inputs)
+	}
+}
+
+// recordArtifactInputs records the artifact revisions materialized into the
+// worktree as the manifest's artifacts.inputs. Best-effort: a sealed manifest
+// (late sync after a crash-seal) is logged at debug and dropped; a real write
+// failure is logged and recorded as an evidence gap at seal time. No-op when
+// the manifest service is nil.
+func (runner *Runner) recordArtifactInputs(ctx context.Context, run stageRun, stageID string, inputs []manifest.ArtifactRef) {
+	if runner.mfst == nil {
+		return
+	}
+	patch := manifest.Body{Artifacts: &manifest.ArtifactEvidence{Inputs: inputs}}
+	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record artifact inputs evidence", "task", run.task.ID, "error", err)
 	}
 }
 
