@@ -17,16 +17,20 @@ SELECT * FROM task_manifests WHERE task_id = $1 AND tenant_id = $2;
 SELECT * FROM task_manifests WHERE task_id = $1 AND tenant_id = $2 FOR UPDATE;
 
 -- name: AddManifestEvidence :one
--- Merge a JSONB patch into the body. Refuses to write when the manifest is
--- already sealed — sealed_at IS NOT NULL means the body is immutable and any
--- correction must go through task_manifest_corrections. Returns the updated
--- row so the caller sees the post-merge body.
+-- Replace the body with an already-merged body the caller computed. Refuses to
+-- write when the manifest is already sealed — sealed_at IS NOT NULL means the
+-- body is immutable and any correction must go through task_manifest_corrections.
+-- Returns the updated row.
 --
--- The merge is shallow at the SQL level (||); the Go service is responsible
--- for constructing a patch that respects append-only semantics per section
--- (e.g. it appends to the `human_decisions` array rather than replacing it).
+-- This is a full replacement, not a JSONB merge, on purpose: the caller holds
+-- the row lock (GetManifestForUpdate) and has already merged the patch into the
+-- locked body in Go. A SQL-level `||` merge here would be a second, shallow
+-- merge whose top-level-key-only semantics silently drop nested evidence a
+-- concurrent writer just committed — the exact lost update the row lock exists
+-- to prevent. Replacing the whole body keeps the merge logic in one place (the
+-- Go merge functions) and makes it deep by construction.
 UPDATE task_manifests
-SET body = body || $3, updated_at = now()
+SET body = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND sealed_at IS NULL
 RETURNING *;
 
@@ -50,3 +54,14 @@ RETURNING *;
 SELECT * FROM task_manifest_corrections
 WHERE manifest_id = $1 AND tenant_id = $2
 ORDER BY created_at ASC;
+
+-- name: LatestManifestCorrection :one
+-- The newest correction for a manifest, or no rows when none exist. Ordered by
+-- created_at DESC with an id DESC tiebreak: created_at has limited resolution
+-- (microseconds on Postgres), so two corrections written in the same transaction
+-- could otherwise order nondeterministically, and the latest one is the base the
+-- next correction chains onto — ordering must be stable.
+SELECT * FROM task_manifest_corrections
+WHERE manifest_id = $1 AND tenant_id = $2
+ORDER BY created_at DESC, id DESC
+LIMIT 1;

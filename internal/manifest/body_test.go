@@ -1,7 +1,9 @@
 package manifest
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestEncodeDecode_Roundtrip(t *testing.T) {
@@ -132,6 +134,69 @@ func TestMergeBodies_NilPatchArtifactsPreservesBase(t *testing.T) {
 	if merged.Artifacts == nil || len(merged.Artifacts.Inputs) != 1 {
 		t.Errorf("Artifacts not preserved: %+v", merged.Artifacts)
 	}
+}
+
+// TestMergeBodies_SequentialPatchesPreserveEarlierContribution is the regression
+// for the lost update at the merge layer (D1). Two patches that each add to an
+// append-only section, merged one after the other onto the same base, must both
+// survive. The pre-fix AddEvidence read its merge base outside the transaction,
+// so the second writer's body replaced the first's at the top level; this test
+// pins the merge semantics the transactional write path now relies on by
+// exercising every append-only section.
+func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) {
+	t.Parallel()
+	base := Body{Schema: "1", Missing: []string{"memory"}}
+	patchA := Body{
+		Prompts:    []PromptRevision{{StageID: "spec", Hash: "spec-hash"}},
+		HumanGates: []HumanDecision{{Stage: "spec", Gate: "final", Decision: "approved", Actor: "alice", Timestamp: parseTestTime(t, "2026-01-01T00:00:00Z")}},
+		Artifacts:  &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "spec.md", RevisionID: "rev-1", ContentHash: "h1", Stage: "spec"}}},
+		Checks:     &CheckEvidence{SetVersion: "v1", Results: []CheckResult{{Name: "build", Status: "pass"}}},
+		Missing:    []string{"capabilities"},
+		Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{
+			Stage: "spec", Role: "implementer", Profile: json.RawMessage("{}"),
+		}}},
+	}
+	patchB := Body{
+		Prompts:    []PromptRevision{{StageID: "impl", Hash: "impl-hash"}},
+		HumanGates: []HumanDecision{{Stage: "impl", Gate: "final", Decision: "approved", Actor: "bob", Timestamp: parseTestTime(t, "2026-01-02T00:00:00Z")}},
+		Artifacts:  &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "impl.md", RevisionID: "rev-2", ContentHash: "h2", Stage: "impl"}}},
+		Checks:     &CheckEvidence{SetVersion: "v2", Results: []CheckResult{{Name: "test", Status: "pass"}}},
+		Missing:    []string{"human_gates"},
+		Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{
+			Stage: "impl", Role: "implementer", Profile: json.RawMessage("{}"),
+		}}},
+	}
+
+	afterA := mergeBodies(base, patchA)
+	afterB := mergeBodies(afterA, patchB)
+
+	if len(afterB.Prompts) != 2 {
+		t.Errorf("Prompts: A's spec prompt lost; got %+v", afterB.Prompts)
+	}
+	if len(afterB.HumanGates) != 2 {
+		t.Errorf("HumanGates: A's decision lost; got %+v", afterB.HumanGates)
+	}
+	if afterB.Artifacts == nil || len(afterB.Artifacts.Outputs) != 2 {
+		t.Errorf("Artifacts.Outputs: A's revision lost; got %+v", afterB.Artifacts)
+	}
+	if afterB.Checks == nil || len(afterB.Checks.Results) != 2 {
+		t.Errorf("Checks.Results: A's build result lost; got %+v", afterB.Checks)
+	}
+	if len(afterB.Missing) != 3 {
+		t.Errorf("Missing: union wrong; got %+v", afterB.Missing)
+	}
+	if afterB.Capabilities == nil || len(afterB.Capabilities.Effective) != 2 {
+		t.Errorf("Capabilities.Effective: A's spec profile lost; got %+v", afterB.Capabilities)
+	}
+}
+
+func parseTestTime(t *testing.T, value string) (ts time.Time) {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("parse %q: %v", value, err)
+	}
+	return ts
 }
 
 func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
