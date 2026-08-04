@@ -239,6 +239,17 @@ Every task records its git lineage explicitly:
   terminal teardown. Immutable; the branch survives teardown so this is always
   resolvable. `base_commit..result_commit` is the review/handoff diff.
 
+`result_commit` is captured at teardown, after the human approval that advances
+the task past `awaiting_memory_commit`, while the delivery checks run earlier
+(verifying the last post-stage checkpoint). If the two diverge — a continue job,
+a human artifact edit, or a filesystem change moved the branch tip in between —
+teardown does not silently seal a manifest asserting "checks passed at X"
+alongside "delivered Y". The divergence is recorded as an evidence gap (so the
+sealed manifest reads `evidence_complete: false`) and emitted as a
+`task.delivery_commit_diverged` event naming both SHAs. The task is not failed:
+the human already approved, and the manifest's incompleteness is the signal a
+reviewer acts on.
+
 The task response exposes all three plus `branch` (the canonical
 `agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
 without touching git. Provider PR creation belongs to Epic P and is not required
@@ -248,14 +259,25 @@ for safe local egress.
 
 The orchestrator owns boundary checkpoints (`task_checkpoints` table): immutable
 SHAs recorded at stage boundaries. The runner captures `base` (the lineage
-anchor) plus a `post-<stage>` checkpoint after each successful stage invocation.
-`(task_id, label)` is unique, so a retry that re-crosses a boundary upserts
-rather than duplicates.
+anchor, a commit that already exists) plus a `post-<stage>` checkpoint after
+each successful stage invocation. `(task_id, label)` is unique, so a retry that
+re-crosses a boundary upserts rather than duplicates.
+
+The orchestrator authors the post-stage checkpoint commit itself
+(`worktree.Manager.Commit`), staging the worktree's working state and committing
+it on `agentum/<task-id>` under the identity `agentum <agentum@orchestrator>`
+(passed inline via `git -c`, so it does not depend on ambient config and the
+audit trail shows Agentum authored the boundary). This is the `git.delivery`
+privilege the capability model reserves for the orchestrator and no agent role
+carries; before this the orchestrator only *read* HEAD, so every checkpoint was
+the base SHA and the agent's uncommitted work was discarded at teardown. A stage
+that produced no change records the unchanged HEAD honestly with no empty commit
+— an empty commit per stage would pollute the lineage a reviewer reads.
 
 Agents may edit and inspect git but cannot create, delete, reset, or rebase
 delivery refs — `agentum/<task-id>` and checkpoint SHAs are orchestrator-owned.
 The routing block tells the agent this; Agentum enforces it by being the only
-thing that touches those refs.
+thing that touches those refs (and now, by being the thing that commits them).
 
 ### Reconciliation before retry/resume
 
@@ -373,19 +395,34 @@ checks by editing `.agentum.yaml` inside its worktree.
 
 The runner runs the resolved set once, at the **final delivery boundary**: after
 the last stage's checkpoint is recorded and before the task reaches the review
-gate (`awaiting_memory_commit`). The set runs against the worktree HEAD — the
-post-stage checkpoint commit, which is the same SHA that becomes `result_commit`
-at teardown. The outcome is recorded as manifest evidence:
+gate (`awaiting_memory_commit`).
+
+**Commit binding.** The checks must verify exactly the commit they claim to. The
+runner resolves the worktree HEAD (the post-stage checkpoint commit the
+orchestrator authored) *before* the executor runs and asserts the tree is clean
+first: a dirty tree means something wrote after the checkpoint, and running the
+checks against it would test content that exists in no commit while the manifest
+asserts a specific SHA was verified. A dirty tree at this boundary fails the task
+rather than claiming a verification it cannot stand behind. Only then does the
+executor run, and the recorded `checks.commit` is that checkpoint SHA by
+construction — not a pre-run HEAD read that could drift. The outcome is recorded
+as manifest evidence:
 
 - every per-check result (status, exit code, duration, capped stdout/stderr,
   stop reason, definition revision, which layer contributed it);
 - the resolved set version + the registry revision;
-- the verified commit and the executor's capability label.
+- the verified commit and the executor's capability label;
+- `ran`, which is true only when at least one check executed — an empty set (the
+  project defines no checks) is a legitimate configuration recorded as
+  `ran: false` so it is not misread as a gate that ran and cleared.
 
 A **mandatory failure blocks delivery**: instead of reaching the review gate, the
 task fails, and the check evidence in the sealed manifest is the record. Optional
 check failures are recorded as evidence but do not block. A successful run is the
-evidence available to the final reviewer.
+evidence available to the final reviewer. Reaching the delivery boundary without
+a resolved `base_commit` also fails the task — the anchor is required to load the
+registry and to gate delivery, and its absence there is a broken invariant, not
+an early exit to an empty set.
 
 ### The executor's boundary
 
