@@ -462,14 +462,23 @@ func (runner *Runner) recordCheckpoint(ctx context.Context, task sqlc.Task, labe
 	runner.emit(ctx, task, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
 }
 
-// recordStageCheckpoint captures the worktree's current HEAD as a post-stage
-// boundary checkpoint. The label is `post-<stage>`; the SHA is read from the
-// worktree (the agent's commit tip, if it committed). A read failure is logged
-// and skipped — the lineage anchor and result_commit do not depend on it.
+// recordStageCheckpoint commits the worktree's working state on the task branch
+// and records the resulting SHA as a post-stage boundary checkpoint. The label
+// is `post-<stage>`. The orchestrator authors the commit itself (the
+// git.delivery privilege no agent role carries): without this, a checkpoint
+// would be whatever the agent happened to leave at HEAD — often still the base,
+// since nothing in the orchestrator committed — and the agent's uncommitted
+// work would be discarded at the next Restore or at teardown. A stage that
+// produced no change records the unchanged HEAD honestly (Commit returns
+// created=false for a clean tree) rather than creating an empty commit. A
+// commit failure is logged and skipped — the lineage anchor and result_commit
+// do not depend on it, but a checkpoint that cannot be created cannot lie about
+// having captured the boundary.
 func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) {
-	head, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
+	message := fmt.Sprintf("agentum: checkpoint after stage %s", stageID)
+	head, _, err := runner.wt.Commit(ctx, run.worktree.Root, message)
 	if err != nil {
-		runner.log.Warn("read head for checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("commit stage checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
 		return
 	}
 	runner.recordCheckpoint(ctx, run.task, "post-"+stageID, head)

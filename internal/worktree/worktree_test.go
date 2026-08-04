@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,4 +251,242 @@ func headOf(dir string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean is the E1 foundation
+// test: the orchestrator's Commit must turn a dirty working tree into a real
+// commit on the task branch, authored by the orchestrator, leaving the tree
+// clean. Without this, every post-stage checkpoint is the base SHA and the
+// agent's uncommitted work is silently discarded at teardown — the defect class
+// this whole PR exists to close.
+func TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean(t *testing.T) {
+	t.Parallel()
+	repo, wt := setupWorktreeWithIdentity(t)
+
+	// Simulate an agent writing files without committing — the normal state,
+	// since no agent role carries git.delivery.
+	mustWrite(wt.Root, "feature.txt", "new work")
+
+	commitSHA, created, err := New().Commit(t.Context(), wt.Root, "agentum: checkpoint after stage spec")
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if !created {
+		t.Fatal("Commit returned created=false on a dirty tree; the agent's work was not committed")
+	}
+
+	// The tree is now clean — the commit captured everything.
+	clean, err := New().IsClean(t.Context(), wt.Root)
+	if err != nil {
+		t.Fatalf("IsClean: %v", err)
+	}
+	if !clean {
+		t.Error("worktree not clean after Commit; the checkpoint did not capture the working state")
+	}
+
+	// The commit is a real commit beyond the base, authored by the orchestrator
+	// (not a human), on the task branch, and it contains the agent's work.
+	assertCommitBeyondBase(t, repo, commitSHA)
+	assertCommitAuthor(t, repo, commitSHA, orchestratorIdentityName, orchestratorIdentityEmail)
+	assertCommitContainsFile(t, repo, commitSHA, "feature.txt", "new work")
+	assertBranchAtCommit(t, repo, "agentum/task-commit-dirty", commitSHA)
+}
+
+// TestManager_Commit_CleanTreeCreatesNothing pins the no-empty-commit contract:
+// a stage that produced no change records the unchanged HEAD honestly, rather
+// than inserting a no-op commit into the lineage. An empty commit per stage
+// would corrupt the lineage a reviewer reads — a flat line of identical
+// checkpoints obscuring where real work landed.
+func TestManager_Commit_CleanTreeCreatesNothing(t *testing.T) {
+	t.Parallel()
+	_, wt := setupWorktreeWithIdentity(t)
+	baseCommit, err := New().HeadCommit(t.Context(), wt.Root)
+	if err != nil {
+		t.Fatalf("base HEAD: %v", err)
+	}
+
+	commitSHA, created, err := New().Commit(t.Context(), wt.Root, "agentum: checkpoint after stage spec")
+	if err != nil {
+		t.Fatalf("Commit on clean tree: %v", err)
+	}
+	if created {
+		t.Error("Commit returned created=true on a clean tree; an empty commit would pollute the lineage")
+	}
+	if commitSHA != baseCommit {
+		t.Errorf("Commit on clean tree returned %q, want the unchanged HEAD %q", commitSHA, baseCommit)
+	}
+}
+
+// TestManager_Commit_SucceedsWithoutGitIdentity covers the failure mode that
+// would otherwise only surface in CI or on a fresh operator server: a repo with
+// no user.name / user.email configured. git commit refuses without an identity,
+// so Commit passes the orchestrator's identity inline via `git -c`. This is the
+// test that would have caught the defect in the environment where it bites.
+func TestManager_Commit_SucceedsWithoutGitIdentity(t *testing.T) {
+	t.Parallel()
+	repo, wt := setupWorktreeWithoutIdentity(t)
+
+	mustWrite(wt.Root, "feature.txt", "work")
+	commitSHA, created, err := New().Commit(t.Context(), wt.Root, "agentum: checkpoint after stage spec")
+	if err != nil {
+		t.Fatalf("Commit without repo identity must succeed by passing identity inline: %v", err)
+	}
+	if !created {
+		t.Fatal("Commit returned created=false on a dirty tree")
+	}
+	assertCommitAuthor(t, repo, commitSHA, orchestratorIdentityName, orchestratorIdentityEmail)
+}
+
+// TestManager_Commit_DoesNotSweepAgentumDir guards PR C's containment work: the
+// .agentum/ artifact tree is gitignored, so artifact-dir churn (result.json,
+// per-stage outputs) never enters a checkpoint commit. A checkpoint that swept
+// in .agentum/ would mix orchestrator bookkeeping into the work lineage.
+func TestManager_Commit_DoesNotSweepAgentumDir(t *testing.T) {
+	t.Parallel()
+	repo, wt := setupWorktreeWithIdentity(t)
+
+	// Write real work AND orchestrator bookkeeping under .agentum/.
+	mustWrite(wt.Root, "feature.txt", "real work")
+	agentumArtifactDir := filepath.Join(wt.Root, ".agentum", "task-x", ".ag-artifacts", "spec")
+	if err := os.MkdirAll(agentumArtifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	mustWrite(agentumArtifactDir, "result.json", `{"status":"complete"}`)
+
+	commitSHA, _, err := New().Commit(t.Context(), wt.Root, "agentum: checkpoint after stage spec")
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// feature.txt is in the commit; .agentum/ is not.
+	assertCommitContainsFile(t, repo, commitSHA, "feature.txt", "real work")
+	if files := committedFiles(t, repo, commitSHA); strings.Contains(strings.Join(files, ","), ".agentum") {
+		t.Errorf(".agentum/ swept into checkpoint commit: %v", files)
+	}
+}
+
+// setupWorktreeWithIdentity builds a repo (with git identity configured, as the
+// existing init helper does) and a worktree branched from its HEAD, mirroring
+// what the runner creates per task. Returns both so a test can write into the
+// worktree and assert against the repo.
+func setupWorktreeWithIdentity(t *testing.T) (repo string, wt *Worktree) {
+	t.Helper()
+	repo = t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	manager := New()
+	baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatalf("resolve HEAD: %v", err)
+	}
+	wt, err = manager.Create(t.Context(), repo, "task-commit-dirty", baseCommit)
+	if err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	return repo, wt
+}
+
+// setupWorktreeWithoutIdentity is setupWorktreeWithIdentity for a repo that has
+// NO user.name / user.email configured — the CI / fresh-server state. Used to
+// prove Commit supplies its own identity rather than depending on ambient config.
+func setupWorktreeWithoutIdentity(t *testing.T) (repo string, wt *Worktree) {
+	t.Helper()
+	repo = t.TempDir()
+	if err := initRepoWithoutIdentity(repo); err != nil {
+		t.Fatalf("setup repo without identity: %v", err)
+	}
+	manager := New()
+	baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatalf("resolve HEAD: %v", err)
+	}
+	wt, err = manager.Create(t.Context(), repo, "task-commit-noidentity", baseCommit)
+	if err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	return repo, wt
+}
+
+// initRepoWithoutIdentity inits a repo and commits the seed file WITHOUT setting
+// user.name / user.email locally — the state that breaks a naive `git commit`.
+// The seed commit itself needs an identity, so it is made with inline `-c`
+// (mirroring how Commit works); subsequent commits in the worktree have none.
+func initRepoWithoutIdentity(dir string) error {
+	if out, err := exec.Command("git", "-C", dir, "init", "--quiet").CombinedOutput(); err != nil {
+		return fmt.Errorf("git init: %w (%s)", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("hello"), 0o644); err != nil {
+		return err
+	}
+	// Seed commit with an inline identity so the repo has a HEAD to branch from;
+	// the repo itself remains without a configured identity.
+	for _, args := range [][]string{
+		{"add", "README"},
+		{"-c", "user.name=seed", "-c", "user.email=seed@agentum", "commit", "--quiet", "-m", "init"},
+	} {
+		fullArgs := append([]string{"-C", dir}, args...)
+		cmd := exec.Command("git", fullArgs...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return &setupError{args: args, out: out, err: err}
+		}
+	}
+	return nil
+}
+
+// assertCommitBeyondBase confirms commitSHA is a real descendant of the repo's
+// initial commit (not the base SHA itself), proving Commit captured work rather
+// than recording a no-op.
+func assertCommitBeyondBase(t *testing.T, repo, commitSHA string) {
+	t.Helper()
+	// A commit with a parent is a real commit; the seed commit has none.
+	parents := strings.TrimSpace(mustGit(t, repo, "rev-list", "--parents", "-n", "1", commitSHA))
+	fields := strings.Fields(parents)
+	if len(fields) < 2 {
+		t.Fatalf("checkpoint commit %s has no parent; it is not a real commit beyond the base", commitSHA)
+	}
+}
+
+// assertCommitAuthor checks the commit's author identity matches the
+// orchestrator's, so the audit trail distinguishes orchestrator checkpoints
+// from any agent git.write commits.
+func assertCommitAuthor(t *testing.T, repo, commitSHA, wantName, wantEmail string) {
+	t.Helper()
+	line := strings.TrimSpace(mustGit(t, repo, "show", "-s", "--format=%an <%ae>", commitSHA))
+	want := wantName + " <" + wantEmail + ">"
+	if line != want {
+		t.Errorf("commit author = %q, want %q (the orchestrator must author checkpoints)", line, want)
+	}
+}
+
+// assertCommitContainsFile asserts the file's content at commitSHA matches body,
+// proving the checkpoint captured the working state rather than an empty tree.
+func assertCommitContainsFile(t *testing.T, repo, commitSHA, path, body string) {
+	t.Helper()
+	got, err := New().FileAtCommit(t.Context(), repo, commitSHA, path)
+	if err != nil {
+		t.Fatalf("read %s at %s: %v", path, commitSHA, err)
+	}
+	if string(got) != body {
+		t.Errorf("content of %s at checkpoint = %q, want %q", path, got, body)
+	}
+}
+
+// committedFiles lists the file paths a commit touched, for the .agentum/
+// containment check.
+func committedFiles(t *testing.T, repo, commitSHA string) []string {
+	t.Helper()
+	out := strings.TrimSpace(mustGit(t, repo, "show", "--stat", "--name-only", "--format=", commitSHA))
+	return strings.Split(out, "\n")
+}
+
+// assertBranchAtCommit confirms the named branch ref resolves to commitSHA,
+// proving Commit landed on the branch rather than a detached HEAD.
+func assertBranchAtCommit(t *testing.T, repo, branch, commitSHA string) {
+	t.Helper()
+	tip := strings.TrimSpace(mustGit(t, repo, "rev-parse", branch))
+	if tip != commitSHA {
+		t.Errorf("branch %s tip = %s, want the checkpoint commit %s (Commit must land on the task branch)", branch, tip, commitSHA)
+	}
 }
