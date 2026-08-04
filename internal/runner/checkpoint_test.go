@@ -1,4 +1,3 @@
-
 package runner
 
 import (
@@ -208,4 +207,78 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v in %s: %v (%s)", args, dir, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent is the E3
+// test: when result_commit (captured at teardown, after human approval) differs
+// from the commit the delivery checks verified (the last post-stage checkpoint),
+// teardown must not silently seal a manifest that asserts "checks passed at X"
+// alongside "delivered Y". The divergence is recorded as an evidence gap (so
+// the sealed manifest reads incomplete) and emitted as a distinct event (so it
+// is visible on the stream). The task is not failed — the human already
+// approved, and failing at teardown would be a confusing terminal state.
+func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testing.T) {
+	t.Parallel()
+	task := sqlc.Task{
+		ID: "Td", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
+		PipelinePack: "test@0.1.0",
+		// result_commit recorded at teardown, AFTER a human approved and something
+		// moved the branch tip (a continue job, an artifact edit, fs access).
+		ResultCommit: nullStr("sha-result-tip"),
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
+	store := newFakeStore(task, proj)
+	// The checkpoint the delivery checks verified — a different SHA.
+	store.checkpoints = []sqlc.TaskCheckpoint{
+		{Label: "base", CommitSha: "sha-base"},
+		{Label: "post-spec", CommitSha: "sha-verified"},
+	}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
+		AgentName: "opencode",
+	})
+
+	runner.verifyDeliveryCommitBinding(context.Background(), task)
+
+	// A distinct event names both SHAs so the divergence is visible on the stream.
+	found := false
+	for _, event := range store.events {
+		if event.Type == EvDeliveryCommitDiverged {
+			found = true
+			payload := string(event.Payload)
+			if !strings.Contains(payload, "sha-result-tip") || !strings.Contains(payload, "sha-verified") {
+				t.Errorf("divergence event payload = %s, want both SHAs", payload)
+			}
+		}
+	}
+	if !found {
+		t.Error("no EvDeliveryCommitDiverged event emitted for a result_commit != checks.commit divergence")
+	}
+}
+
+// TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet is the E3
+// negative: when result_commit equals the checks-verified checkpoint, teardown
+// must not emit a divergence event or record a gap. The happy path stays quiet
+// so a reviewer is not surfaced noise for the normal case.
+func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T) {
+	t.Parallel()
+	task := sqlc.Task{
+		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
+		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-same"),
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
+	store := newFakeStore(task, proj)
+	store.checkpoints = []sqlc.TaskCheckpoint{{Label: "post-spec", CommitSha: "sha-same"}}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
+		AgentName: "opencode",
+	})
+
+	runner.verifyDeliveryCommitBinding(context.Background(), task)
+
+	for _, event := range store.events {
+		if event.Type == EvDeliveryCommitDiverged {
+			t.Error("a matching result_commit must not emit a divergence event")
+		}
+	}
 }

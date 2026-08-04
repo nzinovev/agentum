@@ -18,8 +18,9 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// fakeStore is an in-memory runner.Store. It holds one task, one project, and a
-// log of stage invocations + events. The task/project are seeded at construct.
+// fakeStore is an in-memory runner.Store. It holds one task, one project, a
+// log of stage invocations + events, and the checkpoints CreateCheckpoint
+// recorded. The task/project are seeded at construct.
 type fakeStore struct {
 	mu          sync.Mutex
 	task        sqlc.Task
@@ -27,6 +28,7 @@ type fakeStore struct {
 	invocations []sqlc.StageInvocation
 	events      []sqlc.Event
 	enqueued    []string
+	checkpoints []sqlc.TaskCheckpoint
 }
 
 func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
@@ -100,13 +102,35 @@ func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStage
 	return store.invocations[len(store.invocations)-1], nil
 }
 func (store *fakeStore) LatestCheckpointForTask(_ context.Context, _ sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error) {
-	return sqlc.TaskCheckpoint{}, sql.ErrNoRows // no checkpoints in the fake
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.checkpoints) == 0 {
+		return sqlc.TaskCheckpoint{}, sql.ErrNoRows
+	}
+	// Return the most recently created checkpoint, mirroring the SQL's
+	// ORDER BY created_at DESC LIMIT 1.
+	return store.checkpoints[len(store.checkpoints)-1], nil
 }
 func (store *fakeStore) ListCheckpointsForTask(_ context.Context, _ sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error) {
-	return nil, nil // no checkpoints in the fake
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make([]sqlc.TaskCheckpoint, len(store.checkpoints))
+	copy(out, store.checkpoints)
+	return out, nil
 }
 func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error) {
-	return sqlc.TaskCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}, nil
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	// Upsert by label, mirroring the SQL's ON CONFLICT (task_id, label).
+	for index, checkpoint := range store.checkpoints {
+		if checkpoint.Label == arg.Label {
+			store.checkpoints[index].CommitSha = arg.CommitSha
+			return store.checkpoints[index], nil
+		}
+	}
+	created := sqlc.TaskCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}
+	store.checkpoints = append(store.checkpoints, created)
+	return created, nil
 }
 func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
 	store.mu.Lock()

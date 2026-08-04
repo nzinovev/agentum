@@ -230,13 +230,16 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	}
 	runner.recordResultCommit(ctx, task, project.RepoPath)
 	// Refresh task state (recordResultCommit may have set result_commit) and
-	// seal the manifest. The seal captures the final git lineage; a sealed
+	// detect any divergence between what was delivered and what the checks
+	// verified, before sealing. The seal captures the final git lineage; a sealed
 	// manifest is the immutable record a comparison / reproduction reads.
 	updatedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
 	if refreshErr == nil {
+		runner.verifyDeliveryCommitBinding(ctx, updatedTask)
 		runner.sealManifestAtTerminal(ctx, updatedTask)
 	} else {
 		runner.log.Warn("teardown: reload task for seal", "task", task.ID, "error", refreshErr)
+		runner.verifyDeliveryCommitBinding(ctx, task)
 		runner.sealManifestAtTerminal(ctx, task)
 	}
 	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
@@ -297,6 +300,65 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 	}); err != nil {
 		runner.log.Warn("record result_commit", "task", task.ID, "error", err)
 	}
+}
+
+// verifyDeliveryCommitBinding detects a divergence between the commit the
+// delivery checks verified and the commit recorded as delivered (result_commit).
+// The two are separated by a human approval: the checks run before the task
+// reaches awaiting_memory_commit, teardown runs after approval, and in between a
+// continue job, a human artifact edit, or a filesystem change can move the
+// branch tip. Nothing previously compared the two, so the sealed manifest could
+// assert "mandatory checks passed at X" alongside "delivered Y" with no signal
+// they differ.
+//
+// On a mismatch this does NOT fail the task — the human already approved, and
+// failing at teardown after approval would be a confusing terminal state.
+// Instead the divergence is recorded as an EvidenceGap (so the sealed manifest
+// carries it and evidence_complete reads false) and emitted as a distinct event
+// (so it is visible on the stream). The sealed manifest's incompleteness is the
+// signal a reviewer acts on. This is the cheaper of the two readings the plan
+// considered; re-running checks inside teardown was rejected because it puts an
+// arbitrarily long build on the terminal path and can fail after approval.
+//
+// The comparison uses the latest checkpoint SHA as the checks-verified commit
+// proxy: after E1+E2 the checks verified the worktree HEAD, which is the last
+// post-stage checkpoint, and LatestCheckpointForTask returns the most recent one.
+// The persisted result_commit is used (the refreshed task), not the value this
+// teardown would have written — recordResultCommit is a no-op when result_commit
+// is already set, so comparing against a not-yet-persisted tip would miss a
+// divergence that a prior teardown already recorded.
+func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc.Task) {
+	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
+		return
+	}
+	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	})
+	if err != nil {
+		// No checkpoint to compare against (e.g. a task that never ran a stage).
+		// Nothing to diverge from; this path is for tasks that reached delivery.
+		if !errors.Is(err, sql.ErrNoRows) {
+			runner.log.Warn("verify delivery binding: load checkpoint", "task", task.ID, "error", err)
+		}
+		return
+	}
+	if task.ResultCommit.String == checkpoint.CommitSha {
+		return
+	}
+	// Divergence: the delivered commit is not the one the checks verified. Record
+	// it as a gap so the sealed manifest carries both SHAs and reads incomplete,
+	// and emit a distinct event so the divergence is visible on the stream rather
+	// than buried in the manifest body.
+	cause := fmt.Errorf(
+		"result_commit %s != checks-verified checkpoint %s; the delivered commit was not the one the delivery checks verified",
+		task.ResultCommit.String, checkpoint.CommitSha,
+	)
+	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
+	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
+		"result_commit":    task.ResultCommit.String,
+		"checks_commit":    checkpoint.CommitSha,
+		"checkpoint_label": checkpoint.Label,
+	})
 }
 
 // drive performs the shared setup (load task + project + pack, resolve the
@@ -971,6 +1033,14 @@ const (
 	// results; this event is the durable signal that Agentum ran its own checks
 	// (not the agent's claim) against the checkpoint commit.
 	EvProjectChecksRun = "task.project_checks_run"
+	// EvDeliveryCommitDiverged records that the commit recorded as delivered
+	// (result_commit) differs from the one the delivery checks verified. Emitted
+	// at teardown when the two diverge — a human approval, a continue job, or a
+	// filesystem change moved the branch tip between the checks and teardown.
+	// The task is not failed (the human already approved); the divergence is
+	// recorded as an evidence gap and the sealed manifest reads incomplete, which
+	// is the signal a reviewer acts on.
+	EvDeliveryCommitDiverged = "task.delivery_commit_diverged"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.
