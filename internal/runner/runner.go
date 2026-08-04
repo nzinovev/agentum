@@ -668,6 +668,17 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// HEAD as an orchestrator-owned checkpoint so a later crash can restore to
 	// this point rather than blindly replaying the next side-effectful stage.
 	// Skipped on any failure flag — there is no trustworthy commit to record.
+	//
+	// The clean check for the auto_if_clean gate MUST be sampled before the
+	// checkpoint commit, not after. The gate's purpose is to surface "the agent
+	// touched files beyond its declared edit_targets" — that is a property of
+	// the working tree the agent left, which recordStageCheckpoint destroys by
+	// committing it. Sampling after would make the tree permanently clean and
+	// the gate unreachable (the mirror image of the PR B defect where isClean was
+	// permanently false); git add -A would also sweep those undeclared files into
+	// the delivery commit. Sampling before preserves the signal the gate exists
+	// to send.
+	cleanBeforeCommit := runner.isClean(run.project.RepoPath, run.task.ID)
 	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
 		runner.recordStageCheckpoint(ctx, run, stageID)
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
@@ -679,7 +690,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		Result:           outcome.result,
 		Stage:            stage,
 		StageID:          stageID,
-		Clean:            runner.isClean(run.project.RepoPath, run.task.ID),
+		Clean:            cleanBeforeCommit,
 		AdapterError:     outcome.adapterErr,
 		ParseError:       outcome.parseErr,
 		ArtifactRejected: outcome.rejected,

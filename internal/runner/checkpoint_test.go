@@ -282,3 +282,77 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 		}
 	}
 }
+
+// TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite is the regression test for the
+// E1 interaction the initial fix broke. auto_if_clean exists to surface "the
+// agent touched files beyond its declared edit_targets," and that is a property
+// of the working tree the agent left. recordStageCheckpoint commits that tree,
+// so sampling cleanliness AFTER the commit (as the first E1 cut did) makes the
+// tree permanently clean and the gate unreachable — the mirror image of the PR B
+// defect where isClean was permanently false. This test runs the real loop
+// (eval_test cannot catch it: it feeds Clean directly to a pure Evaluate), so a
+// writing agent under an auto_if_clean stage must pause for review, not advance.
+func TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	// auto_if_clean stage → terminal. The writingAdapter writes an undeclared
+	// file, so the gate must pause rather than auto-advance.
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "Tg", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &writingAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
+	}, writeName: "undeclared.txt", writeBody: "the agent touched this"}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		AgentName: "opencode",
+	})
+
+	if err := runner.Handle(context.Background(), job("run", "Tg", "tn", "us")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("state = %q, want paused_gate — the auto_if_clean gate must fire when the agent writes an undeclared file (sampling cleanliness after the checkpoint commit would make it permanently clean and the gate unreachable)", got)
+	}
+}
+
+// TestRunner_AutoIfCleanGateAdvancesOnCleanTree is the negative: an auto_if_clean
+// stage whose agent wrote nothing (clean tree) advances, not pauses. This pins
+// that the fix did not invert the gate — only restored it.
+func TestRunner_AutoIfCleanGateAdvancesOnCleanTree(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	// scriptAdapter writes nothing — the tree stays clean.
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
+	}}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+	})
+
+	if err := runner.Handle(context.Background(), job("run", "Tc", "tn", "us")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	// Clean tree → gate auto-advances → terminal → delivery checks → final gate.
+	if got := store.taskState(); got != "awaiting_memory_commit" {
+		t.Fatalf("state = %q, want awaiting_memory_commit (clean tree under auto_if_clean must advance)", got)
+	}
+}
