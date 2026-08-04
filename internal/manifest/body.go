@@ -193,11 +193,19 @@ type ArtifactRef struct {
 // boundary, against the commit recorded here, and records the outcome as
 // evidence a final review reconstructs. MandatoryPassed is the delivery gate: a
 // false value blocked the task from reaching successful final delivery.
+//
+// Ran reports whether any check actually executed. An empty set is a legitimate
+// configuration (the project defines no checks), but recording it as
+// mandatory_passed=true alone would read as "the gate ran and cleared it" when
+// in fact nothing ran. Ran lets a reviewer distinguish "no checks defined" from
+// "checks ran and passed"; it also gates IsEvidenceComplete so a checks section
+// that ran nothing does not satisfy the completeness flag.
 type CheckEvidence struct {
 	SetVersion       string        `json:"set_version,omitempty"`
 	RegistryRevision string        `json:"registry_revision,omitempty"`
 	Commit           string        `json:"commit,omitempty"`
 	Profile          string        `json:"profile,omitempty"`
+	Ran              bool          `json:"ran"`
 	MandatoryPassed  bool          `json:"mandatory_passed"`
 	Results          []CheckResult `json:"results,omitempty"`
 }
@@ -255,69 +263,85 @@ type ExecutionCoordinate struct {
 	Phase         string `json:"phase,omitempty"`
 }
 
+// expectedSections is the single source of truth for the evidence sections a
+// run is expected to produce, the predicate that detects each section's
+// presence, and whether an absent/degraded section counts toward the
+// completeness flag. MissingSections and IsEvidenceComplete both derive from
+// this list so they cannot drift — a third parallel condition (the D-review
+// hazard this list replaces) would otherwise be the natural next mistake.
+//
+// countsTowardCompleteness is false only for memory: the memory subsystem is
+// not wired in this build and its absence is a known, permanent gap rather than
+// a degradation of this run's evidence. Counting it would make
+// evidence_complete permanently false and conflate "subsystem not built" with
+// "evidence degraded," which is the confusion the flag exists to dispel.
+// MissingSections still reports memory honestly; only the completeness flag
+// excludes it.
+//
+// The checks predicate requires Ran: a checks section that recorded no run (the
+// project defines no checks) is a legitimate configuration, but it must not
+// satisfy completeness — a reviewer reads evidence_complete as "the delivery
+// gate ran," and an empty set is not that.
+type expectedSection struct {
+	name                     string
+	present                  func(body *Body) bool
+	countsTowardCompleteness bool
+}
+
+var expectedSections = []expectedSection{
+	{name: "memory", present: func(body *Body) bool { return body.Memory != nil }, countsTowardCompleteness: false},
+	{name: "human_gates", present: func(body *Body) bool { return len(body.HumanGates) > 0 }, countsTowardCompleteness: true},
+	{name: "artifacts", present: func(body *Body) bool { return body.Artifacts != nil }, countsTowardCompleteness: true},
+	{name: "checks", present: func(body *Body) bool { return body.Checks != nil && body.Checks.Ran }, countsTowardCompleteness: true},
+	{name: "capabilities", present: func(body *Body) bool { return body.Capabilities != nil }, countsTowardCompleteness: true},
+	{name: "prompts", present: func(body *Body) bool { return len(body.Prompts) > 0 }, countsTowardCompleteness: true},
+}
+
 // MissingSections reports the evidence sections that are absent in this body.
-// Derived from the body's actual shape rather than asserted once at init, so a
-// stale claim (e.g. "capabilities missing" on a body that carries a populated
-// capabilities section) cannot survive to seal time. The sections covered are
-// the ones the run is expected to produce; Input / Project / Pack / Adapter /
-// Git are written once at init and their absence is a gap, not a "missing
-// subsystem," so they are not reported here.
+// Derived from the body's actual shape via expectedSections rather than asserted
+// once at init, so a stale claim (e.g. "capabilities missing" on a body that
+// carries a populated capabilities section) cannot survive to seal time. The
+// sections covered are the ones the run is expected to produce; Input / Project
+// / Pack / Adapter / Git are written once at init and their absence is a gap,
+// not a "missing subsystem," so they are not reported here.
 //
 // Note that memory is genuinely absent until Epic 1 wires it; a derived missing
 // list keeps reporting it, correctly, rather than hiding it.
 func (body Body) MissingSections() []string {
-	missing := make([]string, 0, 8)
-	if body.Memory == nil {
-		missing = append(missing, "memory")
-	}
-	if len(body.HumanGates) == 0 {
-		missing = append(missing, "human_gates")
-	}
-	if body.Artifacts == nil {
-		missing = append(missing, "artifacts")
-	}
-	if body.Checks == nil {
-		missing = append(missing, "checks")
-	}
-	if body.Capabilities == nil {
-		missing = append(missing, "capabilities")
-	}
-	if len(body.Prompts) == 0 {
-		missing = append(missing, "prompts")
+	missing := make([]string, 0, len(expectedSections))
+	for _, section := range expectedSections {
+		if !section.present(&body) {
+			missing = append(missing, section.name)
+		}
 	}
 	return missing
 }
 
 // IsEvidenceComplete reports whether this body's evidence is complete for the
 // purposes of the seal-time flag. It differs from MissingSections in one
-// deliberate way: `memory` is excluded, because the memory subsystem is not
-// wired in this build and its absence is a known, permanent gap — not a
-// degradation of this run's evidence. Counting it would make the flag permanently
-// false and conflate "subsystem not built" with "evidence degraded," which is
-// exactly the confusion the flag exists to dispel. A reviewer reads `missing`
-// for the honest list of gaps (memory included) and `evidence_complete` for
-// whether the run's own evidence degraded.
+// deliberate way: `memory` is excluded (countsTowardCompleteness=false), because
+// the memory subsystem is not wired in this build and its absence is a known,
+// permanent gap — not a degradation of this run's evidence. Counting it would
+// make the flag permanently false and conflate "subsystem not built" with
+// "evidence degraded," which is exactly the confusion the flag exists to
+// dispel. A reviewer reads `missing` for the honest list of gaps (memory
+// included) and `evidence_complete` for whether the run's own evidence degraded.
 //
 // True when there are no evidence gaps and every section the run is expected to
-// produce (excluding the unwired memory subsystem) is present.
+// produce (excluding the unwired memory subsystem) is present. Both the section
+// list and the per-section presence test come from expectedSections, so this and
+// MissingSections share one source of truth and cannot drift apart.
 func (body Body) IsEvidenceComplete() bool {
 	if len(body.EvidenceGaps) > 0 {
 		return false
 	}
-	if len(body.HumanGates) == 0 {
-		return false
-	}
-	if body.Artifacts == nil {
-		return false
-	}
-	if body.Checks == nil {
-		return false
-	}
-	if body.Capabilities == nil {
-		return false
-	}
-	if len(body.Prompts) == 0 {
-		return false
+	for _, section := range expectedSections {
+		if !section.countsTowardCompleteness {
+			continue
+		}
+		if !section.present(&body) {
+			return false
+		}
 	}
 	return true
 }
@@ -677,8 +701,8 @@ func firstNonEmpty(preferred, fallback string) string {
 // scalars take the patch's value when set (the runner writes a fresh full set
 // each delivery boundary), and results are merged de-duplicating by name so a
 // re-run after resume replaces a prior result for the same check with the latest
-// one. MandatoryPassed is the OR of the two — once mandatory checks passed, a
-// later partial patch must not flip it back.
+// one. MandatoryPassed and Ran are the OR of the two — once mandatory checks
+// passed (or once any check ran), a later partial patch must not flip it back.
 func mergeCheckEvidence(existing *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
 	if existing == nil {
 		return patch
@@ -688,6 +712,7 @@ func mergeCheckEvidence(existing *CheckEvidence, patch *CheckEvidence) *CheckEvi
 		RegistryRevision: firstNonEmpty(patch.RegistryRevision, existing.RegistryRevision),
 		Commit:           firstNonEmpty(patch.Commit, existing.Commit),
 		Profile:          firstNonEmpty(patch.Profile, existing.Profile),
+		Ran:              existing.Ran || patch.Ran,
 		MandatoryPassed:  existing.MandatoryPassed || patch.MandatoryPassed,
 		Results:          appendUniqueCheckResult(existing.Results, patch.Results),
 	}

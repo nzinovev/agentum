@@ -39,17 +39,33 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) error
 	return nil
 }
 
+// ErrDirtyTreeAtDeliveryBoundary is returned by enforceProjectChecks when the
+// worktree is not clean at the delivery boundary. A dirty tree means something
+// wrote after the checkpoint commit; running the checks against it would test
+// content that exists in no commit while the manifest asserts a specific SHA was
+// verified. The checks must not run and claim a commit they are not testing.
+var ErrDirtyTreeAtDeliveryBoundary = errors.New("runner: worktree dirty at delivery boundary; cannot bind checks to a commit")
+
 // enforceProjectChecks loads the project registry, resolves the effective set
 // (project baseline ∪ pack ∪ task), runs it, records the evidence, and returns
 // the report plus whether mandatory checks passed. A nil registry (project
-// defines no checks) is a valid empty run that passes.
+// defines no checks) is a valid empty run that passes — recorded as Ran:false so
+// the manifest never presents an absent gate as a cleared one.
 //
 // The registry is read from the task's base_commit (the lineage anchor, captured
 // before the worktree is created), NOT from the agent-mutable worktree. This is
 // the agent-immutability seam: an implementer with fs.write to its worktree
 // cannot weaken the checks that gate its own delivery by editing .agentum.yaml,
-// because the definitions come from a commit it cannot reach. The checks still
-// EXECUTE in the worktree, against the post-stage checkpoint HEAD.
+// because the definitions come from a commit it cannot reach.
+//
+// Commit binding (E2): the verified commit is established BEFORE the checks run
+// and cannot drift under them. After E1 the post-stage checkpoint is a real
+// commit the orchestrator authored, so the worktree HEAD at this point is that
+// commit. The tree is asserted clean first — a dirty tree means something wrote
+// after the checkpoint, and the checks must not claim to have verified a commit
+// whose tree they did not test. Only then does the executor run, and the
+// recorded checks.commit is the checkpoint SHA, not a pre-run HEAD read that
+// could be stale by the time the checks finish.
 func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (checks.Report, bool, error) {
 	registry, err := runner.loadRegistryAtBaseCommit(ctx, run)
 	if err != nil {
@@ -62,19 +78,40 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		return checks.Report{}, false, err
 	}
 
+	// Establish the verification commit before anything runs. The worktree HEAD
+	// is the post-stage checkpoint commit (E1 created it); resolving it now and
+	// asserting the tree is clean binds the checks to exactly that commit's tree.
+	commit, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
+	if err != nil {
+		return checks.Report{}, false, fmt.Errorf("read checkpoint commit for project checks: %w", err)
+	}
+	clean, err := runner.wt.IsClean(ctx, run.worktree.Root)
+	if err != nil {
+		return checks.Report{}, false, fmt.Errorf("check worktree clean for project checks: %w", err)
+	}
+	if !clean {
+		// A dirty tree at the delivery boundary is a broken invariant, not a
+		// recoverable state: the checkpoint commit exists but the working tree
+		// has drifted off it, so checks against the tree would not be checks
+		// against the commit. Fail the task rather than claim a verification we
+		// cannot stand behind.
+		return checks.Report{}, false, fmt.Errorf(
+			"%w: worktree has uncommitted changes after checkpoint %s", ErrDirtyTreeAtDeliveryBoundary, commit,
+		)
+	}
+
 	if set.Empty() {
 		// The project defines no checks (or none are referenced). Record that
-		// the executor ran and nothing blocked delivery, so the manifest never
-		// hides the absence — it surfaces it explicitly.
-		empty := checks.Report{Set: set, Profile: checks.ProfileLabel}
-		runner.recordCheckEvidence(ctx, run.task, empty, "")
+		// the executor reached the boundary and nothing blocked delivery, with
+		// Ran:false so the manifest distinguishes "no checks defined" from "the
+		// gate ran and cleared it." The commit is still recorded: the clean-tree
+		// precondition held, so the boundary commit is the honest anchor even
+		// when no check verified it.
+		empty := checks.Report{Set: set, Commit: commit, Profile: checks.ProfileLabel}
+		runner.recordCheckEvidence(ctx, run.task, empty, commit)
 		return empty, true, nil
 	}
 
-	commit, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
-	if err != nil {
-		return checks.Report{}, false, fmt.Errorf("read head for project checks: %w", err)
-	}
 	report, err := runner.checkExec.Run(ctx, set, run.worktree.Root)
 	if err != nil {
 		return checks.Report{}, false, fmt.Errorf("run checks: %w", err)
@@ -93,14 +130,17 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 
 // loadRegistryAtBaseCommit reads .agentum.yaml from the project repo at the
 // task's lineage anchor. A missing file (os.ErrNotExist) is a nil registry —
-// the project defines no checks. Any other read/parse error fails the run.
+// the project defines no checks, which is a real configuration. An absent or
+// empty base_commit is an error, not an early exit: this method runs only at the
+// delivery boundary, so by construction the task has reached exactly the state
+// whose entire purpose is to be anchored. A missing anchor there is a broken
+// invariant, and fail-closed at this boundary is non-negotiable — returning a
+// nil registry would route to an empty set and MandatoryPassed()=true vacuously,
+// which is the mirror image of the fail-open defects PR C and PR D fixed.
 func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun) (*checks.Registry, error) {
 	baseCommit := run.task.BaseCommit.String
 	if !run.task.BaseCommit.Valid || baseCommit == "" {
-		// No anchor yet: nothing to gate against. Treat as no registry rather
-		// than failing — checks are a delivery boundary, and a task without a
-		// pinned base has not reached a deliverable state.
-		return nil, nil
+		return nil, errors.New("delivery boundary reached without a resolved base_commit; lineage anchor is required to gate delivery")
 	}
 	raw, err := runner.wt.FileAtCommit(ctx, run.project.RepoPath, baseCommit, checks.ConfigFile)
 	if err != nil {
@@ -115,7 +155,9 @@ func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun
 // recordCheckEvidence writes the project-check outcome into the manifest. The
 // full per-check results (status, exit code, duration, capped output, reason,
 // definition revision, source) become the evidence a final review reconstructs.
-// No-op when the manifest service is nil (unit tests).
+// Ran reflects whether any check actually executed (!set.Empty()), so an empty
+// set is recorded honestly rather than as a cleared gate. No-op when the
+// manifest service is nil (unit tests).
 func (runner *Runner) recordCheckEvidence(ctx context.Context, task sqlc.Task, report checks.Report, commit string) {
 	if runner.mfst == nil {
 		return
@@ -135,12 +177,14 @@ func (runner *Runner) recordCheckEvidence(ctx context.Context, task sqlc.Task, r
 			Source:             strings.Join(outcome.Item.Sources, ","),
 		})
 	}
+	ran := report.Set != nil && !report.Set.Empty()
 	patch := manifest.Body{
 		Checks: &manifest.CheckEvidence{
 			SetVersion:       setVersionOf(report.Set),
 			RegistryRevision: registryRevisionOf(report.Set),
 			Commit:           commit,
 			Profile:          report.Profile,
+			Ran:              ran,
 			MandatoryPassed:  report.MandatoryPassed(),
 			Results:          results,
 		},

@@ -229,7 +229,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Memory:       &MemorySlice{Entries: 1},
 				HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
 				Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-				Checks:       &CheckEvidence{SetVersion: "v1"},
+				Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
 			},
@@ -312,7 +312,7 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 		// Memory intentionally nil — the subsystem is not wired.
 		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
 		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1"},
+		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
 	}
@@ -333,7 +333,7 @@ func TestEvidenceComplete_GapOrAbsentSectionBlocks(t *testing.T) {
 	complete := Body{
 		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
 		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1"},
+		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
 	}
@@ -457,5 +457,55 @@ func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 		if result.Name == "build" && result.Status != "fail" {
 			t.Errorf("build result should be replaced with fail, got %q", result.Status)
 		}
+	}
+}
+
+// TestMergeBodies_CheckEvidenceRanIsMonotonic pins the Ran OR-merge: once any
+// delivery-boundary run executed checks (Ran=true), a later partial patch must
+// not flip it back to false. Ran distinguishes "the gate ran" from "no checks
+// defined"; a re-run after resume that records an empty set must not erase the
+// fact that checks ran earlier. This mirrors MandatoryPassed's monotonicity.
+func TestMergeBodies_CheckEvidenceRanIsMonotonic(t *testing.T) {
+	t.Parallel()
+	base := Body{Checks: &CheckEvidence{Commit: "c1", Ran: true, MandatoryPassed: true}}
+	// Patch with Ran=false (e.g. a re-run resolved an empty set) must not clear it.
+	patch := Body{Checks: &CheckEvidence{Commit: "c2", Ran: false}}
+	merged := mergeBodies(base, patch)
+	if !merged.Checks.Ran {
+		t.Error("Ran must be monotonic (OR): once true, a later patch must not flip it back to false")
+	}
+	if merged.Checks.Commit != "c2" {
+		t.Errorf("Commit scalar should take patch value, got %q", merged.Checks.Commit)
+	}
+}
+
+// TestEvidenceComplete_ChecksWithoutRanBlocks is the E4 completeness fix: a
+// checks section that recorded no run (Ran=false — the project defines no
+// checks) must not satisfy evidence_complete. The flag reads as "the delivery
+// gate ran," and an empty set is not that. MissingSections still reports checks
+// honestly so a reviewer sees the gap either way.
+func TestEvidenceComplete_ChecksWithoutRanBlocks(t *testing.T) {
+	t.Parallel()
+	body := Body{
+		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:       &CheckEvidence{SetVersion: "v1", Ran: false, MandatoryPassed: true},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+	}
+	if body.IsEvidenceComplete() {
+		t.Error("a checks section with Ran=false must not satisfy completeness even if MandatoryPassed=true")
+	}
+	// And MissingSections reports the gap by the same predicate, so the two
+	// cannot drift (the drift hazard the expectedSections list collapses).
+	missing := body.MissingSections()
+	found := false
+	for _, section := range missing {
+		if section == "checks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MissingSections = %v; a Ran=false checks section must be reported missing", missing)
 	}
 }
