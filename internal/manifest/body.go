@@ -31,7 +31,9 @@ const schemaVersion = "1"
 //   - HumanGates    — human gate decisions
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
-//   - Missing       — subsystems that did not contribute (explicit)
+//   - Missing       — subsystems that did not contribute (derived at seal)
+//   - EvidenceGaps  — evidence the orchestrator tried and failed to write
+//   - EvidenceComplete — set at seal: false when any section is degraded
 type Body struct {
 	Schema              string               `json:"schema_version"`
 	Input               *InputEvidence       `json:"input,omitempty"`
@@ -48,6 +50,20 @@ type Body struct {
 	Git                 *GitEvidence         `json:"git,omitempty"`
 	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
 	Missing             []string             `json:"missing,omitempty"`
+	EvidenceGaps        []EvidenceGap        `json:"evidence_gaps,omitempty"`
+	EvidenceComplete    *bool                `json:"evidence_complete,omitempty"`
+}
+
+// EvidenceGap records one evidence write the orchestrator attempted and failed.
+// A sealed manifest carries the gaps so a reviewer can tell a section that was
+// never produced from one that was attempted and degraded — the two are
+// indistinguishable without this, and a silently degraded manifest is worse
+// than an absent one because the reviewer has no way to know to distrust it.
+type EvidenceGap struct {
+	Section string    `json:"section"`
+	Stage   string    `json:"stage,omitempty"`
+	Reason  string    `json:"reason"`
+	At      time.Time `json:"at"`
 }
 
 // newEmptyBody returns a Body with the schema version set and nothing else.
@@ -103,8 +119,23 @@ type AdapterEvidence struct {
 	DeclaredCapabilities []string `json:"declared_capabilities,omitempty"`
 }
 
-// ModelEvidence records the model + tier the invocation used.
+// ModelEvidence records the model + tier the invocation used. The scalar
+// fields are the run-level summary (the last stage's model) and are what the
+// cross-run diff compares, since two runs differing only in a mid-pipeline
+// stage's model are still comparable on their primary model. PerStage records
+// which model served each stage, so "which model wrote this code" is
+// answerable per stage rather than only for whichever stage ran last.
 type ModelEvidence struct {
+	Tier      string       `json:"tier"`
+	Model     string       `json:"model"`
+	AgentName string       `json:"agent_name,omitempty"`
+	PerStage  []StageModel `json:"per_stage,omitempty"`
+}
+
+// StageModel is the model + tier that served one stage. A stage re-run after
+// resume supersedes the prior entry rather than appending a duplicate.
+type StageModel struct {
+	Stage     string `json:"stage"`
 	Tier      string `json:"tier"`
 	Model     string `json:"model"`
 	AgentName string `json:"agent_name,omitempty"`
@@ -187,11 +218,14 @@ type CheckResult struct {
 	Source             string `json:"source,omitempty"`
 }
 
-// HumanDecision is one human gate decision.
+// HumanDecision is one human gate decision. Decision is one of: approved (a
+// gate was passed), rejected (the run was cancelled), edited (a human edit at a
+// human_edit gate — the edit is the approval), continued (a paused run was
+// resumed past an open_questions or user_stop pause).
 type HumanDecision struct {
 	Stage     string    `json:"stage"`
 	Gate      string    `json:"gate"`
-	Decision  string    `json:"decision"` // approved | rejected | edited
+	Decision  string    `json:"decision"` // approved | rejected | edited | continued
 	Actor     string    `json:"actor"`
 	Timestamp time.Time `json:"timestamp"`
 }
@@ -219,6 +253,73 @@ type ExecutionCoordinate struct {
 	DeliveryStep  string `json:"delivery_step,omitempty"`
 	ExecutionUnit string `json:"execution_unit,omitempty"`
 	Phase         string `json:"phase,omitempty"`
+}
+
+// MissingSections reports the evidence sections that are absent in this body.
+// Derived from the body's actual shape rather than asserted once at init, so a
+// stale claim (e.g. "capabilities missing" on a body that carries a populated
+// capabilities section) cannot survive to seal time. The sections covered are
+// the ones the run is expected to produce; Input / Project / Pack / Adapter /
+// Git are written once at init and their absence is a gap, not a "missing
+// subsystem," so they are not reported here.
+//
+// Note that memory is genuinely absent until Epic 1 wires it; a derived missing
+// list keeps reporting it, correctly, rather than hiding it.
+func (body Body) MissingSections() []string {
+	missing := make([]string, 0, 8)
+	if body.Memory == nil {
+		missing = append(missing, "memory")
+	}
+	if len(body.HumanGates) == 0 {
+		missing = append(missing, "human_gates")
+	}
+	if body.Artifacts == nil {
+		missing = append(missing, "artifacts")
+	}
+	if body.Checks == nil {
+		missing = append(missing, "checks")
+	}
+	if body.Capabilities == nil {
+		missing = append(missing, "capabilities")
+	}
+	if len(body.Prompts) == 0 {
+		missing = append(missing, "prompts")
+	}
+	return missing
+}
+
+// IsEvidenceComplete reports whether this body's evidence is complete for the
+// purposes of the seal-time flag. It differs from MissingSections in one
+// deliberate way: `memory` is excluded, because the memory subsystem is not
+// wired in this build and its absence is a known, permanent gap — not a
+// degradation of this run's evidence. Counting it would make the flag permanently
+// false and conflate "subsystem not built" with "evidence degraded," which is
+// exactly the confusion the flag exists to dispel. A reviewer reads `missing`
+// for the honest list of gaps (memory included) and `evidence_complete` for
+// whether the run's own evidence degraded.
+//
+// True when there are no evidence gaps and every section the run is expected to
+// produce (excluding the unwired memory subsystem) is present.
+func (body Body) IsEvidenceComplete() bool {
+	if len(body.EvidenceGaps) > 0 {
+		return false
+	}
+	if len(body.HumanGates) == 0 {
+		return false
+	}
+	if body.Artifacts == nil {
+		return false
+	}
+	if body.Checks == nil {
+		return false
+	}
+	if body.Capabilities == nil {
+		return false
+	}
+	if len(body.Prompts) == 0 {
+		return false
+	}
+	return true
 }
 
 // encodeBody marshals a Body to canonical JSON. Used by AddEvidence and Seal.
@@ -279,7 +380,7 @@ func mergeBodies(existing Body, patch Body) Body {
 		merged.Adapter = patch.Adapter
 	}
 	if patch.Model != nil {
-		merged.Model = patch.Model
+		merged.Model = mergeModelEvidence(merged.Model, patch.Model)
 	}
 	if patch.Capabilities != nil {
 		merged.Capabilities = mergeCapabilityProfile(merged.Capabilities, patch.Capabilities)
@@ -305,7 +406,38 @@ func mergeBodies(existing Body, patch Body) Body {
 	if len(patch.Missing) > 0 {
 		merged.Missing = appendUniqueString(merged.Missing, patch.Missing)
 	}
+	if len(patch.EvidenceGaps) > 0 {
+		merged.EvidenceGaps = appendUniqueEvidenceGap(merged.EvidenceGaps, patch.EvidenceGaps)
+	}
+	// EvidenceComplete is intentionally NOT merged from patches: it is a seal-
+	// time assertion the seal transaction sets once, against the body as it
+	// then exists. A patch carrying it would be a caller overstepping; leaving
+	// it unset keeps "not yet sealed" distinguishable from "sealed and
+	// incomplete", which a pointer (rather than a bool) exists to express.
 	return merged
+}
+
+// appendUniqueEvidenceGap appends gaps not already in base, matched by
+// (Section, Stage, Reason) so the same failure recorded twice (a retry that
+// failed the same way) does not duplicate. At is taken from the addition so
+// the latest occurrence is kept on a duplicate.
+func appendUniqueEvidenceGap(base []EvidenceGap, additions []EvidenceGap) []EvidenceGap {
+	out := make([]EvidenceGap, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		found := false
+		for index, present := range out {
+			if present.Section == addition.Section && present.Stage == addition.Stage && present.Reason == addition.Reason {
+				out[index].At = addition.At
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
 }
 
 // appendUniquePrompt appends prompts from additions that are not already in
@@ -432,6 +564,57 @@ func appendUniqueCheckpoint(base []CheckpointRef, additions []CheckpointRef) []C
 			}
 		}
 		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// mergeModelEvidence combines two ModelEvidence. The scalars (Tier, Model,
+// AgentName) take the patch's value when set — they are the run-level summary
+// the last stage's model wrote, and the diff compares them. PerStage appends,
+// de-duplicating by Stage so a stage re-run after resume supersedes its prior
+// entry rather than leaving a duplicate. This mirrors mergeCapabilityProfile's
+// treatment of Effective.
+func mergeModelEvidence(existing *ModelEvidence, patch *ModelEvidence) *ModelEvidence {
+	if existing == nil {
+		return patch
+	}
+	merged := &ModelEvidence{
+		Tier:      existing.Tier,
+		Model:     existing.Model,
+		AgentName: existing.AgentName,
+		PerStage:  append([]StageModel(nil), existing.PerStage...),
+	}
+	if patch.Tier != "" {
+		merged.Tier = patch.Tier
+	}
+	if patch.Model != "" {
+		merged.Model = patch.Model
+	}
+	if patch.AgentName != "" {
+		merged.AgentName = patch.AgentName
+	}
+	merged.PerStage = appendUniqueStageModel(merged.PerStage, patch.PerStage)
+	return merged
+}
+
+// appendUniqueStageModel appends entries whose Stage is not already present; a
+// re-run of the same stage replaces the prior snapshot — the latest invocation's
+// model is the authoritative one for that stage.
+func appendUniqueStageModel(base []StageModel, additions []StageModel) []StageModel {
+	out := make([]StageModel, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		replaced := false
+		for index, present := range out {
+			if present.Stage == addition.Stage {
+				out[index] = addition
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
 			out = append(out, addition)
 		}
 	}

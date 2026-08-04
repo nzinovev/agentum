@@ -212,6 +212,13 @@ func diffAdapters(left, right *AdapterEvidence) *SectionDelta {
 	return nil
 }
 
+// diffModels compares the run-level scalar model/tier, intentionally not the
+// per-stage entries. Two runs that differ only in a mid-pipeline stage's model
+// (e.g. a cheap tier for analysis, an expensive one for implementation) are
+// still comparable on their primary model — the per-stage record exists to
+// answer "which model wrote this code," not to widen the input diff. PerStage
+// is therefore read from the manifest directly by a reviewer; leaving it out of
+// the diff keeps the comparability decision on the summary axis.
 func diffModels(left, right *ModelEvidence) *SectionDelta {
 	if left == nil && right == nil {
 		return nil

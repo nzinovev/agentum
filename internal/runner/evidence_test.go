@@ -15,6 +15,9 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
@@ -36,7 +39,14 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 		return artifacts.Revision{}, store.failWith
 	}
 	store.puts = append(store.puts, params)
-	return artifacts.Revision{ID: "rev", Name: params.Name}, nil
+	// A stable, distinct id + content hash per ingest so the manifest-ref
+	// assertions can distinguish revisions by more than name. Hash mirrors the
+	// real store: the bytes determine the hash.
+	return artifacts.Revision{
+		ID:          "rev-" + params.Name,
+		Name:        params.Name,
+		ContentHash: artifacts.Hash(params.Bytes),
+	}, nil
 }
 
 func (store *recordingArtifactStore) names() []string {
@@ -136,7 +146,7 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 }
 
 // capture runs captureStageOutputs for a result declaring the given artifacts.
-func (fixture *captureFixture) capture(t *testing.T, declared ...agent.Artifact) error {
+func (fixture *captureFixture) capture(t *testing.T, declared ...agent.Artifact) ([]manifest.ArtifactRef, error) {
 	t.Helper()
 	return fixture.runner.captureStageOutputs(
 		context.Background(), fixture.run, fixtureStage, "inv-1", fixture.artifactDir,
@@ -165,7 +175,7 @@ func TestCaptureStageOutputs_IngestsDeclaredArtifacts(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
 
-	if err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"}); err != nil {
 		t.Fatalf("captureStageOutputs: %v", err)
 	}
 	got := fixture.store.names()
@@ -189,7 +199,7 @@ func TestCaptureStageOutputs_RejectsPathOutsideTheWorktree(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	outside := filepath.Join(fixture.outsideDir, "secret.txt")
 
-	err := fixture.capture(t, agent.Artifact{Path: outside, Kind: "spec"})
+	_, err := fixture.capture(t, agent.Artifact{Path: outside, Kind: "spec"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -204,7 +214,7 @@ func TestCaptureStageOutputs_RejectsTraversal(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 
-	err := fixture.capture(t, agent.Artifact{Path: "../outside/secret.txt"})
+	_, err := fixture.capture(t, agent.Artifact{Path: "../outside/secret.txt"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -220,7 +230,7 @@ func TestCaptureStageOutputs_RejectionIsAllOrNothing(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
 
-	err := fixture.capture(t,
+	_, err := fixture.capture(t,
 		agent.Artifact{Path: "docs/spec.md", Kind: "spec"},
 		agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")},
 	)
@@ -239,7 +249,7 @@ func TestCaptureStageOutputs_MissingFileIsNotABreach(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 
-	if err := fixture.capture(t, agent.Artifact{Path: "docs/never-written.md"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "docs/never-written.md"}); err != nil {
 		t.Fatalf("captureStageOutputs = %v, want nil for a declared-but-absent file", err)
 	}
 	names := fixture.store.names()
@@ -276,7 +286,7 @@ func TestCaptureStageOutputs_RejectsLinkEscape(t *testing.T) {
 		t.Fatalf("control read through the link failed: %v", err)
 	}
 
-	err := fixture.capture(t, agent.Artifact{Path: "escape/secret.txt"})
+	_, err := fixture.capture(t, agent.Artifact{Path: "escape/secret.txt"})
 	if !errors.Is(err, ErrArtifactEscapesWorktree) {
 		t.Fatalf("captureStageOutputs = %v, want ErrArtifactEscapesWorktree", err)
 	}
@@ -294,7 +304,7 @@ func TestCaptureStageOutputs_RefusedPutDoesNotFailTheStage(t *testing.T) {
 	fixture.store.failWith = artifacts.ErrSecretDetected
 	writeInWorktree(t, fixture.worktreeDir, "config.yaml", "token: ghp_x")
 
-	if err := fixture.capture(t, agent.Artifact{Path: "config.yaml"}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: "config.yaml"}); err != nil {
 		t.Fatalf("captureStageOutputs = %v, want nil for a refused Put", err)
 	}
 	reasons := fixture.emittedReasons()
@@ -315,8 +325,75 @@ func TestCaptureStageOutputs_NilStoreIsANoop(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	fixture.runner.art = nil
 
-	if err := fixture.capture(t, agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")}); err != nil {
+	if _, err := fixture.capture(t, agent.Artifact{Path: filepath.Join(fixture.outsideDir, "secret.txt")}); err != nil {
 		t.Fatalf("captureStageOutputs with a nil store = %v, want nil", err)
+	}
+}
+
+// TestCaptureStageOutputs_RecordsOutputRefsForStoredRevisions is D3: a stage
+// that captures two artifacts must yield two manifest refs carrying the
+// revision id and content hash the store returned, plus result.json's own ref.
+// Before D3 the revision returned by Put was discarded, so the manifest's
+// artifacts.outputs was always empty and the diff endpoint always reported no
+// difference between runs.
+func TestCaptureStageOutputs_RecordsOutputRefsForStoredRevisions(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
+	writeInWorktree(t, fixture.worktreeDir, "src/main.go", "package main")
+
+	refs, err := fixture.capture(t,
+		agent.Artifact{Path: "docs/spec.md", Kind: "spec"},
+		agent.Artifact{Path: "src/main.go", Kind: "code"},
+	)
+	if err != nil {
+		t.Fatalf("captureStageOutputs: %v", err)
+	}
+	// result.json + the two declared artifacts.
+	if len(refs) != 3 {
+		t.Fatalf("captured %d refs, want 3 (result.json + 2 declared): %+v", len(refs), refs)
+	}
+	byName := make(map[string]manifest.ArtifactRef, len(refs))
+	for _, ref := range refs {
+		byName[ref.Name] = ref
+	}
+	for _, name := range []string{fixtureStage + "/result.json", "docs/spec.md", "src/main.go"} {
+		ref, ok := byName[name]
+		if !ok {
+			t.Errorf("missing ref for %q", name)
+			continue
+		}
+		if ref.RevisionID == "" {
+			t.Errorf("ref %q has empty revision id; the manifest would point at nothing", name)
+		}
+		if ref.ContentHash == "" {
+			t.Errorf("ref %q has empty content hash; the manifest could not verify the bytes", name)
+		}
+		if ref.Stage != fixtureStage {
+			t.Errorf("ref %q stage = %q, want %q", name, ref.Stage, fixtureStage)
+		}
+	}
+}
+
+// TestCaptureStageOutputs_ReflectedPutRecordsNoRef guards the input side of D3:
+// a Put the store refuses (here, a secret-shaped artifact under reject policy)
+// must not produce a manifest ref, because the revision it would reference was
+// never stored. The stage still succeeds — the gap is on the event stream — but
+// the manifest records only revisions that actually exist.
+func TestCaptureStageOutputs_RefusedPutRecordsNoRef(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fixture.store.failWith = artifacts.ErrSecretDetected
+	writeInWorktree(t, fixture.worktreeDir, "docs/spec.md", "the spec")
+
+	refs, err := fixture.capture(t, agent.Artifact{Path: "docs/spec.md", Kind: "spec"})
+	if err != nil {
+		t.Fatalf("captureStageOutputs: %v, want nil for a refused Put", err)
+	}
+	for _, ref := range refs {
+		if ref.Name == "docs/spec.md" {
+			t.Errorf("refused Put produced a manifest ref %+v; the revision was never stored", ref)
+		}
 	}
 }
 
@@ -341,5 +418,102 @@ func writeInWorktree(t *testing.T, root, relPath, content string) {
 	}
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", full, err)
+	}
+}
+
+// fakeManifestService is a manifestService that records calls and can be told
+// to fail. Used to exercise the evidence-gap path (D5) without a database.
+type fakeManifestService struct {
+	mu          sync.Mutex
+	addEvidence []manifest.Body
+	gaps        []manifest.EvidenceGap
+	sealed      bool
+	// addErr, when set, is returned from AddEvidence.
+	addErr error
+}
+
+func (service *fakeManifestService) AddEvidence(_ context.Context, _, _ string, patch manifest.Body) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.addErr != nil {
+		return service.addErr
+	}
+	service.addEvidence = append(service.addEvidence, patch)
+	return nil
+}
+
+func (service *fakeManifestService) Seal(_ context.Context, _, _, _ string, _ manifest.SealReason) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.sealed = true
+	return nil
+}
+
+func (service *fakeManifestService) RecordGap(_ context.Context, _, _ string, gap manifest.EvidenceGap) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.gaps = append(service.gaps, gap)
+	return nil
+}
+
+func (service *fakeManifestService) gapSections() []string {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	out := make([]string, 0, len(service.gaps))
+	for _, gap := range service.gaps {
+		out = append(out, gap.Section)
+	}
+	return out
+}
+
+// TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5: when
+// AddEvidence fails mid-run, the runner must record the failure as an
+// EvidenceGap on the manifest rather than swallow it, and the stage must
+// survive. A sealed manifest that swallows the failure (degrading silently) is
+// worse than an absent record because a reviewer cannot tell the two apart.
+func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fake := &fakeManifestService{addErr: errors.New("db connection lost")}
+	fixture.runner.mfst = fake
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+	run := stageRun{task: task, taskPack: taskPack}
+	stage := taskPack.Stages[fixtureStage]
+
+	// Must not panic or fail the stage; the run continues.
+	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, stage, "model-x", caps.Profile{}, nil)
+
+	gaps := fake.gapSections()
+	if len(gaps) != 1 {
+		t.Fatalf("AddEvidence failure recorded %d gaps, want 1: %v", len(gaps), gaps)
+	}
+	if gaps[0] != "prompts_model_capabilities" {
+		t.Errorf("gap section = %q, want prompts_model_capabilities", gaps[0])
+	}
+}
+
+// TestRecordInitialEvidence_FailureFailsTheTask is D5's exception: the initial
+// evidence is the run's provenance root, so a failure there must propagate
+// (the caller fails the task through failTask) rather than degrade.
+// recordInitialEvidence returns the error; this test pins that it does, so the
+// caller can fail the run.
+func TestRecordInitialEvidence_FailureFailsTheTask(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fixture.runner.mfst = &fakeManifestService{addErr: errors.New("db connection lost")}
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	project := sqlc.Project{ID: "proj-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+
+	err := fixture.runner.recordInitialEvidence(context.Background(), task, project, taskPack)
+	if err == nil {
+		t.Fatal("recordInitialEvidence with a failing manifest service returned nil; the provenance root must fail rather than degrade")
 	}
 }

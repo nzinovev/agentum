@@ -53,18 +53,9 @@ func (api *API) handleInvocationAddContext(w http.ResponseWriter, r *http.Reques
 }
 
 // --- Artifacts ---
-
-// GET /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}
-func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "GET /tasks/{id}/invocations/{iid}/artifacts/{name}")
-}
-
-// PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}
-func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "PUT /tasks/{id}/invocations/{iid}/artifacts/{name}")
-}
-
-// --- Memory (keyword-pull handle) ---
+//
+// GET / PUT /tasks/{id}/invocations/{iid}/artifacts/{name} are implemented in
+// artifact_edit.go (the human-edit path over the immutable revisions store).
 
 // GET /api/v1/projects/{id}/memory?keyword=...
 func (api *API) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
