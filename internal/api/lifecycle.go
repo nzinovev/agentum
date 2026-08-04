@@ -138,7 +138,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordStrict); err != nil {
 			return err
 		}
 		updated = transitioned
@@ -199,10 +199,11 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Transactional outbox: abort transition + teardown enqueue in one tx. The
-	// cancel decision rides in the same tx, but a cancel on a task whose
-	// manifest sealed during a crash is legitimate — a sealed/missing manifest
-	// is non-fatal here (unlike approve/advance, where failing to record the
-	// decision must fail the request).
+	// cancel decision rides in the same tx under recordLenient: a sealed or
+	// missing manifest (Init is best-effort, and a crash may have sealed the
+	// manifest mid-flight) is absorbed so the cancel still lands — cancel is an
+	// emergency exit and must be the most tolerant handler. A real write error
+	// still fails the tx, which is correct: the transition did not commit.
 	decision := humanDecisionPatch(
 		currentStageOr(task.CurrentStage, ""), gateCancel, decisionRejected,
 		principal.UserID, time.Now().UTC(),
@@ -220,7 +221,7 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordLenient); err != nil {
 			return err
 		}
 		updated = transitioned
@@ -261,7 +262,7 @@ func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEv
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision); err != nil {
+		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordStrict); err != nil {
 			return err
 		}
 		updated = transitioned

@@ -258,7 +258,7 @@ func (service *Service) Seal(
 		return fmt.Errorf("manifest: decode body for seal: %w", err)
 	}
 	body.Missing = body.MissingSections()
-	complete := len(body.EvidenceGaps) == 0 && len(body.Missing) == 0
+	complete := body.IsEvidenceComplete()
 	body.EvidenceComplete = &complete
 	sealedBody, err := encodeBody(body)
 	if err != nil {

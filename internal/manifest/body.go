@@ -288,6 +288,40 @@ func (body Body) MissingSections() []string {
 	return missing
 }
 
+// IsEvidenceComplete reports whether this body's evidence is complete for the
+// purposes of the seal-time flag. It differs from MissingSections in one
+// deliberate way: `memory` is excluded, because the memory subsystem is not
+// wired in this build and its absence is a known, permanent gap — not a
+// degradation of this run's evidence. Counting it would make the flag permanently
+// false and conflate "subsystem not built" with "evidence degraded," which is
+// exactly the confusion the flag exists to dispel. A reviewer reads `missing`
+// for the honest list of gaps (memory included) and `evidence_complete` for
+// whether the run's own evidence degraded.
+//
+// True when there are no evidence gaps and every section the run is expected to
+// produce (excluding the unwired memory subsystem) is present.
+func (body Body) IsEvidenceComplete() bool {
+	if len(body.EvidenceGaps) > 0 {
+		return false
+	}
+	if len(body.HumanGates) == 0 {
+		return false
+	}
+	if body.Artifacts == nil {
+		return false
+	}
+	if body.Checks == nil {
+		return false
+	}
+	if body.Capabilities == nil {
+		return false
+	}
+	if len(body.Prompts) == 0 {
+		return false
+	}
+	return true
+}
+
 // encodeBody marshals a Body to canonical JSON. Used by AddEvidence and Seal.
 // The map ordering produced by encoding/json is stable for our shape (struct
 // fields are encoded in declaration order), so two callers with the same Body

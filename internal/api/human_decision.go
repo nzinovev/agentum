@@ -59,54 +59,70 @@ func currentStageOr(stage sql.NullString, fallback string) string {
 	return fallback
 }
 
+// recordPolicy is how strictly a lifecycle handler treats a manifest write
+// failure when recording a human decision. The asymmetry is load-bearing: a
+// gate action (advance, approve, continue) must fail the request if the
+// decision cannot land on the record — the whole point of the gate is the
+// record. Cancel is an emergency exit and must be the most tolerant handler:
+// cancelling a task whose manifest sealed during a crash, or was never
+// initialized (Init is best-effort), is legitimate, so a sealed or missing
+// manifest is absorbed there rather than blocking the cancel.
+type recordPolicy int
+
+const (
+	// recordStrict fails the transaction on any write error, including
+	// sealed/missing. Used by advance/approve/continue.
+	recordStrict recordPolicy = iota
+	// recordLenient absorbs ErrSealed / ErrNoManifest (returns nil so runInTx
+	// commits the transition without the decision); any other write error still
+	// fails. Used by cancel.
+	recordLenient
+)
+
 // recordHumanDecisionTx writes a human-decision patch into the manifest using
 // the caller's transaction (the same runInTx the FSM transition + enqueue run
-// in), so the decision commits atomically with the state change it describes. A
-// nil manifest service (unit tests, or a server that did not wire one) is a
-// no-op — the lifecycle action still proceeds, matching the read handlers that
-// also tolerate a nil manifest service.
-//
-// The cancel path treats ErrSealed / ErrNoManifest as non-fatal (a cancel on a
-// task whose manifest sealed during a crash is legitimate); the advance/approve
-// paths must fail the whole request on any non-fatal-class error, because a
-// gate passed with no recorded decision defeats the gate's purpose. The caller
-// distinguishes the two via isHumanDecisionRecordFailure.
+// in), so the decision commits atomically with the state change it describes.
+// A nil manifest service (unit tests, a server that did not wire one) is a
+// no-op. Under recordLenient, a sealed or missing manifest is absorbed — the
+// caller still sees nil and the transition commits without the decision.
 func (api *API) recordHumanDecisionTx(
 	ctx context.Context,
 	qtx *sqlc.Queries,
 	principal authz.Principal,
 	taskID string,
 	decision manifest.Body,
+	policy recordPolicy,
 ) error {
 	if api.mfst == nil {
 		return nil
 	}
-	if err := api.mfst.AddEvidenceTx(ctx, qtx, principal.TenantID, taskID, decision); err != nil {
-		return humanDecisionRecordError{cause: err}
+	err := api.mfst.AddEvidenceTx(ctx, qtx, principal.TenantID, taskID, decision)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if policy == recordLenient && (errors.Is(err, manifest.ErrSealed) || errors.Is(err, manifest.ErrNoManifest)) {
+		// A cancel on a task whose manifest sealed during a crash, or whose
+		// Init failed (best-effort at task creation), is legitimate. Absorb it
+		// so the transition commits; the artifact/revision rows remain the
+		// durable record, and evidence_complete will honestly report the gap.
+		return nil
+	}
+	return humanDecisionRecordError{cause: err}
 }
 
-// humanDecisionRecordError wraps any failure from recordHumanDecisionTx so the
-// handlers can distinguish "the decision could not be recorded" (which must
-// fail the request for gate actions) from a plain store error. ErrSealed and
-// ErrNoManifest are unpacked separately by the handlers via errors.Is.
+// humanDecisionRecordError wraps a manifest write failure so the handlers can
+// distinguish "the decision could not be recorded" (which must fail a gate
+// action) from a plain store error returned by the transition/enqueue.
 type humanDecisionRecordError struct{ cause error }
 
 func (recordErr humanDecisionRecordError) Error() string { return recordErr.cause.Error() }
 func (recordErr humanDecisionRecordError) Unwrap() error { return recordErr.cause }
 
-// isHumanDecisionRecordFailure reports whether err is a record failure that is
-// NOT one of the cancel-acceptable cases (sealed / no manifest). Gate actions
-// (advance, approve, continue) use this to decide whether to fail the request.
+// isHumanDecisionRecordFailure reports whether err came from
+// recordHumanDecisionTx rather than the transition/enqueue. Gate actions use it
+// to surface a recording failure as "could not record the decision" rather than
+// a generic 500, so a reviewer knows the transition did not advance.
 func isHumanDecisionRecordFailure(err error) bool {
 	var recordErr humanDecisionRecordError
-	if !errors.As(err, &recordErr) {
-		return false
-	}
-	// Sealed / no-manifest are acceptable for cancel; a gate action treats
-	// them as failures too (the decision must be on the record), but they are
-	// not internal errors — surface them as the same internal status the
-	// caller already uses for "could not record the decision".
-	return true
+	return errors.As(err, &recordErr)
 }

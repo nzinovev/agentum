@@ -205,7 +205,9 @@ type LatestManifestCorrectionParams struct {
 // created_at DESC with an id DESC tiebreak: created_at has limited resolution
 // (microseconds on Postgres), so two corrections written in the same transaction
 // could otherwise order nondeterministically, and the latest one is the base the
-// next correction chains onto — ordering must be stable.
+// next correction chains onto — ordering must be stable. ListManifestCorrections
+// mirrors this tiebreak (ASC, id ASC) so the two queries agree on order and Get,
+// which takes the last row as the authoritative body, sees the true chain head.
 func (q *Queries) LatestManifestCorrection(ctx context.Context, arg LatestManifestCorrectionParams) (TaskManifestCorrection, error) {
 	row := q.db.QueryRowContext(ctx, latestManifestCorrection, arg.ManifestID, arg.TenantID)
 	var i TaskManifestCorrection
@@ -224,7 +226,7 @@ func (q *Queries) LatestManifestCorrection(ctx context.Context, arg LatestManife
 const listManifestCorrections = `-- name: ListManifestCorrections :many
 SELECT id, tenant_id, user_id, manifest_id, body, reason, created_at FROM task_manifest_corrections
 WHERE manifest_id = $1 AND tenant_id = $2
-ORDER BY created_at ASC
+ORDER BY created_at ASC, id ASC
 `
 
 type ListManifestCorrectionsParams struct {

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/manifest"
 )
 
@@ -106,4 +108,26 @@ func TestIsHumanDecisionRecordFailure_DistinguishesRecordErrors(t *testing.T) {
 	if isHumanDecisionRecordFailure(plainErr) {
 		t.Error("a plain error was mistaken for a record failure")
 	}
+}
+
+// TestRecordHumanDecisionTx_NilManifestServiceIsNoOp keeps the cancel-path
+// tolerance honest at the boundary: a nil manifest service (unit tests, or a
+// server that did not wire one) records no decision and returns nil under both
+// policies, so the lifecycle action still proceeds. The sealed/missing-manifest
+// absorption under recordLenient is the same idea applied to a service that
+// exists but refuses; exercising it requires a DB, so the policy logic itself
+// (errors.Is ErrSealed/ErrNoManifest under lenient) is review-only here.
+func TestRecordHumanDecisionTx_NilManifestServiceIsNoOp(t *testing.T) {
+	t.Parallel()
+	patch := humanDecisionPatch("impl", gateCancel, decisionRejected, "alice", time.Now().UTC())
+	apiInst := newEditAPI(nil) // mfst is nil
+	for _, policy := range []recordPolicy{recordLenient, recordStrict} {
+		if err := apiInst.recordHumanDecisionTx(context.Background(), nil, authzPrincipal(), "task-1", patch, policy); err != nil {
+			t.Errorf("nil manifest service under policy %v returned %v; it must be a no-op", policy, err)
+		}
+	}
+}
+
+func authzPrincipal() authz.Principal {
+	return authz.Principal{TenantID: "tenant-1", UserID: "user-1"}
 }

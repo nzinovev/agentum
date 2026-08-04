@@ -10,6 +10,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
+	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -71,19 +72,34 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 
 // handleArtifactPut PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}
 // Creates a new revision from the request body. A human edit has no source
-// invocation (actor = human), unlike a stage capture. Because the edit IS the
-// approval at a human_edit gate, a successful PUT also records a
+// invocation (actor = human), unlike a stage capture. When the task is paused at
+// a human gate, the edit IS the approval, so a successful PUT also records a
 // HumanDecision{decision: "edited"} on the manifest — a plain AddEvidence, since
-// this handler performs no FSM transition and needs no shared transaction.
+// this handler performs no FSM transition and needs no shared transaction. The
+// decision is recorded only at a gate: a PUT issued while the task is running or
+// terminal is a legitimate artifact edit but not a gate decision, and recording
+// one would be a false claim in a record whose purpose is to be trustworthy.
 //
 // Precondition policy: when the artifact already has a current revision, the
 // request MUST carry expected_revision_id naming it. This prevents a blind
 // overwrite of an existing artifact by a PUT that did not first GET the
 // revision it is replacing. A create (no current revision yet) needs no
-// precondition. The two race outcomes are therefore: two creates collide → the
-// store's unique index rejects the loser with ErrRevisionConflict (409); two
-// edits collide → the loser's expected_revision_id no longer names the current
-// revision → ErrRevisionConflict (409).
+// precondition. The concurrent-edit race outcomes are: two creates collide →
+// the store's unique index rejects the loser with ErrRevisionConflict (409);
+// two edits collide → the loser's expected_revision_id no longer names the
+// current revision → ErrRevisionConflict (409).
+//
+// Known limitation (TOCTOU on first create): two concurrent PUTs that both see
+// "no current revision" both proceed as creates with no precondition; the
+// store's unique index still rejects one of them (409), so neither write is
+// lost, but the loser's failure is a generic conflict rather than a
+// precondition one. Fully closing this would need a store-level "expect no
+// current revision" sentinel on Put, which PR C does not provide. The handler
+// documents this rather than pretending the third outcome cannot happen.
+//
+// A transient Current() store error fails the request hard (500) rather than
+// being collapsed into "no current revision" — the latter would silently
+// disable the precondition and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePrincipal(w, r)
 	if !ok {
@@ -117,11 +133,28 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the prior current revision to (a) default the kind and (b) decide
+	// the precondition. A transient store error here must fail the request hard —
+	// collapsing it into "no current revision" (as a plain `currentErr == nil`
+	// check would) would let a PUT with no precondition chain onto a revision the
+	// handler never confirmed was absent: a blind overwrite, which is exactly the
+	// failure the precondition policy exists to prevent. Only ErrNoCurrentRevision
+	// is an honest "no current revision"; anything else is a hard refusal.
+	current, currentErr := api.art.Current(r.Context(), principal.TenantID, taskID, name)
+	hasCurrent := false
+	switch {
+	case currentErr == nil:
+		hasCurrent = true
+	case errors.Is(currentErr, artifacts.ErrNoCurrentRevision):
+		// Honest absence — proceed as a create.
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, errForCaller(currentErr))
+		return
+	}
+
 	// Determine the kind: the request's kind, else the prior revision's kind,
 	// else the default "file" for a create.
 	kind := req.Kind
-	current, currentErr := api.art.Current(r.Context(), principal.TenantID, taskID, name)
-	hasCurrent := currentErr == nil
 	if hasCurrent && kind == "" {
 		kind = current.Kind
 	}
@@ -141,10 +174,6 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	// create — the store's planRevision would reject it as a conflict anyway,
 	// but surfacing it here gives a clearer message.
 	if !hasCurrent && req.ExpectedRevisionID != "" {
-		if !errors.Is(currentErr, artifacts.ErrNoCurrentRevision) {
-			writeError(w, http.StatusInternalServerError, codeInternal, errForCaller(currentErr))
-			return
-		}
 		writeError(w, http.StatusConflict, codeConflict,
 			"expected_revision_id was set but the artifact has no current revision; resend without it to create")
 		return
@@ -176,19 +205,32 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 const maxArtifactEditBytes = 16 << 20 // 16 MiB
 
 // recordHumanEditDecision records a HumanDecision{decision: edited} for a
-// successful human artifact edit. The stage is resolved from the task's
-// current_stage so the decision is placeable in the audit trail. Best-effort:
-// a nil manifest service (tests, a server that did not wire one) is a no-op,
-// and a sealed / missing manifest is dropped — the edit itself landed, and the
-// artifact revision row is its own durable record.
+// successful human artifact edit — but only when the task is actually paused at
+// a human gate. The edit endpoint is available regardless of task state (a
+// reviewer may inspect or tweak an artifact at many points), but a
+// HumanDecision claims a human passed a gate. Recording one on a PUT issued
+// while the task is `running`, far from any gate, would be a false claim in a
+// record whose entire purpose is to be trustworthy: a reader would conclude a
+// gate was passed when none was active. The artifact revision row is always the
+// durable record of the edit itself; the HumanDecision is gated to the gate.
+//
+// Best-effort: a nil manifest service (tests, a server that did not wire one)
+// is a no-op, and a sealed / missing manifest is dropped.
 func (api *API) recordHumanEditDecision(ctx context.Context, principal authz.Principal, taskID string) {
 	if api.mfst == nil {
 		return
 	}
-	stage := ""
-	if task, err := api.queries.GetTask(ctx, sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID}); err == nil {
-		stage = currentStageOr(task.CurrentStage, "")
+	task, err := api.queries.GetTask(ctx, sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID})
+	if err != nil {
+		return
 	}
+	// Only record a gate decision when the task is actually at a gate. A PUT
+	// while running / terminal / at a non-gate pause is still a legitimate
+	// artifact edit, but it is not a gate decision and must not claim to be one.
+	if engine.TaskState(task.State) != engine.StatePausedGate {
+		return
+	}
+	stage := currentStageOr(task.CurrentStage, "")
 	patch := humanDecisionPatch(stage, gateHumanEdit, decisionEdited, principal.UserID, time.Now().UTC())
 	if err := api.mfst.AddEvidence(ctx, principal.TenantID, taskID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) || errors.Is(err, manifest.ErrNoManifest) {

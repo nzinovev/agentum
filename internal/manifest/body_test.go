@@ -136,13 +136,21 @@ func TestMergeBodies_NilPatchArtifactsPreservesBase(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_SequentialPatchesPreserveEarlierContribution is the regression
-// for the lost update at the merge layer (D1). Two patches that each add to an
-// append-only section, merged one after the other onto the same base, must both
-// survive. The pre-fix AddEvidence read its merge base outside the transaction,
-// so the second writer's body replaced the first's at the top level; this test
-// pins the merge semantics the transactional write path now relies on by
-// exercising every append-only section.
+// TestMergeBodies_SequentialPatchesPreserveEarlierContribution pins the
+// append-only merge semantics the transactional write path relies on: two
+// patches that each add to an append-only section, merged one after the other
+// onto the same base, must both survive in every section that appends.
+//
+// Scope note (known coverage gap): this exercises the *merge functions*, which
+// were never the D1 defect — the merge was always correct given the right base.
+// D1 was a lost update caused by reading the merge base outside the transaction
+// and a shallow SQL `||`. That defect is not unit-testable without a database
+// harness (which this repo deliberately does not have): the failure requires two
+// concurrent transactions racing on the same row. The fix is verified by reading
+// the transactional structure of AddEvidenceTx (merge base = locked body, SQL =
+// full replacement) and is review-only, not test-covered. This test stays
+// because it pins the merge contract the write path depends on; it is not a D1
+// regression test and was mislabeled as one in the original plan.
 func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) {
 	t.Parallel()
 	base := Body{Schema: "1", Missing: []string{"memory"}}
@@ -287,6 +295,62 @@ func TestMergeBodies_DoesNotCarryEvidenceCompleteFromPatch(t *testing.T) {
 	merged := mergeBodies(base, patch)
 	if merged.EvidenceComplete != nil {
 		t.Errorf("merge accepted EvidenceComplete from a patch: %+v", merged.EvidenceComplete)
+	}
+}
+
+// TestEvidenceComplete_MemoryDoesNotBlockCompleteness is the D5 flag fix: a run
+// that produced every section the system can write is complete, even though
+// `memory` is absent — the memory subsystem is not wired, and its absence is a
+// permanent build-level gap, not a degradation of this run's evidence. Counting
+// it would make evidence_complete permanently false and conflate "subsystem not
+// built" with "evidence degraded," which is the confusion the flag exists to
+// dispel. A reviewer reads `missing` (memory included, honestly) for the gap
+// list and `evidence_complete` for whether this run's evidence degraded.
+func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
+	t.Parallel()
+	body := Body{
+		// Memory intentionally nil — the subsystem is not wired.
+		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:       &CheckEvidence{SetVersion: "v1"},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+	}
+	if !body.IsEvidenceComplete() {
+		t.Error("a run with every wired section present should be complete despite memory being absent")
+	}
+	// And `missing` still honestly reports memory.
+	if missing := body.MissingSections(); len(missing) != 1 || missing[0] != "memory" {
+		t.Errorf("MissingSections = %v, want [memory] — the gap list must still report it", missing)
+	}
+}
+
+// TestEvidenceComplete_GapOrAbsentSectionBlocks guards the flag's other axis:
+// an evidence gap (degraded write) or an absent wired section makes the run
+// incomplete, which is the whole point of distinguishing it from `missing`.
+func TestEvidenceComplete_GapOrAbsentSectionBlocks(t *testing.T) {
+	t.Parallel()
+	complete := Body{
+		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:       &CheckEvidence{SetVersion: "v1"},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+	}
+	if !complete.IsEvidenceComplete() {
+		t.Fatal("baseline body should be complete")
+	}
+	// An evidence gap blocks.
+	withGap := complete
+	withGap.EvidenceGaps = []EvidenceGap{{Section: "prompts", Reason: "db down"}}
+	if withGap.IsEvidenceComplete() {
+		t.Error("an evidence gap did not block completeness")
+	}
+	// An absent wired section blocks.
+	noChecks := complete
+	noChecks.Checks = nil
+	if noChecks.IsEvidenceComplete() {
+		t.Error("an absent checks section did not block completeness")
 	}
 }
 

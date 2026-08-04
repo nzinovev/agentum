@@ -276,6 +276,40 @@ Once tagged releases begin, this project adheres to
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
+- **Cancelling a task whose manifest was sealed or missing returned 500**: the
+  cancel handler recorded the human decision under the same strict policy as
+  advance/approve, so a sealed manifest (crash mid-flight) or a missing one (Init
+  is best-effort at task creation) rolled the whole transaction back, leaving the
+  task un-cancellable and forever non-terminal. Cancel is an emergency exit and
+  is now the most tolerant handler: a sealed/missing manifest is absorbed
+  (`recordLenient`) so the transition commits without the decision, while a real
+  write error still fails. `isHumanDecisionRecordFailure` now actually
+  distinguishes a recording failure from a plain store error rather than
+  returning true unconditionally.
+- **`evidence_complete` could never become true**: `memory` is never written
+  (the subsystem is not wired), and completeness counted it as a missing section,
+  so the flag was permanently false and conflated "subsystem not built in this
+  release" with "this run's evidence degraded." Completeness is now derived from
+  the sections the run is expected to produce (`IsEvidenceComplete`, excluding
+  `memory`); the `missing` list still honestly reports `memory` for a reviewer.
+- **A transient `Current()` store error disabled the artifact-edit precondition**:
+  `hasCurrent := currentErr == nil` collapsed any store error into "no current
+  revision," so a PUT with no `expected_revision_id` would chain onto a revision
+  the handler never confirmed was absent — a blind overwrite, exactly the failure
+  the precondition exists to prevent. Any `Current` error other than
+  `ErrNoCurrentRevision` now fails the request (500) before the precondition
+  branches.
+- **`ListManifestCorrections` lacked the tiebreak its latest-correction sibling
+  had**: `LatestManifestCorrection` orders by `created_at DESC, id DESC`, but
+  `ListManifestCorrections` ordered by `created_at ASC` alone, so at equal
+  timestamps the two queries could disagree and `Get` would take a body that was
+  not the chain head. The list now mirrors the tiebreak (`ASC, id ASC`).
+- **A human artifact edit recorded a gate decision even when no gate was active**:
+  every successful PUT wrote `human_gates: [{decision: edited}]`, so a PUT while
+  the task was `running` (far from any gate) produced a record a reader would
+  interpret as "a human passed a gate." The decision is now recorded only when
+  the task is `paused_gate`; the artifact revision row remains the durable record
+  of the edit itself regardless of state.
 - **Concurrent manifest evidence writes silently lost each other**: `AddEvidence`
   computed its merge from a pre-transaction read and then took the row lock only
   to re-check the seal, discarding the locked body. Two stages finishing close

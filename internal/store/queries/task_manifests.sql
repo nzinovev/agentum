@@ -53,14 +53,16 @@ RETURNING *;
 -- name: ListManifestCorrections :many
 SELECT * FROM task_manifest_corrections
 WHERE manifest_id = $1 AND tenant_id = $2
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, id ASC;
 
 -- name: LatestManifestCorrection :one
 -- The newest correction for a manifest, or no rows when none exist. Ordered by
 -- created_at DESC with an id DESC tiebreak: created_at has limited resolution
 -- (microseconds on Postgres), so two corrections written in the same transaction
 -- could otherwise order nondeterministically, and the latest one is the base the
--- next correction chains onto — ordering must be stable.
+-- next correction chains onto — ordering must be stable. ListManifestCorrections
+-- mirrors this tiebreak (ASC, id ASC) so the two queries agree on order and Get,
+-- which takes the last row as the authoritative body, sees the true chain head.
 SELECT * FROM task_manifest_corrections
 WHERE manifest_id = $1 AND tenant_id = $2
 ORDER BY created_at DESC, id DESC

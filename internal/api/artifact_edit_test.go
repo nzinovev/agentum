@@ -232,6 +232,31 @@ func TestArtifactPut_FirstCreateNeedsNoPrecondition(t *testing.T) {
 	}
 }
 
+// TestArtifactPut_TransientCurrentErrorFailsHard is the fix for the failure
+// mode where a transient Current() store error was collapsed into "no current
+// revision," disabling the precondition and letting a blind PUT through. Any
+// Current error other than ErrNoCurrentRevision must fail the request (500)
+// before the precondition branching, so a store hiccup cannot become a silent
+// overwrite. The artifact must not reach Put.
+func TestArtifactPut_TransientCurrentErrorFailsHard(t *testing.T) {
+	t.Parallel()
+	store := &editArtifactStore{currentErr: errors.New("connection reset")}
+	apiInst := newEditAPI(store)
+
+	request := editRequest(http.MethodPut,
+		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		`{"content":"blind overwrite, no precondition"}`)
+	recorder := httptest.NewRecorder()
+	apiInst.handleArtifactPut(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for a transient Current error; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.lastPut.Name != "" {
+		t.Error("a PUT reached the store despite a transient Current error; the precondition was disabled")
+	}
+}
+
 // TestArtifactPut_PreconditionOnCreateMapsTo409 covers the mismatch: a PUT that
 // pins a revision against an artifact that has none is a conflict, not a create.
 func TestArtifactPut_PreconditionOnCreateMapsTo409(t *testing.T) {
