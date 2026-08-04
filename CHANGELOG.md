@@ -276,6 +276,68 @@ Once tagged releases begin, this project adheres to
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
 
 ### Fixed
+- **The orchestrator never created a commit, so agent work was silently destroyed
+  at teardown.** Every post-stage checkpoint was whatever the worktree's HEAD
+  happened to be, and since no agent role carries `git.delivery` and nothing in
+  the orchestrator committed, that was always the base SHA. `post-spec`,
+  `post-implement` and `base` collapsed to one commit; `result_commit` resolved
+  a branch tip that was still the base, reading as "delivered nothing"; and then
+  the work was destroyed, because teardown is `git worktree remove --force` and
+  the reconciler's restorable path is `git reset --hard` + `git clean -fd`. A
+  task could complete, pass its gates, and deliver an empty diff while discarding
+  everything the agent produced. The orchestrator now exercises the `git.delivery`
+  privilege the capability model already reserves for it: `worktree.Commit`
+  stages the working tree and commits it on `agentum/<task-id>` under an
+  orchestrator identity passed inline via `git -c` (so it does not depend on
+  ambient config), and `recordStageCheckpoint` calls it at each boundary. A stage
+  that produced no change records the unchanged HEAD with no empty commit.
+  - Committing the tree destroys the signal the `auto_if_clean` gate reads, so
+    worktree cleanliness is sampled **before** the checkpoint commit and that
+    sample is what the gate evaluates. Sampling after would make the tree clean
+    by construction and the gate unreachable — the mirror image of the earlier
+    defect where a config file written into the worktree made `isClean()`
+    permanently false. Pinned by a stage-loop test; the pure evaluator tests
+    cannot catch it, because they feed `Clean` directly to `Evaluate`.
+- **The delivery checks ran against the working tree but the evidence claimed
+  they verified a commit.** `enforceProjectChecks` read HEAD separately, ran the
+  executor in the working directory (uncommitted and untracked files included),
+  then stamped that SHA onto the report. A reviewer checking out the recorded
+  `checks.commit` would reproduce a different tree than the one that passed, with
+  no signal. The verification commit is now established before the checks run and
+  the tree is asserted clean first: after the checkpoint fix the worktree HEAD is
+  a real commit, a dirty tree at the boundary fails the task rather than claiming
+  a verification it cannot stand behind, and `checks.commit` is the checkpoint
+  SHA by construction.
+- **A missing base commit silently disabled the delivery gate.**
+  `loadRegistryAtBaseCommit` returned a nil registry for an absent or empty
+  `base_commit`, routing to an empty set where `MandatoryPassed()` is vacuously
+  true — fail-open at the one boundary whose purpose is to be fail-closed, and
+  the mirror image of the defects the prior PRs fixed. Reaching the delivery
+  boundary without a resolved base commit now fails the task. A project that
+  defines no `.agentum.yaml` is still a legitimate empty run, now recorded with
+  `ran: false` so it is not misread as a gate that ran and cleared.
+- **`result_commit` could diverge from the commit the delivery checks verified
+  with no signal.** The checks run before `awaiting_memory_commit`; teardown
+  captures `result_commit` after human approval, and in between a continue job, a
+  human artifact edit, or a filesystem change can move the branch tip. Nothing
+  compared the two, so the sealed manifest could assert "checks passed at X"
+  alongside "delivered Y". Teardown now reads the verified commit directly from
+  `body.checks.commit` and compares it against `result_commit`. On a mismatch it
+  records an evidence gap (so `evidence_complete` reads false) and emits a
+  `task.delivery_commit_diverged` event naming both SHAs. The task is not failed
+  — the human already approved — and the manifest's incompleteness is the signal
+  a reviewer acts on. Reading the recorded value (rather than proxying through
+  the latest checkpoint) avoids a hidden dependency on an FSM property a future
+  ask-to-edit feature would break silently. A comparison that cannot run — the
+  verified commit could not be read back — is itself recorded as a gap, since
+  "checked, no divergence" and "never checked" are different claims and a
+  manifest silent about both would reintroduce the fail-open shape.
+- **`evidence_complete` overcounted a checks section that ran nothing.**
+  `IsEvidenceComplete` and `MissingSections` encoded the section list in
+  parallel and would drift; both now derive from one `expectedSections` table,
+  and the checks predicate requires `ran: true`, so a checks section that
+  recorded no run does not satisfy completeness even when `mandatory_passed` is
+  vacuously true.
 - **Cancelling a task whose manifest was sealed or missing returned 500**: the
   cancel handler recorded the human decision under the same strict policy as
   advance/approve, so a sealed manifest (crash mid-flight) or a missing one (Init

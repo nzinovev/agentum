@@ -145,6 +145,75 @@ func (manager *Manager) ResolveRef(ctx context.Context, repoPath, ref string) (s
 	return strings.TrimSpace(string(out)), nil
 }
 
+// orchestratorIdentity is the git identity the orchestrator uses for the
+// checkpoint commits it authors. It is passed inline via `git -c` rather than
+// read from ambient config, because user.name / user.email are unset in CI
+// containers and on a fresh operator server, and `git commit` refuses without
+// them. A named constant also makes the audit trail unambiguous: a checkpoint
+// commit's author is Agentum, not a human and not the agent's own git.write
+// commits (which carry whatever identity the adapter configured). This is the
+// git.delivery privilege the capability model reserves for the orchestrator
+// (internal/caps: CatGitDelivery) being exercised — no agent role carries it.
+const (
+	orchestratorIdentityName  = "agentum"
+	orchestratorIdentityEmail = "agentum@orchestrator"
+)
+
+// Commit stages everything in the worktree and commits it on the task branch,
+// returning the new commit SHA. Returns (head, false, nil) when the tree is
+// already clean — a boundary that produced no change is a real outcome, not an
+// error, and an empty commit would pollute the lineage a reviewer reads.
+//
+// The orchestrator authors the commit itself rather than reading whatever the
+// agent left at HEAD because the agent is not granted git.delivery: nothing in
+// the orchestrator ran `git commit` before this, so without Commit a checkpoint
+// is whatever the agent happened to commit (often nothing), and the work lives
+// only in the working tree until teardown discards it. The checkpoint SHA this
+// returns is therefore a real snapshot the orchestrator owns — Restore can
+// return to it, and a reviewer can check it out and reproduce what was verified.
+func (manager *Manager) Commit(ctx context.Context, wtRoot, message string) (commit string, created bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	clean, err := manager.IsClean(ctx, wtRoot)
+	if err != nil {
+		return "", false, err
+	}
+	if clean {
+		// A boundary that produced no change is reported honestly as the
+		// unchanged HEAD, not as a new empty commit. An empty commit per stage
+		// would corrupt the lineage a reviewer reads (a flat line of no-op
+		// checkpoints obscuring where real work landed).
+		head, headErr := manager.HeadCommit(ctx, wtRoot)
+		if headErr != nil {
+			return "", false, headErr
+		}
+		return head, false, nil
+	}
+	// Stage everything tracked under the worktree. .agentum/ is excluded by
+	// ensureIgnored (worktree.go:430), so artifact-dir churn does not enter the
+	// commit — this keeps the checkpoint a snapshot of the work, not of
+	// orchestrator bookkeeping.
+	if out, stageErr := git(ctx, wtRoot, "add", "-A"); stageErr != nil {
+		return "", false, fmt.Errorf("git add -A: %w (%s)", stageErr, strings.TrimSpace(string(out)))
+	}
+	// Identity is passed inline via -c so the commit succeeds without ambient
+	// git config (CI containers, fresh servers) and is authored by Agentum in
+	// the audit trail.
+	if out, commitErr := git(ctx, wtRoot,
+		"-c", "user.name="+orchestratorIdentityName,
+		"-c", "user.email="+orchestratorIdentityEmail,
+		"commit", "-m", message,
+	); commitErr != nil {
+		return "", false, fmt.Errorf("git commit: %w (%s)", commitErr, strings.TrimSpace(string(out)))
+	}
+	head, headErr := manager.HeadCommit(ctx, wtRoot)
+	if headErr != nil {
+		return "", false, headErr
+	}
+	return head, true, nil
+}
+
 // HeadCommit returns the full commit SHA the worktree's HEAD currently points
 // at. The runner records this at stage boundaries as a checkpoint SHA. Operates
 // on the worktree dir (the checked-out branch HEAD), not the project repo.

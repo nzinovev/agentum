@@ -239,6 +239,29 @@ Every task records its git lineage explicitly:
   terminal teardown. Immutable; the branch survives teardown so this is always
   resolvable. `base_commit..result_commit` is the review/handoff diff.
 
+`result_commit` is captured at teardown, after the human approval that advances
+the task past `awaiting_memory_commit`, while the delivery checks run earlier
+(verifying the commit recorded as `body.checks.commit`). If the two diverge — a
+continue job, a human artifact edit, or a filesystem change moved the branch tip
+in between — teardown does not silently seal a manifest asserting "checks passed
+at X" alongside "delivered Y". The verified commit is read back from
+`body.checks.commit` (not proxied through the latest checkpoint, whose
+correctness would depend on an FSM property a future ask-to-edit feature could
+break) and compared against `result_commit`. The divergence is recorded as an
+evidence gap (so the sealed manifest reads `evidence_complete: false`) and
+emitted as a `task.delivery_commit_diverged` event naming both SHAs. The task is
+not failed: the human already approved, and the manifest's incompleteness is the
+signal a reviewer acts on.
+
+A comparison that *cannot* run is recorded too. If the verified commit cannot be
+read back, teardown records an evidence gap rather than returning quietly —
+"checked, no divergence" and "never checked" are different claims about a
+delivery, and a manifest silent about both would be the fail-open shape this
+comparison exists to remove. No divergence event is emitted in that case:
+nothing was compared, so asserting a divergence would be equally unsupported.
+An *absent* checks commit (a task that never reached delivery, or a project that
+defines no checks) is an absence rather than a failure and records nothing.
+
 The task response exposes all three plus `branch` (the canonical
 `agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
 without touching git. Provider PR creation belongs to Epic P and is not required
@@ -248,14 +271,53 @@ for safe local egress.
 
 The orchestrator owns boundary checkpoints (`task_checkpoints` table): immutable
 SHAs recorded at stage boundaries. The runner captures `base` (the lineage
-anchor) plus a `post-<stage>` checkpoint after each successful stage invocation.
-`(task_id, label)` is unique, so a retry that re-crosses a boundary upserts
-rather than duplicates.
+anchor, a commit that already exists) plus a `post-<stage>` checkpoint after
+each successful stage invocation. `(task_id, label)` is unique, so a retry that
+re-crosses a boundary upserts rather than duplicates.
+
+The orchestrator authors the post-stage checkpoint commit itself
+(`worktree.Manager.Commit`), staging the worktree's working state and committing
+it on `agentum/<task-id>` under the identity `agentum <agentum@orchestrator>`
+(passed inline via `git -c`, so it does not depend on ambient config and the
+audit trail shows Agentum authored the boundary). This is the `git.delivery`
+privilege the capability model reserves for the orchestrator and no agent role
+carries; before this the orchestrator only *read* HEAD, so every checkpoint was
+the base SHA and the agent's uncommitted work was discarded at teardown. A stage
+that produced no change records the unchanged HEAD honestly with no empty commit
+— an empty commit per stage would pollute the lineage a reviewer reads.
 
 Agents may edit and inspect git but cannot create, delete, reset, or rebase
 delivery refs — `agentum/<task-id>` and checkpoint SHAs are orchestrator-owned.
 The routing block tells the agent this; Agentum enforces it by being the only
-thing that touches those refs.
+thing that touches those refs (and now, by being the thing that commits them).
+
+#### Checkpoint commits and the `auto_if_clean` gate
+
+The checkpoint commit destroys the signal the `auto_if_clean` gate reads, so the
+order of the two is load-bearing: **worktree cleanliness is sampled before the
+checkpoint commit, and that sample is what the gate evaluates.**
+
+`auto_if_clean` exists to surface "the agent touched files beyond its declared
+`edit_targets`" — a property of the working tree the agent left behind. Staging
+and committing that tree makes it clean by construction, so a cleanliness check
+taken after the commit is always true and the gate degenerates into `auto`,
+auto-advancing exactly the runs it was meant to hold for review. The undeclared
+files are committed into the delivery at the same time, so the signal is lost on
+both sides.
+
+This is a two-sided trap, and both sides have been hit:
+
+| Sampled | `isClean` | Effect on the gate |
+|---|---|---|
+| While a per-invocation config file was written into the worktree | always false | gate unreachable; everything paused for review |
+| After the checkpoint commit | always true | gate unreachable; nothing paused for review |
+
+The first was fixed by moving the adapter's generated config out of the worktree
+(see the opencode permission-config entry in `CHANGELOG.md`); the second by
+sampling before the commit. A change to either the checkpoint or the gate should
+re-check this ordering — the pure evaluator tests cannot catch it, because they
+feed `Clean` directly to `Evaluate`; only a test that drives the stage loop can
+(`TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite`).
 
 ### Reconciliation before retry/resume
 
@@ -373,19 +435,34 @@ checks by editing `.agentum.yaml` inside its worktree.
 
 The runner runs the resolved set once, at the **final delivery boundary**: after
 the last stage's checkpoint is recorded and before the task reaches the review
-gate (`awaiting_memory_commit`). The set runs against the worktree HEAD — the
-post-stage checkpoint commit, which is the same SHA that becomes `result_commit`
-at teardown. The outcome is recorded as manifest evidence:
+gate (`awaiting_memory_commit`).
+
+**Commit binding.** The checks must verify exactly the commit they claim to. The
+runner resolves the worktree HEAD (the post-stage checkpoint commit the
+orchestrator authored) *before* the executor runs and asserts the tree is clean
+first: a dirty tree means something wrote after the checkpoint, and running the
+checks against it would test content that exists in no commit while the manifest
+asserts a specific SHA was verified. A dirty tree at this boundary fails the task
+rather than claiming a verification it cannot stand behind. Only then does the
+executor run, and the recorded `checks.commit` is that checkpoint SHA by
+construction — not a pre-run HEAD read that could drift. The outcome is recorded
+as manifest evidence:
 
 - every per-check result (status, exit code, duration, capped stdout/stderr,
   stop reason, definition revision, which layer contributed it);
 - the resolved set version + the registry revision;
-- the verified commit and the executor's capability label.
+- the verified commit and the executor's capability label;
+- `ran`, which is true only when at least one check executed — an empty set (the
+  project defines no checks) is a legitimate configuration recorded as
+  `ran: false` so it is not misread as a gate that ran and cleared.
 
 A **mandatory failure blocks delivery**: instead of reaching the review gate, the
 task fails, and the check evidence in the sealed manifest is the record. Optional
 check failures are recorded as evidence but do not block. A successful run is the
-evidence available to the final reviewer.
+evidence available to the final reviewer. Reaching the delivery boundary without
+a resolved `base_commit` also fails the task — the anchor is required to load the
+registry and to gate delivery, and its absence there is a broken invariant, not
+an early exit to an empty set.
 
 ### The executor's boundary
 

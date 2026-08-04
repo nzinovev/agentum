@@ -96,6 +96,12 @@ type manifestService interface {
 	AddEvidence(ctx context.Context, tenantID, taskID string, patch manifest.Body) error
 	Seal(ctx context.Context, tenantID, userID, taskID string, reason manifest.SealReason) error
 	RecordGap(ctx context.Context, tenantID, taskID string, gap manifest.EvidenceGap) error
+	// ChecksCommit returns the commit the delivery checks verified
+	// (body.checks.commit). Empty when no checks section was recorded. Used by
+	// teardown to compare result_commit against the verified commit directly,
+	// rather than a checkpoint proxy whose correctness depends on an FSM
+	// property a future feature could break silently.
+	ChecksCommit(ctx context.Context, tenantID, taskID string) (string, error)
 }
 
 // manifestServiceOrNil returns service as a manifestService, or nil when
@@ -230,13 +236,16 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	}
 	runner.recordResultCommit(ctx, task, project.RepoPath)
 	// Refresh task state (recordResultCommit may have set result_commit) and
-	// seal the manifest. The seal captures the final git lineage; a sealed
+	// detect any divergence between what was delivered and what the checks
+	// verified, before sealing. The seal captures the final git lineage; a sealed
 	// manifest is the immutable record a comparison / reproduction reads.
 	updatedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
 	if refreshErr == nil {
+		runner.verifyDeliveryCommitBinding(ctx, updatedTask)
 		runner.sealManifestAtTerminal(ctx, updatedTask)
 	} else {
 		runner.log.Warn("teardown: reload task for seal", "task", task.ID, "error", refreshErr)
+		runner.verifyDeliveryCommitBinding(ctx, task)
 		runner.sealManifestAtTerminal(ctx, task)
 	}
 	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
@@ -297,6 +306,113 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 	}); err != nil {
 		runner.log.Warn("record result_commit", "task", task.ID, "error", err)
 	}
+}
+
+// verifyDeliveryCommitBinding detects a divergence between the commit the
+// delivery checks verified and the commit recorded as delivered (result_commit).
+// The two are separated by a human approval: the checks run before the task
+// reaches awaiting_memory_commit, teardown runs after approval, and in between a
+// continue job, a human artifact edit, or a filesystem change can move the
+// branch tip. Nothing previously compared the two, so the sealed manifest could
+// assert "mandatory checks passed at X" alongside "delivered Y" with no signal
+// they differ.
+//
+// On a mismatch this does NOT fail the task — the human already approved, and
+// failing at teardown after approval would be a confusing terminal state.
+// Instead the divergence is recorded as an EvidenceGap (so the sealed manifest
+// carries it and evidence_complete reads false) and emitted as a distinct event
+// (so it is visible on the stream). The sealed manifest's incompleteness is the
+// signal a reviewer acts on. This is the cheaper of the two readings the plan
+// considered; re-running checks inside teardown was rejected because it puts an
+// arbitrarily long build on the terminal path and can fail after approval.
+//
+// The verified commit is read directly from body.checks.commit, not proxied
+// through the latest checkpoint. The proxy (last post-stage checkpoint == the
+// commit the checks verified) happens to hold today because the FSM has no path
+// from awaiting_memory_commit back into a stage, but that property is nowhere
+// asserted or tested, and a future ask-to-edit / add-context feature (Epic 2
+// stubs in internal/api/stubs.go) would add exactly that path — at which point a
+// post-checks stage would mint a new checkpoint, result_commit would match it,
+// and the proxy comparison would fall silent in the very scenario it exists to
+// catch. Reading the recorded value removes the hidden dependency.
+//
+// A comparison that cannot run is itself recorded as a gap. Skipping quietly
+// would leave the manifest unable to distinguish "checked, no divergence" from
+// "never checked" — the same fail-open shape the comparison was added to close.
+//
+// When the manifest service is nil (unit tests without a DB), the verified
+// commit falls back to the latest checkpoint SHA. This is the degraded path:
+// correct only while the FSM property above holds, and used solely so the
+// teardown flow does not skip the check entirely in tests. The persisted
+// result_commit is used (the refreshed task), not the value this teardown would
+// have written — recordResultCommit is a no-op when result_commit is already
+// set, so comparing against a not-yet-persisted tip would miss a divergence that
+// a prior teardown already recorded.
+func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc.Task) {
+	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
+		return
+	}
+	verifiedCommit, err := runner.checksVerifiedCommit(ctx, task)
+	if err != nil {
+		// The comparison could not run. Record that as a gap rather than
+		// returning quietly: "the check found no divergence" and "the check
+		// never happened" are different claims, and a manifest silent about
+		// both is the fail-open shape this whole comparison exists to remove.
+		runner.log.Warn("verify delivery binding: read verified commit", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "checks", "",
+			fmt.Errorf("could not compare result_commit against the checks-verified commit: %w", err))
+		return
+	}
+	if verifiedCommit == "" {
+		// No recorded checks commit (e.g. a task that never reached delivery, or
+		// the manifest service is nil and no checkpoint exists). Nothing to
+		// compare against — an absence, not a failure.
+		return
+	}
+	if task.ResultCommit.String == verifiedCommit {
+		return
+	}
+	// Divergence: the delivered commit is not the one the checks verified. Record
+	// it as a gap so the sealed manifest carries both SHAs and reads incomplete,
+	// and emit a distinct event so the divergence is visible on the stream rather
+	// than buried in the manifest body.
+	cause := fmt.Errorf(
+		"result_commit %s != checks-verified commit %s; the delivered commit was not the one the delivery checks verified",
+		task.ResultCommit.String, verifiedCommit,
+	)
+	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
+	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
+		"result_commit": task.ResultCommit.String,
+		"checks_commit": verifiedCommit,
+	})
+}
+
+// checksVerifiedCommit returns the commit the delivery checks verified, reading
+// body.checks.commit directly when the manifest service is available, and
+// falling back to the latest checkpoint SHA when it is not (unit tests). The
+// fallback is a degraded proxy — see verifyDeliveryCommitBinding for why it is
+// not the primary path.
+//
+// An empty commit with a nil error means "nothing was recorded to compare
+// against"; a non-nil error means "the recorded value could not be read." The
+// caller must distinguish them, because only the second one is a gap in the
+// evidence.
+func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) (string, error) {
+	if runner.mfst != nil {
+		return runner.mfst.ChecksCommit(ctx, task.TenantID, task.ID)
+	}
+	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A task that never recorded a checkpoint has nothing to compare
+			// against; that is an absence, not a read failure.
+			return "", nil
+		}
+		return "", fmt.Errorf("load checkpoint fallback: %w", err)
+	}
+	return checkpoint.CommitSha, nil
 }
 
 // drive performs the shared setup (load task + project + pack, resolve the
@@ -462,14 +578,23 @@ func (runner *Runner) recordCheckpoint(ctx context.Context, task sqlc.Task, labe
 	runner.emit(ctx, task, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
 }
 
-// recordStageCheckpoint captures the worktree's current HEAD as a post-stage
-// boundary checkpoint. The label is `post-<stage>`; the SHA is read from the
-// worktree (the agent's commit tip, if it committed). A read failure is logged
-// and skipped — the lineage anchor and result_commit do not depend on it.
+// recordStageCheckpoint commits the worktree's working state on the task branch
+// and records the resulting SHA as a post-stage boundary checkpoint. The label
+// is `post-<stage>`. The orchestrator authors the commit itself (the
+// git.delivery privilege no agent role carries): without this, a checkpoint
+// would be whatever the agent happened to leave at HEAD — often still the base,
+// since nothing in the orchestrator committed — and the agent's uncommitted
+// work would be discarded at the next Restore or at teardown. A stage that
+// produced no change records the unchanged HEAD honestly (Commit returns
+// created=false for a clean tree) rather than creating an empty commit. A
+// commit failure is logged and skipped — the lineage anchor and result_commit
+// do not depend on it, but a checkpoint that cannot be created cannot lie about
+// having captured the boundary.
 func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) {
-	head, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
+	message := fmt.Sprintf("agentum: checkpoint after stage %s", stageID)
+	head, _, err := runner.wt.Commit(ctx, run.worktree.Root, message)
 	if err != nil {
-		runner.log.Warn("read head for checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("commit stage checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
 		return
 	}
 	runner.recordCheckpoint(ctx, run.task, "post-"+stageID, head)
@@ -597,6 +722,17 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// HEAD as an orchestrator-owned checkpoint so a later crash can restore to
 	// this point rather than blindly replaying the next side-effectful stage.
 	// Skipped on any failure flag — there is no trustworthy commit to record.
+	//
+	// The clean check for the auto_if_clean gate MUST be sampled before the
+	// checkpoint commit, not after. The gate's purpose is to surface "the agent
+	// touched files beyond its declared edit_targets" — that is a property of
+	// the working tree the agent left, which recordStageCheckpoint destroys by
+	// committing it. Sampling after would make the tree permanently clean and
+	// the gate unreachable (the mirror image of the PR B defect where isClean was
+	// permanently false); git add -A would also sweep those undeclared files into
+	// the delivery commit. Sampling before preserves the signal the gate exists
+	// to send.
+	cleanBeforeCommit := runner.isClean(run.project.RepoPath, run.task.ID)
 	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
 		runner.recordStageCheckpoint(ctx, run, stageID)
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
@@ -608,7 +744,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		Result:           outcome.result,
 		Stage:            stage,
 		StageID:          stageID,
-		Clean:            runner.isClean(run.project.RepoPath, run.task.ID),
+		Clean:            cleanBeforeCommit,
 		AdapterError:     outcome.adapterErr,
 		ParseError:       outcome.parseErr,
 		ArtifactRejected: outcome.rejected,
@@ -962,6 +1098,14 @@ const (
 	// results; this event is the durable signal that Agentum ran its own checks
 	// (not the agent's claim) against the checkpoint commit.
 	EvProjectChecksRun = "task.project_checks_run"
+	// EvDeliveryCommitDiverged records that the commit recorded as delivered
+	// (result_commit) differs from the one the delivery checks verified. Emitted
+	// at teardown when the two diverge — a human approval, a continue job, or a
+	// filesystem change moved the branch tip between the checks and teardown.
+	// The task is not failed (the human already approved); the divergence is
+	// recorded as an evidence gap and the sealed manifest reads incomplete, which
+	// is the signal a reviewer acts on.
+	EvDeliveryCommitDiverged = "task.delivery_commit_diverged"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

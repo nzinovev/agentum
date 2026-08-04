@@ -306,6 +306,7 @@ data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
 | `stage.stopped` | `{task_id, invocation_id, stop_reason}` | runner at a stop point |
 | `stage.result` | `{task_id, invocation_id, status, open_questions, ...}` | runner after result.json |
 | `stage.artifact_rejected` | `{task_id, stage, path, reason}` | runner when a declared artifact is refused (`reason` ∈ `escapes_worktree`, `unresolvable`, `secret_detected`) |
+| `task.delivery_commit_diverged` | `{task_id, result_commit, checks_commit, checkpoint_label}` | runner at teardown when `result_commit` differs from the commit the delivery checks verified; the task is not failed, but the sealed manifest reads `evidence_complete: false` |
 | `memory.committed` | `{task_id, entries:[...]}` | memory layer at final approval |
 | `run.log` | `{task_id, level, message}` | runner / adapter diagnostics |
 
