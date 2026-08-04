@@ -253,6 +253,15 @@ emitted as a `task.delivery_commit_diverged` event naming both SHAs. The task is
 not failed: the human already approved, and the manifest's incompleteness is the
 signal a reviewer acts on.
 
+A comparison that *cannot* run is recorded too. If the verified commit cannot be
+read back, teardown records an evidence gap rather than returning quietly —
+"checked, no divergence" and "never checked" are different claims about a
+delivery, and a manifest silent about both would be the fail-open shape this
+comparison exists to remove. No divergence event is emitted in that case:
+nothing was compared, so asserting a divergence would be equally unsupported.
+An *absent* checks commit (a task that never reached delivery, or a project that
+defines no checks) is an absence rather than a failure and records nothing.
+
 The task response exposes all three plus `branch` (the canonical
 `agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
 without touching git. Provider PR creation belongs to Epic P and is not required
@@ -281,6 +290,34 @@ Agents may edit and inspect git but cannot create, delete, reset, or rebase
 delivery refs — `agentum/<task-id>` and checkpoint SHAs are orchestrator-owned.
 The routing block tells the agent this; Agentum enforces it by being the only
 thing that touches those refs (and now, by being the thing that commits them).
+
+#### Checkpoint commits and the `auto_if_clean` gate
+
+The checkpoint commit destroys the signal the `auto_if_clean` gate reads, so the
+order of the two is load-bearing: **worktree cleanliness is sampled before the
+checkpoint commit, and that sample is what the gate evaluates.**
+
+`auto_if_clean` exists to surface "the agent touched files beyond its declared
+`edit_targets`" — a property of the working tree the agent left behind. Staging
+and committing that tree makes it clean by construction, so a cleanliness check
+taken after the commit is always true and the gate degenerates into `auto`,
+auto-advancing exactly the runs it was meant to hold for review. The undeclared
+files are committed into the delivery at the same time, so the signal is lost on
+both sides.
+
+This is a two-sided trap, and both sides have been hit:
+
+| Sampled | `isClean` | Effect on the gate |
+|---|---|---|
+| While a per-invocation config file was written into the worktree | always false | gate unreachable; everything paused for review |
+| After the checkpoint commit | always true | gate unreachable; nothing paused for review |
+
+The first was fixed by moving the adapter's generated config out of the worktree
+(see the opencode permission-config entry in `CHANGELOG.md`); the second by
+sampling before the commit. A change to either the checkpoint or the gate should
+re-check this ordering — the pure evaluator tests cannot catch it, because they
+feed `Clean` directly to `Evaluate`; only a test that drives the stage loop can
+(`TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite`).
 
 ### Reconciliation before retry/resume
 

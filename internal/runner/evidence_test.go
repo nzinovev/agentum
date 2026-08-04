@@ -432,6 +432,9 @@ type fakeManifestService struct {
 	addErr error
 	// checksCommitValue is returned by ChecksCommit; "" means none recorded.
 	checksCommitValue string
+	// checksCommitErr, when set, is returned from ChecksCommit — the "the
+	// verified commit could not be read" case, distinct from "none recorded".
+	checksCommitErr error
 }
 
 func (service *fakeManifestService) AddEvidence(_ context.Context, _, _ string, patch manifest.Body) error {
@@ -463,6 +466,9 @@ func (service *fakeManifestService) RecordGap(_ context.Context, _, _ string, ga
 func (service *fakeManifestService) ChecksCommit(_ context.Context, _, _ string) (string, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if service.checksCommitErr != nil {
+		return "", service.checksCommitErr
+	}
 	return service.checksCommitValue, nil
 }
 

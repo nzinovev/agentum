@@ -13,6 +13,7 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/checks"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -285,6 +286,86 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 	for _, event := range store.events {
 		if event.Type == EvDeliveryCommitDiverged {
 			t.Error("a matching result_commit must not emit a divergence event")
+		}
+	}
+}
+
+// TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap: a
+// comparison that could not run must leave a trace. "The check found no
+// divergence" and "the check never happened" are different claims about the
+// delivery, and a manifest that is silent about both is exactly the fail-open
+// shape this comparison was added to close — so a failed read of the verified
+// commit records a gap (which drives evidence_complete false) instead of
+// returning quietly.
+//
+// No divergence event is emitted: nothing was compared, so asserting a
+// divergence would be a claim we cannot support either.
+func TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap(t *testing.T) {
+	t.Parallel()
+	task := sqlc.Task{
+		ID: "Tu", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
+		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-delivered"),
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
+	store := newFakeStore(task, proj)
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
+		AgentName: "opencode",
+	})
+	manifestFake := &fakeManifestService{checksCommitErr: errors.New("connection reset by peer")}
+	runner.mfst = manifestFake
+
+	runner.verifyDeliveryCommitBinding(context.Background(), task)
+
+	manifestFake.mu.Lock()
+	gaps := append([]manifest.EvidenceGap(nil), manifestFake.gaps...)
+	manifestFake.mu.Unlock()
+	if len(gaps) != 1 {
+		t.Fatalf("recorded %d evidence gaps, want exactly 1 for an unreadable verified commit", len(gaps))
+	}
+	if gaps[0].Section != "checks" {
+		t.Errorf("gap section = %q, want checks", gaps[0].Section)
+	}
+	if !strings.Contains(gaps[0].Reason, "could not compare") {
+		t.Errorf("gap reason %q does not say the comparison could not run", gaps[0].Reason)
+	}
+	for _, event := range store.events {
+		if event.Type == EvDeliveryCommitDiverged {
+			t.Error("a comparison that never ran must not claim a divergence")
+		}
+	}
+}
+
+// TestRunner_VerifyDeliveryCommitBinding_NoRecordedCommitIsQuiet separates the
+// two empty cases the previous test depends on: a task with no recorded checks
+// commit (never reached delivery, or the project defines no checks) is an
+// absence, not a read failure, and must record nothing.
+func TestRunner_VerifyDeliveryCommitBinding_NoRecordedCommitIsQuiet(t *testing.T) {
+	t.Parallel()
+	task := sqlc.Task{
+		ID: "Tn", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
+		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-delivered"),
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
+	store := newFakeStore(task, proj)
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
+		AgentName: "opencode",
+	})
+	manifestFake := &fakeManifestService{} // no checks commit, no error
+	runner.mfst = manifestFake
+
+	runner.verifyDeliveryCommitBinding(context.Background(), task)
+
+	manifestFake.mu.Lock()
+	gapCount := len(manifestFake.gaps)
+	manifestFake.mu.Unlock()
+	if gapCount != 0 {
+		t.Errorf("recorded %d gaps for an absent checks commit; absence is not a failure", gapCount)
+	}
+	for _, event := range store.events {
+		if event.Type == EvDeliveryCommitDiverged {
+			t.Error("an absent checks commit must not emit a divergence event")
 		}
 	}
 }

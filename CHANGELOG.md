@@ -291,6 +291,13 @@ Once tagged releases begin, this project adheres to
   orchestrator identity passed inline via `git -c` (so it does not depend on
   ambient config), and `recordStageCheckpoint` calls it at each boundary. A stage
   that produced no change records the unchanged HEAD with no empty commit.
+  - Committing the tree destroys the signal the `auto_if_clean` gate reads, so
+    worktree cleanliness is sampled **before** the checkpoint commit and that
+    sample is what the gate evaluates. Sampling after would make the tree clean
+    by construction and the gate unreachable — the mirror image of the earlier
+    defect where a config file written into the worktree made `isClean()`
+    permanently false. Pinned by a stage-loop test; the pure evaluator tests
+    cannot catch it, because they feed `Clean` directly to `Evaluate`.
 - **The delivery checks ran against the working tree but the evidence claimed
   they verified a commit.** `enforceProjectChecks` read HEAD separately, ran the
   executor in the working directory (uncommitted and untracked files included),
@@ -321,7 +328,10 @@ Once tagged releases begin, this project adheres to
   — the human already approved — and the manifest's incompleteness is the signal
   a reviewer acts on. Reading the recorded value (rather than proxying through
   the latest checkpoint) avoids a hidden dependency on an FSM property a future
-  ask-to-edit feature would break silently.
+  ask-to-edit feature would break silently. A comparison that cannot run — the
+  verified commit could not be read back — is itself recorded as a gap, since
+  "checked, no divergence" and "never checked" are different claims and a
+  manifest silent about both would reintroduce the fail-open shape.
 - **`evidence_complete` overcounted a checks section that ran nothing.**
   `IsEvidenceComplete` and `MissingSections` encoded the section list in
   parallel and would drift; both now derive from one `expectedSections` table,

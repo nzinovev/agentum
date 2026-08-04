@@ -336,6 +336,10 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 // and the proxy comparison would fall silent in the very scenario it exists to
 // catch. Reading the recorded value removes the hidden dependency.
 //
+// A comparison that cannot run is itself recorded as a gap. Skipping quietly
+// would leave the manifest unable to distinguish "checked, no divergence" from
+// "never checked" — the same fail-open shape the comparison was added to close.
+//
 // When the manifest service is nil (unit tests without a DB), the verified
 // commit falls back to the latest checkpoint SHA. This is the degraded path:
 // correct only while the FSM property above holds, and used solely so the
@@ -348,11 +352,21 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc
 	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
 		return
 	}
-	verifiedCommit := runner.checksVerifiedCommit(ctx, task)
+	verifiedCommit, err := runner.checksVerifiedCommit(ctx, task)
+	if err != nil {
+		// The comparison could not run. Record that as a gap rather than
+		// returning quietly: "the check found no divergence" and "the check
+		// never happened" are different claims, and a manifest silent about
+		// both is the fail-open shape this whole comparison exists to remove.
+		runner.log.Warn("verify delivery binding: read verified commit", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "checks", "",
+			fmt.Errorf("could not compare result_commit against the checks-verified commit: %w", err))
+		return
+	}
 	if verifiedCommit == "" {
 		// No recorded checks commit (e.g. a task that never reached delivery, or
 		// the manifest service is nil and no checkpoint exists). Nothing to
-		// compare against.
+		// compare against — an absence, not a failure.
 		return
 	}
 	if task.ResultCommit.String == verifiedCommit {
@@ -378,24 +392,27 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc
 // falling back to the latest checkpoint SHA when it is not (unit tests). The
 // fallback is a degraded proxy — see verifyDeliveryCommitBinding for why it is
 // not the primary path.
-func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) string {
+//
+// An empty commit with a nil error means "nothing was recorded to compare
+// against"; a non-nil error means "the recorded value could not be read." The
+// caller must distinguish them, because only the second one is a gap in the
+// evidence.
+func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) (string, error) {
 	if runner.mfst != nil {
-		commit, err := runner.mfst.ChecksCommit(ctx, task.TenantID, task.ID)
-		if err != nil {
-			runner.log.Warn("verify delivery binding: read checks commit", "task", task.ID, "error", err)
-		}
-		return commit
+		return runner.mfst.ChecksCommit(ctx, task.TenantID, task.ID)
 	}
 	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
 		TaskID: task.ID, TenantID: task.TenantID,
 	})
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			runner.log.Warn("verify delivery binding: load checkpoint fallback", "task", task.ID, "error", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A task that never recorded a checkpoint has nothing to compare
+			// against; that is an absence, not a read failure.
+			return "", nil
 		}
-		return ""
+		return "", fmt.Errorf("load checkpoint fallback: %w", err)
 	}
-	return checkpoint.CommitSha
+	return checkpoint.CommitSha, nil
 }
 
 // drive performs the shared setup (load task + project + pack, resolve the
