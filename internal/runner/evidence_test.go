@@ -430,6 +430,8 @@ type fakeManifestService struct {
 	sealed      bool
 	// addErr, when set, is returned from AddEvidence.
 	addErr error
+	// checksCommitValue is returned by ChecksCommit; "" means none recorded.
+	checksCommitValue string
 }
 
 func (service *fakeManifestService) AddEvidence(_ context.Context, _, _ string, patch manifest.Body) error {
@@ -454,6 +456,14 @@ func (service *fakeManifestService) RecordGap(_ context.Context, _, _ string, ga
 	defer service.mu.Unlock()
 	service.gaps = append(service.gaps, gap)
 	return nil
+}
+
+// checksCommit is the recorded checks commit, or "" when none was set. The E3
+// teardown divergence test sets this to drive verifyDeliveryCommitBinding.
+func (service *fakeManifestService) ChecksCommit(_ context.Context, _, _ string) (string, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return service.checksCommitValue, nil
 }
 
 func (service *fakeManifestService) gapSections() []string {

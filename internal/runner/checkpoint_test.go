@@ -211,12 +211,19 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 
 // TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent is the E3
 // test: when result_commit (captured at teardown, after human approval) differs
-// from the commit the delivery checks verified (the last post-stage checkpoint),
-// teardown must not silently seal a manifest that asserts "checks passed at X"
-// alongside "delivered Y". The divergence is recorded as an evidence gap (so
-// the sealed manifest reads incomplete) and emitted as a distinct event (so it
-// is visible on the stream). The task is not failed — the human already
-// approved, and failing at teardown would be a confusing terminal state.
+// from the commit the delivery checks verified (body.checks.commit), teardown
+// must not silently seal a manifest that asserts "checks passed at X" alongside
+// "delivered Y". The divergence is recorded as an evidence gap (so the sealed
+// manifest reads incomplete) and emitted as a distinct event (so it is visible
+// on the stream). The task is not failed — the human already approved, and
+// failing at teardown would be a confusing terminal state.
+//
+// The verified commit is read directly from body.checks.commit, not proxied
+// through the latest checkpoint: the proxy's correctness depends on an FSM
+// property (no path back into a stage from the gate) that a future ask-to-edit
+// feature would break silently. This test drives the real path by setting the
+// manifest's checks commit and asserting the comparison uses it, not a
+// checkpoint.
 func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testing.T) {
 	t.Parallel()
 	task := sqlc.Task{
@@ -228,15 +235,14 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
 	store := newFakeStore(task, proj)
-	// The checkpoint the delivery checks verified — a different SHA.
-	store.checkpoints = []sqlc.TaskCheckpoint{
-		{Label: "base", CommitSha: "sha-base"},
-		{Label: "post-spec", CommitSha: "sha-verified"},
-	}
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 		AgentName: "opencode",
 	})
+	// Inject the fake manifest carrying the verified commit (same-package field
+	// assignment, matching evidence_test.go). Drives the primary path: the
+	// comparison reads body.checks.commit, not a checkpoint proxy.
+	runner.mfst = &fakeManifestService{checksCommitValue: "sha-verified"}
 
 	runner.verifyDeliveryCommitBinding(context.Background(), task)
 
@@ -257,9 +263,9 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 }
 
 // TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet is the E3
-// negative: when result_commit equals the checks-verified checkpoint, teardown
-// must not emit a divergence event or record a gap. The happy path stays quiet
-// so a reviewer is not surfaced noise for the normal case.
+// negative: when result_commit equals the checks-verified commit, teardown must
+// not emit a divergence event or record a gap. The happy path stays quiet so a
+// reviewer is not surfaced noise for the normal case.
 func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T) {
 	t.Parallel()
 	task := sqlc.Task{
@@ -268,11 +274,11 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
 	store := newFakeStore(task, proj)
-	store.checkpoints = []sqlc.TaskCheckpoint{{Label: "post-spec", CommitSha: "sha-same"}}
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 		AgentName: "opencode",
 	})
+	runner.mfst = &fakeManifestService{checksCommitValue: "sha-same"}
 
 	runner.verifyDeliveryCommitBinding(context.Background(), task)
 

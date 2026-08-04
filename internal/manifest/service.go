@@ -371,6 +371,28 @@ func correctionBase(sealed Body, latest *Body) Body {
 	return sealed
 }
 
+// ChecksCommit returns the commit the delivery checks verified
+// (body.checks.commit), reading the most recent body state (sealed body with the
+// latest correction applied). Empty when no checks section was recorded, the
+// project defined no checks, or no manifest exists — the caller treats an empty
+// result as "nothing to compare against." This is the narrow read the teardown
+// divergence check needs: it compares result_commit against exactly the commit
+// recorded as verified, not a proxy whose correctness depends on an FSM property
+// a future feature (ask-to-edit / add-context) could break silently.
+func (service *Service) ChecksCommit(ctx context.Context, tenantID, taskID string) (string, error) {
+	body, _, _, err := service.Get(ctx, tenantID, taskID)
+	if err != nil {
+		if errors.Is(err, ErrNoManifest) {
+			return "", nil
+		}
+		return "", err
+	}
+	if body.Checks == nil {
+		return "", nil
+	}
+	return body.Checks.Commit, nil
+}
+
 // Get returns the manifest body, the seal metadata, and any corrections. The
 // corrections list is empty when no corrections exist. The body the caller
 // gets back is the most recent state — the sealed body with the latest

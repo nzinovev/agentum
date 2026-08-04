@@ -314,11 +314,14 @@ Once tagged releases begin, this project adheres to
   captures `result_commit` after human approval, and in between a continue job, a
   human artifact edit, or a filesystem change can move the branch tip. Nothing
   compared the two, so the sealed manifest could assert "checks passed at X"
-  alongside "delivered Y". Teardown now detects the divergence, records it as an
-  evidence gap (so `evidence_complete` reads false) and emits a
+  alongside "delivered Y". Teardown now reads the verified commit directly from
+  `body.checks.commit` and compares it against `result_commit`. On a mismatch it
+  records an evidence gap (so `evidence_complete` reads false) and emits a
   `task.delivery_commit_diverged` event naming both SHAs. The task is not failed
   — the human already approved — and the manifest's incompleteness is the signal
-  a reviewer acts on.
+  a reviewer acts on. Reading the recorded value (rather than proxying through
+  the latest checkpoint) avoids a hidden dependency on an FSM property a future
+  ask-to-edit feature would break silently.
 - **`evidence_complete` overcounted a checks section that ran nothing.**
   `IsEvidenceComplete` and `MissingSections` encoded the section list in
   parallel and would drift; both now derive from one `expectedSections` table,

@@ -96,6 +96,12 @@ type manifestService interface {
 	AddEvidence(ctx context.Context, tenantID, taskID string, patch manifest.Body) error
 	Seal(ctx context.Context, tenantID, userID, taskID string, reason manifest.SealReason) error
 	RecordGap(ctx context.Context, tenantID, taskID string, gap manifest.EvidenceGap) error
+	// ChecksCommit returns the commit the delivery checks verified
+	// (body.checks.commit). Empty when no checks section was recorded. Used by
+	// teardown to compare result_commit against the verified commit directly,
+	// rather than a checkpoint proxy whose correctness depends on an FSM
+	// property a future feature could break silently.
+	ChecksCommit(ctx context.Context, tenantID, taskID string) (string, error)
 }
 
 // manifestServiceOrNil returns service as a manifestService, or nil when
@@ -320,29 +326,36 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 // considered; re-running checks inside teardown was rejected because it puts an
 // arbitrarily long build on the terminal path and can fail after approval.
 //
-// The comparison uses the latest checkpoint SHA as the checks-verified commit
-// proxy: after E1+E2 the checks verified the worktree HEAD, which is the last
-// post-stage checkpoint, and LatestCheckpointForTask returns the most recent one.
-// The persisted result_commit is used (the refreshed task), not the value this
-// teardown would have written — recordResultCommit is a no-op when result_commit
-// is already set, so comparing against a not-yet-persisted tip would miss a
-// divergence that a prior teardown already recorded.
+// The verified commit is read directly from body.checks.commit, not proxied
+// through the latest checkpoint. The proxy (last post-stage checkpoint == the
+// commit the checks verified) happens to hold today because the FSM has no path
+// from awaiting_memory_commit back into a stage, but that property is nowhere
+// asserted or tested, and a future ask-to-edit / add-context feature (Epic 2
+// stubs in internal/api/stubs.go) would add exactly that path — at which point a
+// post-checks stage would mint a new checkpoint, result_commit would match it,
+// and the proxy comparison would fall silent in the very scenario it exists to
+// catch. Reading the recorded value removes the hidden dependency.
+//
+// When the manifest service is nil (unit tests without a DB), the verified
+// commit falls back to the latest checkpoint SHA. This is the degraded path:
+// correct only while the FSM property above holds, and used solely so the
+// teardown flow does not skip the check entirely in tests. The persisted
+// result_commit is used (the refreshed task), not the value this teardown would
+// have written — recordResultCommit is a no-op when result_commit is already
+// set, so comparing against a not-yet-persisted tip would miss a divergence that
+// a prior teardown already recorded.
 func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc.Task) {
 	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
 		return
 	}
-	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
-	})
-	if err != nil {
-		// No checkpoint to compare against (e.g. a task that never ran a stage).
-		// Nothing to diverge from; this path is for tasks that reached delivery.
-		if !errors.Is(err, sql.ErrNoRows) {
-			runner.log.Warn("verify delivery binding: load checkpoint", "task", task.ID, "error", err)
-		}
+	verifiedCommit := runner.checksVerifiedCommit(ctx, task)
+	if verifiedCommit == "" {
+		// No recorded checks commit (e.g. a task that never reached delivery, or
+		// the manifest service is nil and no checkpoint exists). Nothing to
+		// compare against.
 		return
 	}
-	if task.ResultCommit.String == checkpoint.CommitSha {
+	if task.ResultCommit.String == verifiedCommit {
 		return
 	}
 	// Divergence: the delivered commit is not the one the checks verified. Record
@@ -350,15 +363,39 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc
 	// and emit a distinct event so the divergence is visible on the stream rather
 	// than buried in the manifest body.
 	cause := fmt.Errorf(
-		"result_commit %s != checks-verified checkpoint %s; the delivered commit was not the one the delivery checks verified",
-		task.ResultCommit.String, checkpoint.CommitSha,
+		"result_commit %s != checks-verified commit %s; the delivered commit was not the one the delivery checks verified",
+		task.ResultCommit.String, verifiedCommit,
 	)
 	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
 	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
-		"result_commit":    task.ResultCommit.String,
-		"checks_commit":    checkpoint.CommitSha,
-		"checkpoint_label": checkpoint.Label,
+		"result_commit": task.ResultCommit.String,
+		"checks_commit": verifiedCommit,
 	})
+}
+
+// checksVerifiedCommit returns the commit the delivery checks verified, reading
+// body.checks.commit directly when the manifest service is available, and
+// falling back to the latest checkpoint SHA when it is not (unit tests). The
+// fallback is a degraded proxy — see verifyDeliveryCommitBinding for why it is
+// not the primary path.
+func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) string {
+	if runner.mfst != nil {
+		commit, err := runner.mfst.ChecksCommit(ctx, task.TenantID, task.ID)
+		if err != nil {
+			runner.log.Warn("verify delivery binding: read checks commit", "task", task.ID, "error", err)
+		}
+		return commit
+	}
+	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	})
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			runner.log.Warn("verify delivery binding: load checkpoint fallback", "task", task.ID, "error", err)
+		}
+		return ""
+	}
+	return checkpoint.CommitSha
 }
 
 // drive performs the shared setup (load task + project + pack, resolve the

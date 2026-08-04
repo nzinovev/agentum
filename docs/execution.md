@@ -241,14 +241,17 @@ Every task records its git lineage explicitly:
 
 `result_commit` is captured at teardown, after the human approval that advances
 the task past `awaiting_memory_commit`, while the delivery checks run earlier
-(verifying the last post-stage checkpoint). If the two diverge — a continue job,
-a human artifact edit, or a filesystem change moved the branch tip in between —
-teardown does not silently seal a manifest asserting "checks passed at X"
-alongside "delivered Y". The divergence is recorded as an evidence gap (so the
-sealed manifest reads `evidence_complete: false`) and emitted as a
-`task.delivery_commit_diverged` event naming both SHAs. The task is not failed:
-the human already approved, and the manifest's incompleteness is the signal a
-reviewer acts on.
+(verifying the commit recorded as `body.checks.commit`). If the two diverge — a
+continue job, a human artifact edit, or a filesystem change moved the branch tip
+in between — teardown does not silently seal a manifest asserting "checks passed
+at X" alongside "delivered Y". The verified commit is read back from
+`body.checks.commit` (not proxied through the latest checkpoint, whose
+correctness would depend on an FSM property a future ask-to-edit feature could
+break) and compared against `result_commit`. The divergence is recorded as an
+evidence gap (so the sealed manifest reads `evidence_complete: false`) and
+emitted as a `task.delivery_commit_diverged` event naming both SHAs. The task is
+not failed: the human already approved, and the manifest's incompleteness is the
+signal a reviewer acts on.
 
 The task response exposes all three plus `branch` (the canonical
 `agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
