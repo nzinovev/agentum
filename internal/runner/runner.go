@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -732,11 +733,12 @@ func (runner *Runner) latestStoredResult(ctx context.Context, task sqlc.Task) *a
 // lives in processStage; runLoop stays a flat claim-retry loop.
 func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, resumeSession string) error {
 	stageID := startStage
+	transition := stageTransition{} // empty for the entry stage
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		outcome, err := runner.processStage(ctx, run, stageID, resumeSession)
+		outcome, err := runner.processStage(ctx, run, stageID, resumeSession, transition)
 		if err != nil {
 			return err
 		}
@@ -744,22 +746,29 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 			return nil
 		}
 		stageID = outcome.nextStage
+		transition = outcome.transition
 		resumeSession = "" // only the first iteration resumes
 	}
 }
 
 // stageOutcome is processStage's verdict for one iteration of runLoop. Exactly
 // one of done or nextStage applies: done ends the loop (terminal/pause/final);
-// nextStage advances the loop to the next pack stage.
+// nextStage advances the loop to the next pack stage. transition carries the
+// resolved edge to the next stage so the next iteration can hand the fixer the
+// findings (commit 7) and commit 8 can record the TransitionRecord.
 type stageOutcome struct {
-	nextStage string
-	done      bool
+	nextStage  string
+	done       bool
+	transition stageTransition
 }
 
 // processStage runs one iteration: look up the stage, dispatch (terminal marker
 // vs adapter invocation), evaluate the outcome, and apply the resulting
-// decision. The caller owns loop control (continue / stop) via stageOutcome.
-func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string) (stageOutcome, error) {
+// decision. transitionIn is the edge that brought the run to stageID (empty for
+// the entry stage), threaded so invokeStage can render the reviewer-findings
+// hand-off without re-reading the artifact. The caller owns loop control
+// (continue / stop) via stageOutcome.
+func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string, transitionIn stageTransition) (stageOutcome, error) {
 	stage, ok := run.taskPack.Stages[stageID]
 	if !ok {
 		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("pack stage %q not found", stageID))
@@ -792,7 +801,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	run.task = updatedTask
 	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
 
-	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession)
+	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, transitionIn)
 
 	// If the run was cancelled (the cancel handler aborts it via the registry),
 	// bow out without touching the FSM — the handler owns the transition to
@@ -856,7 +865,21 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 			Condition: decision.Transition.Condition,
 			Cycle:     decision.Transition.Cycle, Verdict: decision.Transition.Verdict,
 		})
-		return stageOutcome{nextStage: decision.NextStage}, nil
+		// Carry the resolved edge to the next iteration so invokeStage can hand
+		// the fixer the predecessor's findings (commit 7) and commit 8 can
+		// record the TransitionRecord without re-resolving.
+		next := stageTransition{
+			from: stageID, condition: decision.Transition.Condition,
+			verdict: decision.Transition.Verdict, cycle: decision.Transition.Cycle,
+		}
+		// When the edge was verdict-conditioned, the predecessor's verdict.json
+		// path and finding count come from the transition context we built
+		// above; carry them so the fixer's routing block points at the findings.
+		if decision.Transition.Verdict != "" {
+			next.verdictPath = filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID), agent.VerdictFileName)
+			next.findingsCount = transitionContext.FindingsCount
+		}
+		return stageOutcome{nextStage: decision.NextStage, transition: next}, nil
 	case ActionPause:
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
 	case ActionFinal:
@@ -940,7 +963,7 @@ type invocationOutcome struct {
 // creates the stage_invocation row at start (so a crash leaves a partial
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
 // row with session_id / stop_reason / parsed result.
-func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string) invocationOutcome {
+func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		runner.log.Error("create artifact dir", "dir", artifactDir, "error", err)
@@ -961,11 +984,26 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		runner.hardTimeout, runner.idleTimeout)
 	profileBytes := marshalProfile(profile)
 
-	block := routing.Render(routing.Block{
+	// VerdictPath is set when this stage sources a verdict condition (detected
+	// via parsed conditions, never substring-scanned). ReviewFindings is set
+	// when the stage was entered through a verdict-conditioned transition, so
+	// the fixer is pointed at the predecessor's findings artifact rather than a
+	// log. Both render nothing when unset.
+	routingBlock := routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
 		Capabilities: profileTokens(profile),
-	})
+	}
+	if stage.SourcesVerdict() {
+		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
+	}
+	if transitionIn.verdict != "" && transitionIn.verdictPath != "" {
+		routingBlock.ReviewFindings = &routing.ReviewRef{
+			Stage: transitionIn.from, Path: transitionIn.verdictPath,
+			Count: transitionIn.findingsCount,
+		}
+	}
+	block := routing.Render(routingBlock)
 
 	// Next sequence number + resume_of for this task. resume_of is set ONLY when
 	// this invocation resumes a captured session (resumeSession != ""); setting

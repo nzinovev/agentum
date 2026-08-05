@@ -74,6 +74,12 @@ func (runner *Runner) captureStageOutputs(
 	// The artifact dir is orchestrator-constructed, so it needs no containment
 	// check of its own.
 	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, "result.json", "result_json", outputs)
+	// Capture verdict.json (if the reviewer wrote one) with kind verdict_json.
+	// The path is orchestrator-constructed (next to result.json), so it needs no
+	// containment check. This is what makes the advance path work after a
+	// worktree restore or a worker restart: the verdict is read from the store,
+	// not from a file that may have been reset by Restore.
+	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, agent.VerdictFileName, "verdict_json", outputs)
 	for _, artifact := range declared {
 		bytes, readErr := container.ReadFile(artifact.name)
 		if readErr != nil {
@@ -452,11 +458,11 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	targets := make([]artifacts.SyncTarget, 0, len(currentRevisions))
 	revisionByName := make(map[string]artifacts.Revision, len(currentRevisions))
 	for _, revision := range currentRevisions {
-		// Skip the per-stage result_json blobs — those live under
-		// .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper. The
-		// agent reads them by path from the artifact dir; we should not write
-		// them into the worktree at the top level.
-		if revision.Kind == "result_json" {
+		// Skip the per-stage result_json and verdict_json blobs — those live
+		// under .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper.
+		// The agent reads them by path from the artifact dir; writing them into
+		// the worktree would put <stage>/verdict.json into the delivery tree.
+		if revision.Kind == "result_json" || revision.Kind == "verdict_json" {
 			continue
 		}
 		// The revision name is the in-tree path (the agent wrote it there in a
