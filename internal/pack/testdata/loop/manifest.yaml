@@ -1,0 +1,39 @@
+api: agentum/v1
+pack:
+  name: loop
+  version: 0.1.0
+  persona: engineering
+  description: Branching pack fixture for conditional-transition validation.
+memory:
+  reads: [project]
+  writes: true
+capabilities: [fs.read, fs.write, git.read]
+budgets:
+  fix_cycles: 2
+  ask_to_edit: 1
+tiers:
+  default: fast
+entry: spec
+stages:
+  spec:
+    gate: human_approval
+    role: analyst
+    prompt: prompts/spec.md
+    transitions:
+      - to: review
+  review:
+    gate: auto
+    role: reviewer
+    prompt: prompts/review.md
+    transitions:
+      - to: fix
+        condition: verdict == "changes_requested"
+      - to: done
+        condition: verdict == "approved"
+  fix:
+    gate: auto_if_clean
+    role: fixer
+    prompt: prompts/fix.md
+    transitions:
+      - to: review
+  done: {}

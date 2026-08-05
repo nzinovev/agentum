@@ -7,9 +7,12 @@
 // named map of stages with explicit transitions.
 //
 // Stages are a named map (not an ordered list): each stage declares its own
-// transitions, and the pack declares one entry stage. This is the substrate for
-// conditional-linear routing (Epic 4): a transition grows an opaque condition
-// field and a stage may fan out. We do not build a DAG.
+// transitions, and the pack declares one entry stage. A transition carries a
+// condition in the closed D1 grammar (see condition.go); a stage may fan out
+// across several conditional edges with first-match-wins ordering. The
+// validator enforces that a branching stage is total (a fallback or an
+// exhaustive enum cover) and that any cycle is bounded by a fixer-role stage
+// and a fix_cycles budget.
 //
 // This is PR 1 of F.5: types, loader, validator. Override-layer resolution
 // (lock-major / fork / override-prompts / override-params) lands in PR 2.
@@ -149,10 +152,71 @@ func (s *Stage) setPromptText(t string) { s.promptText = t }
 // Terminal reports whether this stage has no outgoing transitions.
 func (s Stage) Terminal() bool { return len(s.Transitions) == 0 }
 
-// Transition is a named edge to another stage. Condition is opaque until the
-// Epic 4 evaluator lands; a stage with multiple transitions fans out by
-// condition.
+// Transition is a named edge to another stage. Condition is a term in the
+// closed D1 grammar (see condition.go); empty means the unconditional fallback
+// edge. A stage with several transitions fans out by condition with
+// first-match-wins ordering.
 type Transition struct {
 	To        string `yaml:"to"`
 	Condition string `yaml:"condition,omitempty"`
+}
+
+// EffectiveRole returns the capability role this stage runs under: the stage's
+// explicit `role` when declared, otherwise the convention-derived role from the
+// stage id. It mirrors caps.DeriveRole so the pack package can derive roles
+// (for validation and for the runner's fixer list) without importing caps.
+//
+// The two derivations MUST agree on the fallback path; a drift test in
+// internal/runner (the only package that imports both) asserts they do for the
+// full convention-matching id space. Keep this switch in sync with
+// caps.DeriveRole. The convention is a fallback, not a security boundary: a
+// pack that needs a non-conventional role for an unusual stage declares it
+// explicitly.
+func EffectiveRole(stageID string, stage Stage) string {
+	if stage.Role != "" {
+		return stage.Role
+	}
+	return deriveRoleByID(stageID)
+}
+
+// deriveRoleByID is the convention fallback mirrored from caps.DeriveRole. See
+// EffectiveRole for the sync requirement. Substring match (not tokenized) so
+// "pre_review" and "review-v2" both match "review".
+func deriveRoleByID(stageID string) string {
+	switch {
+	case stageID == "":
+		return "analyst"
+	case containsWord(stageID, "review"):
+		return "reviewer"
+	case containsWord(stageID, "implement"), containsWord(stageID, "build"):
+		return "implementer"
+	case containsWord(stageID, "fix"), containsWord(stageID, "patch"):
+		return "fixer"
+	default:
+		return "analyst"
+	}
+}
+
+// containsWord reports whether stageID contains word as a substring. Mirrors
+// caps.containsWord; kept here so the role mirror is self-contained.
+func containsWord(stageID, word string) bool {
+	for index := 0; index+len(word) <= len(stageID); index++ {
+		if stageID[index:index+len(word)] == word {
+			return true
+		}
+	}
+	return false
+}
+
+// FixerStages returns the ids of stages whose effective role is fixer. The
+// runner uses this to compute the durable fix-cycle counter (MaxCycleForStages
+// over the fixer set) and to guard fixer entry against budgets.fix_cycles.
+func (p *Pack) FixerStages() []string {
+	var fixerStages []string
+	for stageID, stage := range p.Stages {
+		if EffectiveRole(stageID, stage) == "fixer" {
+			fixerStages = append(fixerStages, stageID)
+		}
+	}
+	return fixerStages
 }
