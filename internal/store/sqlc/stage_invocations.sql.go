@@ -9,13 +9,14 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/lib/pq"
 	"github.com/sqlc-dev/pqtype"
 )
 
 const createStageInvocation = `-- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile
+INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle
 `
 
 type CreateStageInvocationParams struct {
@@ -28,6 +29,7 @@ type CreateStageInvocationParams struct {
 	ResumeOf          sql.NullString        `json:"resume_of"`
 	StopReason        sql.NullString        `json:"stop_reason"`
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
+	Cycle             int32                 `json:"cycle"`
 }
 
 func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvocationParams) (StageInvocation, error) {
@@ -41,6 +43,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		arg.ResumeOf,
 		arg.StopReason,
 		arg.CapabilityProfile,
+		arg.Cycle,
 	)
 	var i StageInvocation
 	err := row.Scan(
@@ -58,6 +61,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.CapabilityProfile,
+		&i.Cycle,
 	)
 	return i, err
 }
@@ -91,7 +95,7 @@ func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvo
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile FROM stage_invocations WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations WHERE id = $1 AND tenant_id = $2
 `
 
 type GetStageInvocationParams struct {
@@ -117,12 +121,13 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.CapabilityProfile,
+		&i.Cycle,
 	)
 	return i, err
 }
 
 const latestStageForTask = `-- name: LatestStageForTask :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile FROM stage_invocations
+SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
 WHERE task_id = $1 AND tenant_id = $2
 ORDER BY sequence DESC
 LIMIT 1
@@ -151,8 +156,85 @@ func (q *Queries) LatestStageForTask(ctx context.Context, arg LatestStageForTask
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.CapabilityProfile,
+		&i.Cycle,
 	)
 	return i, err
+}
+
+const listStageInvocationsForTask = `-- name: ListStageInvocationsForTask :many
+SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
+WHERE task_id = $1 AND tenant_id = $2
+ORDER BY sequence ASC
+`
+
+type ListStageInvocationsForTaskParams struct {
+	TaskID   string `json:"task_id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// Ordered by sequence so each attempt is visible in run order; the cycle column
+// distinguishes retries from resumes. Backs GET /tasks/{id}/invocations.
+func (q *Queries) ListStageInvocationsForTask(ctx context.Context, arg ListStageInvocationsForTaskParams) ([]StageInvocation, error) {
+	rows, err := q.db.QueryContext(ctx, listStageInvocationsForTask, arg.TaskID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StageInvocation
+	for rows.Next() {
+		var i StageInvocation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.UserID,
+			&i.TaskID,
+			&i.Stage,
+			&i.Sequence,
+			&i.SessionID,
+			&i.ResumeOf,
+			&i.StopReason,
+			&i.PendingEdits,
+			&i.Result,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CapabilityProfile,
+			&i.Cycle,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maxCycleForStages = `-- name: MaxCycleForStages :one
+SELECT COALESCE(MAX(cycle), -1)::int FROM stage_invocations
+WHERE task_id = $1 AND tenant_id = $2 AND stage = ANY($3::text[])
+`
+
+type MaxCycleForStagesParams struct {
+	TaskID   string   `json:"task_id"`
+	TenantID string   `json:"tenant_id"`
+	Column3  []string `json:"column_3"`
+}
+
+// The durable fix-cycle counter: the highest cycle any of the given (fixer-
+// role) stages has reached for this task. Returns -1 when none of the stages
+// has run yet (MAX over zero rows is NULL; COALESCE to a sentinel that cannot
+// be a real cycle, since cycles are >= 0). The runner maps -1 -> 0 entries.
+// stage = ANY($3) takes the fixer set in one round-trip (pq.Array over pgx
+// stdlib, already exercised by projects.related_projects).
+func (q *Queries) MaxCycleForStages(ctx context.Context, arg MaxCycleForStagesParams) (int32, error) {
+	row := q.db.QueryRowContext(ctx, maxCycleForStages, arg.TaskID, arg.TenantID, pq.Array(arg.Column3))
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const setStageSession = `-- name: SetStageSession :exec
