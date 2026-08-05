@@ -181,7 +181,7 @@ func advance(input StageInput) (Decision, error) {
 	if resolution.StopReason != "" {
 		return Decision{
 			Action: ActionPause, FSMEvent: engine.EventStopUser,
-			StopReason: resolution.StopReason,
+			StopReason: resolution.StopReason, Transition: resolution,
 		}, nil
 	}
 	return Decision{

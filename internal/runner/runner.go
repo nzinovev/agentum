@@ -700,6 +700,14 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 			From: currentStageID, To: resolution.To,
 			Condition: resolution.Condition, Cycle: resolution.Cycle, Verdict: resolution.Verdict,
 		})
+		// Record the taken branch (the same record processStage writes on the
+		// loop path), so an advance-job resolution is auditable from the sealed
+		// manifest too (D7).
+		runner.recordTransitionEvidence(ctx, task, manifest.TransitionRecord{
+			From: currentStageID, To: resolution.To,
+			Condition: resolution.Condition, Cycle: resolution.Cycle,
+			Verdict: resolution.Verdict, At: time.Now().UTC(),
+		})
 		return resolution.To, "", nil, nil
 	}
 	return "", "", nil, fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
@@ -865,6 +873,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 			Condition: decision.Transition.Condition,
 			Cycle:     decision.Transition.Cycle, Verdict: decision.Transition.Verdict,
 		})
+		// Record the taken branch in the manifest's transitions section so the
+		// review ⇄ fix loop is auditable from the sealed manifest (D7).
+		runner.recordTransitionEvidence(ctx, run.task, manifest.TransitionRecord{
+			From: stageID, To: decision.Transition.To,
+			Condition: decision.Transition.Condition, Cycle: decision.Transition.Cycle,
+			Verdict: decision.Transition.Verdict, At: time.Now().UTC(),
+		})
 		// Carry the resolved edge to the next iteration so invokeStage can hand
 		// the fixer the predecessor's findings (commit 7) and commit 8 can
 		// record the TransitionRecord without re-resolving.
@@ -923,6 +938,16 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 	}
 	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{
 		"from": task.State, "to": string(newState), "stop_reason": decision.StopReason, "stage": stageID,
+	})
+	// Record EVERY pause in the manifest's stops section (D7, deliberately
+	// widened beyond budget/verdict): budget exhaustion, verdict_unreadable,
+	// gate, adapter_error, parse_error, open_questions. (Stage, Reason, Cycle)
+	// collapses repeats. The cycle is the prospective fix-cycle count at the
+	// stop point when the resolver populated it (budget/verdict halts); 0 for
+	// the non-branching pauses.
+	runner.recordStopEvidence(ctx, task, manifest.StopRecord{
+		Stage: stageID, Reason: decision.StopReason,
+		Cycle: decision.Transition.Cycle, At: time.Now().UTC(),
 	})
 	return nil
 }

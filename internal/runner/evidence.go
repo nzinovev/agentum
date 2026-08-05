@@ -560,6 +560,51 @@ func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, sec
 	}
 }
 
+// recordTransitionEvidence records one taken conditional transition in the
+// manifest's transitions section (D7). Called at the resolution point so the
+// branch is auditable even when the next stage never starts (e.g. budget
+// exhaustion stops the run before the target runs). Best-effort and a no-op
+// when the manifest service is nil (unit tests).
+func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Task, record manifest.TransitionRecord) {
+	if runner.mfst == nil {
+		return
+	}
+	if record.At.IsZero() {
+		record.At = time.Now().UTC()
+	}
+	patch := manifest.Body{Transitions: []manifest.TransitionRecord{record}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record transition evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "transitions", record.From, err)
+	}
+}
+
+// recordStopEvidence records one controlled stop in the manifest's stops
+// section (D7). Called from applyPauseDecision for EVERY pause — a deliberate
+// widening of D7, so the manifest carries the full stop history (budget,
+// verdict, gate, adapter_error, etc.), not just the budget/verdict ones.
+// (Stage, Reason, Cycle) collapses repeats. Best-effort and a no-op when the
+// manifest service is nil.
+func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, record manifest.StopRecord) {
+	if runner.mfst == nil {
+		return
+	}
+	if record.At.IsZero() {
+		record.At = time.Now().UTC()
+	}
+	patch := manifest.Body{Stops: []manifest.StopRecord{record}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record stop evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "stops", record.Stage, err)
+	}
+}
+
 // hashForEvidence returns the sha256 hex of the bytes of the prompt text.
 // Centralized so two callers (recordStageEvidence, the manifest diff) agree on
 // the canonical hashing scheme.

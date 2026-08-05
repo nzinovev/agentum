@@ -509,3 +509,66 @@ func TestEvidenceComplete_ChecksWithoutRanBlocks(t *testing.T) {
 		t.Errorf("MissingSections = %v; a Ran=false checks section must be reported missing", missing)
 	}
 }
+
+// TestMergeBodies_TransitionsAppendUnique confirms the D7 transitions section
+// appends by (From, To, Condition, Cycle) so a re-resolution of the same edge
+// under a retry collapses to one record.
+func TestMergeBodies_TransitionsAppendUnique(t *testing.T) {
+	t.Parallel()
+	base := Body{Transitions: []TransitionRecord{
+		{From: "review", To: "fix", Condition: `verdict == "changes_requested"`, Cycle: 0},
+	}}
+	patch := Body{Transitions: []TransitionRecord{
+		{From: "review", To: "fix", Condition: `verdict == "changes_requested"`, Cycle: 1},
+		{From: "review", To: "done", Condition: `verdict == "approved"`, Cycle: 1},
+	}}
+	merged := mergeBodies(base, patch)
+	if len(merged.Transitions) != 3 {
+		t.Fatalf("merged transitions len = %d, want 3 (distinct edges), got %+v", len(merged.Transitions), merged.Transitions)
+	}
+}
+
+// TestMergeBodies_StopsAppendUnique confirms the stops section appends by
+// (Stage, Reason, Cycle) so a repeat pause collapses.
+func TestMergeBodies_StopsAppendUnique(t *testing.T) {
+	t.Parallel()
+	base := Body{Stops: []StopRecord{
+		{Stage: "fix", Reason: "fix_budget_exhausted", Cycle: 1},
+	}}
+	patch := Body{Stops: []StopRecord{
+		{Stage: "fix", Reason: "fix_budget_exhausted", Cycle: 1}, // duplicate -> collapsed
+		{Stage: "review", Reason: "verdict_unreadable", Cycle: 0},
+	}}
+	merged := mergeBodies(base, patch)
+	if len(merged.Stops) != 2 {
+		t.Fatalf("merged stops len = %d, want 2 (duplicate collapsed), got %+v", len(merged.Stops), merged.Stops)
+	}
+}
+
+// TestNewSections_DoNotAffectCompleteness is the D7 invariant: the transitions
+// and stops sections must NOT drive evidence_complete, so a pack with no branch
+// does not read as degraded. A body with the branching sections populated but
+// none of the completeness-driving sections present must still report
+// incomplete (and list the same missing sections as before).
+func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
+	t.Parallel()
+	body := Body{
+		Schema:      "1",
+		Transitions: []TransitionRecord{{From: "review", To: "fix", Cycle: 0}},
+		Stops:       []StopRecord{{Stage: "fix", Reason: "fix_budget_exhausted"}},
+	}
+	if body.IsEvidenceComplete() {
+		t.Error("a body with only transitions/stops must not be evidence-complete")
+	}
+	missing := body.MissingSections()
+	for _, section := range missing {
+		if section == "transitions" || section == "stops" {
+			t.Errorf("MissingSections reports %q — the new sections must not be in expectedSections", section)
+		}
+	}
+	// The expected sections list is unchanged.
+	wantMissing := []string{"memory", "human_gates", "artifacts", "checks", "capabilities", "prompts"}
+	if len(missing) != len(wantMissing) {
+		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
+	}
+}
