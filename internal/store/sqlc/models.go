@@ -100,6 +100,7 @@ type StageInvocation struct {
 	StartedAt         time.Time             `json:"started_at"`
 	FinishedAt        sql.NullTime          `json:"finished_at"`
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
+	Cycle             int32                 `json:"cycle"`
 }
 
 type Task struct {

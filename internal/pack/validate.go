@@ -18,10 +18,12 @@ func (p *Pack) Validate() error {
 	problems = append(problems, p.validateBudgets()...)
 	problems = append(problems, validateCheckPolicy(p.Checks)...)
 
-	// reachability + terminal-exit (only meaningful once the structural checks
-	// already passed, so we can assume refs resolve).
+	// reachability + terminal-exit + bounded cycles (only meaningful once the
+	// structural checks already passed, so we can assume refs resolve and
+	// conditions parse).
 	if len(problems) == 0 {
 		problems = append(problems, validateGraph(p)...)
+		problems = append(problems, validateBoundedCycles(p)...)
 	}
 
 	if len(problems) > 0 {
@@ -103,6 +105,7 @@ func (p *Pack) validateStage(id string, stage Stage, gateOK map[Gate]bool, known
 	}
 	problems = append(problems, p.validateStagePrompt(id, stage)...)
 	problems = append(problems, validateTransitions(id, stage, p.Stages)...)
+	problems = append(problems, validateConditionalEdges(id, stage)...)
 	return problems
 }
 
@@ -133,6 +136,251 @@ func validateTransitions(id string, stage Stage, stages map[string]Stage) []stri
 		}
 	}
 	return problems
+}
+
+// validateConditionalEdges enforces the D6 condition rules per stage:
+//
+//  1. Every non-empty condition parses under D1's grammar with a known subject
+//     and a literal from that subject's closed set. ParseCondition already does
+//     the closed-set check; a parse failure is reported with the stage id.
+//  2. At most one unconditional transition per stage, and it must be last — a
+//     fallback declared before a conditional edge makes that edge dead.
+//  3. Totality: a stage with conditional transitions must end with an
+//     unconditional fallback OR exhaustively cover one closed enum subject
+//     (every member of verdict/status appears with ==). fix_cycles conditions
+//     can never establish coverage, so a stage using them requires the fallback.
+//
+// The rules run in addition to validateTransitions (targets exist, no
+// self-loops) and accumulate problems without short-circuiting.
+func validateConditionalEdges(id string, stage Stage) []string {
+	var problems []string
+	hasConditional := false
+	unconditionalIndex := -1
+	verdictLiteralsSeen := map[string]bool{}
+	statusLiteralsSeen := map[string]bool{}
+	hasFixCycles := false
+	for index, transition := range stage.Transitions {
+		condition, parseErr := ParseCondition(transition.Condition)
+		if parseErr != nil {
+			problems = append(problems, fmt.Sprintf("stage %q transition[%d].condition: %v", id, index, parseErr))
+			continue
+		}
+		if condition.IsUnconditional() {
+			if unconditionalIndex >= 0 {
+				problems = append(problems, fmt.Sprintf("stage %q has more than one unconditional transition", id))
+			}
+			unconditionalIndex = index
+			continue
+		}
+		hasConditional = true
+		switch condition.subject {
+		case SubjectVerdict:
+			verdictLiteralsSeen[condition.enumTerm] = true
+		case SubjectStatus:
+			statusLiteralsSeen[condition.enumTerm] = true
+		case SubjectFixCycles:
+			hasFixCycles = true
+		}
+	}
+	// Rule 2: the unconditional edge (if any) must be last. A fallback before a
+	// conditional edge would shadow it — the first-match-wins resolver never
+	// reaches the conditional.
+	if unconditionalIndex >= 0 && hasConditional && unconditionalIndex < len(stage.Transitions)-1 {
+		problems = append(problems, fmt.Sprintf("stage %q unconditional transition at [%d] must be last (a fallback before a conditional edge makes the edge dead)", id, unconditionalIndex))
+	}
+	// Rule 3: totality. A branching stage needs a fallback OR an exhaustive
+	// enum cover. fix_cycles alone never covers.
+	if hasConditional && unconditionalIndex < 0 {
+		if hasFixCycles && !enumComplete(verdictLiteralsSeen, verdictLiterals) && !enumComplete(statusLiteralsSeen, statusLiterals) {
+			problems = append(problems, fmt.Sprintf("stage %q uses fix_cycles conditions without a fallback and without an exhaustive verdict/status cover", id))
+		}
+		if !enumComplete(verdictLiteralsSeen, verdictLiterals) && !enumComplete(statusLiteralsSeen, statusLiterals) {
+			problems = append(problems, fmt.Sprintf("stage %q conditional transitions do not cover verdict/status exhaustively and there is no fallback", id))
+		}
+	}
+	return problems
+}
+
+// enumComplete reports whether seen covers every member of the closed literal
+// set. The verdict/status subjects are the only enum subjects; fix_cycles is
+// never passed here.
+func enumComplete(seen map[string]bool, closed map[string]bool) bool {
+	if len(seen) == 0 {
+		return false
+	}
+	for literal := range closed {
+		if !seen[literal] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateBoundedCycles enforces D6 rule 4: every non-trivial strongly
+// connected component reachable from entry must contain at least one fixer-role
+// stage, and budgets.fix_cycles >= 1. Per-component, not whole-graph: a pack
+// with one bounded loop and one unbounded loop must be rejected.
+//
+// The existing validateGraph walk cannot do this — it is a reachability DFS
+// over a visited map and never observes a back-edge. This function runs a
+// Tarjan SCC decomposition over the entry-reachable subgraph. A non-trivial
+// component (size > 1, or a self-loop) is a cycle; self-loops are already
+// rejected by validateTransitions, so here a non-trivial component has size > 1.
+// The implication is one-way: a budget without a cycle stays valid.
+// packs/minimal and testdata/minimal declare fix_cycles with a linear graph
+// and must keep validating.
+func validateBoundedCycles(p *Pack) []string {
+	reachable := reachableStages(p)
+	components := tarjanSCC(p, reachable)
+	var problems []string
+	for _, component := range components {
+		if !isCyclicComponent(component, p) {
+			continue
+		}
+		hasFixer := false
+		for _, stageID := range component {
+			if EffectiveRole(stageID, p.Stages[stageID]) == "fixer" {
+				hasFixer = true
+				break
+			}
+		}
+		if !hasFixer {
+			problems = append(problems, fmt.Sprintf("cycle %v has no fixer-role stage; a loop with no budget-boundable role cannot validate", component))
+		}
+		if p.Budgets.FixCycles < 1 {
+			problems = append(problems, fmt.Sprintf("cycle %v requires budgets.fix_cycles >= 1", component))
+		}
+	}
+	return problems
+}
+
+// reachableStages returns the set of stage ids reachable from entry, including
+// entry itself. Terminal stages (no transitions) contribute no successors.
+func reachableStages(p *Pack) map[string]bool {
+	visited := map[string]bool{}
+	var walk func(string)
+	walk = func(stageID string) {
+		if visited[stageID] {
+			return
+		}
+		visited[stageID] = true
+		for _, transition := range p.Stages[stageID].Transitions {
+			walk(transition.To)
+		}
+	}
+	walk(p.Entry)
+	return visited
+}
+
+// isCyclicComponent reports whether a Tarjan component is a cycle. A component
+// of size > 1 is always cyclic. A single-node component is cyclic only if the
+// node has a self-edge — already rejected by validateTransitions, so this
+// returns false for singletons. Kept defensive so a future relaxation of the
+// self-loop rule does not silently let a self-loop bypass the budget check.
+func isCyclicComponent(component []string, p *Pack) bool {
+	if len(component) > 1 {
+		return true
+	}
+	if len(component) == 0 {
+		return false
+	}
+	stageID := component[0]
+	for _, transition := range p.Stages[stageID].Transitions {
+		if transition.To == stageID {
+			return true
+		}
+	}
+	return false
+}
+
+// tarjanSCC returns the strongly connected components of the entry-reachable
+// subgraph, restricted to nodes in reachable. Each component is a slice of
+// stage ids; the order of components and of ids within a component is not
+// specified. The iterative form is used (no recursion) so a deep pack graph
+// cannot overflow the goroutine stack.
+func tarjanSCC(p *Pack, reachable map[string]bool) [][]string {
+	// Iterative Tarjan. The classic recursive algorithm tracks an index and a
+	// low-link per node plus an on-stack flag; we mirror that with explicit
+	// frames so the depth of the DFS is bounded by available heap, not stack.
+	type frame struct {
+		stageID    string
+		successors []string
+		cursor     int
+	}
+	var index int32
+	indices := map[string]int32{}
+	lowLinks := map[string]int32{}
+	onStack := map[string]bool{}
+	var stack []string
+	var components [][]string
+
+	successorsOf := func(stageID string) []string {
+		var successors []string
+		for _, transition := range p.Stages[stageID].Transitions {
+			if reachable[transition.To] {
+				successors = append(successors, transition.To)
+			}
+		}
+		return successors
+	}
+
+	var frames []frame
+	for startID := range reachable {
+		if alreadyIndexed(startID, indices) {
+			continue
+		}
+		frames = append(frames, frame{stageID: startID, successors: successorsOf(startID)})
+		for len(frames) > 0 {
+			top := &frames[len(frames)-1]
+			if top.cursor == 0 {
+				index++
+				indices[top.stageID] = index
+				lowLinks[top.stageID] = index
+				stack = append(stack, top.stageID)
+				onStack[top.stageID] = true
+			}
+			if top.cursor < len(top.successors) {
+				successor := top.successors[top.cursor]
+				top.cursor++
+				if !alreadyIndexed(successor, indices) {
+					frames = append(frames, frame{stageID: successor, successors: successorsOf(successor)})
+				} else if onStack[successor] {
+					if indices[successor] < lowLinks[top.stageID] {
+						lowLinks[top.stageID] = indices[successor]
+					}
+				}
+				continue
+			}
+			// All successors visited: this frame is done.
+			if lowLinks[top.stageID] == indices[top.stageID] {
+				component := []string{}
+				for {
+					node := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[node] = false
+					component = append(component, node)
+					if node == top.stageID {
+						break
+					}
+				}
+				components = append(components, component)
+			}
+			frames = frames[:len(frames)-1]
+			if len(frames) > 0 {
+				parent := &frames[len(frames)-1]
+				if lowLinks[top.stageID] < lowLinks[parent.stageID] {
+					lowLinks[parent.stageID] = lowLinks[top.stageID]
+				}
+			}
+		}
+	}
+	return components
+}
+
+// alreadyIndexed reports whether stageID has been assigned an SCC index.
+func alreadyIndexed(stageID string, indices map[string]int32) bool {
+	_, present := indices[stageID]
+	return present
 }
 
 // validateMemory checks the declared memory scopes are known and unique.

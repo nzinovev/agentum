@@ -74,6 +74,12 @@ func (runner *Runner) captureStageOutputs(
 	// The artifact dir is orchestrator-constructed, so it needs no containment
 	// check of its own.
 	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, "result.json", "result_json", outputs)
+	// Capture verdict.json (if the reviewer wrote one) with kind verdict_json.
+	// The path is orchestrator-constructed (next to result.json), so it needs no
+	// containment check. This is what makes the advance path work after a
+	// worktree restore or a worker restart: the verdict is read from the store,
+	// not from a file that may have been reset by Restore.
+	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, agent.VerdictFileName, "verdict_json", outputs)
 	for _, artifact := range declared {
 		bytes, readErr := container.ReadFile(artifact.name)
 		if readErr != nil {
@@ -452,11 +458,11 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	targets := make([]artifacts.SyncTarget, 0, len(currentRevisions))
 	revisionByName := make(map[string]artifacts.Revision, len(currentRevisions))
 	for _, revision := range currentRevisions {
-		// Skip the per-stage result_json blobs — those live under
-		// .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper. The
-		// agent reads them by path from the artifact dir; we should not write
-		// them into the worktree at the top level.
-		if revision.Kind == "result_json" {
+		// Skip the per-stage result_json and verdict_json blobs — those live
+		// under .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper.
+		// The agent reads them by path from the artifact dir; writing them into
+		// the worktree would put <stage>/verdict.json into the delivery tree.
+		if revision.Kind == "result_json" || revision.Kind == "verdict_json" {
 			continue
 		}
 		// The revision name is the in-tree path (the agent wrote it there in a
@@ -551,6 +557,51 @@ func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, sec
 	}
 	if err := runner.mfst.RecordGap(ctx, task.TenantID, task.ID, gap); err != nil {
 		runner.log.Warn("record evidence gap", "task", task.ID, "section", section, "cause", cause, "gap_error", err)
+	}
+}
+
+// recordTransitionEvidence records one taken conditional transition in the
+// manifest's transitions section (D7). Called at the resolution point so the
+// branch is auditable even when the next stage never starts (e.g. budget
+// exhaustion stops the run before the target runs). Best-effort and a no-op
+// when the manifest service is nil (unit tests).
+func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Task, record manifest.TransitionRecord) {
+	if runner.mfst == nil {
+		return
+	}
+	if record.At.IsZero() {
+		record.At = time.Now().UTC()
+	}
+	patch := manifest.Body{Transitions: []manifest.TransitionRecord{record}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record transition evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "transitions", record.From, err)
+	}
+}
+
+// recordStopEvidence records one controlled stop in the manifest's stops
+// section (D7). Called from applyPauseDecision for EVERY pause — a deliberate
+// widening of D7, so the manifest carries the full stop history (budget,
+// verdict, gate, adapter_error, etc.), not just the budget/verdict ones.
+// (Stage, Reason, Cycle) collapses repeats. Best-effort and a no-op when the
+// manifest service is nil.
+func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, record manifest.StopRecord) {
+	if runner.mfst == nil {
+		return
+	}
+	if record.At.IsZero() {
+		record.At = time.Now().UTC()
+	}
+	patch := manifest.Body{Stops: []manifest.StopRecord{record}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record stop evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "stops", record.Stage, err)
 	}
 }
 

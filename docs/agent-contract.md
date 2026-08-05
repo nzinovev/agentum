@@ -21,6 +21,7 @@ directory inside it:
 ```
 <worktree-root>/.agentum/<worktree-id>/.ag-artifacts/<stage>/
   result.json          # the agent MUST write this
+  verdict.json         # reviewer stages MUST write this (see below)
   ...                  # plus whatever artifacts the stage produces
 ```
 
@@ -85,6 +86,46 @@ violation and surfaces as a retryable stop-point — not a silent skip.
 - `artifacts` → the next stage reads them by path; the UI lists them.
 - `edit_targets` → scope the ask-to-edit gate action.
 - `summary` + `notes` → UI and audit trail.
+
+## verdict.json v1 (reviewer stages only)
+
+A **reviewer stage** — one whose transitions include a `verdict` condition —
+writes a second file, `verdict.json`, next to its `result.json` at
+`<artifact-dir>/verdict.json`. This is the routing input the orchestrator parses
+to decide whether the pipeline advances or loops back to a fixer. The
+orchestrator routes on the parsed `verdict` field **only**; `result.json.summary`
+and stream text cannot move a verdict-conditioned pipeline.
+
+```json
+{
+  "schema_version": "1",
+  "verdict": "approved | changes_requested",
+  "summary": "one-line rationale",
+  "findings": [
+    {"id": "F1", "severity": "blocker|major|minor", "path": "internal/x/y.go", "line": 42, "detail": "..."}
+  ]
+}
+```
+
+Parsing rules (a violation pauses the run with `verdict_unreadable`, the same
+retryable shape as a `parse_error`):
+
+- `schema_version` and `verdict` are required; `verdict` ∈ {`approved`,
+  `changes_requested`}.
+- `findings[].severity` ∈ {`blocker`, `major`, `minor`}.
+- `changes_requested` with zero findings is a contract violation: a fixer with
+  no findings has nothing to act on. `approved` with no findings is the normal
+  clean-pass shape.
+- Unknown fields are ignored (forward-compatible).
+- A missing `verdict.json` (the reviewer stage produced none) also pauses with
+  `verdict_unreadable` — the orchestrator never defaults to `approved`.
+
+The orchestrator captures `verdict.json` as an immutable artifact revision
+(`<stage>/verdict.json`, kind `verdict_json`), so a transition resolved on the
+`advance` job path (after a worktree restore or a worker restart) reads the
+verdict from the store rather than a file Restore may have reset. A fixer stage
+entered through a `changes_requested` transition is pointed at the findings in
+its routing block.
 
 ## Event stream (reference: opencode)
 

@@ -113,11 +113,32 @@ happened (`04 §7.1.6`).
 | `result.json` missing / invalid | `stop_user` | `paused_user_stop` | `parse_error` |
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
+| resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
+| a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
-Multi-branch transitions are unconditional in F.6 (a stage declares one
-`transitions:` target). The condition evaluator for conditional-linear
-pipelines lands with Epic 4.
+### Conditional transitions and the fix loop
+
+A transition may carry a `condition` in the closed grammar (see
+[docs/pack-format.md](pack-format.md#transition-conditions)). The runner resolves
+the first matching edge in declaration order through one resolver, shared
+between the auto-advance path and the `advance` job. A reviewer stage sources a
+`verdict` condition and writes `verdict.json`; the orchestrator parses it (never
+the agent's prose) and routes on the `verdict` field. A fixer stage is
+budget-bound: `budgets.fix_cycles: N` ⇒ at most `N` fixer entries; the `N+1`-th
+is refused with `fix_budget_exhausted`.
+
+The fix-cycle counter is durable — derived from `stage_invocations.cycle` (the
+0-based repeat index of a stage within the task), not process memory. It
+survives a worker restart (recomputed from committed rows) and cannot be
+inflated by a resume (a resume inherits its cycle). Each retry is a separate
+invocation row with its own `sequence` and `cycle`.
+
+`fix_budget_exhausted` and `verdict_unreadable` are controlled pauses, not
+failures: nothing is torn down (the branch, checkpoint commits, artifact
+revisions, and the unsealed manifest all stay). From `paused_user_stop` a human
+can `continue` (the loop re-evaluates, hits the bound again, and stops again —
+bounded, not a runaway) or `cancel` (terminal, branch preserved).
 
 ## Job queue
 
@@ -481,9 +502,6 @@ These land with their epics — the seams exist, the behavior does not:
   section is an inert stub until 1.2/1.3 land).
 - **MCP capability pass-through** → **Epic 6** (the routing block's
   "Capabilities available" section is an inert stub).
-- **Conditional-linear pipelines** → **Epic 4** (transitions are unconditional
-  here; the condition evaluator lands with 4.1).
-- **Fix-loops** → **Epic 3** (the runner does not yet honor a fix-cycle budget).
 - **Multi-step delivery / handoff** → **F.8** (one task = one step today).
 - **Idle/hard timeout values** — the ctx seam is used, but no idle timer ships
   (`04 §5.2`).

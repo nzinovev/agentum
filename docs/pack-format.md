@@ -60,7 +60,7 @@ stages:
     transitions:
       - to: review
       # - to: security
-      #   condition: touches_auth   # opaque until conditional-linear lands
+      #   condition: status == "blocked"   # a closed-grammar condition
   review:
     gate: human_final
     prompt: prompts/review.md
@@ -99,10 +99,9 @@ stages:
 ### Stages
 
 Stages are a **named map**, not an ordered list. Each stage declares its own
-outgoing transitions, and the pack declares one `entry`. This is the substrate
-for conditional-linear routing: a transition carries an opaque `condition` and a
-stage may fan out to several destinations. (The condition evaluator itself is
-not part of format v1.)
+outgoing transitions, and the pack declares one `entry`. A transition may carry
+a `condition` in the closed grammar below; a stage with several transitions
+fans out by condition with first-match-wins ordering.
 
 ```yaml
 stages:
@@ -115,7 +114,7 @@ stages:
     transitions:
       - to: <stage-id>
       - to: <stage-id>
-        condition: <opaque>
+        condition: <condition-term>
 ```
 
 | Field | Required | Notes |
@@ -125,10 +124,49 @@ stages:
 | `tier` | optional | Overrides `tiers.default` for this stage. |
 | `role` | optional | Capability-profile selector: `analyst` \| `reviewer` \| `implementer` \| `fixer`. Absent → derived from the stage id by convention (spec/analyze/design → analyst; review → reviewer; implement → implementer; fix → fixer; default analyst). See [docs/capabilities.md](capabilities.md). |
 | `capabilities` | optional | Stage-level subset that narrows the pack's `capabilities` for this stage. Absent → inherit the pack set; present → only the listed categories. Entries are scope-less categories (`fs.read`, `fs.write`, `git.read`, `git.write`, `exec.bash`, `net.fetch`) or named entities (`secret.<name>`, `mcp.<server>`). |
-| `transitions` | optional | Outgoing edges. Absent ⇒ terminal. |
+| `transitions` | optional | Outgoing edges. Absent ⇒ terminal. Each may carry a `condition`. |
 
 A **terminal stage** (no `transitions`) is an engine state, not an agent
 invocation: it has no prompt and no gate. It is the pipeline's exit.
+
+### Transition conditions
+
+A condition is exactly one term in a closed two-token grammar — no boolean
+operators, no negation, no commands or scripts. The first matching transition
+in declaration order wins; that supplies disjunction and precedence. An empty
+`condition` (or no field) is the unconditional fallback edge.
+
+```
+condition := enum_term | count_term
+enum_term  := ("verdict" | "status") "==" '"' literal '"'
+count_term := "fix_cycles" ("<" | "<=" | ">" | ">=" | "==") (integer | "budget")
+```
+
+| Subject | Source | Allowed literals |
+|---|---|---|
+| `verdict` | the reviewer's own `verdict.json`, parsed by the orchestrator (never the agent's prose) | `approved`, `changes_requested` |
+| `status` | `result.json.status` of the stage that is transitioning | `complete`, `partial`, `blocked` |
+| `fix_cycles` | the durable counter of fixer-stage entries in the current run | a non-negative integer, or the keyword `budget` (resolves to `budgets.fix_cycles`) |
+
+- `verdict` is read by the orchestrator, not the agent: `result.json.summary`
+  and stream text cannot move the pipeline past a verdict-conditioned stage.
+- A reviewer stage that sources a `verdict` condition writes `verdict.json`
+  next to its `result.json` (see [docs/agent-contract.md](agent-contract.md)).
+- `fix_cycles` conditions can never establish totality (a stage using them
+  requires an unconditional fallback).
+
+### The fix budget
+
+`budgets.fix_cycles: N` ⇒ the run may enter a fixer-role stage at most `N`
+times. The `N+1`-th entry is refused with a controlled stop
+(`fix_budget_exhausted` → `paused_user_stop`); the branch, checkpoint commits,
+artifact revisions, and the unsealed manifest all stay exactly as they are.
+
+The budget binds **entries into fixer-role stages**, not back-edges in general:
+bounding the fixer entry stops immediately after a review (so the tree at the
+stop point is always a reviewed tree), and with `fix_cycles: 2` the fixer runs
+at most twice and the reviewer at most three times. A pack may declare a budget
+without declaring a cycle.
 
 ### Gate values
 
@@ -153,6 +191,18 @@ A pack is rejected at load/resolve time if any of these fail:
 - Every non-terminal stage has a `gate` from the six-value enum and a `prompt`
   that resolves to a readable, non-empty file inside the pack dir.
 - Every `transitions[*].to` references a defined stage; no self-loops.
+- Every non-empty `transitions[*].condition` parses under the closed grammar
+  with a known subject and a literal from that subject's closed set.
+- A stage has at most one unconditional transition, and it must be **last** (a
+  fallback declared before a conditional edge would make that edge dead).
+- A stage with conditional transitions is **total**: it ends with an
+  unconditional fallback, OR its conditions exhaustively cover one closed enum
+  subject (every member of `verdict` / `status` appears with `==`). A stage
+  using `fix_cycles` conditions requires the fallback.
+- Every non-trivial strongly connected component reachable from `entry` contains
+  at least one fixer-role stage **and** `budgets.fix_cycles >= 1`. Per-component
+  (a pack with one bounded loop and one unbounded loop is rejected). A budget
+  without a cycle stays valid.
 - Every stage is reachable from `entry` (orphans are errors, not warnings).
 - At least one terminal stage is reachable from `entry` (the pipeline has an
   exit).

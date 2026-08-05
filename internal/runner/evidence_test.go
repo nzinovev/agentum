@@ -23,11 +23,17 @@ import (
 )
 
 // recordingArtifactStore is an artifacts.Store that records what was ingested.
-// Only Put is exercised by the capture path; the read methods are present to
-// satisfy the interface and fail loudly if the capture path ever calls one.
+// Put is exercised by the capture path; Current/GetBytes return the most
+// recently Put bytes for a name so the verdict-read path (buildTransitionContext)
+// can resolve a verdict.json without a live database. The other read methods
+// remain "not used" stubs that fail loudly if called.
 type recordingArtifactStore struct {
 	mu   sync.Mutex
 	puts []artifacts.PutParams
+	// currentByName maps a revision name to its most-recent Put bytes, so
+	// Current + GetBytes can serve the verdict artifact the capture path
+	// ingested. Updated on every Put.
+	currentByName map[string][]byte
 	// failWith, when set, is returned from every Put.
 	failWith error
 }
@@ -39,6 +45,14 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 		return artifacts.Revision{}, store.failWith
 	}
 	store.puts = append(store.puts, params)
+	if store.currentByName == nil {
+		store.currentByName = make(map[string][]byte)
+	}
+	// Stash a copy so later mutation of params.Bytes cannot retroactively
+	// change what GetBytes returns.
+	stashed := make([]byte, len(params.Bytes))
+	copy(stashed, params.Bytes)
+	store.currentByName[params.Name] = stashed
 	// A stable, distinct id + content hash per ingest so the manifest-ref
 	// assertions can distinguish revisions by more than name. Hash mirrors the
 	// real store: the bytes determine the hash.
@@ -59,11 +73,29 @@ func (store *recordingArtifactStore) names() []string {
 	return out
 }
 
-func (*recordingArtifactStore) Get(context.Context, string, string) (artifacts.Revision, error) {
-	return artifacts.Revision{}, errors.New("not used")
+func (store *recordingArtifactStore) Get(_ context.Context, _ string, revisionID string) (artifacts.Revision, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	// The Put-generated id is "rev-<name>"; reverse it so Get/GetBytes agree
+	// with Current's returned id for the same name.
+	for name := range store.currentByName {
+		if "rev-"+name == revisionID {
+			return artifacts.Revision{ID: revisionID, Name: name}, nil
+		}
+	}
+	return artifacts.Revision{}, artifacts.ErrNoCurrentRevision
 }
-func (*recordingArtifactStore) GetBytes(context.Context, string, string) ([]byte, error) {
-	return nil, errors.New("not used")
+func (store *recordingArtifactStore) GetBytes(_ context.Context, _ string, revisionID string) ([]byte, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for name, bytes := range store.currentByName {
+		if "rev-"+name == revisionID {
+			stashed := make([]byte, len(bytes))
+			copy(stashed, bytes)
+			return stashed, nil
+		}
+	}
+	return nil, errors.New("not found")
 }
 func (*recordingArtifactStore) Reader(context.Context, string, string) (io.ReadCloser, error) {
 	return nil, errors.New("not used")
@@ -71,8 +103,13 @@ func (*recordingArtifactStore) Reader(context.Context, string, string) (io.ReadC
 func (*recordingArtifactStore) CopyTo(context.Context, string, string, io.Writer) (int64, error) {
 	return 0, errors.New("not used")
 }
-func (*recordingArtifactStore) Current(context.Context, string, string, string) (artifacts.Revision, error) {
-	return artifacts.Revision{}, errors.New("not used")
+func (store *recordingArtifactStore) Current(_ context.Context, _ string, _ string, name string) (artifacts.Revision, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, ok := store.currentByName[name]; ok {
+		return artifacts.Revision{ID: "rev-" + name, Name: name}, nil
+	}
+	return artifacts.Revision{}, artifacts.ErrNoCurrentRevision
 }
 func (*recordingArtifactStore) ListForTask(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,13 @@ type Store interface {
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
+	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
+	// of the given stages has reached for the task. Returns -1 when none has run
+	// (the query's COALESCE sentinel); the runner maps -1 -> 0 entries.
+	MaxCycleForStages(ctx context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error)
+	// ListStageInvocationsForTask backs GET /tasks/{id}/invocations and makes
+	// "each attempt visible separately" checkable.
+	ListStageInvocationsForTask(ctx context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error)
 	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
 	ListCheckpointsForTask(ctx context.Context, arg sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error)
 	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
@@ -472,9 +480,15 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	runner.recordGitEvidence(ctx, task)
 
-	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)
+	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, task, taskPack)
 	if err != nil {
 		return runner.failTask(ctx, task, err)
+	}
+	// A halt (budget exhausted / verdict unreadable on the advance path) is a
+	// controlled pause, not a failure: apply it and stop without entering the
+	// loop. This must not flow through err, which drive turns into failTask.
+	if halt != nil {
+		return runner.applyPauseDecision(ctx, task, halt.decision, halt.stageID)
 	}
 
 	// Register a cancel for this task so the cancel handler can abort the
@@ -610,37 +624,124 @@ type stageRun struct {
 	worktree *worktree.Worktree
 }
 
+// haltDecision carries a pause Decision out of entryPoint without surfacing it
+// as an error. drive turns any entryPoint error into failTask; a budget halt or
+// a verdict_unreadable halt is a controlled pause, not a failure, so it must
+// travel a separate channel. When entryPoint returns a non-nil halt, drive
+// applies it via applyPauseDecision and returns without entering the loop.
+type haltDecision struct {
+	decision Decision
+	stageID  string
+}
+
 // entryPoint resolves where the loop starts and whether it resumes a session.
-func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Task, taskPack *pack.Pack) (stage, resume string, err error) {
+// The returned halt is non-nil only for the advance job when the resolved
+// transition halts (fix_budget_exhausted / verdict_unreadable) — those are
+// controlled pauses, not errors, so they must not flow through err (which drive
+// turns into failTask).
+func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Task, taskPack *pack.Pack) (stage, resume string, halt *haltDecision, err error) {
 	switch job.Kind {
 	case "run":
 		// A fresh run starts at the pack entry, unless a previous attempt set
 		// current_stage before a crash — resume there.
 		if task.CurrentStage.Valid {
-			return task.CurrentStage.String, "", nil
+			return task.CurrentStage.String, "", nil, nil
 		}
-		return taskPack.Entry, "", nil
+		return taskPack.Entry, "", nil, nil
 	case "continue":
 		// Resume the current stage from its captured session id (non-destructive).
 		latest, latestErr := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
 			TaskID: task.ID, TenantID: task.TenantID,
 		})
 		if latestErr != nil {
-			return "", "", fmt.Errorf("find resume session: %w", latestErr)
+			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
 		}
-		return task.CurrentStage.String, latest.SessionID.String, nil
+		return task.CurrentStage.String, latest.SessionID.String, nil, nil
 	case "advance":
-		// Past the gate: move to the current stage's declared transition target.
-		cur, ok := taskPack.Stages[task.CurrentStage.String]
+		// Past the gate: resolve the current stage's transition through the SAME
+		// resolver the loop path uses (D3: one resolver, not two). A halt
+		// (budget exhausted / verdict unreadable) returns a pause Decision via
+		// halt rather than err, so drive applies a controlled pause instead of
+		// failing the task.
+		currentStageID := task.CurrentStage.String
+		currentStage, ok := taskPack.Stages[currentStageID]
 		if !ok {
-			return "", "", fmt.Errorf("advance: current stage %q not in pack", task.CurrentStage.String)
+			return "", "", nil, fmt.Errorf("advance: current stage %q not in pack", currentStageID)
 		}
-		if len(cur.Transitions) == 0 {
-			return "", "", fmt.Errorf("advance: stage %q has no transition", task.CurrentStage.String)
+		if len(currentStage.Transitions) == 0 {
+			return "", "", nil, fmt.Errorf("advance: stage %q has no transition", currentStageID)
 		}
-		return cur.Transitions[0].To, "", nil
+		// On the advance path the prior stage already produced its result; read
+		// the status from the latest invocation's stored result so the condition
+		// matches on what the stage actually reported.
+		latestResult := runner.latestStoredResult(ctx, task)
+		transitionContext, transitionErr := runner.buildTransitionContext(ctx, task, taskPack, currentStageID, latestResult)
+		if transitionErr != nil {
+			return "", "", nil, fmt.Errorf("advance: build transition context: %w", transitionErr)
+		}
+		resolution, resolveErr := ResolveTransition(currentStage, currentStageID, transitionContext)
+		if resolveErr != nil {
+			return "", "", nil, fmt.Errorf("advance: resolve transition: %w", resolveErr)
+		}
+		if resolution.StopReason != "" {
+			decision := Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser,
+				StopReason: resolution.StopReason,
+			}
+			// Emit the transition resolution (even though no stage starts) so
+			// the would-be branch is auditable.
+			runner.emitStageTransition(ctx, task, verdictPayload{
+				From: currentStageID, Condition: resolution.Condition,
+				Cycle: resolution.Cycle, Verdict: resolution.Verdict,
+			})
+			return "", "", &haltDecision{decision: decision, stageID: currentStageID}, nil
+		}
+		// Fill the prospective cycle for the target invocation at the call site
+		// (the pure resolver leaves it zero; see processStage's ActionAdvance
+		// branch for why). Using nextCycleForStage keeps the record and the
+		// invocation row in agreement.
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, task, resolution.To, nil)
+		if cycleErr != nil {
+			return "", "", nil, fmt.Errorf("advance: resolve target cycle for stage %q: %w", resolution.To, cycleErr)
+		}
+		resolution.Cycle = int(targetCycle)
+		runner.emitStageTransition(ctx, task, verdictPayload{
+			From: currentStageID, To: resolution.To,
+			Condition: resolution.Condition, Cycle: resolution.Cycle, Verdict: resolution.Verdict,
+		})
+		// Record the taken branch (the same record processStage writes on the
+		// loop path), so an advance-job resolution is auditable from the sealed
+		// manifest too (D7).
+		runner.recordTransitionEvidence(ctx, task, manifest.TransitionRecord{
+			From: currentStageID, To: resolution.To,
+			Condition: resolution.Condition, Cycle: resolution.Cycle,
+			Verdict: resolution.Verdict, At: time.Now().UTC(),
+		})
+		return resolution.To, "", nil, nil
 	}
-	return "", "", fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
+	return "", "", nil, fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
+}
+
+// latestStoredResult reads the parsed result.json off the task's most recent
+// stage invocation, so the advance path can match transition conditions on the
+// status the prior stage actually reported. Returns nil when there is no stored
+// result (the condition will treat status as empty, which is correct for a
+// verdict-only stage).
+func (runner *Runner) latestStoredResult(ctx context.Context, task sqlc.Task) *agent.ResultJSON {
+	latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	})
+	if err != nil {
+		return nil
+	}
+	if !latest.Result.Valid || len(latest.Result.RawMessage) == 0 {
+		return nil
+	}
+	parsed, parseErr := agent.ParseResultJSON(latest.Result.RawMessage)
+	if parseErr != nil {
+		return nil
+	}
+	return &parsed
 }
 
 // runLoop walks the pack's stages from startStage, invoking the adapter per
@@ -649,11 +750,12 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 // lives in processStage; runLoop stays a flat claim-retry loop.
 func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, resumeSession string) error {
 	stageID := startStage
+	transition := stageTransition{} // empty for the entry stage
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		outcome, err := runner.processStage(ctx, run, stageID, resumeSession)
+		outcome, err := runner.processStage(ctx, run, stageID, resumeSession, transition)
 		if err != nil {
 			return err
 		}
@@ -661,22 +763,29 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 			return nil
 		}
 		stageID = outcome.nextStage
+		transition = outcome.transition
 		resumeSession = "" // only the first iteration resumes
 	}
 }
 
 // stageOutcome is processStage's verdict for one iteration of runLoop. Exactly
 // one of done or nextStage applies: done ends the loop (terminal/pause/final);
-// nextStage advances the loop to the next pack stage.
+// nextStage advances the loop to the next pack stage. transition carries the
+// resolved edge to the next stage so the next iteration can hand the fixer the
+// findings (commit 7) and commit 8 can record the TransitionRecord.
 type stageOutcome struct {
-	nextStage string
-	done      bool
+	nextStage  string
+	done       bool
+	transition stageTransition
 }
 
 // processStage runs one iteration: look up the stage, dispatch (terminal marker
 // vs adapter invocation), evaluate the outcome, and apply the resulting
-// decision. The caller owns loop control (continue / stop) via stageOutcome.
-func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string) (stageOutcome, error) {
+// decision. transitionIn is the edge that brought the run to stageID (empty for
+// the entry stage), threaded so invokeStage can render the reviewer-findings
+// hand-off without re-reading the artifact. The caller owns loop control
+// (continue / stop) via stageOutcome.
+func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string, transitionIn stageTransition) (stageOutcome, error) {
 	stage, ok := run.taskPack.Stages[stageID]
 	if !ok {
 		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("pack stage %q not found", stageID))
@@ -709,7 +818,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	run.task = updatedTask
 	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
 
-	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession)
+	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, transitionIn)
 
 	// If the run was cancelled (the cancel handler aborts it via the registry),
 	// bow out without touching the FSM — the handler owns the transition to
@@ -740,10 +849,19 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		runner.recordGitEvidence(ctx, run.task)
 	}
 
+	// Build the transition context (verdict, status, fix-cycle counter, budget)
+	// before Evaluate so the gate logic and the branch logic share one pure
+	// function. A build failure halts the run rather than guessing a route.
+	transitionContext, transitionErr := runner.buildTransitionContext(ctx, run.task, run.taskPack, stageID, outcome.result)
+	if transitionErr != nil {
+		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("build transition context for stage %q: %w", stageID, transitionErr))
+	}
+
 	decision, err := Evaluate(StageInput{
 		Result:           outcome.result,
 		Stage:            stage,
 		StageID:          stageID,
+		Transition:       transitionContext,
 		Clean:            cleanBeforeCommit,
 		AdapterError:     outcome.adapterErr,
 		ParseError:       outcome.parseErr,
@@ -755,7 +873,48 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 
 	switch decision.Action {
 	case ActionAdvance:
-		return stageOutcome{nextStage: decision.NextStage}, nil
+		// Fill the prospective cycle for the target invocation. The pure
+		// ResolveTransition leaves it zero (it cannot know the per-stage cycle
+		// without a store read, and deriving it from the fixer-set max would be
+		// wrong for a non-fixer back-edge and for multi-fixer packs). Compute it
+		// here via nextCycleForStage — the SAME function that assigns the
+		// invocation row's cycle — so the record and the row can never disagree.
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, run.task, decision.Transition.To, nil)
+		if cycleErr != nil {
+			return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("resolve target cycle for stage %q: %w", decision.Transition.To, cycleErr))
+		}
+		decision.Transition.Cycle = int(targetCycle)
+		// Emit the transition resolution so the branch is auditable even when
+		// the next stage never starts. The cycle carried on the Resolution is
+		// the prospective cycle for the next invocation; from is the stage that
+		// just ran.
+		runner.emitStageTransition(ctx, run.task, verdictPayload{
+			From: stageID, To: decision.Transition.To,
+			Condition: decision.Transition.Condition,
+			Cycle:     decision.Transition.Cycle, Verdict: decision.Transition.Verdict,
+		})
+		// Record the taken branch in the manifest's transitions section so the
+		// review ⇄ fix loop is auditable from the sealed manifest (D7).
+		runner.recordTransitionEvidence(ctx, run.task, manifest.TransitionRecord{
+			From: stageID, To: decision.Transition.To,
+			Condition: decision.Transition.Condition, Cycle: decision.Transition.Cycle,
+			Verdict: decision.Transition.Verdict, At: time.Now().UTC(),
+		})
+		// Carry the resolved edge to the next iteration so invokeStage can hand
+		// the fixer the predecessor's findings (commit 7) and commit 8 can
+		// record the TransitionRecord without re-resolving.
+		next := stageTransition{
+			from: stageID, condition: decision.Transition.Condition,
+			verdict: decision.Transition.Verdict, cycle: decision.Transition.Cycle,
+		}
+		// When the edge was verdict-conditioned, the predecessor's verdict.json
+		// path and finding count come from the transition context we built
+		// above; carry them so the fixer's routing block points at the findings.
+		if decision.Transition.Verdict != "" {
+			next.verdictPath = filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID), agent.VerdictFileName)
+			next.findingsCount = transitionContext.FindingsCount
+		}
+		return stageOutcome{nextStage: decision.NextStage, transition: next}, nil
 	case ActionPause:
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
 	case ActionFinal:
@@ -800,6 +959,16 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{
 		"from": task.State, "to": string(newState), "stop_reason": decision.StopReason, "stage": stageID,
 	})
+	// Record EVERY pause in the manifest's stops section (D7, deliberately
+	// widened beyond budget/verdict): budget exhaustion, verdict_unreadable,
+	// gate, adapter_error, parse_error, open_questions. (Stage, Reason, Cycle)
+	// collapses repeats. The cycle is the prospective fix-cycle count at the
+	// stop point when the resolver populated it (budget/verdict halts); 0 for
+	// the non-branching pauses.
+	runner.recordStopEvidence(ctx, task, manifest.StopRecord{
+		Stage: stageID, Reason: decision.StopReason,
+		Cycle: decision.Transition.Cycle, At: time.Now().UTC(),
+	})
 	return nil
 }
 
@@ -839,7 +1008,7 @@ type invocationOutcome struct {
 // creates the stage_invocation row at start (so a crash leaves a partial
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
 // row with session_id / stop_reason / parsed result.
-func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string) invocationOutcome {
+func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		runner.log.Error("create artifact dir", "dir", artifactDir, "error", err)
@@ -860,24 +1029,55 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		runner.hardTimeout, runner.idleTimeout)
 	profileBytes := marshalProfile(profile)
 
-	block := routing.Render(routing.Block{
+	// VerdictPath is set when this stage sources a verdict condition (detected
+	// via parsed conditions, never substring-scanned). ReviewFindings is set
+	// when the stage was entered through a verdict-conditioned transition, so
+	// the fixer is pointed at the predecessor's findings artifact rather than a
+	// log. Both render nothing when unset.
+	routingBlock := routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
 		Capabilities: profileTokens(profile),
-	})
+	}
+	if stage.SourcesVerdict() {
+		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
+	}
+	if transitionIn.verdict != "" && transitionIn.verdictPath != "" {
+		routingBlock.ReviewFindings = &routing.ReviewRef{
+			Stage: transitionIn.from, Path: transitionIn.verdictPath,
+			Count: transitionIn.findingsCount,
+		}
+	}
+	block := routing.Render(routingBlock)
 
-	// Next sequence number + resume_of for this task.
+	// Next sequence number + resume_of for this task. resume_of is set ONLY when
+	// this invocation resumes a captured session (resumeSession != ""); setting
+	// it for every invocation made the resume chain a lie — it pointed at the
+	// previous invocation even for a fresh entry, blocking "was this a retry or
+	// a resume" from being readable off the row. sequence keeps incrementing
+	// unconditionally (every attempt is a distinct row).
 	var seq int32 = 1
-	resumeOf := sql.NullString{}
+	var resumeOf sql.NullString
+	var resumed *sqlc.StageInvocation
 	if latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{TaskID: run.task.ID, TenantID: run.task.TenantID}); err == nil {
 		seq = latest.Sequence + 1
-		resumeOf = nullStr(latest.ID)
+		if resumeSession != "" {
+			resumeOf = nullStr(latest.ID)
+			resumed = &latest
+		}
+	}
+
+	cycle, err := runner.nextCycleForStage(ctx, run.task, stageID, resumed)
+	if err != nil {
+		runner.log.Error("compute cycle for stage", "task", run.task.ID, "stage", stageID, "error", err)
+		return invocationOutcome{adapterErr: true}
 	}
 
 	invocation, err := runner.store.CreateStageInvocation(ctx, sqlc.CreateStageInvocationParams{
 		TenantID: run.task.TenantID, UserID: run.task.UserID, TaskID: run.task.ID,
 		Stage: stageID, Sequence: seq, ResumeOf: resumeOf,
 		CapabilityProfile: toNullRaw(profileBytes),
+		Cycle:             cycle,
 	})
 	if err != nil {
 		runner.log.Error("create stage invocation", "task", run.task.ID, "stage", stageID, "error", err)
@@ -890,6 +1090,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	runner.emit(ctx, run.task, EvCapabilityEnforced, map[string]any{
 		"stage": stageID, "invocation": invocation.ID,
 		"role": string(profile.Source.Role), "profile": profile,
+		"cycle": invocation.Cycle,
 	})
 
 	eventCh, invokeErr := runner.adapter.Invoke(ctx, agent.Invocation{
@@ -1010,6 +1211,35 @@ func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocat
 	}
 }
 
+// nextCycleForStage computes the cycle for a fresh invocation of stageID per
+// D4's table. This is the single place cycles are computed:
+//
+//   - a resume (resumed != nil) inherits the resumed invocation's cycle, so a
+//     `continue` does not consume budget or inflate the counter;
+//   - a fresh entry takes MAX(cycle for (task, stageID)) + 1. MaxCycleForStages
+//     returns -1 when the stage never ran (the COALESCE sentinel), which maps
+//     to cycle 0 — the first entry.
+//
+// Durability follows from deriving the value off committed rows: a worker
+// restart recomputes the same answer, and a crash between "transition chosen"
+// and "invocation created" leaves no row, so the recomputed value is identical.
+func (runner *Runner) nextCycleForStage(ctx context.Context, task sqlc.Task, stageID string, resumed *sqlc.StageInvocation) (int32, error) {
+	if resumed != nil {
+		return resumed.Cycle, nil
+	}
+	maxCycle, err := runner.store.MaxCycleForStages(ctx, sqlc.MaxCycleForStagesParams{
+		TaskID: task.ID, TenantID: task.TenantID, Column3: []string{stageID},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("load max cycle for stage %q: %w", stageID, err)
+	}
+	if maxCycle < 0 {
+		// -1 sentinel: the stage has never run. First entry is cycle 0.
+		return 0, nil
+	}
+	return maxCycle + 1, nil
+}
+
 // failTask transitions the task to failed and emits the reason. Used when the
 // runner cannot proceed (bad pack, missing stage, evaluator error) — these are
 // genuine failures, not retryable pause points.
@@ -1079,6 +1309,12 @@ const (
 	EvWorktreeReconciled = "task.worktree_reconciled"
 	EvCheckpointRecorded = "task.checkpoint_recorded"
 	EvTaskCleanedUp      = "task.cleaned_up"
+	// EvStageTransition records a conditional transition resolution ({from, to,
+	// condition, cycle, verdict}), emitted at the resolution point so the
+	// branch is auditable even when the next stage never starts (e.g. budget
+	// exhaustion stops the run before the target stage runs). Exhaustion itself
+	// needs no new event type: task.state_changed already carries stop_reason.
+	EvStageTransition = "stage.transition"
 	// EvCapabilityEnforced records the effective capability profile granted to
 	// a stage invocation, emitted before the adapter is invoked. The profile
 	// (grants + denials + role + source inputs) is the audit evidence that the

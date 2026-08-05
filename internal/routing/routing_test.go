@@ -91,6 +91,58 @@ func TestRender_PriorStages(t *testing.T) {
 	}
 }
 
+func TestRender_VerdictPath_WhenSet(t *testing.T) {
+	t.Parallel()
+	got := Render(Block{
+		Stage: "review", Gate: "auto", ArtifactDir: "/wt/.agentum/T1/.ag-artifacts/review",
+		VerdictPath: "/wt/.agentum/T1/.ag-artifacts/review/verdict.json",
+	})
+	if !strings.Contains(got, "/wt/.agentum/T1/.ag-artifacts/review/verdict.json") {
+		t.Errorf("verdict path not rendered; got:\n%s", got)
+	}
+	if !strings.Contains(got, "verdict") || !strings.Contains(got, "approved | changes_requested") {
+		t.Errorf("verdict contract schema not rendered; got:\n%s", got)
+	}
+	if !strings.Contains(got, "changes_requested requires at least one finding") {
+		t.Errorf("changes_requested-requires-findings rule not rendered; got:\n%s", got)
+	}
+}
+
+func TestRender_VerdictPath_OmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	got := Render(Block{Stage: "spec", Gate: "auto", ArtifactDir: "/x"})
+	if strings.Contains(got, "Reviewer verdict") {
+		t.Errorf("verdict section must not render when VerdictPath is empty; got:\n%s", got)
+	}
+}
+
+func TestRender_ReviewFindings_WhenSet(t *testing.T) {
+	t.Parallel()
+	got := Render(Block{
+		Stage: "fix", Gate: "auto_if_clean", ArtifactDir: "/wt/.agentum/T1/.ag-artifacts/fix",
+		ReviewFindings: &ReviewRef{
+			Stage: "review", Path: "/wt/.agentum/T1/.ag-artifacts/review/verdict.json", Count: 3,
+		},
+	})
+	if !strings.Contains(got, "review") {
+		t.Errorf("reviewer stage not named; got:\n%s", got)
+	}
+	if !strings.Contains(got, "/wt/.agentum/T1/.ag-artifacts/review/verdict.json") {
+		t.Errorf("findings path not rendered; got:\n%s", got)
+	}
+	if !strings.Contains(got, "3 finding(s)") {
+		t.Errorf("finding count not rendered; got:\n%s", got)
+	}
+}
+
+func TestRender_ReviewFindings_OmittedWhenNil(t *testing.T) {
+	t.Parallel()
+	got := Render(Block{Stage: "fix", Gate: "auto", ArtifactDir: "/x"})
+	if strings.Contains(got, "Reviewer findings to address") {
+		t.Errorf("findings section must not render when ReviewFindings is nil; got:\n%s", got)
+	}
+}
+
 func TestRender_Deterministic(t *testing.T) {
 	t.Parallel()
 	// Same input → identical output. The runner caches/prompts rely on this.

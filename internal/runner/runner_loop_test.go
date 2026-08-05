@@ -76,7 +76,7 @@ func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.Create
 	invocation := sqlc.StageInvocation{
 		ID: fmt.Sprintf("inv-%d", len(store.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
 		TaskID: arg.TaskID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
-		CapabilityProfile: arg.CapabilityProfile,
+		CapabilityProfile: arg.CapabilityProfile, Cycle: arg.Cycle,
 	}
 	store.invocations = append(store.invocations, invocation)
 	return invocation, nil
@@ -100,6 +100,33 @@ func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStage
 		return sqlc.StageInvocation{}, sql.ErrNoRows
 	}
 	return store.invocations[len(store.invocations)-1], nil
+}
+func (store *fakeStore) MaxCycleForStages(_ context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var max int32 = -1
+	for _, invocation := range store.invocations {
+		if invocation.TaskID != arg.TaskID {
+			continue
+		}
+		for _, stageID := range arg.Column3 {
+			if invocation.Stage == stageID && invocation.Cycle > max {
+				max = invocation.Cycle
+			}
+		}
+	}
+	return max, nil
+}
+func (store *fakeStore) ListStageInvocationsForTask(_ context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make([]sqlc.StageInvocation, 0, len(store.invocations))
+	for _, invocation := range store.invocations {
+		if invocation.TaskID == arg.TaskID {
+			out = append(out, invocation)
+		}
+	}
+	return out, nil
 }
 func (store *fakeStore) LatestCheckpointForTask(_ context.Context, _ sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error) {
 	store.mu.Lock()

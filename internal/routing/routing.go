@@ -41,6 +41,28 @@ type Block struct {
 	// Capabilities are the pack∩stage capability subset granted to this
 	// invocation. Empty renders an inert stub; Epic 6 enforces them.
 	Capabilities []string
+
+	// VerdictPath is the absolute path to the verdict.json a verdict-sourcing
+	// stage must write. Empty for a stage that does not branch on verdict; when
+	// set, the template renders the verdict contract (the schema + the path),
+	// so every adapter enforces the same shape and packs do not restate it.
+	// Detected via pack.Stage.SourcesVerdict(), never by substring-scanning.
+	VerdictPath string
+
+	// ReviewFindings, when set, points a stage entered through a verdict-
+	// conditioned transition at the predecessor's findings artifact, so the
+	// fixer reads structured findings rather than a log. Nil for a stage not
+	// entered via a verdict edge.
+	ReviewFindings *ReviewRef
+}
+
+// ReviewRef points a fixer stage at the reviewer's findings. The count lets the
+// routing block say how many findings to expect without the agent re-reading
+// the whole artifact to count them.
+type ReviewRef struct {
+	Stage string // the reviewer stage id whose verdict produced the findings
+	Path  string // absolute path to the reviewer's verdict.json
+	Count int    // number of findings in the verdict
 }
 
 // PriorStage is one earlier stage whose artifacts are referenceable.

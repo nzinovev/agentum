@@ -10,6 +10,38 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Conditional transitions, the review/fix loop, and a durable fix budget**:
+  a transition may carry a `condition` in a closed two-token grammar
+  (`verdict` / `status` / `fix_cycles`), and a pack may declare a fix-cycle
+  budget that bounds the review ⇄ fix loop. Unblocks the Backend Development
+  pack (task 3).
+  - **Condition language** (`internal/pack`): closed, declarative, no boolean
+    operators, no commands or scripts — a pure function over three scalars.
+    First-match-wins ordering supplies disjunction; an empty condition is the
+    unconditional fallback.
+  - **Reviewer verdict contract** (`internal/agent/verdict.go`): a reviewer
+    stage writes `verdict.json`, which the orchestrator parses (never the
+    agent's prose) and routes on. `changes_requested` with no findings is a
+    contract violation; the contract text lives in `routing/template.md`.
+  - **One resolver on both paths** (`internal/runner/transition.go`): the
+    auto-advance path and the `advance` job share `ResolveTransition`, with the
+    D4 budget guard `fix_cycles_used >= budget`.
+  - **Durable fix-cycle counter** (migration `0008`): `stage_invocations.cycle`
+    is the 0-based repeat index of a stage within the task, derived from
+    committed rows — it survives a worker restart and cannot be inflated by a
+    resume.
+  - **Controlled stops**: `fix_budget_exhausted` and `verdict_unreadable` map
+    to `paused_user_stop`; nothing is torn down (branch, checkpoints, artifact
+    revisions, the unsealed manifest all stay).
+  - **Validator rules** (D6): closed-set literals, totality, ≤1 unconditional
+    edge last, and per-SCC bounded-cycle checking (every non-trivial component
+    reachable from entry needs a fixer-role stage and `fix_cycles >= 1`).
+  - **Evidence**: manifest `transitions` and `stops` sections (not driving
+    `evidence_complete`), the `stage.transition` event, and `cycle` on every
+    invocation row.
+  - **Invocations API**: `GET /tasks/{id}/invocations` and
+    `GET /tasks/{id}/invocations/{iid}` now return each attempt (with `cycle`)
+    in run order.
 - **Orchestrator-owned project checks**: the project ships a versioned registry
   of named checks (`.agentum.yaml`, tracked in the repo) and Agentum runs the
   resolved set itself at the delivery boundary — never trusting an agent's claim

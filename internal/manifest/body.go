@@ -31,6 +31,8 @@ const schemaVersion = "1"
 //   - HumanGates    — human gate decisions
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
+//   - Transitions   — conditional transitions the run took (D7)
+//   - Stops         — controlled stops the run hit (D7)
 //   - Missing       — subsystems that did not contribute (derived at seal)
 //   - EvidenceGaps  — evidence the orchestrator tried and failed to write
 //   - EvidenceComplete — set at seal: false when any section is degraded
@@ -49,9 +51,38 @@ type Body struct {
 	HumanGates          []HumanDecision      `json:"human_gates,omitempty"`
 	Git                 *GitEvidence         `json:"git,omitempty"`
 	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
+	Transitions         []TransitionRecord   `json:"transitions,omitempty"`
+	Stops               []StopRecord         `json:"stops,omitempty"`
 	Missing             []string             `json:"missing,omitempty"`
 	EvidenceGaps        []EvidenceGap        `json:"evidence_gaps,omitempty"`
 	EvidenceComplete    *bool                `json:"evidence_complete,omitempty"`
+}
+
+// TransitionRecord is one conditional transition the run took (D7). It makes
+// the review ⇄ fix loop auditable from the manifest: each taken branch is
+// recorded with its condition, the verdict that matched, and the prospective
+// cycle of the target invocation. Cycle comes from the runner's Resolution
+// (commit 6), not re-derived. Append-merged by (From, To, Condition, Cycle) so
+// a re-resolution of the same edge under a retry collapses to one record.
+type TransitionRecord struct {
+	From      string    `json:"from,omitempty"`
+	To        string    `json:"to,omitempty"`
+	Condition string    `json:"condition,omitempty"`
+	Cycle     int       `json:"cycle,omitempty"`
+	Verdict   string    `json:"verdict,omitempty"`
+	At        time.Time `json:"at"`
+}
+
+// StopRecord is one controlled stop the run hit (D7): fix_budget_exhausted,
+// verdict_unreadable, gate, adapter_error, etc. recordStopEvidence records
+// every pause (a deliberate widening of D7), so the manifest carries the full
+// stop history; (Stage, Reason, Cycle) collapses repeats. Cycle is the
+// prospective cycle at the stop point.
+type StopRecord struct {
+	Stage  string    `json:"stage"`
+	Reason string    `json:"reason"`
+	Cycle  int       `json:"cycle,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // EvidenceGap records one evidence write the orchestrator attempted and failed.
@@ -427,6 +458,12 @@ func mergeBodies(existing Body, patch Body) Body {
 	if patch.ExecutionCoordinate != nil {
 		merged.ExecutionCoordinate = patch.ExecutionCoordinate
 	}
+	if len(patch.Transitions) > 0 {
+		merged.Transitions = appendUniqueTransition(merged.Transitions, patch.Transitions)
+	}
+	if len(patch.Stops) > 0 {
+		merged.Stops = appendUniqueStop(merged.Stops, patch.Stops)
+	}
 	if len(patch.Missing) > 0 {
 		merged.Missing = appendUniqueString(merged.Missing, patch.Missing)
 	}
@@ -583,6 +620,52 @@ func appendUniqueCheckpoint(base []CheckpointRef, additions []CheckpointRef) []C
 		found := false
 		for _, present := range base {
 			if present.Label == addition.Label {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// appendUniqueTransition appends transitions not already in base, matched by
+// (From, To, Condition, Cycle) so a re-resolution of the same edge under a
+// retry collapses to one record. At is taken from the addition so the latest
+// occurrence is kept on a duplicate.
+func appendUniqueTransition(base []TransitionRecord, additions []TransitionRecord) []TransitionRecord {
+	out := make([]TransitionRecord, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		found := false
+		for index, present := range out {
+			if present.From == addition.From && present.To == addition.To &&
+				present.Condition == addition.Condition && present.Cycle == addition.Cycle {
+				out[index].At = addition.At
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, addition)
+		}
+	}
+	return out
+}
+
+// appendUniqueStop appends stops not already in base, matched by
+// (Stage, Reason, Cycle) so a repeat pause (e.g. budget re-hit on continue)
+// collapses to one record. At is taken from the addition.
+func appendUniqueStop(base []StopRecord, additions []StopRecord) []StopRecord {
+	out := make([]StopRecord, 0, len(base)+len(additions))
+	out = append(out, base...)
+	for _, addition := range additions {
+		found := false
+		for index, present := range out {
+			if present.Stage == addition.Stage && present.Reason == addition.Reason && present.Cycle == addition.Cycle {
+				out[index].At = addition.At
 				found = true
 				break
 			}
