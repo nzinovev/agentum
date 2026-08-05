@@ -103,12 +103,19 @@ ambiguous with each other or with pause.
 
 A stage invocation is one agent run within a task (`stage_invocations` row).
 Each carries a `session_id` (for non-destructive resume), `stop_reason`
-(`open_questions | gate | user_stop`), and `pending_edits`.
+(`open_questions | gate | user_stop | fix_budget_exhausted | verdict_unreadable`),
+`cycle` (the 0-based repeat index of the stage within the task — distinguishes
+retries from resumes), and `pending_edits`.
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
-| `GET` | `/tasks/{id}/invocations` | stub | list invocations for a task. Epic 5.1 |
-| `GET` | `/tasks/{id}/invocations/{iid}` | stub | one invocation. Epic 5.1 |
+| `GET` | `/tasks/{id}/invocations` | ✅ | list invocations for a task, ordered by sequence. `200 Invocation[]` / `404 not_found` (unknown task). |
+| `GET` | `/tasks/{id}/invocations/{iid}` | ✅ | one invocation. `200 Invocation` / `404 not_found`. |
+
+`Invocation` shape: `{id, stage, sequence, cycle, stop_reason?, session_id?,
+resume_of?, started_at, finished_at?}`. `sequence` is the global run order;
+`cycle` is the per-stage repeat index (0 = first entry, increments on a fresh
+re-entry, inherited on a resume).
 
 ## Gate actions — stop-point → continue semantics
 

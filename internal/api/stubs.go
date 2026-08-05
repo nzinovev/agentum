@@ -17,16 +17,10 @@ const (
 )
 
 // --- Stage invocations (read-only) ---
-
-// GET /api/v1/tasks/{id}/invocations
-func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicCatalogReads, "GET /tasks/{id}/invocations")
-}
-
-// GET /api/v1/tasks/{id}/invocations/{iid}
-func (api *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicCatalogReads, "GET /tasks/{id}/invocations/{iid}")
-}
+//
+// GET /tasks/{id}/invocations and GET /tasks/{id}/invocations/{iid} are
+// implemented in invocations.go (the per-attempt read surface, including the
+// cycle column that distinguishes retries from resumes).
 
 // --- Gate actions (§3.2 stop conditions → continue semantics) ---
 //
