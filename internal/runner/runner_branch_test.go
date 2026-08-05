@@ -14,6 +14,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -431,5 +432,106 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 	}
 	if !foundUnreadable {
 		t.Error("no task.state_changed event carrying verdict_unreadable")
+	}
+}
+
+// TestLoop_TransitionRecordsPerLap is the D7 assertion that was missing: each
+// lap of the review ⇄ fix loop produces one TransitionRecord, and the records
+// for BOTH edges (review → fix and fix → review) carry distinct cycles per lap.
+// Before the call-site cycle fix, the pure resolver returned FixCyclesUsed for
+// a fixer target and 0 for everything else, so every fix → review record
+// collapsed to cycle 0 (appendUniqueTransition keys on
+// From+To+Condition+Cycle) and the manifest lost the loop shape.
+func TestLoop_TransitionRecordsPerLap(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	// budget 3, two changes_requested laps then approved: review → fix → review
+	// → fix → review → done. Three laps, so two fixer entries (cycles 0, 1) and
+	// three review entries (cycles 0, 1, 2).
+	taskPack := branchPack(3)
+	task := sqlc.Task{ID: "T-rec", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	manifestFake := &fakeManifestService{}
+	adapter := &countingVerdictAdapter{
+		results: map[string]agent.ResultJSON{
+			"spec":   {SchemaVersion: "1", Status: agent.StatusComplete},
+			"review": {SchemaVersion: "1", Status: agent.StatusComplete},
+			"fix":    {SchemaVersion: "1", Status: agent.StatusComplete},
+		},
+		reviewSequence: []agent.VerdictJSON{
+			changesRequested("lap1"), changesRequested("lap2"), approvedVerdict("lap3"),
+		},
+	}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		AgentName: "opencode", Artifacts: newRecordingStore(), Manifest: nil,
+	})
+	// Inject the fake manifest service after construction (same pattern as
+	// checkpoint_test.go:246).
+	runner.mfst = manifestFake
+
+	if err := runner.Handle(t.Context(), job("run", "T-rec", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+
+	// Collect every TransitionRecord the runner wrote, across AddEvidence patches.
+	records := collectTransitionRecords(t, manifestFake)
+	// Filter to the loop edges (drop spec → review, review → done) so the
+	// assertion is about the loop shape, not the entry/exit edges.
+	var reviewToFix, fixToReview []manifest.TransitionRecord
+	for _, record := range records {
+		if record.From == "review" && record.To == "fix" {
+			reviewToFix = append(reviewToFix, record)
+		}
+		if record.From == "fix" && record.To == "review" {
+			fixToReview = append(fixToReview, record)
+		}
+	}
+	// Two laps means two review→fix transitions and two fix→review transitions.
+	// (The third review is approved → done, not → fix.)
+	if len(reviewToFix) != 2 {
+		t.Errorf("review→fix records = %d, want 2 (one per lap): %+v", len(reviewToFix), reviewToFix)
+	}
+	if len(fixToReview) != 2 {
+		t.Errorf("fix→review records = %d, want 2 (one per lap — the regression collapsed these to 1): %+v", len(fixToReview), fixToReview)
+	}
+	// Both edges' cycles must be distinct per lap (0 then 1), proving the loop
+	// shape survived. The regression would have produced [0, 1] for review→fix
+	// (fixer target — the buggy FixCyclesUsed path happened to be right for a
+	// single-fixer pack) but [0, 0] for fix→review (non-fixer target — the
+	// buggy 0 path, which collapsed).
+	assertDistinctCycles(t, "review→fix", reviewToFix)
+	assertDistinctCycles(t, "fix→review", fixToReview)
+}
+
+// collectTransitionRecords flattens every TransitionRecord across all
+// AddEvidence patches the fake received. appendUniqueTransition would have
+// collapsed duplicates at merge time, so the flattened list IS what the sealed
+// manifest would carry (modulo non-transition patches, which contribute none).
+func collectTransitionRecords(t *testing.T, service *fakeManifestService) []manifest.TransitionRecord {
+	t.Helper()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	var records []manifest.TransitionRecord
+	for _, patch := range service.addEvidence {
+		records = append(records, patch.Transitions...)
+	}
+	return records
+}
+
+// assertDistinctCycles fails if two records carry the same Cycle — the
+// signature of the collapse the regression caused.
+func assertDistinctCycles(t *testing.T, edge string, records []manifest.TransitionRecord) {
+	t.Helper()
+	seen := map[int]bool{}
+	for _, record := range records {
+		if seen[record.Cycle] {
+			t.Errorf("%s: duplicate Cycle %d across laps — records collapsed (the regression): %+v", edge, record.Cycle, records)
+		}
+		seen[record.Cycle] = true
 	}
 }

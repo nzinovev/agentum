@@ -257,25 +257,18 @@ func ResolveTransition(stage pack.Stage, stageID string, transitionContext Trans
 		}, nil
 	}
 
-	cycle := resolveProspectiveCycle(matched.To, transitionContext)
+	// Cycle is LEFT ZERO here. The pure resolver cannot know the next
+	// invocation's cycle — it would have to derive it from the fixer-set max
+	// (FixCyclesUsed), which equals the per-stage cycle only while a pack has
+	// exactly one fixer stage, and is wrong for a non-fixer back-edge target
+	// (fix → review on lap 3 is review's cycle 2, not 0). The caller fills
+	// Resolution.Cycle at the call site via nextCycleForStage(To), the same
+	// function that assigns the invocation row's cycle, so the two can never
+	// disagree.
 	return Resolution{
 		To: matched.To, Condition: matched.Condition,
-		Verdict: transitionContext.Verdict, Cycle: cycle,
+		Verdict: transitionContext.Verdict,
 	}, nil
-}
-
-// resolveProspectiveCycle returns the cycle the next invocation of target will
-// receive. For a fixer target it is exactly FixCyclesUsed (the count of fixer
-// entries already made): cycle 0 for the first entry, 1 for the second, etc.
-// For a non-fixer target the precise per-stage cycle is computed at invoke
-// time (nextCycleForStage); the budget-relevant value carried here is what the
-// transition record and the stage.transition event need for the loop case, and
-// 0 is the honest "first entry" for a non-fixing target.
-func resolveProspectiveCycle(target string, transitionContext TransitionContext) int {
-	if isFixerStage(target, transitionContext.FixerStages) {
-		return transitionContext.FixCyclesUsed
-	}
-	return 0
 }
 
 // isFixerStage reports whether target is one of the pack's fixer-role stages.

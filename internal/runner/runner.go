@@ -696,6 +696,15 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 			})
 			return "", "", &haltDecision{decision: decision, stageID: currentStageID}, nil
 		}
+		// Fill the prospective cycle for the target invocation at the call site
+		// (the pure resolver leaves it zero; see processStage's ActionAdvance
+		// branch for why). Using nextCycleForStage keeps the record and the
+		// invocation row in agreement.
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, task, resolution.To, nil)
+		if cycleErr != nil {
+			return "", "", nil, fmt.Errorf("advance: resolve target cycle for stage %q: %w", resolution.To, cycleErr)
+		}
+		resolution.Cycle = int(targetCycle)
 		runner.emitStageTransition(ctx, task, verdictPayload{
 			From: currentStageID, To: resolution.To,
 			Condition: resolution.Condition, Cycle: resolution.Cycle, Verdict: resolution.Verdict,
@@ -864,6 +873,17 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 
 	switch decision.Action {
 	case ActionAdvance:
+		// Fill the prospective cycle for the target invocation. The pure
+		// ResolveTransition leaves it zero (it cannot know the per-stage cycle
+		// without a store read, and deriving it from the fixer-set max would be
+		// wrong for a non-fixer back-edge and for multi-fixer packs). Compute it
+		// here via nextCycleForStage — the SAME function that assigns the
+		// invocation row's cycle — so the record and the row can never disagree.
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, run.task, decision.Transition.To, nil)
+		if cycleErr != nil {
+			return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("resolve target cycle for stage %q: %w", decision.Transition.To, cycleErr))
+		}
+		decision.Transition.Cycle = int(targetCycle)
 		// Emit the transition resolution so the branch is auditable even when
 		// the next stage never starts. The cycle carried on the Resolution is
 		// the prospective cycle for the next invocation; from is the stage that

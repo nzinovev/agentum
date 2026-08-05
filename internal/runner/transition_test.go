@@ -34,8 +34,12 @@ func TestResolveTransition_VerdictMatches(t *testing.T) {
 	if resolution.To != "fix" {
 		t.Errorf("changes_requested: To = %q, want fix", resolution.To)
 	}
+	// The pure resolver leaves Cycle zero: it cannot know the per-stage cycle
+	// without a store read, and the call site fills it via nextCycleForStage
+	// (see processStage / entryPoint). Asserting 0 here pins that the resolver
+	// does NOT guess — a non-zero value would be the old, wrong derivation.
 	if resolution.Cycle != 0 {
-		t.Errorf("changes_requested: Cycle = %d, want 0 (first fixer entry)", resolution.Cycle)
+		t.Errorf("changes_requested: Cycle = %d, want 0 (resolver leaves it for the call site)", resolution.Cycle)
 	}
 
 	// approved -> done.
