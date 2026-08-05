@@ -38,6 +38,13 @@ type Store interface {
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
+	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
+	// of the given stages has reached for the task. Returns -1 when none has run
+	// (the query's COALESCE sentinel); the runner maps -1 -> 0 entries.
+	MaxCycleForStages(ctx context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error)
+	// ListStageInvocationsForTask backs GET /tasks/{id}/invocations and makes
+	// "each attempt visible separately" checkable.
+	ListStageInvocationsForTask(ctx context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error)
 	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
 	ListCheckpointsForTask(ctx context.Context, arg sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error)
 	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
@@ -866,18 +873,34 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		Capabilities: profileTokens(profile),
 	})
 
-	// Next sequence number + resume_of for this task.
+	// Next sequence number + resume_of for this task. resume_of is set ONLY when
+	// this invocation resumes a captured session (resumeSession != ""); setting
+	// it for every invocation made the resume chain a lie — it pointed at the
+	// previous invocation even for a fresh entry, blocking "was this a retry or
+	// a resume" from being readable off the row. sequence keeps incrementing
+	// unconditionally (every attempt is a distinct row).
 	var seq int32 = 1
-	resumeOf := sql.NullString{}
+	var resumeOf sql.NullString
+	var resumed *sqlc.StageInvocation
 	if latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{TaskID: run.task.ID, TenantID: run.task.TenantID}); err == nil {
 		seq = latest.Sequence + 1
-		resumeOf = nullStr(latest.ID)
+		if resumeSession != "" {
+			resumeOf = nullStr(latest.ID)
+			resumed = &latest
+		}
+	}
+
+	cycle, err := runner.nextCycleForStage(ctx, run.task, stageID, resumed)
+	if err != nil {
+		runner.log.Error("compute cycle for stage", "task", run.task.ID, "stage", stageID, "error", err)
+		return invocationOutcome{adapterErr: true}
 	}
 
 	invocation, err := runner.store.CreateStageInvocation(ctx, sqlc.CreateStageInvocationParams{
 		TenantID: run.task.TenantID, UserID: run.task.UserID, TaskID: run.task.ID,
 		Stage: stageID, Sequence: seq, ResumeOf: resumeOf,
 		CapabilityProfile: toNullRaw(profileBytes),
+		Cycle:             cycle,
 	})
 	if err != nil {
 		runner.log.Error("create stage invocation", "task", run.task.ID, "stage", stageID, "error", err)
@@ -890,6 +913,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	runner.emit(ctx, run.task, EvCapabilityEnforced, map[string]any{
 		"stage": stageID, "invocation": invocation.ID,
 		"role": string(profile.Source.Role), "profile": profile,
+		"cycle": invocation.Cycle,
 	})
 
 	eventCh, invokeErr := runner.adapter.Invoke(ctx, agent.Invocation{
@@ -1008,6 +1032,35 @@ func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocat
 	}); err != nil {
 		runner.log.Error("finish stage invocation", "invocation", invocation.ID, "error", err)
 	}
+}
+
+// nextCycleForStage computes the cycle for a fresh invocation of stageID per
+// D4's table. This is the single place cycles are computed:
+//
+//   - a resume (resumed != nil) inherits the resumed invocation's cycle, so a
+//     `continue` does not consume budget or inflate the counter;
+//   - a fresh entry takes MAX(cycle for (task, stageID)) + 1. MaxCycleForStages
+//     returns -1 when the stage never ran (the COALESCE sentinel), which maps
+//     to cycle 0 — the first entry.
+//
+// Durability follows from deriving the value off committed rows: a worker
+// restart recomputes the same answer, and a crash between "transition chosen"
+// and "invocation created" leaves no row, so the recomputed value is identical.
+func (runner *Runner) nextCycleForStage(ctx context.Context, task sqlc.Task, stageID string, resumed *sqlc.StageInvocation) (int32, error) {
+	if resumed != nil {
+		return resumed.Cycle, nil
+	}
+	maxCycle, err := runner.store.MaxCycleForStages(ctx, sqlc.MaxCycleForStagesParams{
+		TaskID: task.ID, TenantID: task.TenantID, Column3: []string{stageID},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("load max cycle for stage %q: %w", stageID, err)
+	}
+	if maxCycle < 0 {
+		// -1 sentinel: the stage has never run. First entry is cycle 0.
+		return 0, nil
+	}
+	return maxCycle + 1, nil
 }
 
 // failTask transitions the task to failed and emits the reason. Used when the
