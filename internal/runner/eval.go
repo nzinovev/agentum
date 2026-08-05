@@ -40,9 +40,16 @@ type Decision struct {
 	// StopReason is recorded on the stage_invocation row. Empty unless pausing.
 	StopReason string
 
-	// NextStage is the stage id to advance to (ActionAdvance only), taken from
-	// the stage's first transition. Empty otherwise.
+	// NextStage is the stage id to advance to (ActionAdvance only), resolved by
+	// ResolveTransition against the stage's conditional transitions and the
+	// fix-cycle budget. Empty otherwise.
 	NextStage string
+
+	// Transition is the matched transition's auditable detail (condition text,
+	// verdict, prospective cycle), carried so processStage can emit the
+	// stage.transition event and record the TransitionRecord without re-resolving.
+	// Zero value on non-advance decisions.
+	Transition Resolution
 }
 
 // StageInput bundles everything Evaluate needs. Keeping it explicit (rather than
@@ -57,6 +64,12 @@ type StageInput struct {
 	// transitions. StageID is the pack key (e.g. "spec").
 	Stage   pack.Stage
 	StageID string
+
+	// Transition is the durable-state bundle the runner fills before calling
+	// Evaluate: the parsed verdict, the result status, the fix-cycle counter
+	// and budget, the fixer set. ResolveTransition reads it, so the gate logic
+	// and the branch logic remain one pure function (D3).
+	Transition TransitionContext
 
 	// Clean reports whether the worktree has no changes outside the result's
 	// declared edit_targets. Drives auto_if_clean.
@@ -152,12 +165,26 @@ func Evaluate(input StageInput) (Decision, error) {
 	}
 }
 
-// advance builds an ActionAdvance decision, reading the next stage from the
-// stage's first transition. Conditions (Epic 4) are not evaluated here — the
-// first transition wins at MVP.
+// advance builds an ActionAdvance (or ActionPause) decision by resolving the
+// stage's conditional transitions through ResolveTransition — the same resolver
+// the advance job path uses (D3: one resolver, not two). A halt
+// (fix_budget_exhausted / verdict_unreadable) becomes an ActionPause with the
+// resolver's StopReason, so the run stops cleanly without failing.
 func advance(input StageInput) (Decision, error) {
 	if len(input.Stage.Transitions) == 0 {
 		return Decision{}, fmt.Errorf("runner: stage %q has no transition to advance along", input.StageID)
 	}
-	return Decision{Action: ActionAdvance, NextStage: input.Stage.Transitions[0].To}, nil
+	resolution, err := ResolveTransition(input.Stage, input.StageID, input.Transition)
+	if err != nil {
+		return Decision{}, err
+	}
+	if resolution.StopReason != "" {
+		return Decision{
+			Action: ActionPause, FSMEvent: engine.EventStopUser,
+			StopReason: resolution.StopReason,
+		}, nil
+	}
+	return Decision{
+		Action: ActionAdvance, NextStage: resolution.To, Transition: resolution,
+	}, nil
 }

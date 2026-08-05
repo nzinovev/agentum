@@ -479,9 +479,15 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	runner.recordGitEvidence(ctx, task)
 
-	startStage, resumeSession, err := runner.entryPoint(ctx, job, task, taskPack)
+	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, task, taskPack)
 	if err != nil {
 		return runner.failTask(ctx, task, err)
+	}
+	// A halt (budget exhausted / verdict unreadable on the advance path) is a
+	// controlled pause, not a failure: apply it and stop without entering the
+	// loop. This must not flow through err, which drive turns into failTask.
+	if halt != nil {
+		return runner.applyPauseDecision(ctx, task, halt.decision, halt.stageID)
 	}
 
 	// Register a cancel for this task so the cancel handler can abort the
@@ -617,37 +623,107 @@ type stageRun struct {
 	worktree *worktree.Worktree
 }
 
+// haltDecision carries a pause Decision out of entryPoint without surfacing it
+// as an error. drive turns any entryPoint error into failTask; a budget halt or
+// a verdict_unreadable halt is a controlled pause, not a failure, so it must
+// travel a separate channel. When entryPoint returns a non-nil halt, drive
+// applies it via applyPauseDecision and returns without entering the loop.
+type haltDecision struct {
+	decision Decision
+	stageID  string
+}
+
 // entryPoint resolves where the loop starts and whether it resumes a session.
-func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Task, taskPack *pack.Pack) (stage, resume string, err error) {
+// The returned halt is non-nil only for the advance job when the resolved
+// transition halts (fix_budget_exhausted / verdict_unreadable) — those are
+// controlled pauses, not errors, so they must not flow through err (which drive
+// turns into failTask).
+func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Task, taskPack *pack.Pack) (stage, resume string, halt *haltDecision, err error) {
 	switch job.Kind {
 	case "run":
 		// A fresh run starts at the pack entry, unless a previous attempt set
 		// current_stage before a crash — resume there.
 		if task.CurrentStage.Valid {
-			return task.CurrentStage.String, "", nil
+			return task.CurrentStage.String, "", nil, nil
 		}
-		return taskPack.Entry, "", nil
+		return taskPack.Entry, "", nil, nil
 	case "continue":
 		// Resume the current stage from its captured session id (non-destructive).
 		latest, latestErr := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
 			TaskID: task.ID, TenantID: task.TenantID,
 		})
 		if latestErr != nil {
-			return "", "", fmt.Errorf("find resume session: %w", latestErr)
+			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
 		}
-		return task.CurrentStage.String, latest.SessionID.String, nil
+		return task.CurrentStage.String, latest.SessionID.String, nil, nil
 	case "advance":
-		// Past the gate: move to the current stage's declared transition target.
-		cur, ok := taskPack.Stages[task.CurrentStage.String]
+		// Past the gate: resolve the current stage's transition through the SAME
+		// resolver the loop path uses (D3: one resolver, not two). A halt
+		// (budget exhausted / verdict unreadable) returns a pause Decision via
+		// halt rather than err, so drive applies a controlled pause instead of
+		// failing the task.
+		currentStageID := task.CurrentStage.String
+		currentStage, ok := taskPack.Stages[currentStageID]
 		if !ok {
-			return "", "", fmt.Errorf("advance: current stage %q not in pack", task.CurrentStage.String)
+			return "", "", nil, fmt.Errorf("advance: current stage %q not in pack", currentStageID)
 		}
-		if len(cur.Transitions) == 0 {
-			return "", "", fmt.Errorf("advance: stage %q has no transition", task.CurrentStage.String)
+		if len(currentStage.Transitions) == 0 {
+			return "", "", nil, fmt.Errorf("advance: stage %q has no transition", currentStageID)
 		}
-		return cur.Transitions[0].To, "", nil
+		// On the advance path the prior stage already produced its result; read
+		// the status from the latest invocation's stored result so the condition
+		// matches on what the stage actually reported.
+		latestResult := runner.latestStoredResult(ctx, task)
+		transitionContext, transitionErr := runner.buildTransitionContext(ctx, task, taskPack, currentStageID, latestResult)
+		if transitionErr != nil {
+			return "", "", nil, fmt.Errorf("advance: build transition context: %w", transitionErr)
+		}
+		resolution, resolveErr := ResolveTransition(currentStage, currentStageID, transitionContext)
+		if resolveErr != nil {
+			return "", "", nil, fmt.Errorf("advance: resolve transition: %w", resolveErr)
+		}
+		if resolution.StopReason != "" {
+			decision := Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser,
+				StopReason: resolution.StopReason,
+			}
+			// Emit the transition resolution (even though no stage starts) so
+			// the would-be branch is auditable.
+			runner.emitStageTransition(ctx, task, verdictPayload{
+				From: currentStageID, Condition: resolution.Condition,
+				Cycle: resolution.Cycle, Verdict: resolution.Verdict,
+			})
+			return "", "", &haltDecision{decision: decision, stageID: currentStageID}, nil
+		}
+		runner.emitStageTransition(ctx, task, verdictPayload{
+			From: currentStageID, To: resolution.To,
+			Condition: resolution.Condition, Cycle: resolution.Cycle, Verdict: resolution.Verdict,
+		})
+		return resolution.To, "", nil, nil
 	}
-	return "", "", fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
+	return "", "", nil, fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
+}
+
+// latestStoredResult reads the parsed result.json off the task's most recent
+// stage invocation, so the advance path can match transition conditions on the
+// status the prior stage actually reported. Returns nil when there is no stored
+// result (the condition will treat status as empty, which is correct for a
+// verdict-only stage).
+func (runner *Runner) latestStoredResult(ctx context.Context, task sqlc.Task) *agent.ResultJSON {
+	latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
+		TaskID: task.ID, TenantID: task.TenantID,
+	})
+	if err != nil {
+		return nil
+	}
+	if !latest.Result.Valid || len(latest.Result.RawMessage) == 0 {
+		return nil
+	}
+	parsed, parseErr := agent.ParseResultJSON(latest.Result.RawMessage)
+	if parseErr != nil {
+		return nil
+	}
+	return &parsed
 }
 
 // runLoop walks the pack's stages from startStage, invoking the adapter per
@@ -747,10 +823,19 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		runner.recordGitEvidence(ctx, run.task)
 	}
 
+	// Build the transition context (verdict, status, fix-cycle counter, budget)
+	// before Evaluate so the gate logic and the branch logic share one pure
+	// function. A build failure halts the run rather than guessing a route.
+	transitionContext, transitionErr := runner.buildTransitionContext(ctx, run.task, run.taskPack, stageID, outcome.result)
+	if transitionErr != nil {
+		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("build transition context for stage %q: %w", stageID, transitionErr))
+	}
+
 	decision, err := Evaluate(StageInput{
 		Result:           outcome.result,
 		Stage:            stage,
 		StageID:          stageID,
+		Transition:       transitionContext,
 		Clean:            cleanBeforeCommit,
 		AdapterError:     outcome.adapterErr,
 		ParseError:       outcome.parseErr,
@@ -762,6 +847,15 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 
 	switch decision.Action {
 	case ActionAdvance:
+		// Emit the transition resolution so the branch is auditable even when
+		// the next stage never starts. The cycle carried on the Resolution is
+		// the prospective cycle for the next invocation; from is the stage that
+		// just ran.
+		runner.emitStageTransition(ctx, run.task, verdictPayload{
+			From: stageID, To: decision.Transition.To,
+			Condition: decision.Transition.Condition,
+			Cycle:     decision.Transition.Cycle, Verdict: decision.Transition.Verdict,
+		})
 		return stageOutcome{nextStage: decision.NextStage}, nil
 	case ActionPause:
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
@@ -1132,6 +1226,12 @@ const (
 	EvWorktreeReconciled = "task.worktree_reconciled"
 	EvCheckpointRecorded = "task.checkpoint_recorded"
 	EvTaskCleanedUp      = "task.cleaned_up"
+	// EvStageTransition records a conditional transition resolution ({from, to,
+	// condition, cycle, verdict}), emitted at the resolution point so the
+	// branch is auditable even when the next stage never starts (e.g. budget
+	// exhaustion stops the run before the target stage runs). Exhaustion itself
+	// needs no new event type: task.state_changed already carries stop_reason.
+	EvStageTransition = "stage.transition"
 	// EvCapabilityEnforced records the effective capability profile granted to
 	// a stage invocation, emitted before the adapter is invoked. The profile
 	// (grants + denials + role + source inputs) is the audit evidence that the
