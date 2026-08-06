@@ -80,6 +80,13 @@ const (
 	CatGitWrite      Category = "git.write"
 	CatGitDelivery   Category = "git.delivery" // orchestrator-only; never in an agent role
 	CatNetFetch      Category = "net.fetch"
+	CatSkill         Category = "skill" // ADR 0002 D7: inert seam. No role grants it, so no
+	// effective profile carries it and MVP behaviour is unchanged. An adapter
+	// that cannot enforce it (the opencode adapter does not list it in Supported)
+	// refuses to start a profile that carries skill.* — the same answer mcp.*
+	// gets, for the same reason. The token exists so narrowing the skill set
+	// later becomes a config change (permission.skill rule list) rather than a
+	// model redesign.
 )
 
 // CategoryOf reports the enforcement category a token belongs to — the value

@@ -130,9 +130,16 @@ func grantedBy(token Token, candidates []Token) bool {
 }
 
 // enforcementCategory returns the category an enforcer must support to honor
-// the token. Scoped tokens drop the scope; named-entity tokens (secret.*/mcp.*)
-// collapse to their meta-category, since the enforcer declares mechanism
-// support (env scrub / mcp config) rather than per-entity support.
+// the token. Scoped tokens drop the scope; named-entity tokens
+// (secret.*/mcp.*/skill.*) collapse to their meta-category, since the enforcer
+// declares mechanism support (env scrub / mcp config / skill permission map)
+// rather than per-entity support.
+//
+// skill.* joins the vocabulary as an inert seam (ADR 0002 D7): no role template
+// grants it and the opencode adapter does not list CatSkill in Supported, so a
+// profile carrying it is unenforceable and the invocation refuses to start. The
+// category exists so a future adapter can declare support and render a
+// permission.skill rule list without a model change.
 func enforcementCategory(token Token) Category {
 	raw := string(token)
 	switch {
@@ -140,6 +147,8 @@ func enforcementCategory(token Token) Category {
 		return "secret"
 	case raw == "mcp" || startsWithNamed(raw, "mcp."):
 		return "mcp"
+	case raw == "skill" || startsWithNamed(raw, "skill."):
+		return CatSkill
 	}
 	return Category(token.Key())
 }
