@@ -57,10 +57,18 @@ func analystProfile(t *testing.T) caps.Profile {
 // mustRender substitutes the profile's scope placeholders and renders the
 // indented config, failing on any error. Substitution lives here so a test
 // cannot accidentally hand prepareEnforcement an already-substituted profile —
-// the two are not idempotent together.
+// the two are not idempotent together. instructionPaths defaults to none
+// (most tests exercise the permission map, not the instruction channel).
 func mustRender(t *testing.T, profile caps.Profile, subst scopeSubst) []byte {
 	t.Helper()
-	config, err := buildOpencodeConfig(substituteScopes(profile, subst), subst)
+	return mustRenderWithInstructions(t, profile, subst, nil)
+}
+
+// mustRenderWithInstructions is mustRender for tests that exercise the
+// instruction edit-deny rules (ADR 0002 D4).
+func mustRenderWithInstructions(t *testing.T, profile caps.Profile, subst scopeSubst, instructionPaths []string) []byte {
+	t.Helper()
+	config, err := buildOpencodeConfig(substituteScopes(profile, subst), subst, instructionPaths)
 	if err != nil {
 		t.Fatalf("build config: %v", err)
 	}
@@ -215,6 +223,8 @@ func TestRenderConfig_SetsEveryPermissionKey(t *testing.T) {
 
 // TestRenderConfig_DenyByDefault: an empty profile renders every tool as deny,
 // including the wildcard baseline that covers tools this adapter does not model.
+// Skill is the deliberate exception (ADR 0002 D5): a skill grants knowledge, not
+// reach, so it is allowed unconditionally even for an empty profile.
 func TestRenderConfig_DenyByDefault(t *testing.T) {
 	t.Parallel()
 	subst := testSubst(t.TempDir())
@@ -222,6 +232,12 @@ func TestRenderConfig_DenyByDefault(t *testing.T) {
 	for key, value := range permissions {
 		if key == "todowrite" {
 			continue // session-local bookkeeping with no reach
+		}
+		if key == "skill" {
+			if value != actionAllow {
+				t.Errorf("empty profile: skill = %v, want allow (knowledge, not reach)", value)
+			}
+			continue
 		}
 		if value != actionDeny {
 			t.Errorf("empty profile: %q = %v, want deny", key, value)
@@ -232,7 +248,9 @@ func TestRenderConfig_DenyByDefault(t *testing.T) {
 // TestRenderConfig_WildcardBaselineIsDeny: the catch-all stays deny even for a
 // fully-granted implementer, so an unmodelled or future tool is refused rather
 // than inherited. Confirmed live: this entry overrides opencode's own built-in
-// {permission:"*", pattern:"*", action:"allow"}.
+// {permission:"*", pattern:"*", action:"allow"}. task and external_directory
+// have no capability token that grants them, so they stay deny too. Skill is
+// allowed (D5) regardless of the profile.
 func TestRenderConfig_WildcardBaselineIsDeny(t *testing.T) {
 	t.Parallel()
 	subst := testSubst(t.TempDir())
@@ -240,10 +258,13 @@ func TestRenderConfig_WildcardBaselineIsDeny(t *testing.T) {
 	if permissions["*"] != actionDeny {
 		t.Errorf("wildcard baseline = %v, want deny", permissions["*"])
 	}
-	for _, key := range []string{"task", "skill", "external_directory"} {
+	for _, key := range []string{"task", "external_directory"} {
 		if permissions[key] != actionDeny {
 			t.Errorf("%s = %v, want deny (no capability token grants it)", key, permissions[key])
 		}
+	}
+	if permissions["skill"] != actionAllow {
+		t.Errorf("skill = %v, want allow (ADR 0002 D5: knowledge, not reach)", permissions["skill"])
 	}
 }
 
@@ -600,4 +621,261 @@ func countEnv(env []string, key string) int {
 		}
 	}
 	return count
+}
+
+// --- ADR 0002: instruction channel (skill allow, edit deny, staging) --------
+
+// editRuleOrder decodes the rendered config and returns the `edit` patterns in
+// emitted JSON order. opencode resolves permission rules last-match-wins, so the
+// order is load-bearing — a map[string]any decode would lose it.
+func editRuleOrder(t *testing.T, rendered []byte) []string {
+	t.Helper()
+	var envelope struct {
+		Permission struct {
+			Edit *json.RawMessage `json:"edit"`
+		} `json:"permission"`
+	}
+	if err := json.Unmarshal(rendered, &envelope); err != nil {
+		t.Fatalf("parse rendered config: %v", err)
+	}
+	if envelope.Permission.Edit == nil {
+		return nil
+	}
+	// edit may be a plain string ("deny") or an object. Only the object case
+	// has an order to inspect.
+	var plain string
+	if err := json.Unmarshal(*envelope.Permission.Edit, &plain); err == nil {
+		return nil
+	}
+	var ordered []string
+	if err := json.Unmarshal(*envelope.Permission.Edit, &ordered); err == nil {
+		return ordered
+	}
+	// Fall back to a manual scan of the raw bytes for keys.
+	raw := string(*envelope.Permission.Edit)
+	var keys []string
+	inKey := false
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '"' && (i == 0 || raw[i-1] != '\\') {
+			if !inKey {
+				start = i + 1
+				inKey = true
+			} else {
+				keys = append(keys, raw[start:i])
+				inKey = false
+			}
+		}
+	}
+	return keys
+}
+
+// TestRenderConfig_SkillIsAllowedForEveryProfile (ADR 0002 D5): skill resolves
+// to allow for an empty profile, an analyst, and an implementer alike. A skill
+// grants knowledge, not reach; the protection that replaces a blanket deny is
+// visibility (the ContextProber records each skill in evidence).
+func TestRenderConfig_SkillIsAllowedForEveryProfile(t *testing.T) {
+	t.Parallel()
+	subst := testSubst(t.TempDir())
+	for _, profile := range []caps.Profile{
+		{},
+		analystProfile(t),
+		implementerProfile(t),
+	} {
+		permissions := decodePermissions(t, mustRender(t, profile, subst))
+		if permissions["skill"] != actionAllow {
+			t.Errorf("skill = %v, want allow (D5)", permissions["skill"])
+		}
+	}
+}
+
+// TestEditRules_InstructionDeniesAreLastAndDistinct (ADR 0002 D4 layer 1):
+// declared instruction paths and the name guard land AFTER the granted scope
+// allows so last-match-wins makes them win, and they never collide with a scope
+// pattern (ruleList.add would keep a colliding pattern's old position).
+func TestEditRules_InstructionDeniesAreLastAndDistinct(t *testing.T) {
+	t.Parallel()
+	subst := testSubst(t.TempDir())
+	profile := implementerProfile(t) // grants fs.write:${worktree}/** → pattern "**"
+	rendered := mustRenderWithInstructions(t, profile, subst,
+		[]string{"AGENTS.md", "docs/conventions.md"})
+	order := editRuleOrder(t, rendered)
+	if len(order) < 4 {
+		t.Fatalf("edit rule order = %v, want at least 4 entries", order)
+	}
+	// The scope allow ("**") comes after the deny baseline ("*") and before the
+	// instruction denies.
+	scopeIdx := indexOf(order, "**")
+	denyIdx := indexOf(order, "*")
+	agentsIdx := indexOf(order, "AGENTS.md")
+	conventionsIdx := indexOf(order, "docs/conventions.md")
+	guardIdx := indexOf(order, "**/conventions.md")
+	if scopeIdx < 0 || denyIdx < 0 {
+		t.Fatalf("missing baseline/scope rules: %v", order)
+	}
+	if scopeIdx < denyIdx {
+		t.Errorf("scope allow must come after deny baseline: order=%v", order)
+	}
+	if agentsIdx < 0 || agentsIdx < scopeIdx {
+		t.Errorf("AGENTS.md deny must come after the scope allow: order=%v", order)
+	}
+	if conventionsIdx < 0 || conventionsIdx < scopeIdx {
+		t.Errorf("docs/conventions.md deny must come after the scope allow: order=%v", order)
+	}
+	// Name guard for the nested declared file (a root-level path needs no guard
+	// because the exact rule already covers it).
+	if guardIdx < 0 || guardIdx < scopeIdx {
+		t.Errorf("**/conventions.md name guard must come after the scope allow: order=%v", order)
+	}
+	// The instruction denies must be distinct from the scope patterns.
+	for _, instructionPattern := range []string{"AGENTS.md", "docs/conventions.md", "**/conventions.md"} {
+		if instructionPattern == "**" || instructionPattern == "*" {
+			t.Errorf("instruction pattern %q collides with a scope pattern", instructionPattern)
+		}
+	}
+}
+
+// indexOf returns the index of value in slice, or -1.
+func indexOf(slice []string, value string) int {
+	for i, item := range slice {
+		if item == value {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestEditRules_NoWriteProfileHasNoInstructionRules (ADR 0002 D4 trap): when
+// the profile grants no write at all, `edit` is the bare string "deny" and there
+// is no rule list to append instruction denies to. An analyst (artifact.write
+// only) DOES take the rule list branch, so instruction denies DO land there.
+func TestEditRules_NoWriteProfileHasNoInstructionRules(t *testing.T) {
+	t.Parallel()
+	subst := testSubst(t.TempDir())
+	emptyRendered := mustRenderWithInstructions(t, caps.Profile{}, subst,
+		[]string{"AGENTS.md"})
+	emptyPerms := decodePermissions(t, emptyRendered)
+	if emptyPerms["edit"] != actionDeny {
+		t.Errorf("empty profile edit = %v, want bare \"deny\" (no rule list)", emptyPerms["edit"])
+	}
+	// Analyst takes the rule-list branch (artifact.write). Instruction denies
+	// must appear there even though the analyst cannot write source.
+	analystRendered := mustRenderWithInstructions(t, analystProfile(t), subst,
+		[]string{"AGENTS.md"})
+	analystOrder := editRuleOrder(t, analystRendered)
+	if indexOf(analystOrder, "AGENTS.md") < 0 {
+		t.Errorf("analyst edit rules missing AGENTS.md deny: %v", analystOrder)
+	}
+}
+
+// TestStageInstructionFiles_WritesContentAndUsesForwardSlashes (ADR 0002 D3 +
+// Step-0 finding): prepareEnforcement stages each pinned instruction file into
+// the per-invocation config directory, lists its absolute forward-slash path
+// under `instructions`, and the directory is removed by cleanup.
+func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	artifact := filepath.Join(root, ".agentum", "artifacts", "stage-x")
+	profile := implementerProfile(t)
+	inv := Invocation{
+		Workdir:     root,
+		ArtifactDir: artifact,
+		Profile:     profile,
+		Instructions: []InstructionFile{
+			{RepoPath: "AGENTS.md", Content: []byte("MARKER-ORIGINAL\n")},
+			{RepoPath: "docs/conventions.md", Content: []byte("conventions\n")},
+		},
+	}
+	plan, err := prepareEnforcement(inv)
+	if err != nil {
+		t.Fatalf("prepareEnforcement: %v", err)
+	}
+	defer plan.cleanup()
+
+	// The rendered config lists both files under instructions, with forward
+	// slashes.
+	var envelope struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := json.Unmarshal(plan.config, &envelope); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if len(envelope.Instructions) != 2 {
+		t.Fatalf("instructions = %v, want 2 entries", envelope.Instructions)
+	}
+	for _, listed := range envelope.Instructions {
+		if strings.Contains(listed, "\\") {
+			t.Errorf("instruction path %q contains a backslash (Step-0: forward slashes resolve)", listed)
+		}
+		if !filepath.IsAbs(listed) {
+			t.Errorf("instruction path %q is not absolute", listed)
+		}
+	}
+	// The pinned files exist in the config directory during the run, with the
+	// pinned content.
+	for _, listed := range envelope.Instructions {
+		if _, err := os.Stat(listed); err != nil {
+			t.Errorf("pinned instruction %q not staged in config dir: %v", listed, err)
+		}
+	}
+	// After cleanup, the directory is gone.
+	plan.cleanup()
+	if _, err := os.Stat(plan.configDir); !os.IsNotExist(err) {
+		t.Errorf("config dir %q should be removed by cleanup", plan.configDir)
+	}
+}
+
+// TestStageInstructionFiles_EmptyContentNotStaged: a file truncated to zero by
+// the total budget (or missing at the commit) delivers nothing and is not
+// staged, to avoid a noise instructions entry opencode would still try to read.
+func TestStageInstructionFiles_EmptyContentNotStaged(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	profile := implementerProfile(t)
+	inv := Invocation{
+		Workdir:     root,
+		ArtifactDir: filepath.Join(root, ".agentum", "artifacts", "stage"),
+		Profile:     profile,
+		Instructions: []InstructionFile{
+			{RepoPath: "AGENTS.md", Content: []byte("real\n")},
+			{RepoPath: "empty.md", Content: nil},
+		},
+	}
+	plan, err := prepareEnforcement(inv)
+	if err != nil {
+		t.Fatalf("prepareEnforcement: %v", err)
+	}
+	defer plan.cleanup()
+	var envelope struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := json.Unmarshal(plan.config, &envelope); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if len(envelope.Instructions) != 1 {
+		t.Errorf("instructions = %v, want only the non-empty file staged", envelope.Instructions)
+	}
+}
+
+// TestStageInstructionFiles_EditDeniesAGENTSForImplementer (ADR 0002 D4,
+// config-level half): the edit rule list denies AGENTS.md for an implementer
+// profile, so the agent cannot rewrite the rules its reviewer will judge it by.
+func TestStageInstructionFiles_EditDeniesAGENTSForImplementer(t *testing.T) {
+	t.Parallel()
+	subst := testSubst(t.TempDir())
+	rendered := mustRenderWithInstructions(t, implementerProfile(t), subst,
+		[]string{"AGENTS.md"})
+	rules := decodePermissions(t, rendered)["edit"].(map[string]any)
+	if rules["AGENTS.md"] != actionDeny {
+		t.Errorf("AGENTS.md edit rule = %v, want deny", rules["AGENTS.md"])
+	}
+	// And the matcher agrees: an edit of AGENTS.md is denied even though "**"
+	// (the whole worktree) is allowed.
+	if opencodeMatch("**", "AGENTS.md") {
+		if !opencodeMatch("AGENTS.md", "AGENTS.md") {
+			t.Error("opencodeMatch says AGENTS.md pattern would not match AGENTS.md")
+		}
+	} else {
+		t.Error("opencodeMatch says ** does not match AGENTS.md — matcher model is off")
+	}
 }

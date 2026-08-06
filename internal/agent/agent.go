@@ -57,12 +57,30 @@ type Invocation struct {
 	ResumeSession string   // non-empty → resume that session id; empty → fresh invocation
 	Model         string   // optional provider/model override (BYO-models, F.4)
 
+	// Instructions are the pinned project-instruction files for this run (ADR
+	// 0002): each carries the repo-relative path it occupies in the project and
+	// the exact bytes read from base_commit (already capped/truncated by the
+	// runner). The adapter stages them into the per-invocation config directory
+	// and lists them under opencode's `instructions`, and denies them in the
+	// edit rules so the agent cannot rewrite the rules it will be judged by.
+	Instructions []InstructionFile
+
 	// Profile is the effective, code-enforced capability profile for this
 	// invocation. The adapter MUST refuse to start if Profile grants a
 	// capability it cannot enforce, and MUST apply Profile to the agent
 	// subprocess (filesystem / command / network / mcp / secret enforcement +
 	// time limits). Required for every invocation — deny-by-default.
 	Profile caps.Profile
+}
+
+// InstructionFile is one pinned project-instruction file delivered to the agent
+// (ADR 0002 D3): the repo-relative path it occupies in the project (identity in
+// evidence and in the edit-deny rules) and the exact bytes read from
+// base_commit that will reach the model. The runner owns reading, capping, and
+// truncating; the adapter only stages and lists.
+type InstructionFile struct {
+	RepoPath string // repo-relative, e.g. "AGENTS.md"
+	Content  []byte // pinned bytes (already capped + truncated)
 }
 
 // EventKind distinguishes the things an adapter emits on its stream.
