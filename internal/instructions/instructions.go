@@ -84,11 +84,13 @@ type File struct {
 // Restoration is one entry in the pre-stage tamper plan (ADR 0002 D4). It is
 // produced by Verify without touching the filesystem, so the plan is inspectable
 // before anything runs; Execute applies it. FoundHash is the sha256 of what the
-// worktree held at verification time (empty when the file was absent).
+// worktree held at verification time (empty when the file was absent), with
+// CRLF folded to LF so a checkout under core.autocrlf=true does not read as
+// tampering against the LF bytes git stores in the object.
 type Restoration struct {
 	Path       string        // repo-relative
 	Action     RestoreAction // keep | restore | remove
-	FoundHash  string        // sha256 hex of the worktree content at verify time
+	FoundHash  string        // sha256 hex of the worktree content at verify time (LF-normalised)
 	PinnedHash string        // sha256 hex of the pinned source (empty when removing)
 }
 
@@ -307,6 +309,14 @@ func assembleOrder(declared, auto []string) []pinEntry {
 // source and returns the restore plan (ADR 0002 D4's table) WITHOUT executing
 // it. The plan is pure: it reads the worktree only to classify state.
 //
+// Line endings are normalised (CRLF → LF) before hashing, because a project
+// under core.autocrlf=true checks out text files with CRLF while git stores LF
+// in the object — a semantically-identical file would otherwise trip a
+// false-positive restore every stage, and the orchestrator-authored rewrite
+// would re-introduce LF that checkout immediately re-converts, looping. The
+// pin's SourceHash is over the original (LF) bytes, so normalising the worktree
+// read before comparison is what keeps the two on the same axis.
+//
 // Files marked MissingAtCommit are skipped: there is nothing to restore to, and
 // a worktree file at that path is the agent creating a file the project never
 // declared at the lineage anchor — left to the ordinary review path, not to the
@@ -340,21 +350,52 @@ func Verify(worktreeRoot string, pinned []File) []Restoration {
 			})
 			continue
 		}
-		foundHash := hashBytes(found)
-		if foundHash == file.SourceHash {
-			plan = append(plan, Restoration{Path: file.RepoPath, Action: ActionKeep, FoundHash: foundHash, PinnedHash: file.SourceHash})
+		foundHash := hashBytes(normaliseLineEndings(found))
+		pinnedHash := file.SourceHash
+		if foundHash == pinnedHash {
+			plan = append(plan, Restoration{Path: file.RepoPath, Action: ActionKeep, FoundHash: foundHash, PinnedHash: pinnedHash})
 			continue
 		}
-		// Differs: the agent (or a prior stage) rewrote it. Rewrite the pinned
-		// bytes over the tampered copy so the next invocation sees the original.
+		// Differs after line-ending normalisation: the agent (or a prior stage)
+		// rewrote it. Rewrite the pinned bytes over the tampered copy so the
+		// next invocation sees the original.
 		plan = append(plan, Restoration{
 			Path:       file.RepoPath,
 			Action:     ActionRestore,
 			FoundHash:  foundHash,
-			PinnedHash: file.SourceHash,
+			PinnedHash: pinnedHash,
 		})
 	}
 	return plan
+}
+
+// normaliseLineEndings converts CRLF to LF so a worktree checked out under
+// core.autocrlf=true compares equal to the LF bytes git stores in the object.
+// A lone CR (old Mac) is left alone; only the CRLF pair is folded.
+func normaliseLineEndings(data []byte) []byte {
+	if !containsCRLF(data) {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if i+1 < len(data) && data[i] == '\r' && data[i+1] == '\n' {
+			out = append(out, '\n')
+			i++
+			continue
+		}
+		out = append(out, data[i])
+	}
+	return out
+}
+
+// containsCRLF reports whether data holds at least one CRLF pair.
+func containsCRLF(data []byte) bool {
+	for i := 0; i+1 < len(data); i++ {
+		if data[i] == '\r' && data[i+1] == '\n' {
+			return true
+		}
+	}
+	return false
 }
 
 // Execute applies a restoration plan to the worktree and returns one entry per

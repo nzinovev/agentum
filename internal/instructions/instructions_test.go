@@ -390,3 +390,34 @@ func TestHashStability(t *testing.T) {
 		t.Error("different inputs hashed equal")
 	}
 }
+
+// TestVerify_LineEndingNormalisationIsNotTamper (ADR 0002 D4): a worktree
+// checked out under core.autocrlf=true holds CRLF while git stores LF in the
+// object. That is a semantically-identical file, not tampering — a
+// byte-for-byte compare would false-positive a restore every stage and the
+// orchestrator-authored LF rewrite would immediately be re-converted to CRLF,
+// looping. Verify folds CRLF→LF before hashing so the comparison is on content.
+func TestVerify_LineEndingNormalisationIsNotTamper(t *testing.T) {
+	root := t.TempDir()
+	original := []byte("MARKER-ORIGINAL\n")
+	crlfCopy := []byte("MARKER-ORIGINAL\r\n")
+	matchPath := "match.md"
+	if err := os.WriteFile(filepath.Join(root, matchPath), crlfCopy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinned := []File{{RepoPath: matchPath, SourceContent: original, SourceHash: hashBytes(original)}}
+	plan := Verify(root, pinned)
+	if len(plan) != 1 || plan[0].Action != ActionKeep {
+		t.Fatalf("CRLF worktree copy of an LF pin should be ActionKeep; got %+v", plan)
+	}
+	// A genuinely different file (different marker) still trips a restore.
+	differPath := "differ.md"
+	if err := os.WriteFile(filepath.Join(root, differPath), []byte("TAMPERED\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinnedDiffer := []File{{RepoPath: differPath, SourceContent: original, SourceHash: hashBytes(original)}}
+	planDiffer := Verify(root, pinnedDiffer)
+	if len(planDiffer) != 1 || planDiffer[0].Action != ActionRestore {
+		t.Fatalf("a tampered file must still trip ActionRestore; got %+v", planDiffer)
+	}
+}
