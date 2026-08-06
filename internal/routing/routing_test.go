@@ -153,3 +153,36 @@ func TestRender_Deterministic(t *testing.T) {
 		t.Error("Render must be deterministic for identical input")
 	}
 }
+
+func TestRender_Checks(t *testing.T) {
+	t.Parallel()
+	t.Run("renders resolved checks with command and required marker", func(t *testing.T) {
+		t.Parallel()
+		got := Render(Block{
+			Stage: "implement", Gate: "auto", ArtifactDir: "/x",
+			Checks: []CheckRef{
+				{Name: "build", Command: []string{"go", "build", "./..."}, Required: true, Description: "go build ./..."},
+				{Name: "fmt", Command: []string{"sh", "-c", "test -z \"$(gofmt -l .)\""}},
+			},
+		})
+		if !strings.Contains(got, "Project checks (orchestrator-run") {
+			t.Errorf("section header missing; got:\n%s", got)
+		}
+		if !strings.Contains(got, "**build** (required): go build ./...") {
+			t.Errorf("required build check not rendered; got:\n%s", got)
+		}
+		if !strings.Contains(got, "**fmt**: sh -c") {
+			t.Errorf("fmt check command not rendered; got:\n%s", got)
+		}
+		if !strings.Contains(got, "is not evidence") || !strings.Contains(got, "Your claim that they passed") {
+			t.Errorf("ownership wording missing; got:\n%s", got)
+		}
+	})
+	t.Run("omitted when no checks", func(t *testing.T) {
+		t.Parallel()
+		got := Render(Block{Stage: "spec", Gate: "auto", ArtifactDir: "/x"})
+		if strings.Contains(got, "Project checks") {
+			t.Errorf("checks section must not render when empty; got:\n%s", got)
+		}
+	})
+}

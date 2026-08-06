@@ -42,6 +42,16 @@ type Block struct {
 	// invocation. Empty renders an inert stub; Epic 6 enforces them.
 	Capabilities []string
 
+	// Checks are the resolved project checks the orchestrator will run itself at
+	// the delivery boundary (ADR 0002 D8). They are rendered so the agent knows
+	// the build/test commands and can run them to check its own work — hiding
+	// them is unenforceable (.agentum.yaml is fs.read-able at the repo root) and
+	// harmful (an implementer that knows the commands saves a review/fix cycle).
+	// The agent learns WHAT the checks are; it cannot change WHICH checks gate
+	// delivery. Empty renders nothing. The runner maps checks.Item onto this
+	// plain struct so routing has no checks-package import.
+	Checks []CheckRef
+
 	// VerdictPath is the absolute path to the verdict.json a verdict-sourcing
 	// stage must write. Empty for a stage that does not branch on verdict; when
 	// set, the template renders the verdict contract (the schema + the path),
@@ -63,6 +73,16 @@ type ReviewRef struct {
 	Stage string // the reviewer stage id whose verdict produced the findings
 	Path  string // absolute path to the reviewer's verdict.json
 	Count int    // number of findings in the verdict
+}
+
+// CheckRef is one resolved project check rendered into the routing block (ADR
+// 0002 D8). A plain struct on purpose — routing must not import the checks
+// package, so the runner maps checks.Item onto this shape at render time.
+type CheckRef struct {
+	Name        string   // the check name (resolved, not raw)
+	Command     []string // the arg vector (no shell)
+	Description string   // human-readable purpose, when set
+	Required    bool     // true for a mandatory (baseline) check
 }
 
 // PriorStage is one earlier stage whose artifacts are referenceable.
