@@ -12,7 +12,7 @@ Once tagged releases begin, this project adheres to
 ### Added
 - **Project context channel: pinned instructions and visible skills** (ADR 0002).
   The repository's own instruction files and the runtime's available skills are
-  now an declared, reproducible, evidence-recorded input — so a pack can be
+  now a declared, reproducible, evidence-recorded input — so a pack can be
   stack-neutral without leaving the agent without project rules.
   - **Declared instruction set** (`internal/instructions`, `internal/checks`):
     `.agentum.yaml` gains an optional `instructions:` list (repo-relative paths,

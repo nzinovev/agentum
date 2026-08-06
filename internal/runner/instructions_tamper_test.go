@@ -19,16 +19,17 @@ import (
 
 // tamperAdapter is the fake adapter for the ADR 0002 tamper reproduction: it
 // implements agent.ContextProber (returning the AGENTS.md baseline), captures
-// the worktree root on the first invocation, and — during the implement stage —
-// overwrites AGENTS.md with a tampered marker, standing in for a bash-side
-// rewrite the edit-deny rule cannot reach. The review stage then runs under
-// restoreInstructions, which should detect the drift and restore the pinned
-// bytes before the review invocation sees the routing block.
+// the worktree root and the pinned instruction files each invocation receives,
+// and — during the implement stage — overwrites AGENTS.md with a tampered
+// marker, standing in for a bash-side rewrite the edit-deny rule cannot reach.
+// The review stage then runs under restoreInstructions, which should detect the
+// drift and restore the pinned bytes before the review invocation sees them.
 type tamperAdapter struct {
-	mu            sync.Mutex
-	scripts       map[string]agent.ResultJSON
-	worktreeRoot  string
-	capturedStage []string
+	mu                  sync.Mutex
+	scripts             map[string]agent.ResultJSON
+	worktreeRoot        string
+	capturedStage       []string
+	instructionsByStage map[string][]agent.InstructionFile
 }
 
 func (adapter *tamperAdapter) Supported() []caps.Category {
@@ -45,6 +46,14 @@ func (adapter *tamperAdapter) Invoke(ctx context.Context, inv agent.Invocation) 
 		adapter.worktreeRoot = inv.Workdir
 	}
 	adapter.capturedStage = append(adapter.capturedStage, stage)
+	if adapter.instructionsByStage == nil {
+		adapter.instructionsByStage = map[string][]agent.InstructionFile{}
+	}
+	// Capture by value so a later mutation does not retroactively change the
+	// recorded snapshot.
+	captured := make([]agent.InstructionFile, len(inv.Instructions))
+	copy(captured, inv.Instructions)
+	adapter.instructionsByStage[stage] = captured
 	adapter.mu.Unlock()
 
 	// The tamper: during the implement stage, overwrite AGENTS.md the way a
@@ -206,16 +215,56 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		t.Error("manifest context section recorded no restorations; the tamper reversal is missing from evidence")
 	}
 
-	// (4) The pinned AGENTS.md (with the original marker) was delivered to BOTH
-	// stages — the review invocation's instruction content carries the original,
-	// not the tampered, marker. The adapter's invocation list confirms both
-	// stages ran.
+	// (4) Headline claim (ADR 0002 acceptance): the pinned AGENTS.md — with the
+	// ORIGINAL marker — was delivered to BOTH stages. The implement stage's
+	// bash-side tamper must not reach the review invocation's instruction
+	// content; the pin is what the model actually sees. The adapter captured the
+	// instruction files each invocation received, so this is checked on the
+	// bytes the agent would have read, not on a proxy.
 	adapter.mu.Lock()
 	stagesRun := append([]string(nil), adapter.capturedStage...)
+	instructionsByStage := make(map[string][]agent.InstructionFile, len(adapter.instructionsByStage))
+	for stage, files := range adapter.instructionsByStage {
+		snapshot := make([]agent.InstructionFile, len(files))
+		copy(snapshot, files)
+		instructionsByStage[stage] = snapshot
+	}
 	adapter.mu.Unlock()
 	if len(stagesRun) != 2 || stagesRun[0] != "implement" || stagesRun[1] != "review" {
 		t.Errorf("stages run = %v, want [implement review]", stagesRun)
 	}
+	for _, stage := range []string{"implement", "review"} {
+		files, ok := instructionsByStage[stage]
+		if !ok {
+			t.Errorf("stage %q: no captured instructions", stage)
+			continue
+		}
+		var agentsContent string
+		for _, file := range files {
+			if file.RepoPath == "AGENTS.md" {
+				agentsContent = string(file.Content)
+			}
+		}
+		if agentsContent == "" {
+			t.Errorf("stage %q: AGENTS.md not in delivered instructions %v", stage, fileNames(files))
+			continue
+		}
+		if !strings.Contains(agentsContent, originalMarker) {
+			t.Errorf("stage %q: delivered AGENTS.md = %q, want to contain the original marker %q", stage, agentsContent, originalMarker)
+		}
+		if strings.Contains(agentsContent, "MARKER-EVIL") {
+			t.Errorf("stage %q: delivered AGENTS.md carries the tampered marker — the pin did not reach the model", stage)
+		}
+	}
+}
+
+// fileNames returns the RepoPath of each InstructionFile for assertion messages.
+func fileNames(files []agent.InstructionFile) []string {
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		out = append(out, file.RepoPath)
+	}
+	return out
 }
 
 // TestInstructions_NoTamperIsNoOp pins the other side: when the worktree

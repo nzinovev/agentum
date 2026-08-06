@@ -266,11 +266,17 @@ profile, and why v1 accepts them:
   covers the common case; a privileged orphan is the residual gap.
 - **Instruction files outside the declared set.** The project-context channel
   (ADR 0002) pins `AGENTS.md` and the `instructions:` list declared in
-  `.agentum.yaml`. A nested `sub/AGENTS.md` the project never declared, or the
-  operator's global `~/.config/opencode/AGENTS.md`, can still reach the model
-  through opencode's own injection — these are unpinned and are named here
-  rather than silently ignored. The `edit` deny rule guards `AGENTS.md` and
-  `**/AGENTS.md`; a nested file under a different name is out of scope.
+  `.agentum.yaml`. A file at a declared path that is ABSENT at `base_commit` but
+  present in the worktree (the agent authored an instruction file the project
+  never declared at the anchor) is REMOVED by the pre-stage restore — that is
+  the original substitution attack wearing a different hat, and leaving it would
+  let an implementer author the rules its reviewer judges by. A NESTED
+  `sub/AGENTS.md` the project never declared, or the operator's global
+  `~/.config/opencode/AGENTS.md`, can still reach the model through opencode's
+  own injection; these are unpinned and are named here rather than silently
+  ignored. The `edit` deny rule guards the declared paths plus `**/AGENTS.md`
+  (the runtime-injected filename at any depth); a nested file under a different
+  name is out of scope.
 - **Bash writes between the pre-stage hash check and the run.** The instruction
   restore (`internal/runner` `restoreInstructions`) runs strictly before each
   stage invocation. A bash write that lands after that check but before the

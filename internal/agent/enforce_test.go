@@ -708,8 +708,9 @@ func TestEditRules_InstructionDeniesAreLastAndDistinct(t *testing.T) {
 	scopeIdx := indexOf(order, "**")
 	denyIdx := indexOf(order, "*")
 	agentsIdx := indexOf(order, "AGENTS.md")
+	agentsGuardIdx := indexOf(order, "**/AGENTS.md")
 	conventionsIdx := indexOf(order, "docs/conventions.md")
-	guardIdx := indexOf(order, "**/conventions.md")
+	conventionsGuardIdx := indexOf(order, "**/conventions.md")
 	if scopeIdx < 0 || denyIdx < 0 {
 		t.Fatalf("missing baseline/scope rules: %v", order)
 	}
@@ -722,16 +723,39 @@ func TestEditRules_InstructionDeniesAreLastAndDistinct(t *testing.T) {
 	if conventionsIdx < 0 || conventionsIdx < scopeIdx {
 		t.Errorf("docs/conventions.md deny must come after the scope allow: order=%v", order)
 	}
-	// Name guard for the nested declared file (a root-level path needs no guard
-	// because the exact rule already covers it).
-	if guardIdx < 0 || guardIdx < scopeIdx {
-		t.Errorf("**/conventions.md name guard must come after the scope allow: order=%v", order)
+	// AGENTS.md is a runtime-injected filename, so it gets a **/AGENTS.md name
+	// guard — covering a nested copy the project never declared. The root case
+	// is the one the guard exists for.
+	if agentsGuardIdx < 0 {
+		t.Errorf("**/AGENTS.md name guard missing; order=%v", order)
+	}
+	if agentsGuardIdx >= 0 && agentsGuardIdx < scopeIdx {
+		t.Errorf("**/AGENTS.md name guard must come after the scope allow: order=%v", order)
+	}
+	// docs/conventions.md is NOT a runtime-injected filename, so it must NOT get
+	// a **/conventions.md guard — that would deny any same-named file anywhere,
+	// which is too broad (the runtime does not inject it from elsewhere).
+	if conventionsGuardIdx >= 0 {
+		t.Errorf("**/conventions.md name guard should not be emitted for a non-runtime filename; order=%v", order)
 	}
 	// The instruction denies must be distinct from the scope patterns.
-	for _, instructionPattern := range []string{"AGENTS.md", "docs/conventions.md", "**/conventions.md"} {
+	for _, instructionPattern := range []string{"AGENTS.md", "docs/conventions.md", "**/AGENTS.md"} {
 		if instructionPattern == "**" || instructionPattern == "*" {
 			t.Errorf("instruction pattern %q collides with a scope pattern", instructionPattern)
 		}
+	}
+}
+
+// TestEditRules_AGENTSNameGuardDeniesNestedCopy (ADR 0002 D4 + findings F2):
+// the **/AGENTS.md name guard must match a NESTED AGENTS.md. (The root
+// AGENTS.md is covered by the exact `AGENTS.md` rule; **/<name> requires a
+// directory before the basename, so it does not match the root — which is why
+// both rules are emitted.) This pins that the guard protects the nested copy,
+// the case it exists for.
+func TestEditRules_AGENTSNameGuardDeniesNestedCopy(t *testing.T) {
+	t.Parallel()
+	if !opencodeMatch("**/AGENTS.md", "docs/sub/AGENTS.md") {
+		t.Error("opencodeMatch says **/AGENTS.md does not match docs/sub/AGENTS.md — guard would not protect the nested copy")
 	}
 }
 

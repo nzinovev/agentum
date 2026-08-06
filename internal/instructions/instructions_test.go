@@ -1,6 +1,7 @@
 package instructions
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -286,9 +287,9 @@ func TestVerify_FourWorktreeStates(t *testing.T) {
 	}
 
 	pinned := []File{
-		{RepoPath: matchPath, SourceContent: original, SourceHash: hashBytes(original)},
-		{RepoPath: differsPath, SourceContent: original, SourceHash: hashBytes(original)},
-		{RepoPath: absentPath, SourceContent: original, SourceHash: hashBytes(original)},
+		{RepoPath: matchPath, OriginalContent: original, SourceContent: original, SourceHash: hashBytes(original)},
+		{RepoPath: differsPath, OriginalContent: original, SourceContent: original, SourceHash: hashBytes(original)},
+		{RepoPath: absentPath, OriginalContent: original, SourceContent: original, SourceHash: hashBytes(original)},
 		{RepoPath: presentUnpinnedPath, MissingAtCommit: true},
 	}
 
@@ -310,8 +311,12 @@ func TestVerify_FourWorktreeStates(t *testing.T) {
 	} else if restoration.FoundHash != "" {
 		t.Errorf("absent: FoundHash should be empty, got %s", restoration.FoundHash)
 	}
-	if _, ok := byPath[presentUnpinnedPath]; ok {
-		t.Errorf("MissingAtCommit file should be skipped, got %+v", byPath[presentUnpinnedPath])
+	// D4 row 4: a worktree file at a path absent at base_commit (the agent
+	// authored an instruction file the project never declared) is planned for
+	// removal, not skipped — that is the substitution attack wearing a different
+	// hat, and leaving it would let an implementer author the reviewer's rules.
+	if restoration, ok := byPath[presentUnpinnedPath]; !ok || restoration.Action != ActionRemove {
+		t.Errorf("present-pinned-absent: got %+v, want ActionRemove (D4 row 4)", restoration)
 	}
 }
 
@@ -391,33 +396,115 @@ func TestHashStability(t *testing.T) {
 	}
 }
 
-// TestVerify_LineEndingNormalisationIsNotTamper (ADR 0002 D4): a worktree
-// checked out under core.autocrlf=true holds CRLF while git stores LF in the
-// object. That is a semantically-identical file, not tampering — a
-// byte-for-byte compare would false-positive a restore every stage and the
-// orchestrator-authored LF rewrite would immediately be re-converted to CRLF,
-// looping. Verify folds CRLF→LF before hashing so the comparison is on content.
+// TestVerify_LineEndingNormalisationIsNotTamper (ADR 0002 D4): line-ending
+// differences must not read as tampering in EITHER direction.
+//
+//   - autocrlf checkout: git stores LF, worktree holds CRLF. A one-sided
+//     normalise (worktree only) is the fix for this case.
+//   - CRLF-committed repo: git stores CRLF, worktree holds CRLF. A one-sided
+//     normalise against a raw (CRLF) SourceHash would false-positive forever.
+//
+// Verify normalises BOTH sides, so a byte-identical file classifies as Keep
+// regardless of which ending the object carries. SourceHash stays over the raw
+// bytes for evidence identity; the comparison uses a normalised hash.
 func TestVerify_LineEndingNormalisationIsNotTamper(t *testing.T) {
+	t.Run("autocrlf checkout: LF object, CRLF worktree", func(t *testing.T) {
+		root := t.TempDir()
+		lfOriginal := []byte("MARKER-ORIGINAL\n")
+		crlfCopy := []byte("MARKER-ORIGINAL\r\n")
+		matchPath := "match.md"
+		if err := os.WriteFile(filepath.Join(root, matchPath), crlfCopy, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pinned := []File{{RepoPath: matchPath, OriginalContent: lfOriginal, SourceContent: lfOriginal, SourceHash: hashBytes(lfOriginal)}}
+		plan := Verify(root, pinned)
+		if len(plan) != 1 || plan[0].Action != ActionKeep {
+			t.Fatalf("CRLF worktree copy of an LF pin should be ActionKeep; got %+v", plan)
+		}
+	})
+	t.Run("CRLF-committed repo: CRLF object, CRLF worktree", func(t *testing.T) {
+		root := t.TempDir()
+		crlfOriginal := []byte("MARKER-ORIGINAL\r\n")
+		crlfCopy := []byte("MARKER-ORIGINAL\r\n")
+		matchPath := "match.md"
+		if err := os.WriteFile(filepath.Join(root, matchPath), crlfCopy, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// SourceHash is over the raw CRLF bytes (evidence identity); the
+		// comparison must still treat the byte-identical worktree file as Keep.
+		pinned := []File{{RepoPath: matchPath, OriginalContent: crlfOriginal, SourceContent: crlfOriginal, SourceHash: hashBytes(crlfOriginal)}}
+		plan := Verify(root, pinned)
+		if len(plan) != 1 || plan[0].Action != ActionKeep {
+			t.Fatalf("CRLF-committed byte-identical file should be ActionKeep; got %+v", plan)
+		}
+	})
+	t.Run("a genuinely different file still trips a restore", func(t *testing.T) {
+		root := t.TempDir()
+		lfOriginal := []byte("MARKER-ORIGINAL\n")
+		differPath := "differ.md"
+		if err := os.WriteFile(filepath.Join(root, differPath), []byte("TAMPERED\r\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pinnedDiffer := []File{{RepoPath: differPath, OriginalContent: lfOriginal, SourceContent: lfOriginal, SourceHash: hashBytes(lfOriginal)}}
+		planDiffer := Verify(root, pinnedDiffer)
+		if len(planDiffer) != 1 || planDiffer[0].Action != ActionRestore {
+			t.Fatalf("a tampered file must still trip ActionRestore; got %+v", planDiffer)
+		}
+	})
+}
+
+// TestExecute_RestoresOriginalBytesNotTruncated (ADR 0002 D4 + findings F1):
+// when a pinned file was truncated for delivery, Execute must restore the
+// ORIGINAL base_commit bytes, not the truncated SourceContent. Writing the
+// truncated form would re-truncate on every stage, land a mutilated file (with
+// the truncation marker inside it) in the checkpoint commit, and never
+// converge — the next Verify still sees a file that differs from the original.
+// Restoring the original converges: Verify on the rewritten file reports Keep.
+func TestExecute_RestoresOriginalBytesNotTruncated(t *testing.T) {
 	root := t.TempDir()
-	original := []byte("MARKER-ORIGINAL\n")
-	crlfCopy := []byte("MARKER-ORIGINAL\r\n")
-	matchPath := "match.md"
-	if err := os.WriteFile(filepath.Join(root, matchPath), crlfCopy, 0o644); err != nil {
+	original := bytes.Repeat([]byte("line of original content\n"), 4000) // ~96 KiB > MaxFileBytes
+	truncated, wasTruncated := Cap(original)
+	if !wasTruncated {
+		t.Fatal("fixture: expected Cap to truncate the over-budget original")
+	}
+	pinned := []File{{
+		RepoPath:        "big.md",
+		OriginalContent: original,
+		SourceContent:   truncated,
+		SourceHash:      hashBytes(original),
+		DeliveredHash:   hashBytes(truncated),
+		Truncated:       true,
+	}}
+	// Worktree holds a tampered short file so Verify plans a restore.
+	tamperedPath := filepath.Join(root, "big.md")
+	if err := os.WriteFile(tamperedPath, []byte("TAMPERED\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pinned := []File{{RepoPath: matchPath, SourceContent: original, SourceHash: hashBytes(original)}}
 	plan := Verify(root, pinned)
-	if len(plan) != 1 || plan[0].Action != ActionKeep {
-		t.Fatalf("CRLF worktree copy of an LF pin should be ActionKeep; got %+v", plan)
+	if len(plan) != 1 || plan[0].Action != ActionRestore {
+		t.Fatalf("Verify: got %+v, want one ActionRestore", plan)
 	}
-	// A genuinely different file (different marker) still trips a restore.
-	differPath := "differ.md"
-	if err := os.WriteFile(filepath.Join(root, differPath), []byte("TAMPERED\r\n"), 0o644); err != nil {
+	done, err := Execute(plan, pinned, root)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(done) != 1 {
+		t.Fatalf("Execute: got %d actions, want 1", len(done))
+	}
+	// The restored file holds the ORIGINAL bytes, not the truncated form.
+	restored, err := os.ReadFile(tamperedPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	pinnedDiffer := []File{{RepoPath: differPath, SourceContent: original, SourceHash: hashBytes(original)}}
-	planDiffer := Verify(root, pinnedDiffer)
-	if len(planDiffer) != 1 || planDiffer[0].Action != ActionRestore {
-		t.Fatalf("a tampered file must still trip ActionRestore; got %+v", planDiffer)
+	if !bytes.Equal(restored, original) {
+		t.Errorf("restore wrote %d bytes (truncated form?), want %d original bytes", len(restored), len(original))
+	}
+	if strings.Contains(string(restored), "agentum: truncated") {
+		t.Error("restore wrote the truncation marker into the worktree file")
+	}
+	// Convergence: Verify on the restored file now reports Keep, not Restore.
+	convergence := Verify(root, pinned)
+	if len(convergence) != 1 || convergence[0].Action != ActionKeep {
+		t.Fatalf("Verify after restore did not converge to Keep; got %+v (restore loop)", convergence)
 	}
 }

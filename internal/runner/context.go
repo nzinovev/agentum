@@ -21,19 +21,6 @@ import (
 //
 // A failure to pin or probe degrades evidence, it does not fail the run: the
 // task still proceeds with whatever context was pinnable, and the gaps are
-// recorded. Only a malformed .agentum.yaml that fails to parse fails the task —
-// a project that ships a config it cannot read should not run against a guess.
-// The check-set resolution error is similarly fatal: a pack referencing an
-// unknown check name is a misconfiguration, the same answer
-// enforceProjectChecks gives at the boundary.
-// prepareProjectContext wires the project-context channel for the run (ADR
-// 0002): it reads .agentum.yaml from base_commit once (the agent-immutability
-// seam), pins the declared + auto-injected instruction files, probes the
-// runtime's skills, and resolves the check set for rendering. Everything is
-// stashed on stageRun so the loop and invokeStage share one source of truth.
-//
-// A failure to pin or probe degrades evidence, it does not fail the run: the
-// task still proceeds with whatever context was pinnable, and the gaps are
 // recorded. Only a malformed .agentum.yaml that fails to parse, or a check-set
 // resolution error, returns an error — drive turns those into failTask. The
 // missing-file case is (nil, nil) from loadRegistryAtBaseCommit, not an error.

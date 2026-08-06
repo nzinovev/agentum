@@ -511,22 +511,29 @@ configuration). Bytes are read from `base_commit` through the worktree manager
 (the same agent-immutability seam as the checks registry), capped at 64 KiB/file
 and 192 KiB/set with a recorded truncation marker, and delivered to the adapter
 through the same config channel as the permission map. A path absent at
-`base_commit` is recorded, not fatal. The set is built once in `drive()`
-(`prepareProjectContext`) and carried on `stageRun`.
+`base_commit` is recorded in the manifest's `missing` list, not fatal — and the
+pre-stage restore treats a worktree file at such a path as tampering (D4 row 4):
+the agent authored an instruction file the project never declared at the anchor,
+so the restore removes it rather than judging by agent-authored rules. The set
+is built once in `drive()` (`prepareProjectContext`) and carried on `stageRun`.
 
 **Tampering, two layers.** Delivery only adds context, so the pin is worth
 nothing unless the worktree copy is controlled. An `edit` deny rule stops an
-agent rewriting `AGENTS.md` (or any declared path) via the edit tool; a pre-stage
-hash check stops a `bash`-side rewrite and restores the pinned bytes. The check
-runs strictly before each stage invocation (`restoreInstructions`), never
-between the `isClean` sample and the checkpoint commit (the load-bearing
-ordering for the `auto_if_clean` gate). The compare is CRLF-normalised so a
-`core.autocrlf=true` checkout (CRLF in the worktree, LF in the object) is not a
-false positive. Each restoration emits `task.instructions_restored` and lands in
-the manifest context section; the rewrite is orchestrator-authored, so the next
-checkpoint commit shows it as a revert — the tamper and its reversal are both
-in the git lineage. A restore IO error fails the task, mirroring a dirty tree
-at the delivery boundary.
+agent rewriting `AGENTS.md` (or any declared path) via the edit tool — plus a
+`**/AGENTS.md` name guard, because the runtime injects that filename from
+anywhere in the tree and a nested copy the project never declared could otherwise
+reach the model. A pre-stage hash check stops a `bash`-side rewrite and restores
+the pinned ORIGINAL bytes (not the truncated delivery form). The check runs
+strictly before each stage invocation (`restoreInstructions`), never between the
+`isClean` sample and the checkpoint commit (the load-bearing ordering for the
+`auto_if_clean` gate). The compare is CRLF-normalised on BOTH sides so neither
+an autocrlf checkout (CRLF in the worktree, LF in the object) nor a CRLF-committed
+repo reads as tampering; the pin's `SourceHash` stays over the raw bytes for
+evidence identity. Each restoration emits `task.instructions_restored` and lands
+in the manifest context section; the rewrite is orchestrator-authored, so the
+next checkpoint commit shows it as a revert — the tamper and its reversal are
+both in the git lineage. A restore IO error fails the task, mirroring a dirty
+tree at the delivery boundary.
 
 **Skills, allowed and recorded.** `skill` resolves to `allow`: a skill grants
 knowledge, not reach, and still meets the same `bash`/`edit`/`net` rules.

@@ -309,40 +309,36 @@ func assembleOrder(declared, auto []string) []pinEntry {
 // source and returns the restore plan (ADR 0002 D4's table) WITHOUT executing
 // it. The plan is pure: it reads the worktree only to classify state.
 //
-// Line endings are normalised (CRLF → LF) before hashing, because a project
-// under core.autocrlf=true checks out text files with CRLF while git stores LF
-// in the object — a semantically-identical file would otherwise trip a
-// false-positive restore every stage, and the orchestrator-authored rewrite
-// would re-introduce LF that checkout immediately re-converts, looping. The
-// pin's SourceHash is over the original (LF) bytes, so normalising the worktree
-// read before comparison is what keeps the two on the same axis.
+// Line endings are normalised (CRLF → LF) on BOTH sides before hashing. A
+// project under core.autocrlf=true checks out text files with CRLF while git
+// stores LF in the object; a repo that committed CRLF stores CRLF in the object
+// and the worktree matches. Normalising one side only would fix the first case
+// and break the second with a perpetual false-positive restore. Normalising
+// both puts the comparison on content. The pin's SourceHash stays over the RAW
+// base_commit bytes for evidence identity — it is NOT used for the comparison;
+// the comparison uses a normalised hash derived from OriginalContent.
 //
-// Files marked MissingAtCommit are skipped: there is nothing to restore to, and
-// a worktree file at that path is the agent creating a file the project never
-// declared at the lineage anchor — left to the ordinary review path, not to the
-// instruction restore.
+// Files marked MissingAtCommit (absent at base_commit) follow D4 row 4: when
+// the worktree holds one anyway, the agent created a file the project never
+// declared at the lineage anchor. That is the original substitution attack in a
+// different hat — an implementer can author an AGENTS.md the runtime then
+// injects and the reviewer judges by — so Verify plans an ActionRemove rather
+// than skipping. Execute deletes it and records the removal; nothing is pinned
+// to restore to.
 func Verify(worktreeRoot string, pinned []File) []Restoration {
 	plan := make([]Restoration, 0, len(pinned))
 	for _, file := range pinned {
-		if file.MissingAtCommit {
-			continue
-		}
 		absolutePath := filepath.Join(worktreeRoot, filepath.FromSlash(file.RepoPath))
 		found, readErr := os.ReadFile(absolutePath)
-		if readErr != nil {
-			if errors.Is(readErr, os.ErrNotExist) {
-				// Absent in the worktree, present in the pin: the runtime deleted
-				// it, or a fresh worktree lost it. Rewrite the pinned bytes.
-				plan = append(plan, Restoration{
-					Path:       file.RepoPath,
-					Action:     ActionRestore,
-					PinnedHash: file.SourceHash,
-				})
+		missingInWorktree := readErr != nil && errors.Is(readErr, os.ErrNotExist)
+		if missingInWorktree {
+			if file.MissingAtCommit {
+				// Absent at the commit and absent in the worktree: nothing to do.
+				// Keep the entry out of the plan so a no-op stays a no-op.
 				continue
 			}
-			// An unreadable file is an IO problem Execute will surface; classify
-			// it as a restore so the runner attempts the rewrite and gets the
-			// real error there.
+			// Present in the pin, absent in the worktree: the runtime deleted it
+			// or a fresh worktree lost it. Rewrite the pinned original bytes.
 			plan = append(plan, Restoration{
 				Path:       file.RepoPath,
 				Action:     ActionRestore,
@@ -350,20 +346,45 @@ func Verify(worktreeRoot string, pinned []File) []Restoration {
 			})
 			continue
 		}
+		if readErr != nil {
+			// Present but unreadable: an IO problem Execute will surface. Classify
+			// as a restore so the runner attempts the rewrite and gets the real
+			// error there (a non-MissingAtCommit file is restorable).
+			if !file.MissingAtCommit {
+				plan = append(plan, Restoration{
+					Path:       file.RepoPath,
+					Action:     ActionRestore,
+					PinnedHash: file.SourceHash,
+				})
+			}
+			continue
+		}
+		if file.MissingAtCommit {
+			// D4 row 4: the worktree holds a file the pin does not (the agent
+			// created an instruction file the project never declared at the
+			// anchor). Remove it so the next invocation does not judge by
+			// agent-authored rules.
+			plan = append(plan, Restoration{
+				Path:      file.RepoPath,
+				Action:    ActionRemove,
+				FoundHash: hashBytes(normaliseLineEndings(found)),
+			})
+			continue
+		}
+		// Both sides present: compare normalised content hashes.
 		foundHash := hashBytes(normaliseLineEndings(found))
-		pinnedHash := file.SourceHash
+		pinnedHash := hashBytes(normaliseLineEndings(file.OriginalContent))
 		if foundHash == pinnedHash {
-			plan = append(plan, Restoration{Path: file.RepoPath, Action: ActionKeep, FoundHash: foundHash, PinnedHash: pinnedHash})
+			plan = append(plan, Restoration{Path: file.RepoPath, Action: ActionKeep, FoundHash: foundHash, PinnedHash: file.SourceHash})
 			continue
 		}
 		// Differs after line-ending normalisation: the agent (or a prior stage)
-		// rewrote it. Rewrite the pinned bytes over the tampered copy so the
-		// next invocation sees the original.
+		// rewrote it. Rewrite the pinned original bytes over the tampered copy.
 		plan = append(plan, Restoration{
 			Path:       file.RepoPath,
 			Action:     ActionRestore,
 			FoundHash:  foundHash,
-			PinnedHash: pinnedHash,
+			PinnedHash: file.SourceHash,
 		})
 	}
 	return plan
@@ -427,7 +448,19 @@ func Execute(plan []Restoration, pinned []File, worktreeRoot string) (done []Res
 			if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 				return done, fmt.Errorf("instructions: create dir for %q: %w", restoration.Path, err)
 			}
-			if err := os.WriteFile(absolutePath, file.SourceContent, 0o644); err != nil {
+			// Restore the ORIGINAL base_commit bytes, not the (possibly
+			// truncated) SourceContent. Restoration re-establishes the pin in
+			// the worktree, so the worktree file must hash equal to SourceHash
+			// (the identity over the original bytes) and thus converge on the
+			// next Verify — writing SourceContent would re-truncate on every
+			// stage, land a mutilated file in the checkpoint commit, and never
+			// converge. OriginalContent is empty only when the file was
+			// missing-at-commit, which Verify skips, so it is non-empty here.
+			restoredBytes := file.OriginalContent
+			if len(restoredBytes) == 0 {
+				restoredBytes = file.SourceContent
+			}
+			if err := os.WriteFile(absolutePath, restoredBytes, 0o644); err != nil {
 				return done, fmt.Errorf("instructions: restore %q: %w", restoration.Path, err)
 			}
 			done = append(done, restoration)

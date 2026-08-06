@@ -335,7 +335,14 @@ func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPath
 	}
 	readable := profile.Has(caps.CatFsRead)
 	network := profile.Has(caps.CatNetFetch)
-	config := opencodeConfig{
+	// NOTE: config.Instructions is NOT set here. instructionPaths here are the
+	// repo-relative paths used only to build the edit-deny rules (D4 layer 1);
+	// the `instructions` entries that reach opencode must be ABSOLUTE paths to
+	// the staged pinned copies, which prepareEnforcement sets after staging.
+	// Setting both would leave a dead branch that ships worktree-relative paths
+	// (agent-writable) whenever the staged list is empty — a caller bug that
+	// would silently point opencode at the worktree copy.
+	return opencodeConfig{
 		Schema: "https://opencode.ai/config.json",
 		Permission: opencodePermissionRules{
 			Wildcard: actionDeny,
@@ -361,11 +368,7 @@ func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPath
 
 			TodoWrite: actionAllow,
 		},
-	}
-	if len(instructionPaths) > 0 {
-		config.Instructions = instructionPaths
-	}
-	return config, nil
+	}, nil
 }
 
 // renderOpencodeConfigBytes marshals one config value twice: compact for the
@@ -454,14 +457,20 @@ func (rules *ruleList) MarshalJSON() ([]byte, error) {
 //
 // instructionPaths (ADR 0002 D4, layer 1) are the repo-relative paths of the
 // pinned instruction files (e.g. "AGENTS.md", "docs/conventions.md"). After the
-// allows, each declared path is appended as a deny rule, plus a `**/<basename>`
-// name guard for every runtime-injected filename so a nested instruction file
-// the project never declared is still protected. Last-match-wins means these
-// denies land after the granted scopes and override them: an implementer with
-// fs.write to the whole worktree cannot edit AGENTS.md to rewrite the rules its
-// reviewer will judge it by in the same run. The bash escape path (a write
-// outside the edit tool) is caught by the runner's pre-stage hash check, not
-// here — see internal/instructions and the runner's restore step.
+// allows, each path is appended as an EXACT deny rule. A path whose basename
+// matches a runtime-injected filename (the autoInstructionBaseline set, e.g.
+// AGENTS.md) ALSO gets a `**/<basename>` name guard, because the runtime injects
+// that filename from anywhere in the tree — a nested copy the project never
+// declared can still reach the model. The root case (AGENTS.md at the repo
+// root) is exactly the one the guard exists for: the exact rule covers the root
+// and **/AGENTS.md covers every nested copy. Other declared paths get the exact
+// rule only (the runtime does not inject them from elsewhere). Last-match-wins
+// means these denies land after the granted scopes and override them: an
+// implementer with fs.write to the whole worktree cannot edit AGENTS.md to
+// rewrite the rules its reviewer will judge it by in the same run. The bash
+// escape path (a write outside the edit tool) is caught by the runner's
+// pre-stage hash check, not here — see internal/instructions and the runner's
+// restore step.
 //
 // Two traps: ruleList.add keeps a repeated pattern's original POSITION while
 // taking the new action, so an instruction pattern colliding with a granted
@@ -489,6 +498,17 @@ func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string
 	// Instruction denies come last so last-match-wins makes them win over the
 	// granted scopes. De-duplicate to keep the rule list readable and to avoid
 	// re-stating a pattern (which ruleList.add would keep in its old position).
+	//
+	// Each path gets an EXACT deny. A path whose basename matches a
+	// runtime-injected filename (the autoInstructionBaseline set, e.g.
+	// AGENTS.md) ALSO gets a **/<basename> name guard — because the runtime
+	// injects that filename from anywhere in the tree, a nested copy the project
+	// never declared can still reach the model. The root case (AGENTS.md at the
+	// repo root) is exactly the one the guard exists for: the exact rule covers
+	// the root, and **/AGENTS.md covers every nested copy. Other declared paths
+	// (e.g. docs/conventions.md) get the exact rule only — the runtime does not
+	// inject them from elsewhere, so a same-named file in another directory is
+	// not an instruction-channel concern.
 	seen := make(map[string]bool, len(instructionPaths)*2)
 	for _, path := range instructionPaths {
 		basename := forwardSlashBase(path)
@@ -497,11 +517,7 @@ func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string
 			rules.add(exact, actionDeny)
 			seen[exact] = true
 		}
-		// Name guard: a nested AGENTS.md the project never declared can still
-		// reach the model via the runtime's own injection. Deny it anywhere in
-		// the tree. Skipped when the declared path is itself at the root, since
-		// the exact rule already covers it.
-		if strings.Contains(exact, "/") {
+		if isRuntimeInjectedBasename(basename) {
 			guard := "**/" + basename
 			if !seen[guard] {
 				rules.add(guard, actionDeny)
@@ -510,6 +526,19 @@ func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string
 		}
 	}
 	return rules, nil
+}
+
+// isRuntimeInjectedBasename reports whether opencode auto-injects a file of
+// this name from the project tree (so a nested copy the project never declared
+// can still reach the model and must be denied anywhere). Today that is
+// AGENTS.md at any depth. Kept as a function so the set has one owner.
+func isRuntimeInjectedBasename(basename string) bool {
+	for _, name := range autoInstructionBaseline {
+		if forwardSlashBase(name) == basename {
+			return true
+		}
+	}
+	return false
 }
 
 // forwardSlashClean normalises a repo-relative instruction path to forward
