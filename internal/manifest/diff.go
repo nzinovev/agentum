@@ -25,6 +25,7 @@ type Diff struct {
 	Model               *SectionDelta `json:"model,omitempty"`
 	Capabilities        *SectionDelta `json:"capabilities,omitempty"`
 	Memory              *SectionDelta `json:"memory,omitempty"`
+	Context             *SectionDelta `json:"context,omitempty"`
 	InputArtifacts      *SectionDelta `json:"input_artifacts,omitempty"`
 	Checks              *SectionDelta `json:"checks,omitempty"`
 	GitBase             *SectionDelta `json:"git_base,omitempty"`
@@ -49,6 +50,7 @@ func (diff Diff) Empty() bool {
 		diff.Model == nil &&
 		diff.Capabilities == nil &&
 		diff.Memory == nil &&
+		diff.Context == nil &&
 		diff.InputArtifacts == nil &&
 		diff.Checks == nil &&
 		diff.GitBase == nil &&
@@ -84,6 +86,9 @@ func DiffManifests(left, right Body) Diff {
 	}
 	if delta := diffMemory(left.Memory, right.Memory); delta != nil {
 		diff.Memory = delta
+	}
+	if delta := diffContext(left.Context, right.Context); delta != nil {
+		diff.Context = delta
 	}
 	if delta := diffInputArtifacts(left.Artifacts, right.Artifacts); delta != nil {
 		diff.InputArtifacts = delta
@@ -265,6 +270,49 @@ func diffMemory(left, right *MemorySlice) *SectionDelta {
 		return newDelta("memory-count", "memory entry count differs")
 	}
 	return nil
+}
+
+// diffContext compares the project-context channel (ADR 0002 D9). Both
+// instructions and skills are RUN INPUTS — which is what makes "same task, same
+// commit, same config, different skills ⇒ the runs differ" answerable. The
+// instruction axis compares path → delivered_hash; the skill axis compares the
+// name → hash set. A change in either surfaces a delta; the absence of one side
+// is itself significant.
+func diffContext(left, right *ContextEvidence) *SectionDelta {
+	if left == nil && right == nil {
+		return nil
+	}
+	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "context-missing"); oneNilDelta != nil {
+		return oneNilDelta
+	}
+	if !reflect.DeepEqual(indexInstructions(left.Instructions), indexInstructions(right.Instructions)) {
+		return newDelta("context-instructions", "pinned instruction set differs")
+	}
+	if !reflect.DeepEqual(indexSkills(left.Skills), indexSkills(right.Skills)) {
+		return newDelta("context-skills", "skill set differs")
+	}
+	return nil
+}
+
+// indexInstructions maps each instruction ref to its delivered hash, keyed by
+// path. Two runs with the same paths but different delivered hashes differ;
+// same paths and hashes are the same input.
+func indexInstructions(refs []InstructionRef) map[string]string {
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		out[ref.Path] = ref.DeliveredHash
+	}
+	return out
+}
+
+// indexSkills maps each skill name to its hash. A skill whose body changed
+// between runs (same name, different hash) is a significant input change.
+func indexSkills(skills []SkillRef) map[string]string {
+	out := make(map[string]string, len(skills))
+	for _, skill := range skills {
+		out[skill.Name] = skill.Hash
+	}
+	return out
 }
 
 func diffInputArtifacts(left, right *ArtifactEvidence) *SectionDelta {
