@@ -222,7 +222,7 @@ Every invocation carries its effective profile as evidence in three places:
 | Analytical stage cannot change source | analyst role omits `fs.write`; intersection drops it |
 | Reviewer cannot change tracked source or delivery refs | reviewer role = analyst set; `git.delivery` never in an agent role |
 | Implementer works only in its worktree | `fs.write` and `git.write` carry the `${worktree}` scope |
-| No undeclared credentials / network / commands / MCP / host paths | deny-by-default: the `"*": "deny"` baseline plus explicit `external_directory` / `task` / `skill` / `websearch` denials; `mcp.*` is refused outright |
+| No undeclared credentials / network / commands / MCP / host paths | deny-by-default: the `"*": "deny"` baseline plus explicit `external_directory` / `task` / `websearch` denials; `mcp.*` is refused outright. `skill` is the exception: allowed (knowledge, not reach) and recorded via the `ContextProber` — see the project context channel below |
 | Forbidden actions blocked + reflected in audit | opencode permission rules + bash deny patterns; profile + event + manifest columns record what was granted |
 | Allowed actions keep working | granted tools resolve to `allow` in the generated config, proven by the live enforcement contract |
 | Unattended invocation never starts with unrestricted host perms | the generated config is deny-by-default; an empty profile denies every tool |
@@ -264,7 +264,62 @@ profile, and why v1 accepts them:
 - **Subprocesses spawned by the agent.** A bash command can spawn a long-lived
   helper that outlives the profile's timeouts. The process-group kill on cancel
   covers the common case; a privileged orphan is the residual gap.
+- **Instruction files outside the declared set.** The project-context channel
+  (ADR 0002) pins `AGENTS.md` and the `instructions:` list declared in
+  `.agentum.yaml`. A nested `sub/AGENTS.md` the project never declared, or the
+  operator's global `~/.config/opencode/AGENTS.md`, can still reach the model
+  through opencode's own injection — these are unpinned and are named here
+  rather than silently ignored. The `edit` deny rule guards `AGENTS.md` and
+  `**/AGENTS.md`; a nested file under a different name is out of scope.
+- **Bash writes between the pre-stage hash check and the run.** The instruction
+  restore (`internal/runner` `restoreInstructions`) runs strictly before each
+  stage invocation. A bash write that lands after that check but before the
+  invocation starts is not caught in real time — it is caught by the *next*
+  stage's restore, recorded as a restoration, and reversed in the next
+  checkpoint commit. The tamper and its reversal are both in the git lineage.
 
 When the single-owner assumption no longer holds (multi-user, public
 deployment), v1's enforcement is insufficient and a real sandbox (container,
 namespace, seccomp) becomes required.
+
+## Project context channel (ADR 0002)
+
+The repository's own instruction files and the runtime's available skills form
+a declared input channel, so a pack can be stack-neutral without leaving the
+agent without project rules.
+
+- **Instruction set.** `instructions:` in `.agentum.yaml` (repo-relative paths,
+  validated) ∪ the runtime-injected `AGENTS.md` baseline. No discovery, no
+  globbing — a closed, declared set. Bytes are pinned from `base_commit` (the
+  agent-immutability seam), capped at 64 KiB/file and 192 KiB/set with a
+  recorded truncation marker, and delivered to the adapter through the same
+  config channel as the permission map. The pin's `SourceHash` is over the
+  original base_commit bytes; `DeliveredHash` is over the post-truncate bytes,
+  so truncation is an attributable fact.
+- **Tampering, two layers.** The `edit` deny rule stops an agent rewriting
+  `AGENTS.md` (or any declared path) via the edit tool; a pre-stage hash check
+  (CRLF-normalised, so a `core.autocrlf=true` checkout is not a false positive)
+  stops a `bash`-side rewrite and restores the pinned bytes. Each restoration
+  emits `task.instructions_restored` and lands in the manifest context section;
+  the rewrite is orchestrator-authored, so the next checkpoint commit shows it
+  as a revert.
+- **Skills, allowed and recorded.** `skill` resolves to `allow` — a skill grants
+  knowledge, not reach; it still meets the same `bash`/`edit`/`net` rules.
+  `opencode debug skill` is probed once per run (after the worktree exists),
+  with its own 10s timeout and process-group kill, and each skill's name,
+  location, and content hash land in the manifest (bodies are never stored).
+  A failed probe records an `EvidenceGap("context.skills")`, making
+  `evidence_complete` false; an adapter with no prober records `unsupported`
+  (a permanent capability gap, not a degraded run). `skill.<name>` joins the
+  capability vocabulary as an inert, unenforceable seam — like `mcp.<server>`
+  — so narrowing becomes a config change later, not a model redesign.
+- **Resolved checks rendered.** The routing block lists the resolved project
+  checks (name, command, required) so the agent knows the build/test commands
+  and can run them to check its own work. The agent learns *what* the checks
+  are; it still cannot change *which* checks gate delivery (`enforceProjectChecks`
+  re-resolves independently at the boundary, bound to the verified commit).
+
+| Verified against opencode | What was proven |
+|---|---|
+| 1.18.11 (2026-08-05 / 2026-08-06) | `AGENTS.md` is auto-injected with zero tool calls; editing it in the worktree changes the next invocation; absolute `instructions` paths resolve (forward slashes); `opencode debug skill` returns `{name, description, location, content}` with no `--dir` and one `<built-in>` entry on a clean machine; `permission.skill` accepts the flat `"allow"` and a per-pattern map. |
+| 1.18.11 — instruction pinning + skill enumeration | Step 0 addendum discharged (see ADR 0002 addendum). The live enforcement contract (step 10) — `AGENTS.md` marker reaches the model with zero tool calls; the pinned copy reaches the model; an `edit` of `AGENTS.md` is refused; a `~/.claude/skills/` skill is available and visible; a skill that instructs a denied write does not get the write — is pending manual execution against the pinned binary. |

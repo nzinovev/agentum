@@ -16,7 +16,9 @@ There are **two channels** between orchestrator and agent — do not confuse the
 ## Where the agent writes
 
 Each stage runs in a task worktree. The orchestrator owns a per-stage artifact
-directory inside it:
+directory inside it; the routing block the agent receives tells it the absolute
+path. Prior stages' artifact directories are referenceable by path (later
+stages read earlier stages' outputs that way).
 
 ```
 <worktree-root>/.agentum/<worktree-id>/.ag-artifacts/<stage>/
@@ -25,9 +27,27 @@ directory inside it:
   ...                  # plus whatever artifacts the stage produces
 ```
 
-The routing block the agent receives tells it the absolute path of its artifact
-directory. Prior stages' artifact directories are referenceable by path (later
-stages read earlier stages' outputs that way).
+## Project context the agent sees
+
+Beyond the role-pure prompt from the pack, a stage receives two pieces of
+project context that are **not** pack-owned (ADR 0002):
+
+- **Pinned instruction files.** The repository's `AGENTS.md` and any files
+  declared under `instructions:` in `.agentum.yaml`, pinned from the task's
+  `base_commit`. These are read-only from the agent's perspective: the `edit`
+  tool is denied on them, and a `bash`-side rewrite is caught and reversed by a
+  pre-stage hash check. The agent learns the project's rules from these; it
+  cannot change them mid-run.
+- **Resolved project checks.** The routing block lists the project's named
+  checks (build, test, lint, …) with their commands and required markers. The
+  orchestrator runs these itself at the delivery boundary; the agent is told
+  what they are so it can run them to check its own work. The agent's own claim
+  that a check passed is **not** evidence — Agentum reads the result from its
+  own executor. The agent cannot change which checks gate delivery.
+
+The enumerated set of skills the runtime has available (including the user's
+own in `~/.claude/skills/`) is recorded in the manifest but not surfaced to the
+agent as a list — skills reach the agent through the runtime's own mechanism.
 
 The agent MUST write `result.json` to `<artifact-dir>/result.json` before it
 finishes. A run that exits without a readable `result.json` is a contract

@@ -418,6 +418,9 @@ A tracked file at the repo root carries the versioned registry of named checks:
 
 ```yaml
 api: agentum/v1
+instructions:               # optional: extra project-instruction files to pin
+  - AGENTS.md
+  - docs/conventions.md
 checks:
   - name: build
     command: ["go", "build", "./..."]
@@ -493,6 +496,64 @@ the registry only, a worktree-scoped working directory that cannot escape, a
 scrubbed environment (provider credentials like `OPENAI_API_KEY` / `*_TOKEN` are
 stripped), per-check timeouts, and capped output. Its profile label
 (`checks-executor-v1`) is recorded on every report.
+
+## Project context channel (ADR 0002)
+
+A pack is portable across projects, so it cannot carry stack knowledge — but a
+stage still needs the project's rules. The project-context channel is the
+answer: the repository's own instruction files and the runtime's available
+skills, declared, pinned from `base_commit`, and recorded in the manifest.
+
+**What is pinned.** The instruction set is the project declaration
+(`instructions:` in `.agentum.yaml`, repo-relative, validated) ∪ the
+runtime-injected baseline (`AGENTS.md`, which opencode loads itself with no
+configuration). Bytes are read from `base_commit` through the worktree manager
+(the same agent-immutability seam as the checks registry), capped at 64 KiB/file
+and 192 KiB/set with a recorded truncation marker, and delivered to the adapter
+through the same config channel as the permission map. A path absent at
+`base_commit` is recorded, not fatal. The set is built once in `drive()`
+(`prepareProjectContext`) and carried on `stageRun`.
+
+**Tampering, two layers.** Delivery only adds context, so the pin is worth
+nothing unless the worktree copy is controlled. An `edit` deny rule stops an
+agent rewriting `AGENTS.md` (or any declared path) via the edit tool; a pre-stage
+hash check stops a `bash`-side rewrite and restores the pinned bytes. The check
+runs strictly before each stage invocation (`restoreInstructions`), never
+between the `isClean` sample and the checkpoint commit (the load-bearing
+ordering for the `auto_if_clean` gate). The compare is CRLF-normalised so a
+`core.autocrlf=true` checkout (CRLF in the worktree, LF in the object) is not a
+false positive. Each restoration emits `task.instructions_restored` and lands in
+the manifest context section; the rewrite is orchestrator-authored, so the next
+checkpoint commit shows it as a revert — the tamper and its reversal are both
+in the git lineage. A restore IO error fails the task, mirroring a dirty tree
+at the delivery boundary.
+
+**Skills, allowed and recorded.** `skill` resolves to `allow`: a skill grants
+knowledge, not reach, and still meets the same `bash`/`edit`/`net` rules.
+`opencode debug skill` is probed once per run (after the worktree exists), with
+its own 10s timeout and process-group kill, and each skill's name, location, and
+content hash land in the manifest context section (bodies never stored). A
+failed probe records an `EvidenceGap("context.skills")`, making
+`evidence_complete` false. `skill.<name>` is an inert capability token: no role
+grants it, and a grant is unenforceable (the opencode adapter does not list it
+in `Supported()`), the same answer `mcp.<server>` gets — narrowing becomes a
+config change later.
+
+**Resolved checks, rendered.** The routing block lists the resolved project
+checks (name, command, required) so the agent knows the build/test commands and
+can run them to check its own work — hiding them is unenforceable
+(`.agentum.yaml` is `fs.read`-able) and harmful (an implementer that knows them
+saves a review/fix cycle). The agent learns *what* the checks are; it still
+cannot change *which* gate delivery. This cached set is rendering-only;
+`enforceProjectChecks` keeps its own independent load+resolve at the boundary,
+bound to the verified commit (PR #23).
+
+**Evidence.** The manifest gains a `context` section (written every run, so an
+empty project still seals `evidence_complete: true`): instruction refs (path,
+source, source/delivered hashes, delivered bytes, truncated flag),
+restorations, enumerated skills, the probe label, and the missing list.
+`DiffManifests` gains a `context` axis comparing path→delivered_hash and
+name→hash, so two runs differing only in their skill set are distinguishable.
 
 ## What F.6 does not do yet
 

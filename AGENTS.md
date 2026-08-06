@@ -52,6 +52,13 @@ package they cover.
   them in `internal/agent/enforce.go` (permission config + env scrub + ctx
   timeouts). Never bypass the adapter to run an agent — the profile is the
   boundary. `git.delivery` is orchestrator-only; no agent role includes it.
+  Skills are allowed-and-recorded, not denied: a skill grants knowledge, not
+  reach (it still meets the same `bash`/`edit`/`net` rules), so the runtime
+  loads the operator's own skills and Agentum records each one's name,
+  location, and content hash in the manifest (`internal/agent` `ContextProber`).
+  `skill.*` is an inert capability token (no role grants it; a grant is
+  unenforceable, like `mcp.*`) kept as a seam so narrowing becomes a config
+  change later.
 - **Orchestrator-owned project checks.** The project ships a versioned registry
   of named checks (`.agentum.yaml`, tracked in the repo). Commands live ONLY in
   that registry (an arg vector; no shell injection). Packs and task input add
@@ -61,7 +68,10 @@ package they cover.
   commit, before the result reaches the review gate; a mandatory failure blocks
   delivery. The check executor runs under a fixed minimal boundary (scrubbed
   env, no provider credentials). Never trust an agent's claim that checks
-  passed — Agentum reads the result from its own executor.
+  passed — Agentum reads the result from its own executor. The project's
+  instruction set (`instructions:` in `.agentum.yaml` ∪ the runtime-injected
+  `AGENTS.md`) is pinned from `base_commit` the same way: the agent cannot
+  change which instructions or checks gate a run.
 
 ## Conventions
 
