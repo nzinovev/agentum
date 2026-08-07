@@ -64,6 +64,12 @@ func forbiddenAgentCategories(token Token) string {
 		return "credentials must be an explicit per-invocation grant"
 	case enforcementCategory(token) == "mcp":
 		return "MCP must be an explicit per-invocation grant"
+	case enforcementCategory(token) == CatSkill:
+		// ADR 0002 D7: skill is allowed at runtime (opencode loads the user's
+		// skills) but never granted by a role template — narrowing is a future
+		// policy, and a role granting it would make the seam load-bearing before
+		// any adapter declares support.
+		return "skill narrowing is not a role-granted capability"
 	}
 	return ""
 }
@@ -267,6 +273,59 @@ func TestEnforceableBy_UnsupportedCapabilityRejected(t *testing.T) {
 	okProfile := Profile{Grants: []Token{Token(CatFsRead), Token(CatArtifactWrite)}}
 	if err := okProfile.EnforceableBy([]Category{CatFsRead, CatArtifactWrite}); err != nil {
 		t.Errorf("enforceable profile rejected: %v", err)
+	}
+}
+
+// TestSkillToken_InertSeam (ADR 0002 D7): the skill token joins the vocabulary
+// but no role grants it, and a profile carrying it is unenforceable against an
+// adapter that does not list CatSkill in Supported — the same answer mcp.*
+// gets, for the same reason. The category exists so narrowing becomes a config
+// change later, not a model redesign.
+func TestSkillToken_InertSeam(t *testing.T) {
+	t.Parallel()
+	// Named and bare tokens collapse to the skill meta-category.
+	if CategoryOf("skill") != CatSkill {
+		t.Errorf(`CategoryOf("skill") = %q, want %q`, CategoryOf("skill"), CatSkill)
+	}
+	if CategoryOf("skill.customize-opencode") != CatSkill {
+		t.Errorf(`CategoryOf("skill.customize-opencode") = %q, want %q`, CategoryOf("skill.customize-opencode"), CatSkill)
+	}
+	// "skill." alone is not a named entity (startsWithNamed requires a char
+	// after the dot), so it falls through to the Key() path like "mcp." and
+	// "secret." — out of the named-entity contract. Not asserted here.
+
+	// No role template grants skill.* — the loop over every role already
+	// asserts this via forbiddenAgentCategories, but make the intent explicit.
+	for _, role := range []Role{RoleAnalyst, RoleReviewer, RoleImplementer, RoleFixer, RoleSystem} {
+		for _, granted := range RoleTemplate(role) {
+			if CategoryOf(granted) == CatSkill {
+				t.Errorf("role %q grants skill token %q — skill must not be role-granted", role, granted)
+			}
+		}
+	}
+
+	// A profile carrying skill.foo is unenforceable against an adapter that does
+	// not list CatSkill in Supported (the opencode adapter does not).
+	profile := Profile{Grants: []Token{Token(CatFsRead), "skill.customize-opencode"}}
+	err := profile.EnforceableBy([]Category{CatFsRead, CatFsWrite, CatExecBash})
+	if err == nil {
+		t.Fatal("expected unenforceable error for skill.* against a non-skill-supporting host, got nil")
+	}
+	if !errors.Is(err, ErrUnenforceable) {
+		t.Errorf("error must wrap ErrUnenforceable, got %v", err)
+	}
+	unsupported, ok := err.(*Unsupported)
+	if !ok {
+		t.Fatalf("error must be *Unsupported, got %T", err)
+	}
+	if !containsCategory(unsupported.Missing, CatSkill) {
+		t.Errorf("missing list must contain skill: %v", unsupported.Missing)
+	}
+
+	// And enforceable against an adapter that DOES list CatSkill — so the seam
+	// is a real seam, not a permanent refusal.
+	if err := profile.EnforceableBy([]Category{CatFsRead, CatSkill}); err != nil {
+		t.Errorf("skill-supporting host must accept skill.*: %v", err)
 	}
 }
 

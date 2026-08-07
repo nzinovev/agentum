@@ -19,6 +19,7 @@ import (
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/instructions"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
@@ -500,6 +501,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	defer runner.cancels.Unregister(job.TaskID)
 
 	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
+	// Prepare the project-context channel (ADR 0002): read .agentum.yaml from
+	// base_commit once, pin the declared + auto-injected instruction files,
+	// probe the runtime's skills, and resolve the check set for rendering. This
+	// runs after the worktree exists (project-local skills come from it) and
+	// before the first stage. A malformed config or an unresolvable check set
+	// fails the task; a pin or probe failure degrades evidence and the run
+	// proceeds with whatever context was pinnable.
+	if contextErr := runner.prepareProjectContext(ctx, &run, baseCommit); contextErr != nil {
+		return runner.failTask(ctx, run.task, contextErr)
+	}
 	// On resume / advance, sync the current artifact revisions back into the
 	// worktree so the agent starts from the same content the prior invocation
 	// produced. No-op for a fresh run (no revisions yet).
@@ -622,6 +633,21 @@ type stageRun struct {
 	project  sqlc.Project
 	taskPack *pack.Pack
 	worktree *worktree.Worktree
+
+	// instructionFiles is the pinned project-instruction set for the run (ADR
+	// 0002): bytes read from base_commit, capped/truncated, with source and
+	// delivered hashes. Built once in drive() and carried to every stage
+	// invocation so the adapter stages them and denies them in edit rules.
+	instructionFiles []instructions.File
+	// contextReport is the runtime's non-prompt context (auto-injected
+	// instructions + enumerated skills), probed once in drive() after the
+	// worktree exists. Carried to every stage for evidence.
+	contextReport agent.ContextReport
+	// resolvedChecks is the resolved project-check set, cached for RENDERING
+	// ONLY (ADR 0002 D8). enforceProjectChecks keeps its own independent load
+	// and resolve at the delivery boundary — sharing this cached value would
+	// re-open the commit-binding seam closed by PR #23.
+	resolvedChecks []routing.CheckRef
 }
 
 // haltDecision carries a pause Decision out of entryPoint without surfacing it
@@ -817,6 +843,17 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	}
 	run.task = updatedTask
 	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
+
+	// ADR 0002 D4 layer 2: restore any instruction files the worktree drifted
+	// off the pin BEFORE the invocation. The edit deny (layer 1) does not cover
+	// bash; this hash check is what catches a bash-side rewrite. Runs strictly
+	// before invokeStage, never between the isClean sample and the checkpoint
+	// commit (the load-bearing ordering preserved below). A restore IO error
+	// fails the task — we cannot stand behind a run whose reviewer might be
+	// reading rewritten rules.
+	if restoreErr := runner.restoreInstructions(ctx, run, stageID); restoreErr != nil {
+		return stageOutcome{}, runner.failTask(ctx, run.task, restoreErr)
+	}
 
 	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, transitionIn)
 
@@ -1038,6 +1075,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
 		Capabilities: profileTokens(profile),
+		Checks:       run.resolvedChecks,
 	}
 	if stage.SourcesVerdict() {
 		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
@@ -1097,7 +1135,8 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		Workdir: run.worktree.Root, ArtifactDir: artifactDir,
 		Prompt: stage.PromptText(), RoutingBlock: block,
 		ResumeSession: resumeSession, Model: model,
-		Profile: profile,
+		Instructions: agentInstructionFiles(run.instructionFiles),
+		Profile:      profile,
 	})
 	if invokeErr != nil {
 		// An unenforceable profile (caps.ErrUnenforceable) is a distinct stop
@@ -1142,6 +1181,13 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		// the adapter saw, plus the artifact revisions this stage produced. The
 		// manifest service is nil in unit tests; AddEvidence is a no-op then.
 		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile, artifactOutputs)
+		// ADR 0002: record the project-context channel (pinned instructions +
+		// enumerated skills) and emit the live pinning signal. The section is
+		// written on every successful stage so an empty project still seals
+		// evidence_complete; a failed skill probe additionally records an
+		// evidence gap.
+		runner.recordContextEvidence(ctx, run, stageID)
+		runner.emit(ctx, run.task, EvContextPinned, contextPinnedPayload(stageID, run))
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,
@@ -1342,6 +1388,18 @@ const (
 	// recorded as an evidence gap and the sealed manifest reads incomplete, which
 	// is the signal a reviewer acts on.
 	EvDeliveryCommitDiverged = "task.delivery_commit_diverged"
+	// EvContextPinned records that the project-context channel was pinned for a
+	// stage: how many instruction files and skills were in play, and how many
+	// instruction files were truncated against the cap (ADR 0002). The manifest
+	// body carries the full refs (hashes and sizes only); this event is the live
+	// signal that the channel is active.
+	EvContextPinned = "stage.context_pinned"
+	// EvInstructionsRestored records one tamper reversal: a pre-stage hash check
+	// found a worktree instruction copy had drifted from the pinned bytes and the
+	// runner rewrote or removed it (ADR 0002 D4 layer 2). Carries the stage, the
+	// path, the action, and the tampered hash — the tamper and its reversal both
+	// land in the git lineage via the next checkpoint commit.
+	EvInstructionsRestored = "task.instructions_restored"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

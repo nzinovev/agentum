@@ -47,13 +47,62 @@ const (
 
 // TestMain doubles as the fake agent's entry point. It must intercept before
 // the testing framework parses flags, because the adapter invokes the binary
-// with opencode's argv ("run --format json …"), not with test flags.
+// with opencode's argv ("run --format json …" or "debug skill"), not with test
+// flags. The debug-skill mode serves the ContextProber tests (ADR 0002 D6).
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeAgent(mode))
 	}
+	if os.Getenv(fakeDebugSkillEnv) != "" {
+		os.Exit(runFakeDebugSkill(os.Getenv(fakeDebugSkillEnv)))
+	}
 	os.Exit(m.Run())
 }
+
+// fakeDebugSkillEnv switches the test binary into the `opencode debug skill`
+// fake. Its value selects the behaviour: well-formed JSON, malformed JSON,
+// hang, or non-zero exit.
+const fakeDebugSkillEnv = "AGENTUM_FAKE_DEBUG_SKILL"
+
+// runFakeDebugSkill plays the `opencode debug skill` side of the ContextProber
+// contract: it writes a JSON array of skills to stdout and exits. The mode
+// selects malformed JSON, a hang, or a non-zero exit so the prober's failure
+// paths are exercised without a real opencode binary.
+func runFakeDebugSkill(mode string) int {
+	switch mode {
+	case fakeDebugMalformed:
+		fmt.Println(`[{not json`)
+		return 0
+	case fakeDebugExit:
+		fmt.Fprintln(os.Stderr, "fake debug error")
+		return 2
+	case fakeDebugHang:
+		// Block long enough that the probe's timeout fires and the process
+		// group is killed. The prober test shrinks probeTimeout so this is well
+		// within the test's budget.
+		time.Sleep(30 * time.Second)
+		return 0
+	default: // fakeDebugWellformed and any unknown mode
+		fmt.Println(fakeDebugSkillOutput)
+		return 0
+	}
+}
+
+// fakeDebugSkill modes.
+const (
+	fakeDebugWellformed = "wellformed"
+	fakeDebugMalformed  = "malformed"
+	fakeDebugExit       = "exit"
+	fakeDebugHang       = "hang"
+)
+
+// fakeDebugSkillOutput is the JSON array the well-formed fake emits. It carries
+// a marker body so a test can assert the body is hashed and discarded (never
+// returned in the SkillRef).
+const fakeDebugSkillOutput = `[
+  {"name":"customize-opencode","description":"Customize opencode","location":"<built-in>","content":"MARKER-BODY-SHOULD-NOT-LEAK"},
+  {"name":"user-skill","description":"A user skill","location":"/home/user/.claude/skills/user-skill","content":"user body"}
+]`
 
 // runFakeAgent plays the agent side of the adapter contract.
 func runFakeAgent(mode string) int {

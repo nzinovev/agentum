@@ -86,6 +86,78 @@ checks:
 `,
 			wantErr: "non-negative",
 		},
+		{
+			name: "valid instructions list",
+			yaml: `
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - AGENTS.md
+  - docs/conventions.md
+`,
+		},
+		{
+			name: "instructions without checks",
+			yaml: `
+api: agentum/v1
+instructions:
+  - AGENTS.md
+`,
+		},
+		{
+			name: "instruction absolute path rejected",
+			yaml: `
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - /etc/passwd
+`,
+			wantErr: "absolute",
+		},
+		{
+			name: "instruction parent escape rejected",
+			yaml: `
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - ../outside.md
+`,
+			wantErr: "escapes",
+		},
+		{
+			name: "duplicate instruction path rejected",
+			yaml: `
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - AGENTS.md
+  - AGENTS.md
+`,
+			wantErr: "duplicated",
+		},
+		{
+			name: "too many instruction paths rejected",
+			yaml: `
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - docs/a.md
+  - docs/b.md
+  - docs/c.md
+  - docs/d.md
+  - docs/e.md
+  - docs/f.md
+  - docs/g.md
+  - docs/h.md
+  - docs/i.md
+`,
+			wantErr: "at most",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,6 +211,49 @@ checks:
 	if !strings.Contains(err.Error(), "non-empty arg vector") {
 		t.Errorf("error should mention command problem, got %q", err.Error())
 	}
+}
+
+func TestInstructionPaths(t *testing.T) {
+	t.Run("returns declared paths in order", func(t *testing.T) {
+		yaml := `
+api: agentum/v1
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+instructions:
+  - docs/conventions.md
+  - docs/style.md
+`
+		registry, err := Parse([]byte(yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := registry.InstructionPaths()
+		if len(paths) != 2 || paths[0] != "docs/conventions.md" || paths[1] != "docs/style.md" {
+			t.Fatalf("InstructionPaths = %v, want [docs/conventions.md docs/style.md]", paths)
+		}
+	})
+	t.Run("nil when not declared", func(t *testing.T) {
+		yaml := `
+api: agentum/v1
+checks:
+  - name: build
+    command: ["go", "build", "./..."]
+`
+		registry, err := Parse([]byte(yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths := registry.InstructionPaths(); paths != nil {
+			t.Fatalf("InstructionPaths = %v, want nil", paths)
+		}
+	})
+	t.Run("nil registry is safe", func(t *testing.T) {
+		var registry *Registry
+		if paths := registry.InstructionPaths(); paths != nil {
+			t.Fatalf("nil registry InstructionPaths = %v, want nil", paths)
+		}
+	})
 }
 
 func TestRevisionStableAcrossFormatting(t *testing.T) {

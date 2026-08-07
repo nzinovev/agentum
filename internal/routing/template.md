@@ -59,7 +59,18 @@ not listed is denied and will be blocked at the runtime layer — do not attempt
 it. These are code-enforced; asking politely does not grant more.
 
 {{if .Capabilities}}Granted: {{join .Capabilities ", "}}{{else}}_No capabilities granted (every tool action is denied — you may only write the structured result file).{{end}}
+{{if .Checks}}
 
+## Project checks (orchestrator-run at the delivery boundary)
+
+The orchestrator runs these itself at the delivery boundary against your
+checkpoint commit; run them to check your own work. Your claim that they passed
+is not evidence — Agentum reads the result from its own executor. You cannot
+change which checks gate delivery.
+
+{{range .Checks}}- **{{.Name}}**{{if .Required}} (required){{end}}: {{join .Command " "}}{{if .Description}} — {{.Description}}{{end}}
+{{end}}
+{{end}}
 {{if .PriorStages}}## Prior stage artifacts
 
 {{range .PriorStages}}- **{{.Stage}}**: {{.Path}}

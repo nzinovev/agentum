@@ -10,6 +10,30 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Project context channel: pinned instructions and visible skills** (ADR 0002).
+  The repository's own instruction files and the runtime's available skills are
+  now a declared, reproducible, evidence-recorded input — so a pack can be
+  stack-neutral without leaving the agent without project rules.
+  - **Declared instruction set** (`internal/instructions`, `internal/checks`):
+    `.agentum.yaml` gains an optional `instructions:` list (repo-relative paths,
+    validated). The set is the project declaration ∪ the runtime-injected
+    `AGENTS.md` baseline; bytes are pinned from `base_commit`, capped/truncated
+    against a byte budget, and delivered to the adapter (no discovery, no glob).
+  - **Tampering blocked at the source** (`internal/agent`, `internal/runner`):
+    an `edit` deny rule stops the agent rewriting `AGENTS.md` via the edit tool;
+    a pre-stage hash check (CRLF-normalised) stops a `bash`-side rewrite and
+    restores the pinned bytes, recording the reversal in the manifest.
+  - **Skills allowed and recorded, not denied** (`internal/agent`, `internal/caps`):
+    `skill` moves from `deny` to `allow` — a skill grants knowledge, not reach.
+    `opencode debug skill` is probed once per run and each skill's name,
+    location, and content hash land in the manifest. `skill.<name>` joins the
+    capability vocabulary as an inert, unenforceable seam (like `mcp.<server>`).
+  - **Context evidence + diff axis** (`internal/manifest`): a `context` section
+    records instructions (source + delivered hashes, sizes, truncation),
+    restorations, skills, and the probe label — written every run so an empty
+    project still seals `evidence_complete: true`. `DiffManifests` gains a
+    `context` axis so two runs differing only in their skill set are
+    distinguishable.
 - **Conditional transitions, the review/fix loop, and a durable fix budget**:
   a transition may carry a `condition` in a closed two-token grammar
   (`verdict` / `status` / `fix_cycles`), and a pack may declare a fix-cycle

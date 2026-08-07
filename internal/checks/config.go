@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nzinovev/agentum/internal/instructions"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,23 +59,29 @@ type Definition struct {
 	Description    string   `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
-// ProjectConfig is the parsed `.agentum.yaml`. Only the checks registry is
-// defined today; the shape is a top-level struct so future project-owned config
-// lands here without reshaping the file.
+// ProjectConfig is the parsed `.agentum.yaml`. The checks registry is the
+// load-bearing section today; the instruction-paths list (ADR 0002) is the
+// project-owned declaration of which repo-relative files join the run's pinned
+// instruction set. The shape stays a top-level struct so future project-owned
+// config lands here without reshaping the file.
 type ProjectConfig struct {
-	API    string       `yaml:"api"`
-	Checks []Definition `yaml:"checks"`
+	API          string       `yaml:"api"`
+	Checks       []Definition `yaml:"checks"`
+	Instructions []string     `yaml:"instructions"`
 }
 
 // Registry is the validated, name-indexed set of check definitions the project
 // owns. Revision is a content hash of the canonical definition set so two runs
 // are distinguishable when the registry changed between them (the manifest
-// records it as audit evidence).
+// records it as audit evidence). InstructionPaths are the project-declared
+// repo-relative files that join the run's pinned instruction set (ADR 0002);
+// they are validated alongside the check definitions in one pass.
 type Registry struct {
-	api      string
-	items    []Definition
-	byName   map[string]Definition
-	Revision string
+	api              string
+	items            []Definition
+	byName           map[string]Definition
+	instructionPaths []string
+	Revision         string
 }
 
 // Definitions returns the registry's definitions in declaration order. Callers
@@ -108,6 +115,18 @@ func (registry *Registry) Names() []string {
 	return names
 }
 
+// InstructionPaths returns the project-declared instruction paths in declared
+// order. Callers must not mutate the slice; it shares storage with the registry.
+// A nil registry (project defines no checks and no instructions) yields nil,
+// which the instruction channel treats as "no declared paths" — the
+// runtime-injected baseline alone is pinned.
+func (registry *Registry) InstructionPaths() []string {
+	if registry == nil {
+		return nil
+	}
+	return registry.instructionPaths
+}
+
 // LoadFromRepo reads the config from repoRoot/ConfigFile. A missing file is a
 // valid empty registry: it returns (nil, nil) — the project simply defines no
 // checks, which passes delivery. Any other read or parse error is returned.
@@ -137,10 +156,11 @@ func Parse(raw []byte) (*Registry, error) {
 		byName[definition.Name] = definition
 	}
 	return &Registry{
-		api:      cfg.API,
-		items:    cfg.Checks,
-		byName:   byName,
-		Revision: registryRevision(cfg.Checks),
+		api:              cfg.API,
+		items:            cfg.Checks,
+		byName:           byName,
+		instructionPaths: cfg.Instructions,
+		Revision:         registryRevision(cfg.Checks),
 	}, nil
 }
 
@@ -151,6 +171,9 @@ func Parse(raw []byte) (*Registry, error) {
 //   - each command is a non-empty arg vector with a non-empty binary.
 //   - workdir, when set, does not escape the repo root.
 //   - timeout / output caps are non-negative.
+//   - instruction paths are repo-relative, forward-slash, and unique
+//     (ADR 0002 D1); validated through instructions.ValidateDeclaredSet so the
+//     rule has one owner.
 func validateConfig(cfg ProjectConfig) error {
 	var problems []string
 	if cfg.API != "" && cfg.API != APIVersion {
@@ -160,6 +183,7 @@ func validateConfig(cfg ProjectConfig) error {
 	for index, definition := range cfg.Checks {
 		problems = append(problems, validateDefinition(definition, index, seen)...)
 	}
+	problems = append(problems, instructions.ValidateDeclaredSet(cfg.Instructions)...)
 	if len(problems) > 0 {
 		return fmt.Errorf("checks: invalid %s: %s", ConfigFile, strings.Join(problems, "; "))
 	}

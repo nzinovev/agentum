@@ -31,7 +31,7 @@ import (
 //   - secret → env scrub: credential-bearing vars are stripped from the child
 //     environment unless the profile grants the matching secret.<name>.
 //
-// Two categories are deliberately absent:
+// Three categories are deliberately absent:
 //
 //   - git.delivery: the orchestrator owns delivery refs directly (worktree
 //     manager), never via the agent subprocess.
@@ -40,6 +40,14 @@ import (
 //     "this server and nothing else". Rather than emit a config that looks like
 //     enforcement and is not, an mcp.* grant makes the profile unenforceable
 //     and the invocation refuses to start.
+//   - skill (ADR 0002 D7): skills are ALLOWED at runtime (opencode loads the
+//     user's own skills), not narrowed. An adapter cannot honor "this skill and
+//     nothing else" without enumerating per-skill permission names, so until
+//     narrowing becomes a policy this adapter treats skill.* the same way it
+//     treats mcp.*: a grant makes the profile unenforceable. The seam is real
+//     because permission.skill accepts the same ordered pattern→action map this
+//     adapter already renders; adding CatSkill here is the change that turns
+//     narrowing on.
 var opencodeSupported = []caps.Category{
 	caps.CatFsRead, caps.CatFsWrite, caps.CatArtifactWrite,
 	caps.CatExecBash, caps.CatGitRead, caps.CatGitWrite,
@@ -52,13 +60,14 @@ var opencodeSupported = []caps.Category{
 // this as audit evidence. cleanup releases the per-invocation config directory
 // and must run once the subprocess has been reaped, never before.
 type enforcementPlan struct {
-	configPath string       // absolute path the rendered config was written to
-	configDir  string       // per-invocation directory holding it; removed by cleanup
-	config     []byte       // the rendered opencode permission config (indented)
-	env        []string     // the child environment (credential-scrubbed + config)
-	timeout    timeoutPlan  // time limits applied via ctx
-	subst      scopeSubst   // the scope substitutions applied
-	audit      caps.Profile // the substituted profile recorded for audit
+	configPath       string       // absolute path the rendered config was written to
+	configDir        string       // per-invocation directory holding it; removed by cleanup
+	config           []byte       // the rendered opencode permission config (indented)
+	env              []string     // the child environment (credential-scrubbed + config)
+	timeout          timeoutPlan  // time limits applied via ctx
+	subst            scopeSubst   // the scope substitutions applied
+	audit            caps.Profile // the substituted profile recorded for audit
+	instructionPaths []string     // repo-relative paths denied in edit rules (D4)
 }
 
 // cleanup removes the per-invocation config directory. Idempotent and
@@ -97,33 +106,92 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 	// permissionScope.
 	substituted := substituteScopes(inv.Profile, subst)
 
-	config, buildErr := buildOpencodeConfig(substituted, subst)
+	// The repo-relative paths of the pinned instruction files feed the edit-deny
+	// rules (D4 layer 1). They are derived from inv.Instructions, which carries
+	// the pinned bytes the runner read from base_commit; the adapter stages the
+	// bytes into the per-invocation config directory below.
+	instructionRelPaths := make([]string, 0, len(inv.Instructions))
+	for _, file := range inv.Instructions {
+		instructionRelPaths = append(instructionRelPaths, file.RepoPath)
+	}
+
+	config, buildErr := buildOpencodeConfig(substituted, subst, instructionRelPaths)
 	if buildErr != nil {
 		return enforcementPlan{}, fmt.Errorf("opencode adapter: %w", buildErr)
 	}
-	compact, indented, renderErr := renderOpencodeConfigBytes(config)
-	if renderErr != nil {
-		return enforcementPlan{}, fmt.Errorf("opencode adapter: render config: %w", renderErr)
+
+	configDir, configPath, dirErr := createConfigDir()
+	if dirErr != nil {
+		return enforcementPlan{}, dirErr
 	}
 
-	configDir, configPath, writeErr := writeInvocationConfig(indented)
-	if writeErr != nil {
-		return enforcementPlan{}, writeErr
+	// Stage each pinned instruction file into the config directory and collect
+	// its absolute, forward-slash path. Step-0 finding (ADR 0002): opencode
+	// resolves ABSOLUTE instructions entries, so placing the pinned copies
+	// outside the worktree (where the agent cannot reach them) is both the
+	// tamper-proof location and a working delivery path. Delivery only adds —
+	// the runtime's own AGENTS.md injection still happens — but after D4's edit
+	// deny + the runner's pre-stage hash check the two copies are byte-identical.
+	instructionAbsPaths, stageErr := stageInstructionFiles(configDir, inv.Instructions)
+	if stageErr != nil {
+		_ = os.RemoveAll(configDir)
+		return enforcementPlan{}, stageErr
+	}
+	if len(instructionAbsPaths) > 0 {
+		config.Instructions = instructionAbsPaths
+	}
+
+	compact, indented, renderErr := renderOpencodeConfigBytes(config)
+	if renderErr != nil {
+		_ = os.RemoveAll(configDir)
+		return enforcementPlan{}, fmt.Errorf("opencode adapter: render config: %w", renderErr)
+	}
+	if writeErr := os.WriteFile(configPath, indented, 0o600); writeErr != nil {
+		_ = os.RemoveAll(configDir)
+		return enforcementPlan{}, fmt.Errorf("opencode adapter: write config: %w", writeErr)
 	}
 
 	return enforcementPlan{
-		configPath: configPath,
-		configDir:  configDir,
-		config:     indented,
-		env:        buildChildEnv(substituted, configPath, compact),
-		timeout:    timeoutPlan{hard: substituted},
-		subst:      subst,
-		audit:      substituted,
+		configPath:       configPath,
+		configDir:        configDir,
+		config:           indented,
+		env:              buildChildEnv(substituted, configPath, compact),
+		timeout:          timeoutPlan{hard: substituted},
+		subst:            subst,
+		audit:            substituted,
+		instructionPaths: instructionRelPaths,
 	}, nil
 }
 
-// writeInvocationConfig writes the rendered config to a fresh per-invocation
-// directory and returns (dir, path).
+// stageInstructionFiles writes each pinned instruction file into the per-
+// invocation config directory and returns the absolute, forward-slash paths to
+// list under opencode's `instructions`. Files are named by index and basename
+// so two declared paths that happen to share a basename do not clobber each
+// other. Mode 0600 matches the config file itself; cleanup removes the whole
+// directory.
+func stageInstructionFiles(configDir string, files []InstructionFile) ([]string, error) {
+	paths := make([]string, 0, len(files))
+	for index, file := range files {
+		if len(file.Content) == 0 {
+			// A file truncated to zero by the total budget, or missing at the
+			// commit, delivers nothing. Do not stage it: an empty instructions
+			// entry is noise, and opencode would still try to read it.
+			continue
+		}
+		basename := forwardSlashBase(file.RepoPath)
+		name := fmt.Sprintf("pinned-%d-%s", index, basename)
+		absolute := filepath.Join(configDir, name)
+		if err := os.WriteFile(absolute, file.Content, 0o600); err != nil {
+			return nil, fmt.Errorf("opencode adapter: stage instruction %q: %w", file.RepoPath, err)
+		}
+		paths = append(paths, filepath.ToSlash(absolute))
+	}
+	return paths, nil
+}
+
+// createConfigDir makes a fresh per-invocation directory for the rendered
+// config and the pinned instruction files. Returns the directory and the path
+// opencode.json will occupy.
 //
 // The directory lives OUTSIDE the worktree on purpose. A config inside the
 // worktree would be (a) writable by the very agent it constrains — fs.write is
@@ -131,17 +199,12 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 // feeds the auto_if_clean gate and can leak into the delivery diff. Only
 // `.agentum/` is added to the repo's local excludes; nothing else in the
 // worktree is free.
-func writeInvocationConfig(rendered []byte) (dir string, path string, err error) {
+func createConfigDir() (dir string, path string, err error) {
 	dir, err = os.MkdirTemp("", "agentum-opencode-")
 	if err != nil {
 		return "", "", fmt.Errorf("opencode adapter: create config dir: %w", err)
 	}
-	path = filepath.Join(dir, "opencode.json")
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", "", fmt.Errorf("opencode adapter: write config: %w", err)
-	}
-	return dir, path, nil
+	return dir, filepath.Join(dir, "opencode.json"), nil
 }
 
 // substituteScopes returns a copy of profile with every ${worktree} and
@@ -168,11 +231,18 @@ func substituteScopes(profile caps.Profile, subst scopeSubst) caps.Profile {
 }
 
 // opencodeConfig is the subset of the opencode config schema this adapter
-// writes: the permission map, and nothing else. Everything outside permissions
-// (providers, models, themes) stays the operator's business.
+// writes: the permission map, plus the pinned project-instruction files the
+// adapter itself staged. Everything else (providers, models, themes) stays the
+// operator's business.
+//
+// Instructions is NOT a permission key — it adds context (the pinned copies of
+// AGENTS.md and the project's declared instruction files) rather than widening a
+// permission. It therefore does not violate the "every permission key is set
+// explicitly" rule on opencodePermissionRules, which governs reach, not context.
 type opencodeConfig struct {
-	Schema     string                  `json:"$schema"`
-	Permission opencodePermissionRules `json:"permission"`
+	Schema       string                  `json:"$schema"`
+	Permission   opencodePermissionRules `json:"permission"`
+	Instructions []string                `json:"instructions,omitempty"`
 }
 
 // Permission actions, as opencode spells them.
@@ -222,9 +292,19 @@ type opencodePermissionRules struct {
 	WebSearch string `json:"websearch"`
 
 	// Reach the capability model has no token for, so deny is the only honest
-	// answer: a subagent runs outside the profile we computed, a skill injects
-	// instructions we did not render, and external_directory is the containment
-	// boundary for every read-shaped tool above.
+	// answer: a subagent runs outside the profile we computed, and
+	// external_directory is the containment boundary for every read-shaped tool
+	// above.
+	//
+	// Skill is the exception (ADR 0002 D5). A skill grants knowledge, not reach:
+	// an agent that reads a skill telling it to run a command or write a file
+	// still meets the same bash and edit rules below, so nothing escalates. In
+	// the single-owner threat model this codebase claims (accidental agent
+	// actions, not a hostile process), the skills on the machine are the
+	// operator's own. Skills are therefore allowed unconditionally; the
+	// protection that replaces a blanket deny is visibility — the runner probes
+	// `opencode debug skill` once per run and records each skill's name,
+	// location, and content hash in the manifest (ContextProber, ADR 0002 D6).
 	Task              string `json:"task"`
 	Skill             string `json:"skill"`
 	ExternalDirectory string `json:"external_directory"`
@@ -241,16 +321,27 @@ type opencodePermissionRules struct {
 // buildOpencodeConfig renders the deny-by-default opencode permission config
 // for an effective profile. Anything the profile does not grant resolves to
 // "deny"; granted categories resolve to "allow", with the profile's scopes
-// encoded as per-path / per-command refinement. Returns an error when a granted
-// path scope cannot be expressed as a rule opencode will match — the invocation
-// must not start on a profile the runtime would silently ignore.
-func buildOpencodeConfig(profile caps.Profile, subst scopeSubst) (opencodeConfig, error) {
-	edit, editErr := editRules(profile, subst)
+// encoded as per-path / per-command refinement. instructionPaths are the
+// absolute, forward-slash paths of the pinned instruction files the adapter has
+// staged into the per-invocation config directory (ADR 0002 D3); they are
+// listed under `instructions` so opencode loads the pinned bytes alongside the
+// runtime's own AGENTS.md injection. Returns an error when a granted path scope
+// cannot be expressed as a rule opencode will match — the invocation must not
+// start on a profile the runtime would silently ignore.
+func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPaths []string) (opencodeConfig, error) {
+	edit, editErr := editRules(profile, subst, instructionPaths)
 	if editErr != nil {
 		return opencodeConfig{}, editErr
 	}
 	readable := profile.Has(caps.CatFsRead)
 	network := profile.Has(caps.CatNetFetch)
+	// NOTE: config.Instructions is NOT set here. instructionPaths here are the
+	// repo-relative paths used only to build the edit-deny rules (D4 layer 1);
+	// the `instructions` entries that reach opencode must be ABSOLUTE paths to
+	// the staged pinned copies, which prepareEnforcement sets after staging.
+	// Setting both would leave a dead branch that ships worktree-relative paths
+	// (agent-writable) whenever the staged list is empty — a caller bug that
+	// would silently point opencode at the worktree copy.
 	return opencodeConfig{
 		Schema: "https://opencode.ai/config.json",
 		Permission: opencodePermissionRules{
@@ -269,7 +360,7 @@ func buildOpencodeConfig(profile caps.Profile, subst scopeSubst) (opencodeConfig
 			WebSearch: actionFor(network),
 
 			Task:              actionDeny,
-			Skill:             actionDeny,
+			Skill:             actionAllow,
 			ExternalDirectory: actionDeny,
 
 			Question: actionDeny,
@@ -363,7 +454,32 @@ func (rules *ruleList) MarshalJSON() ([]byte, error) {
 //
 // The rule list denies everything, then re-allows each granted scope — deny
 // first so the allows win under last-match-wins resolution.
-func editRules(profile caps.Profile, subst scopeSubst) (any, error) {
+//
+// instructionPaths (ADR 0002 D4, layer 1) are the repo-relative paths of the
+// pinned instruction files (e.g. "AGENTS.md", "docs/conventions.md"). After the
+// allows, each path is appended as an EXACT deny rule. A path whose basename
+// matches a runtime-injected filename (the autoInstructionBaseline set, e.g.
+// AGENTS.md) ALSO gets a `**/<basename>` name guard, because the runtime injects
+// that filename from anywhere in the tree — a nested copy the project never
+// declared can still reach the model. The root case (AGENTS.md at the repo
+// root) is exactly the one the guard exists for: the exact rule covers the root
+// and **/AGENTS.md covers every nested copy. Other declared paths get the exact
+// rule only (the runtime does not inject them from elsewhere). Last-match-wins
+// means these denies land after the granted scopes and override them: an
+// implementer with fs.write to the whole worktree cannot edit AGENTS.md to
+// rewrite the rules its reviewer will judge it by in the same run. The bash
+// escape path (a write outside the edit tool) is caught by the runner's
+// pre-stage hash check, not here — see internal/instructions and the runner's
+// restore step.
+//
+// Two traps: ruleList.add keeps a repeated pattern's original POSITION while
+// taking the new action, so an instruction pattern colliding with a granted
+// scope pattern would land in the wrong place. Assert (in tests) that the deny
+// patterns are distinct from the scope patterns. And when the profile grants no
+// write at all, `edit` is the bare string "deny" and no rule list exists —
+// adding instruction denies there is both unnecessary and a type error, so this
+// branch is skipped.
+func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string) (any, error) {
 	scopes := append(
 		scopesFor(profile, caps.CatArtifactWrite),
 		scopesFor(profile, caps.CatFsWrite)...,
@@ -379,7 +495,65 @@ func editRules(profile caps.Profile, subst scopeSubst) (any, error) {
 		}
 		rules.add(pattern, actionAllow)
 	}
+	// Instruction denies come last so last-match-wins makes them win over the
+	// granted scopes. De-duplicate to keep the rule list readable and to avoid
+	// re-stating a pattern (which ruleList.add would keep in its old position).
+	//
+	// Each path gets an EXACT deny. A path whose basename matches a
+	// runtime-injected filename (the autoInstructionBaseline set, e.g.
+	// AGENTS.md) ALSO gets a **/<basename> name guard — because the runtime
+	// injects that filename from anywhere in the tree, a nested copy the project
+	// never declared can still reach the model. The root case (AGENTS.md at the
+	// repo root) is exactly the one the guard exists for: the exact rule covers
+	// the root, and **/AGENTS.md covers every nested copy. Other declared paths
+	// (e.g. docs/conventions.md) get the exact rule only — the runtime does not
+	// inject them from elsewhere, so a same-named file in another directory is
+	// not an instruction-channel concern.
+	seen := make(map[string]bool, len(instructionPaths)*2)
+	for _, path := range instructionPaths {
+		basename := forwardSlashBase(path)
+		exact := forwardSlashClean(path)
+		if !seen[exact] {
+			rules.add(exact, actionDeny)
+			seen[exact] = true
+		}
+		if isRuntimeInjectedBasename(basename) {
+			guard := "**/" + basename
+			if !seen[guard] {
+				rules.add(guard, actionDeny)
+				seen[guard] = true
+			}
+		}
+	}
 	return rules, nil
+}
+
+// isRuntimeInjectedBasename reports whether opencode auto-injects a file of
+// this name from the project tree (so a nested copy the project never declared
+// can still reach the model and must be denied anywhere). Today that is
+// AGENTS.md at any depth. Kept as a function so the set has one owner.
+func isRuntimeInjectedBasename(basename string) bool {
+	for _, name := range autoInstructionBaseline {
+		if forwardSlashBase(name) == basename {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardSlashClean normalises a repo-relative instruction path to forward
+// slashes and a clean form, the shape opencode's permission matcher expects.
+func forwardSlashClean(path string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+}
+
+// forwardSlashBase returns the final path element of a forward-slash path.
+func forwardSlashBase(path string) string {
+	cleaned := forwardSlashClean(path)
+	if idx := strings.LastIndex(cleaned, "/"); idx >= 0 {
+		return cleaned[idx+1:]
+	}
+	return cleaned
 }
 
 // anyPath is opencode's match-everything pattern: `*` matches zero or more of

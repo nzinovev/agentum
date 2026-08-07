@@ -26,6 +26,7 @@ const schemaVersion = "1"
 //   - Model         — model + tier
 //   - Capabilities  — effective capability profile (pack ∩ stage ∩ grant)
 //   - Memory        — memory slice pulled into the run
+//   - Context       — pinned project instructions + enumerated skills (ADR 0002)
 //   - Artifacts     — input + output artifact revisions
 //   - Checks        — check set version + their results
 //   - HumanGates    — human gate decisions
@@ -46,6 +47,7 @@ type Body struct {
 	Model               *ModelEvidence       `json:"model,omitempty"`
 	Capabilities        *CapabilityProfile   `json:"capabilities,omitempty"`
 	Memory              *MemorySlice         `json:"memory,omitempty"`
+	Context             *ContextEvidence     `json:"context,omitempty"`
 	Artifacts           *ArtifactEvidence    `json:"artifacts,omitempty"`
 	Checks              *CheckEvidence       `json:"checks,omitempty"`
 	HumanGates          []HumanDecision      `json:"human_gates,omitempty"`
@@ -321,6 +323,7 @@ type expectedSection struct {
 
 var expectedSections = []expectedSection{
 	{name: "memory", present: func(body *Body) bool { return body.Memory != nil }, countsTowardCompleteness: false},
+	{name: "context", present: func(body *Body) bool { return body.Context != nil }, countsTowardCompleteness: true},
 	{name: "human_gates", present: func(body *Body) bool { return len(body.HumanGates) > 0 }, countsTowardCompleteness: true},
 	{name: "artifacts", present: func(body *Body) bool { return body.Artifacts != nil }, countsTowardCompleteness: true},
 	{name: "checks", present: func(body *Body) bool { return body.Checks != nil && body.Checks.Ran }, countsTowardCompleteness: true},
@@ -442,6 +445,9 @@ func mergeBodies(existing Body, patch Body) Body {
 	}
 	if patch.Memory != nil {
 		merged.Memory = patch.Memory
+	}
+	if patch.Context != nil {
+		merged.Context = mergeContextEvidence(merged.Context, patch.Context)
 	}
 	if patch.Artifacts != nil {
 		merged.Artifacts = mergeArtifactEvidence(merged.Artifacts, patch.Artifacts)

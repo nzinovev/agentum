@@ -221,7 +221,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 		{
 			name: "empty body reports every expected section missing",
 			body: Body{Schema: "1"},
-			want: []string{"memory", "human_gates", "artifacts", "checks", "capabilities", "prompts"},
+			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "prompts"},
 		},
 		{
 			name: "fully populated body reports nothing missing",
@@ -232,6 +232,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+				Context:      &ContextEvidence{SkillsProbe: "ok"},
 			},
 			want: nil,
 		},
@@ -241,7 +242,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{Stage: "spec"}}},
 				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
 			},
-			want: []string{"memory", "human_gates", "artifacts", "checks"},
+			want: []string{"memory", "context", "human_gates", "artifacts", "checks"},
 		},
 	}
 	for _, testCase := range tests {
@@ -315,6 +316,7 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Context:      &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !body.IsEvidenceComplete() {
 		t.Error("a run with every wired section present should be complete despite memory being absent")
@@ -336,6 +338,7 @@ func TestEvidenceComplete_GapOrAbsentSectionBlocks(t *testing.T) {
 		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Context:      &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !complete.IsEvidenceComplete() {
 		t.Fatal("baseline body should be complete")
@@ -566,8 +569,8 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 			t.Errorf("MissingSections reports %q — the new sections must not be in expectedSections", section)
 		}
 	}
-	// The expected sections list is unchanged.
-	wantMissing := []string{"memory", "human_gates", "artifacts", "checks", "capabilities", "prompts"}
+	// The expected sections list now includes context (ADR 0002).
+	wantMissing := []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "prompts"}
 	if len(missing) != len(wantMissing) {
 		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
 	}
