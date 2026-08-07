@@ -143,6 +143,12 @@ func (adapter *OpencodeAdapter) ProbeContext(ctx context.Context, inv Invocation
 // body of each skill is hashed and discarded; only the hash and byte size are
 // returned. A timeout, a non-zero exit, or malformed JSON is returned as an
 // error — the caller classifies it into SkillsProbe.
+//
+// The start/watcher/wait order is deliberate and mirrors Invoke: cmd.Start()
+// runs synchronously (writing cmd.Process) BEFORE watchCancellation's goroutine
+// can read cmd.Process via signalProcessGroup. Starting the watcher before Start
+// — the shape a plain cmd.Run() would push toward — is a data race on
+// cmd.Process. Start, then watch, then Wait.
 func (adapter *OpencodeAdapter) runDebugSkill(ctx context.Context, workdir string, env []string) ([]SkillRef, error) {
 	args := []string{adapter.binary, "debug", "skill"}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -154,9 +160,12 @@ func (adapter *OpencodeAdapter) runDebugSkill(ctx context.Context, workdir strin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	if startErr := cmd.Start(); startErr != nil {
+		return nil, fmt.Errorf("opencode debug skill: start: %w", startErr)
+	}
 	reaped := make(chan struct{})
 	watcherDone := watchCancellation(ctx, cmd, reaped)
-	runErr := cmd.Run()
+	runErr := cmd.Wait()
 	close(reaped)
 	<-watcherDone
 
