@@ -97,6 +97,14 @@ runtime refuses source writes until a human approves the named artifact.
 - `artifact.write` is **never** withheld. Every stage must still write
   `result.json`; `withArtifactFloor` guarantees the artifact-dir `edit` rule
   survives the cut.
+- **Rendered `edit` shape under withholding.** A withheld implementer profile
+  does NOT render as a bare `edit: "deny"`. `RoleImplementer` grants
+  `artifact.write:${artifact-root}/**`, which survives the withholding, so
+  `editRules` emits a rule list (`*` → deny, `${artifact-root}/**` → allow) —
+  the artifact floor is visible as the one allow. The load-bearing assertion is
+  `bash: "deny"` (exec.bash is gone, so `bashRules` returns the bare deny) and
+  the `*` → deny edit baseline. A bare `edit: "deny"` would only appear if the
+  role granted no write scope at all, which the floor prevents.
 
 The stored profile's `Source` records both `Withheld` (the category list) and
 `WithheldReason` (a stable phrase explaining why), so an audit reader sees what

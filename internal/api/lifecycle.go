@@ -71,93 +71,37 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// handleInvocationAdvance POST /api/v1/tasks/{id}/invocations/{iid}/advance
-// Pass a gate → the next stage runs (a fresh invocation). When the task's
-// current stage is the pack's approval stage (ADR 0003 D3/D4), advancing IS the
-// approval: the task_approvals row is written in the same tx as the transition,
-// the enqueue, and the human-decision evidence. Idempotent — a repeat advance
-// that matches the recorded decision returns 200 and writes nothing; a
-// conflicting decision on an already-decided gate stays a 409.
-func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
-	if !ok {
-		return
+// approvalNameFinalReview is the orchestrator-owned approval name for the final
+// gate. The plan gate's name is pack-declared (resolved via planApprovalName).
+const approvalNameFinalReview = "final_review"
+
+// planApprovalName resolves the pack-declared plan-approval name for a task,
+// independent of the task's current stage (the runner may have already advanced
+// past the approval stage, so keying on current_stage is a race). Returns "" if
+// the pack declares no source_write approval. This is the durable key the
+// task_approvals row is written under; reject and the plan-gate idempotency
+// check key on it so a reject never collides with an approve.
+func (api *API) planApprovalName(ctx context.Context, task sqlc.Task) string {
+	if api.packs == nil {
+		return ""
 	}
-	if decision := authz.Can(r.Context(), principal, "task:advance", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
+	taskPack, err := api.packs.Resolve(ctx, task.PipelinePack)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
-		return
+		return ""
 	}
-	if engine.TaskState(task.State) != engine.StatePausedGate {
-		// Idempotency: if this gate was already decided approved, a repeat
-		// advance returns the current task without re-transitioning (the task
-		// has already moved past the gate). A different decision stays a 409.
-		if api.advanceIsIdempotent(w, r, task, principal) {
-			return
-		}
-		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"advance requires paused_gate; task is "+task.State)
-		return
+	approval, hasApproval := taskPack.SourceWriteApproval()
+	if !hasApproval {
+		return ""
 	}
-	decision := humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gateAdvance, decisionApproved,
-		principal.UserID, time.Now().UTC(),
-	)
-	// Resolve the pack's approval declaration (if any) for the current stage.
-	// When the stage is the approval stage, the task_approvals row joins the tx.
-	approvalPlan, _ := api.planStageApproval(r.Context(), task, currentStageOr(task.CurrentStage, ""))
-	updated, err := api.applyResume(r, task, engine.EventAdvance, "advance", nil, decision, approvalPlan, principal)
-	if err != nil {
-		if isHumanDecisionRecordFailure(err) {
-			writeError(w, http.StatusInternalServerError, codeInternal,
-				"could not record the advance decision; the task was not advanced")
-			return
-		}
-		statusForTransition(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, toTaskResponse(updated))
+	return approval.Name
 }
 
-// advanceIsIdempotent handles a repeat advance on a task that has already left
-// paused_gate. When the pack declared an approval on the current stage and the
-// recorded decision matches "approved", the repeat returns 200 with the current
-// task and writes nothing — a retried POST must be safe. A conflicting decision
-// stays a 409. Returns true when the handler has written its response.
-func (api *API) advanceIsIdempotent(w http.ResponseWriter, r *http.Request, task sqlc.Task, principal authz.Principal) bool {
-	plan, ok := api.planStageApproval(r.Context(), task, currentStageOr(task.CurrentStage, ""))
-	if !ok {
-		return false
-	}
-	row, err := api.queries.GetApproval(r.Context(), sqlc.GetApprovalParams{
-		TenantID: task.TenantID, TaskID: task.ID, Name: plan.name,
-	})
-	if err != nil {
-		return false // no recorded decision — not idempotent, fall through to 409
-	}
-	if row.Decision == "approved" {
-		writeJSON(w, http.StatusOK, toTaskResponse(task))
-		return true
-	}
-	writeError(w, http.StatusConflict, codeIllegalTransition,
-		"gate "+plan.name+" already decided "+row.Decision+"; cannot approve")
-	return true
-}
-
-// planStageApproval resolves the pack's source_write approval declaration and
-// reports whether the given stage is its approval stage. Returns the approval
-// and true when the pack declares an approval hosted by currentStage; false
-// otherwise (no approval block, or a different stage). Used by the advance
-// handler to decide whether to write a task_approvals row in the transition tx.
-func (api *API) planStageApproval(ctx context.Context, task sqlc.Task, currentStage string) (planApproval, bool) {
+// planApprovalForStage resolves the pack-declared source_write approval when the
+// given stage is its approval stage. Used by the advance handler to decide
+// whether to write a task_approvals row in the transition tx (only when the
+// task is AT the approval stage). Returns the approval and true then; false
+// otherwise (no approval block, or a different stage).
+func (api *API) planApprovalForStage(ctx context.Context, task sqlc.Task, currentStage string) (planApproval, bool) {
 	if api.packs == nil || currentStage == "" {
 		return planApproval{}, false
 	}
@@ -183,25 +127,86 @@ type planApproval struct {
 	artifact string
 }
 
-// finalDecisionIsIdempotent handles a repeat approve or reject on a task that
-// has already left awaiting_final_review (ADR 0003 D4). When the recorded
-// final_review decision matches wantDecision, the repeat returns 200 with the
-// current task and writes nothing; a conflicting decision stays a 409. Returns
+// decisionIsIdempotent handles a repeat gate decision on a task that has already
+// left the gate's state. When the recorded decision under name matches
+// wantDecision, the repeat returns 200 with the current task and writes nothing
+// — a retried POST must be safe. A conflicting decision stays a 409. Returns
 // true when the handler has written its response.
-func (api *API) finalDecisionIsIdempotent(w http.ResponseWriter, r *http.Request, task sqlc.Task, wantDecision string) bool {
+//
+// Keyed on the durable approval name (tenant, task, name), not on current_stage
+// (which the runner has advanced) or a hardcoded constant. The caller resolves
+// the name once from the pack / the final_review constant and passes it here.
+func (api *API) decisionIsIdempotent(w http.ResponseWriter, r *http.Request, task sqlc.Task, name, wantDecision string) bool {
 	row, err := api.queries.GetApproval(r.Context(), sqlc.GetApprovalParams{
-		TenantID: task.TenantID, TaskID: task.ID, Name: "final_review",
+		TenantID: task.TenantID, TaskID: task.ID, Name: name,
 	})
 	if err != nil {
-		return false // no recorded decision — not idempotent, fall through to 409
+		return false // no recorded decision — not idempotent, fall through
 	}
 	if row.Decision == wantDecision {
 		writeJSON(w, http.StatusOK, toTaskResponse(task))
 		return true
 	}
 	writeError(w, http.StatusConflict, codeIllegalTransition,
-		"final_review already decided "+row.Decision+"; cannot "+wantDecision)
+		"gate "+name+" already decided "+row.Decision+"; cannot "+wantDecision)
 	return true
+}
+
+// handleInvocationAdvance POST /api/v1/tasks/{id}/invocations/{iid}/advance
+// Pass a gate → the next stage runs (a fresh invocation). When the task's
+// current stage is the pack's approval stage (ADR 0003 D3/D4), advancing IS the
+// approval: the task_approvals row is written in the same tx as the transition,
+// the enqueue, and the human-decision evidence. Idempotent — a repeat advance
+// that matches the recorded decision returns 200 and writes nothing; a
+// conflicting decision on an already-decided gate stays a 409.
+func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if decision := authz.Can(r.Context(), principal, "task:advance", r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+		return
+	}
+	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
+			return
+		}
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
+		return
+	}
+	planName := api.planApprovalName(r.Context(), task)
+	if engine.TaskState(task.State) != engine.StatePausedGate {
+		// Idempotency: if the plan gate was already decided approved, a repeat
+		// advance returns the current task without re-transitioning. Keyed on the
+		// pack-declared plan name (not current_stage — the runner has advanced
+		// past it, so reading current_stage would race the runner).
+		if planName != "" && api.decisionIsIdempotent(w, r, task, planName, "approved") {
+			return
+		}
+		writeError(w, http.StatusConflict, codeIllegalTransition,
+			"advance requires paused_gate; task is "+task.State)
+		return
+	}
+	decision := humanDecisionPatch(
+		currentStageOr(task.CurrentStage, ""), gateAdvance, decisionApproved,
+		principal.UserID, time.Now().UTC(),
+	)
+	// Write the task_approvals row only when the task is AT the approval stage.
+	approvalPlan, _ := api.planApprovalForStage(r.Context(), task, currentStageOr(task.CurrentStage, ""))
+	updated, err := api.applyResume(r, task, engine.EventAdvance, "advance", nil, decision, approvalPlan, principal)
+	if err != nil {
+		if isHumanDecisionRecordFailure(err) {
+			writeError(w, http.StatusInternalServerError, codeInternal,
+				"could not record the advance decision; the task was not advanced")
+			return
+		}
+		statusForTransition(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
 // handleRejectTask POST /api/v1/tasks/{id}/reject
@@ -233,11 +238,33 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reject is valid at either human gate: awaiting_final_review (final gate)
-	// or paused_gate (plan gate). Anywhere else it is illegal unless idempotent.
+	// or paused_gate (plan gate, which also hosts plan_not_approved / drift
+	// stops). Anywhere else it is illegal unless idempotent.
 	atFinalGate := engine.TaskState(task.State) == engine.StateAwaitingFinalReview
 	atPlanGate := engine.TaskState(task.State) == engine.StatePausedGate
+	// Resolve the durable approval name this reject binds to, ONCE, from the
+	// task's state and the pack. At the final gate it is the orchestrator-owned
+	// "final_review"; at the plan gate it is the pack-declared plan-approval name
+	// (resolved from the pack, not hardcoded — a hardcoded "plan" would collide
+	// with the recorded approve when the pack names its approval differently, and
+	// ON CONFLICT DO NOTHING would silently discard the reject). The same name
+	// keys the idempotency check, so a repeat reject after any gate reject
+	// returns 200 regardless of which gate fired first.
+	planName := api.planApprovalName(r.Context(), task)
+	rejectName := approvalNameFinalReview
+	if atPlanGate {
+		rejectName = planName
+		if rejectName == "" {
+			// A pack with no source_write approval has no plan gate to reject at;
+			// a paused_gate stop there is not an approval decision. Treat it as
+			// final_review so the reject still records under a stable name rather
+			// than guessing. (Should not happen for the shipped pack, but a pack
+			// author may pause at a non-approval gate.)
+			rejectName = approvalNameFinalReview
+		}
+	}
 	if !atFinalGate && !atPlanGate {
-		if api.finalDecisionIsIdempotent(w, r, task, "rejected") {
+		if api.decisionIsIdempotent(w, r, task, rejectName, "rejected") {
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
@@ -245,7 +272,7 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if engine.IsTerminal(engine.TaskState(task.State)) {
-		if api.finalDecisionIsIdempotent(w, r, task, "rejected") {
+		if api.decisionIsIdempotent(w, r, task, rejectName, "rejected") {
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition, "task is already terminal: "+task.State)
@@ -264,17 +291,6 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		currentStageOr(task.CurrentStage, ""), gateReject, decisionRejected,
 		principal.UserID, time.Now().UTC(),
 	)
-	approvalName := "final_review"
-	if atPlanGate {
-		// At the plan gate, record the decision against the pack's approval name
-		// when one exists, so the plan-approval audit and the final-review audit
-		// are distinguishable.
-		if plan, ok := api.planStageApproval(r.Context(), task, currentStageOr(task.CurrentStage, "")); ok {
-			approvalName = plan.name
-		} else {
-			approvalName = "plan"
-		}
-	}
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
@@ -291,10 +307,20 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordLenient); err != nil {
 			return err
 		}
-		// Record the durable reject decision. CreateApproval's ON CONFLICT DO
-		// NOTHING makes a repeated reject idempotent.
+		// Record the durable reject decision under the resolved name. A prior
+		// approve under the SAME name (same gate) is a conflicting decision — but
+		// CreateApproval's ON CONFLICT DO NOTHING would mask it. So when a row
+		// already exists under this name with a different decision, fail the tx
+		// with a 409-shape error instead of silently dropping the reject. This is
+		// the case the review flagged: reject at a non-approval paused_gate used
+		// to hardcode "plan", collide, and seal "approved".
+		if existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
+			TenantID: task.TenantID, TaskID: task.ID, Name: rejectName,
+		}); getErr == nil && existing.Decision != "rejected" {
+			return conflictingGateDecision{name: rejectName, existing: existing.Decision}
+		}
 		if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
-			TenantID: task.TenantID, TaskID: task.ID, Name: approvalName,
+			TenantID: task.TenantID, TaskID: task.ID, Name: rejectName,
 			Decision: "rejected", ArtifactRevisionID: sql.NullString{}, Actor: principal.UserID,
 		}); createErr != nil && !errors.Is(createErr, sql.ErrNoRows) {
 			return createErr
@@ -302,11 +328,30 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		updated = transitioned
 		return nil
 	}); err != nil {
+		var conflict conflictingGateDecision
+		if errors.As(err, &conflict) {
+			writeError(w, http.StatusConflict, codeIllegalTransition,
+				"gate "+conflict.name+" already decided "+conflict.existing+"; cannot reject")
+			return
+		}
 		logUnexpected(api.log, err, "RejectTask tx")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
+}
+
+// conflictingGateDecision is returned inside the reject tx when a decision row
+// already exists under the resolved gate name with a different decision. The
+// handler surfaces it as a 409 rather than letting CreateApproval's
+// ON CONFLICT DO NOTHING silently discard the reject.
+type conflictingGateDecision struct {
+	name     string
+	existing string
+}
+
+func (conflict conflictingGateDecision) Error() string {
+	return "gate " + conflict.name + " already decided " + conflict.existing
 }
 
 // handleInvocationApprove POST /api/v1/tasks/{id}/invocations/{iid}/approve
@@ -336,7 +381,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		// reached done returns 200 with the current task when the recorded
 		// final_review decision matches "approved"; a conflicting decision stays
 		// a 409. A retried POST must be safe.
-		if api.finalDecisionIsIdempotent(w, r, task, "approved") {
+		if api.decisionIsIdempotent(w, r, task, approvalNameFinalReview, "approved") {
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,

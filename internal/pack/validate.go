@@ -512,6 +512,7 @@ func (p *Pack) validateApprovals() []string {
 	}
 	var problems []string
 	seenNames := make(map[string]bool, len(p.Approvals))
+	sourceWriteCount := 0
 	for index, approval := range p.Approvals {
 		if strings.TrimSpace(approval.Name) == "" {
 			problems = append(problems, fmt.Sprintf("approvals[%d].name is empty", index))
@@ -540,6 +541,14 @@ func (p *Pack) validateApprovals() []string {
 
 		if !knownUnlocks[Unlock(approval.Unlocks)] {
 			problems = append(problems, fmt.Sprintf("approvals[%d].unlocks %q is not one of the known unlock names {source_write}", index, approval.Unlocks))
+		} else if Unlock(approval.Unlocks) == UnlockSourceWrite {
+			// SourceWriteApproval() returns the first source_write approval; a
+			// second one would be silently inert (the runner never reads it).
+			// At most one is allowed so the declaration and the runtime agree.
+			sourceWriteCount++
+			if sourceWriteCount > 1 {
+				problems = append(problems, "approvals declares more than one source_write approval; at most one is allowed")
+			}
 		}
 	}
 	return problems

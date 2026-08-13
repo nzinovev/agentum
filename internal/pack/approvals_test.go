@@ -112,6 +112,19 @@ func TestValidate_Approvals_NegativeCases(t *testing.T) {
 			wantSubstr: "lists name \"plan\" more than once",
 		},
 		{
+			// Two source_write approvals with DIFFERENT names would both pass
+			// the unique-name check, but SourceWriteApproval() returns only the
+			// first — the second is silently inert. The validator rejects this.
+			name: "two source_write approvals with different names",
+			transform: func(manifest string) string {
+				return strings.Replace(manifest,
+					"  - {name: plan, stage: plan, artifact: plan.md, unlocks: source_write}",
+					"  - {name: plan, stage: plan, artifact: plan.md, unlocks: source_write}\n  - {name: design, stage: plan, artifact: design.md, unlocks: source_write}",
+					1)
+			},
+			wantSubstr: "more than one source_write approval",
+		},
+		{
 			name: "unknown unlock",
 			transform: func(manifest string) string {
 				return strings.Replace(manifest, "unlocks: source_write}", "unlocks: deploy}", 1)

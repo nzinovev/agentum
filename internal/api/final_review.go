@@ -1,14 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 
 	"github.com/nzinovev/agentum/internal/agent"
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/runner"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -93,6 +96,10 @@ type finalReviewDecision struct {
 func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePrincipal(w, r)
 	if !ok {
+		return
+	}
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, r.PathValue("id")); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
@@ -184,7 +191,11 @@ func (api *API) finalReviewDecisions(ctx context.Context, task sqlc.Task) []fina
 }
 
 // finalReviewStages groups the current artifact revisions by stage for the
-// stages section of the payload.
+// stages section of the payload. Only artifact-dir-resident kinds (result_json,
+// verdict_json, plan_md, diff, diff_stat) are stage-scoped — their revision
+// names are "<stage>/<file>". Agent-declared source files (kind file/code/test,
+// names like "internal/api/foo.go") are worktree paths, not stage artifacts, and
+// must not be split into a fake stage named "internal".
 func (api *API) finalReviewStages(ctx context.Context, task sqlc.Task) []finalReviewStage {
 	revs, err := api.queries.ListCurrentArtifactRevisionsForTask(ctx, sqlc.ListCurrentArtifactRevisionsForTaskParams{
 		TaskID: task.ID, TenantID: task.TenantID,
@@ -195,6 +206,9 @@ func (api *API) finalReviewStages(ctx context.Context, task sqlc.Task) []finalRe
 	byStage := map[string]*finalReviewStage{}
 	order := []string{}
 	for _, rev := range revs {
+		if !isStageScopedKind(rev.Kind) {
+			continue
+		}
 		stage, file, ok := splitStageFile(rev.Name)
 		if !ok {
 			continue
@@ -216,12 +230,32 @@ func (api *API) finalReviewStages(ctx context.Context, task sqlc.Task) []finalRe
 	return out
 }
 
+// isStageScopedKind reports whether a revision kind lives in a per-stage artifact
+// dir (name "<stage>/<file>") rather than the worktree proper. Mirrors the
+// runner's isArtifactDirKind so the payload and the sync redirect agree on which
+// revisions are stage-scoped. Agent-declared source files (kind "file"/"code")
+// are NOT stage-scoped and are excluded from the stages section.
+func isStageScopedKind(kind string) bool {
+	switch kind {
+	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat":
+		return true
+	}
+	return false
+}
+
 // finalReviewDiffAndVerdict scans the current revisions for the latest diff and
-// verdict artifacts, returning refs the client fetches via the content
-// endpoints.
+// verdict artifacts. The diff's Truncated flag is read from the patch bytes
+// (the orchestrator appends an explicit marker when it caps the patch — a size
+// comparison would not distinguish a cap-sized patch from a truncated one). The
+// review verdict is parsed from the latest reviewer's verdict.json so the
+// payload carries the actual verdict + findings, not an empty struct. Both are
+// best-effort: a missing store, a missing revision, or an unparseable verdict
+// yield nil rather than failing the whole payload.
 func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, stages []finalReviewStage) (*finalReviewDiff, *finalReviewVerdict) {
 	var diff *finalReviewDiff
-	// Prefer the last reviewer stage's diff; fall back to any diff revisions.
+	// Collect the diff revisions across reviewer stages (each reviewer stage
+	// produced its own diff against base_commit; the payload surfaces all of
+	// them by revision id, and flags truncation if ANY patch was capped).
 	for _, stage := range stages {
 		for _, artifact := range stage.Artifacts {
 			if artifact.Kind == "diff" && diff == nil {
@@ -232,28 +266,32 @@ func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, s
 			}
 		}
 	}
+	if diff != nil && diff.PatchRevisionID != "" && api.art != nil {
+		if patchBytes, err := api.art.GetBytes(ctx, task.TenantID, diff.PatchRevisionID); err == nil {
+			diff.Truncated = bytes.Contains(patchBytes, []byte(runner.DiffTruncationMarker))
+		}
+	}
 	// Review verdict: read the latest reviewer's verdict.json content and parse
-	// it. Best-effort — a missing or unparseable verdict yields nil.
+	// it. Iterate newest-stage-first so the most recent review wins.
 	var review *finalReviewVerdict
 	for index := len(stages) - 1; index >= 0 && review == nil; index-- {
 		stage := stages[index]
 		for _, artifact := range stage.Artifacts {
-			if artifact.Kind != "verdict_json" {
+			if artifact.Kind != "verdict_json" || api.art == nil {
 				continue
 			}
-			rev, err := api.queries.GetArtifactRevision(ctx, sqlc.GetArtifactRevisionParams{
-				ID: artifact.RevisionID, TenantID: task.TenantID,
-			})
-			if err != nil || rev.ContentSize == 0 {
+			verdictBytes, err := api.art.GetBytes(ctx, task.TenantID, artifact.RevisionID)
+			if err != nil || len(verdictBytes) == 0 {
 				continue
 			}
-			// The content is fetched through the artifact store; for the payload
-			// we surface the parsed verdict shape only when the store exposes it.
-			// Without a content read here (the store is behind the API), we
-			// surface the revision id and let the client fetch+parse. The verdict
-			// field stays empty in this assembly path.
-			review = &finalReviewVerdict{}
-			_ = rev
+			parsed, parseErr := agent.ParseVerdictJSON(verdictBytes)
+			if parseErr != nil {
+				continue // unparseable verdict — surface nothing rather than a guess
+			}
+			review = &finalReviewVerdict{
+				Verdict:  string(parsed.Verdict),
+				Findings: parsed.Findings,
+			}
 		}
 	}
 	return diff, review

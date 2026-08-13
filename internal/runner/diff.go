@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
@@ -88,10 +89,13 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 		runner.log.Warn("produce diff: write stat", "task", run.task.ID, "error", writeErr)
 		return nil
 	}
-	// Capture both as immutable revisions. A refused Put (secret scanner) is
-	// recorded as a gap + event rather than vanishing — a diff of a real change
-	// is the single most likely artifact to trip the scanner.
-	patchRev, patchStored := runner.ingest(ctx, run, stageID, "", stageID+"/diff.patch", "diff", patchBody)
+	// Capture both as immutable revisions with ActorSystem — the orchestrator
+	// produced this diff, not the agent, so the record attributes it correctly
+	// and D5's "the implementer cannot shape what its reviewer sees" is
+	// verifiable from the actor on the revision row. A refused Put (secret
+	// scanner) is recorded as a gap + event rather than vanishing — a diff of a
+	// real change is the single most likely artifact to trip the scanner.
+	patchRev, patchStored := runner.ingest(ctx, run, stageID, "", stageID+"/diff.patch", "diff", patchBody, artifacts.ActorSystem)
 	if patchStored {
 		ref.PatchRevisionID = patchRev.ID
 	} else {
@@ -101,18 +105,26 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 			"stage": stageID, "name": stageID + "/diff.patch", "kind": "diff",
 		})
 	}
-	statRev, statStored := runner.ingest(ctx, run, stageID, "", stageID+"/diff.stat", "diff_stat", statRaw)
+	statRev, statStored := runner.ingest(ctx, run, stageID, "", stageID+"/diff.stat", "diff_stat", statRaw, artifacts.ActorSystem)
 	if statStored {
 		ref.StatRevisionID = statRev.ID
 	}
 	return ref
 }
 
+// DiffTruncationMarker is the byte sequence produceDiff appends to a capped
+// diff.patch so a reader can tell the patch was cut at the size cap. Exported
+// because the final-review payload (internal/api) detects truncation by
+// scanning the stored patch bytes for this marker — the only durable signal
+// (content_size is the truncated size, not the original). Changing this string
+// is a wire-format change that breaks truncation detection; keep it stable.
+const DiffTruncationMarker = "\n--- diff truncated by Agentum at the size cap; see diff.stat and read named files directly ---\n"
+
 // capDiffPatch truncates patch to at most cap bytes on a hunk boundary ("@@"),
-// appending an explicit truncation marker so a reader knows the patch was cut.
-// Returns (body, truncated). When the patch fits, it is returned verbatim and
-// truncated is false. Truncating on a hunk boundary keeps every retained hunk
-// complete and reviewable, rather than cutting mid-hunk.
+// appending DiffTruncationMarker so a reader knows the patch was cut. Returns
+// (body, truncated). When the patch fits, it is returned verbatim and truncated
+// is false. Truncating on a hunk boundary keeps every retained hunk complete and
+// reviewable, rather than cutting mid-hunk.
 func capDiffPatch(patch []byte, cap int) (body []byte, truncated bool) {
 	if len(patch) <= cap {
 		return patch, false
@@ -124,7 +136,7 @@ func capDiffPatch(patch []byte, cap int) (body []byte, truncated bool) {
 	if lastHunk > 0 {
 		cutoff = lastHunk + 1 // include the newline before the hunk header
 	}
-	marker := []byte("\n--- diff truncated by Agentum at the size cap; see diff.stat and read named files directly ---\n")
+	marker := []byte(DiffTruncationMarker)
 	truncated = true
 	return append(patch[:cutoff], marker...), truncated
 }

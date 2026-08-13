@@ -950,11 +950,16 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 		return nil
 	}
 	if !run.sourceWriteUnlock.Granted {
+		// EventStopGate (not EventStopUser): a gate is what this is — the human
+		// resolves it by approving the plan (advance, which re-enters drive() and
+		// now finds the granted approval) or by rejecting. paused_user_stop's only
+		// forward action is continue, which loops straight back into this refusal;
+		// paused_gate carries advance + reject + cancel, the actual exit set.
 		return &haltDecision{
 			stageID: stageID,
 			decision: Decision{
 				Action:     ActionPause,
-				FSMEvent:   engine.EventStopUser,
+				FSMEvent:   engine.EventStopGate,
 				StopReason: "plan_not_approved",
 			},
 		}
@@ -962,13 +967,16 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 	// Granted — but the approval binds to a plan revision. If the current
 	// revision of the approval artifact no longer matches the approved one,
 	// someone edited the plan AFTER approving it; the implementer would then
-	// work within a plan the human never saw. That is a controlled stop too.
+	// work within a plan the human never saw. That is a controlled stop too:
+	// paused_gate so reject/cancel remain exits (advance will loop here until
+	// the plan is re-approved or the run is abandoned — drift is a genuine
+	// stuck state, and surfacing it as a gate lets a human act on it).
 	if runner.detectPlanRevisionDrift(ctx, run) {
 		return &haltDecision{
 			stageID: stageID,
 			decision: Decision{
 				Action:     ActionPause,
-				FSMEvent:   engine.EventStopUser,
+				FSMEvent:   engine.EventStopGate,
 				StopReason: "plan_revision_drift",
 			},
 		}

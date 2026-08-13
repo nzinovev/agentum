@@ -327,6 +327,57 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	}
 }
 
+// TestRunner_PlanApprovalNotApprovedStopsAtPausedGate (ADR 0003 D3/F9): a pack
+// declaring a source_write approval, whose task has no approval row, must refuse
+// to enter the implementer stage and stop in paused_gate (plan_not_approved) —
+// NOT paused_user_stop, whose only forward action (continue) would loop straight
+// back into the refusal. The plan stage runs with gate:auto here so the loop
+// reaches the implementer without a human pause; the refusal is what stops it.
+func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := &pack.Pack{
+		API: "agentum/v1", Pack: pack.Meta{Name: "test", Version: "0.1.0"},
+		Tiers: pack.Tiers{Default: "fast"}, Entry: "plan",
+		Approvals: []pack.Approval{{Name: "plan", Stage: "plan", Artifact: "plan.md", Unlocks: "source_write"}},
+		Stages: map[string]pack.Stage{
+			"plan":      {Gate: pack.GateAuto, Role: "analyst", Prompt: "plan.md", Transitions: []pack.Transition{{To: "implement"}}},
+			"implement": {Gate: pack.GateAuto, Role: "implementer", Prompt: "implement.md", Transitions: []pack.Transition{{To: "done"}}},
+			"done":      {},
+		},
+		PromptText: map[string]string{"plan": "plan", "implement": "implement"},
+	}
+	task := sqlc.Task{ID: "Tpa", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	// No approvals map seeded → GetApproval returns sql.ErrNoRows → unlock absent.
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"plan": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "Tpa", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("state = %q, want paused_gate (plan_not_approved must land in paused_gate so advance/reject are exits, not paused_user_stop whose only exit is continue)", got)
+	}
+	// The implementer was never invoked — the refusal fired before invokeStage.
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("expected 1 invocation (plan only; implementer refused), got %d", count)
+	}
+	// Confirm the stop reason is recorded.
+	store.mu.Lock()
+	currentStage := store.task.CurrentStage.String
+	store.mu.Unlock()
+	if currentStage != "implement" {
+		t.Fatalf("current_stage = %q, want implement (the refused stage)", currentStage)
+	}
+}
+
 func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()

@@ -117,7 +117,7 @@ func (runner *Runner) captureIngest(
 	bytes []byte,
 	outputs []manifest.ArtifactRef,
 ) []manifest.ArtifactRef {
-	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes, artifacts.ActorAgent)
 	if !stored {
 		return outputs
 	}
@@ -195,7 +195,7 @@ func (runner *Runner) captureFile(
 		return outputs
 	}
 	revisionName := stageID + "/" + name
-	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes, artifacts.ActorAgent)
 	if !stored {
 		return outputs
 	}
@@ -228,6 +228,7 @@ func (runner *Runner) ingest(
 	run stageRun,
 	stageID, invocationID, revisionName, kind string,
 	bytes []byte,
+	actor artifacts.Actor,
 ) (artifacts.Revision, bool) {
 	revision, putErr := runner.art.Put(ctx, artifacts.PutParams{
 		TenantID: run.task.TenantID,
@@ -237,7 +238,7 @@ func (runner *Runner) ingest(
 		Kind:     kind,
 		Bytes:    bytes,
 		Source:   invocationID,
-		Actor:    artifacts.ActorAgent,
+		Actor:    actor,
 	})
 	if putErr != nil {
 		runner.log.Warn("capture artifact: put",
