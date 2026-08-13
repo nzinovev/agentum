@@ -6,11 +6,16 @@
 //   - **Deny by default.** Anything not present in the effective Profile is
 //     forbidden. There is no "implicit grant"; an empty input set is an empty
 //     profile.
-//   - **Effective = intersection.** The effective profile for one invocation is
-//     the intersection of four inputs: the runtime's supported set (what the
-//     adapter can technically enforce), the pack's declared set, the stage's
-//     declared set, and the role template (optionally widened by a per-run
-//     grant). A capability absent from any input is absent from the result.
+//   - **Effective = intersection, minus a withholding.** The effective profile
+//     for one invocation is the intersection of four inputs: the runtime's
+//     supported set (what the adapter can technically enforce), the pack's
+//     declared set, the stage's declared set, and the role template (optionally
+//     widened by a per-run grant), MINUS an explicit withholding (ADR 0003 D3).
+//     A capability absent from any input, or withheld, is absent from the
+//     result. The withholding is the one subtractive input in an otherwise
+//     additive-then-intersecting model — it lets the runner remove a category
+//     for the whole run (e.g. before a human approves a plan) without weakening
+//     any role template.
 //   - **Roles carry scope.** Path and command scopes live on the role template
 //     (e.g. an implementer's fs.write is scoped to its worktree). The pack and
 //     stage declare categories without scope; the role refines them. This keeps
@@ -20,6 +25,14 @@
 //     the orchestrator's own (checkpoints, result_commit capture, branch
 //     cleanup). No agent role includes it; deny-by-default keeps it out of every
 //     agent invocation regardless of what a pack declares.
+//   - **Withholding is subtractive (ADR 0003 D3).** Effective first intersects
+//     the four inputs, then drops any grant whose category is in Input.Withheld.
+//     A withheld category is removed regardless of role, pack, or stage. The
+//     motivating use is the plan-approval lock: SourceWriteCategories are
+//     withheld while no human has approved the plan, so fs.write / git.write /
+//     exec.bash are refused even though the role and the pack grant them.
+//     artifact.write is never withheld — every stage must still be able to write
+//     result.json, which withArtifactFloor guarantees.
 //
 // v1 scope: this model protects against *accidental* agent actions in a
 // single-owner local runtime, not against a malicious process. The documented
@@ -89,6 +102,17 @@ const (
 	// model redesign.
 )
 
+// SourceWriteCategories is the closed set of categories a source_write approval
+// unlocks (ADR 0003 D3). While the run's source_write approval is absent, the
+// runner passes this set as Input.Withheld for every stage, so the runtime
+// refuses source writes regardless of role — a pack that mislabels a
+// source-writing stage as an analyst gains nothing. exec.bash is in the set on
+// purpose: withholding fs.write while leaving bash: allow would be theatre, since
+// bashRules allows `*` with a deny list that does not stop
+// `printf ... > internal/x/y.go`. artifact.write is NOT in the set: every stage
+// must still write result.json, and withArtifactFloor guarantees it.
+var SourceWriteCategories = []Category{CatFsWrite, CatGitWrite, CatExecBash}
+
 // CategoryOf reports the enforcement category a token belongs to — the value
 // an enforcer declares support for. Scoped tokens drop the scope
 // ("fs.write:src/**" → "fs.write"); named-entity tokens (secret.*/mcp.*)
@@ -126,6 +150,15 @@ type Sources struct {
 	Stage      []Token `json:"stage,omitempty"`      // stage-level subset
 	Role       Role    `json:"role"`                 // role template applied
 	Invocation []Token `json:"invocation,omitempty"` // per-run grant additions
+
+	// Withheld lists the categories removed AFTER the four-way intersection, as
+	// a subtractive input (ADR 0003 D3). Empty for a run with no withholding;
+	// SourceWriteCategories when a human approval is pending. The stored profile
+	// records both what was granted and what was deliberately removed.
+	Withheld []Category `json:"withheld,omitempty"`
+	// WithheldReason explains the withholding in a stable phrase, so an audit
+	// reader does not have to infer it from the list. Empty alongside Withheld.
+	WithheldReason string `json:"withheld_reason,omitempty"`
 }
 
 // Has reports whether the profile grants the given category (by Key). A scoped
@@ -172,6 +205,28 @@ func (profile Profile) normalized() Profile {
 	out.Source.Pack = dedupSort(out.Source.Pack)
 	out.Source.Stage = dedupSort(out.Source.Stage)
 	out.Source.Invocation = dedupSort(out.Source.Invocation)
+	out.Source.Withheld = dedupSortCategories(out.Source.Withheld)
+	return out
+}
+
+// dedupSortCategories returns categories de-duplicated and sorted, mirroring
+// dedupSort for tokens. Used so the Withheld slice in a stored Source is
+// canonical — two profiles built from the same categories (in any order)
+// compare byte-equal on the audit record.
+func dedupSortCategories(categories []Category) []Category {
+	if len(categories) == 0 {
+		return nil
+	}
+	seen := make(map[Category]struct{}, len(categories))
+	out := make([]Category, 0, len(categories))
+	for _, category := range categories {
+		if _, duplicate := seen[category]; duplicate {
+			continue
+		}
+		seen[category] = struct{}{}
+		out = append(out, category)
+	}
+	slices.Sort(out)
 	return out
 }
 
