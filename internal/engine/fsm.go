@@ -24,15 +24,15 @@ import "fmt"
 type TaskState string
 
 const (
-	StateCreated              TaskState = "created"
-	StateRunning              TaskState = "running"
-	StatePausedOpenQuestions  TaskState = "paused_open_questions"
-	StatePausedGate           TaskState = "paused_gate"
-	StatePausedUserStop       TaskState = "paused_user_stop"
-	StateAwaitingMemoryCommit TaskState = "awaiting_memory_commit"
-	StateDone                 TaskState = "done"
-	StateFailed               TaskState = "failed"
-	StateCancelled            TaskState = "cancelled"
+	StateCreated             TaskState = "created"
+	StateRunning             TaskState = "running"
+	StatePausedOpenQuestions TaskState = "paused_open_questions"
+	StatePausedGate          TaskState = "paused_gate"
+	StatePausedUserStop      TaskState = "paused_user_stop"
+	StateAwaitingFinalReview TaskState = "awaiting_final_review"
+	StateDone                TaskState = "done"
+	StateFailed              TaskState = "failed"
+	StateCancelled           TaskState = "cancelled"
 )
 
 // TaskEvent is a named input to the FSM.
@@ -62,7 +62,7 @@ var transitions = map[TaskState]map[TaskEvent]TaskState{
 		EventStopOpenQ:      StatePausedOpenQuestions,
 		EventStopGate:       StatePausedGate,
 		EventStopUser:       StatePausedUserStop,
-		EventReachFinalGate: StateAwaitingMemoryCommit,
+		EventReachFinalGate: StateAwaitingFinalReview,
 		EventFail:           StateFailed,
 		EventCancel:         StateCancelled,
 	},
@@ -78,7 +78,7 @@ var transitions = map[TaskState]map[TaskEvent]TaskState{
 		EventAdvance: StateRunning, // next stage is a fresh invocation
 		EventCancel:  StateCancelled,
 	},
-	StateAwaitingMemoryCommit: {
+	StateAwaitingFinalReview: {
 		EventApprove: StateDone, // memory commits at task-done
 		EventCancel:  StateCancelled,
 	},
