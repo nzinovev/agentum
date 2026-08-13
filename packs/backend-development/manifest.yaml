@@ -1,0 +1,50 @@
+api: agentum/v1
+pack:
+  name: backend-development
+  version: 0.1.0
+  persona: engineering
+  description: |
+    Stack-neutral backend development pipeline: plan → human approval →
+    implement → review → (fix → review)* → final human review. Declares roles,
+    transitions, gates, budgets, artifacts and stop rules. Names no language,
+    framework, directory layout, build command, or test command — every
+    stack-specific fact reaches an agent through the orchestrator-owned channels
+    (pinned AGENTS.md + declared instructions, enumerated skills, rendered
+    project-check list).
+memory: {reads: [project], writes: false}
+capabilities: [fs.read, fs.write, git.read, git.write, exec.bash]
+budgets: {fix_cycles: 2, ask_to_edit: 0}
+tiers: {default: strong}
+checks: {}
+entry: plan
+approvals:
+  - {name: plan, stage: plan, artifact: plan.md, unlocks: source_write}
+stages:
+  plan:
+    gate: human_approval
+    role: analyst
+    prompt: prompts/plan.md
+    capabilities: [fs.read, git.read]
+    transitions:
+      - to: implement
+  implement:
+    gate: auto
+    role: implementer
+    prompt: prompts/implement.md
+    transitions:
+      - to: review
+  review:
+    gate: auto
+    role: reviewer
+    prompt: prompts/review.md
+    capabilities: [fs.read, git.read]
+    transitions:
+      - {to: fix, condition: 'verdict == "changes_requested"'}
+      - {to: done, condition: 'verdict == "approved"'}
+  fix:
+    gate: auto
+    role: fixer
+    prompt: prompts/fix.md
+    transitions:
+      - to: review
+  done: {}
