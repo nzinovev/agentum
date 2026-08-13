@@ -30,15 +30,49 @@ verdict are required):
   "verdict": "approved | changes_requested",
   "summary": "one-line rationale",
   "findings": [
-    {"id": "F1", "severity": "blocker|major|minor", "path": "internal/x/y.go", "line": 42, "detail": "..."}
+    {"id": "F1", "severity": "blocker|major|minor", "path": "internal/x/y.go", "line": 42, "detail": "...", "category": "implementation_defect|plan_deviation|plan_defect|requirement_ambiguity"}
   ]
 }
 ```
 - verdict must be one of: approved, changes_requested.
 - severity must be one of: blocker, major, minor.
+- category is optional; when present it must be one of:
+  implementation_defect, plan_deviation, plan_defect, requirement_ambiguity.
 - changes_requested requires at least one finding: a fixer with no findings has
   nothing to act on. approved with no findings is the normal clean-pass shape.
 - Unknown fields are ignored. Absent optionals default empty.
+{{end}}{{if .PlanPath}}
+
+## Implementation plan (REQUIRED for this stage)
+
+You are the plan stage. Write the Planning Bundle (Markdown) to the exact path:
+  {{.PlanPath}}
+That file — not your result.json — is the artifact the human approves, and it is
+stored as an immutable revision the implementer and the reviewer both read back.
+You do not need to list it under `artifacts`; the orchestrator captures it from
+the path it gave you.
+{{end}}{{if .ApprovedPlan}}
+
+## Approved implementation plan
+
+A human has approved the plan. Read it at:
+  {{.ApprovedPlan.Path}}
+This is the revision the human approved (revision `{{.ApprovedPlan.RevisionID}}`,
+content hash `{{.ApprovedPlan.ContentHash}}`), which may differ from what the
+planner originally wrote if the human edited it before approving. It is the
+contract every later stage delivers within.
+{{end}}{{if .Diff}}
+
+## Delivery diff
+
+The orchestrator produced this diff from the checkpoint commit (not the agent).
+Read both files with fs.read alone — you have no shell to run git yourself:
+  patch: {{.Diff.PatchPath}}
+  stat:  {{.Diff.StatPath}}
+The patch runs from base commit `{{.Diff.BaseCommit}}` to head `{{.Diff.HeadCommit}}`.{{if .Diff.Truncated}}
+
+The patch was truncated at the size cap; review the stat and read the named files
+directly for the parts the patch omits. Say so in your verification gaps.{{end}}
 {{end}}{{if .ReviewFindings}}
 
 ## Reviewer findings to address
