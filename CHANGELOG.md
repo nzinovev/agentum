@@ -10,6 +10,48 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Backend Development pack, the plan-approval lock, and the final-review gate**
+  (ADR 0003). A stack-neutral five-stage pipeline (plan → human approval →
+  implement → review ⇄ fix → final human review) plus three load-bearing
+  mechanisms: source-write made to depend on a durable approval, the
+  orchestrator-produced diff, and prior-stage artifacts reaching the next stage.
+  - **`approvals` pack block** (`internal/pack`): a pack may declare a
+    `source_write` approval hosted by a stage; the validator enforces names,
+    stages, bare-file artifacts, and that every source-writing stage is reachable
+    from entry only through the approval stage.
+  - **Capability withholding** (`internal/caps`): `Input.Withheld` removes
+    categories AFTER the four-way intersection — the one subtractive input.
+    `SourceWriteCategories = {fs.write, git.write, exec.bash}` (exec.bash on
+    purpose: withholding only fs.write would be theatre). `artifact.write` is
+    never withheld.
+  - **Plan-approval lock** (`internal/runner`): three layers. Layer 1 withholds
+    source-write categories for every stage while the approval is pending.
+    Layer 2 refuses entry to implementer/fixer stages (`plan_not_approved`) and
+    detects `plan_revision_drift` when the approved revision no longer matches
+    the current one. Layer 3 is the static validator check.
+  - **Orchestrator-produced diff** (`internal/runner`, `internal/worktree`): a
+    reviewer stage (and the final gate) gets `diff.patch` + `diff.stat` against
+    `base_commit`, captured as immutable revisions; the reviewer reads the change
+    set with `fs.read` alone, no `exec.bash`.
+  - **Routing pointers + prior stages** (`internal/routing`, `internal/runner`):
+    `PlanPath` / `ApprovedPlan` / `Diff` render the plan and diff sections;
+    `PriorStages` is filled from the durable revision list; artifact-dir kinds
+    (`result_json`, `verdict_json`, `plan_md`, `diff*`) are now materialized at
+    their artifact-dir path on sync instead of skipped, so a human edit to
+    `plan/plan.md` reaches the implementer after an advance.
+  - **Gate decisions: approve / reject / abort** (`internal/api`): advancing past
+    the approval stage writes the `task_approvals` row in the same tx;
+    `POST /tasks/{id}/reject` is a terminal reject (reuses `EventCancel`, sealed
+    `SealRejected`); both gates are idempotent (matching decision → 200).
+  - **Final-review state + endpoint** (`internal/engine`, `internal/api`):
+    the pre-final-review state is renamed `awaiting_final_review` (migration 0009
+    rewrites rows); `GET /tasks/{id}/final-review` returns the reviewable payload
+    in the gate state AND after teardown; `result_commit` is pinned at the gate;
+    artifact edit routes use `{name...}` so `plan/plan.md` is addressable.
+  - **Optional finding `category`** (`internal/agent`): `verdict.json` findings
+    gain an advisory `category` (`implementation_defect` / `plan_deviation` /
+    `plan_defect` / `requirement_ambiguity`), recorded and rendered, never routed
+    on.
 - **Project context channel: pinned instructions and visible skills** (ADR 0002).
   The repository's own instruction files and the runtime's available skills are
   now a declared, reproducible, evidence-recorded input — so a pack can be
@@ -373,7 +415,7 @@ Once tagged releases begin, this project adheres to
   defines no `.agentum.yaml` is still a legitimate empty run, now recorded with
   `ran: false` so it is not misread as a gate that ran and cleared.
 - **`result_commit` could diverge from the commit the delivery checks verified
-  with no signal.** The checks run before `awaiting_memory_commit`; teardown
+  with no signal.** The checks run before `awaiting_final_review`; teardown
   captures `result_commit` after human approval, and in between a continue job, a
   human artifact edit, or a filesystem change can move the branch tip. Nothing
   compared the two, so the sealed manifest could assert "checks passed at X"

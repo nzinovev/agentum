@@ -62,7 +62,7 @@ Two capabilities are **never granted to an agent**:
 ## How an effective profile is computed
 
 ```
-effective = host ∩ pack ∩ stage ∩ (role ∪ invocation-grant)
+effective = (host ∩ pack ∩ stage ∩ (role ∪ invocation-grant)) \ withheld
 ```
 
 | Input | Source | Role in the intersection |
@@ -76,6 +76,32 @@ effective = host ∩ pack ∩ stage ∩ (role ∪ invocation-grant)
 **Deny by default.** A capability absent from any input is absent from the
 result. An empty input set yields an empty profile — the agent may only write
 its structured `result.json`.
+
+### Withholding input (ADR 0003)
+
+The four inputs above are additive-then-intersecting: each narrows, none
+removes a category the others granted. `Input.Withheld` is the one subtractive
+input — it removes categories **after** the four-way intersection, regardless
+of role, pack, or stage. A withheld category is gone from the effective profile
+even if every other input granted it.
+
+`SourceWriteCategories = {fs.write, git.write, exec.bash}` is the closed set a
+`source_write` approval unlocks. While a run's `source_write` approval is
+pending, the runner passes this set as `Input.Withheld` for every stage, so the
+runtime refuses source writes until a human approves the named artifact.
+
+- `exec.bash` is in the set **on purpose.** Withholding only `fs.write` would
+  be theatre: the bash tool allows shell redirects (`printf ... > file`), so an
+  agent with `bash: allow` and no `fs.write` can still write source. Including
+  `exec.bash` closes that hole.
+- `artifact.write` is **never** withheld. Every stage must still write
+  `result.json`; `withArtifactFloor` guarantees the artifact-dir `edit` rule
+  survives the cut.
+
+The stored profile's `Source` records both `Withheld` (the category list) and
+`WithheldReason` (a stable phrase explaining why), so an audit reader sees what
+was deliberately removed without inferring it from the grants. Empty for a run
+with no withholding.
 
 ### Role templates
 
@@ -199,6 +225,7 @@ Two test layers keep the claims above honest:
 | Verified against opencode | Date | Result |
 |---|---|---|
 | 1.18.10 | 2026-08-03 | All four live contracts pass (stream/resume, artifact allow, source deny, implementer allow) |
+| — | pending | Pre-approval stage denies source write — a `source_write` approval is pending, so `SourceWriteCategories` is withheld; an implementer-role stage is refused an `fs.write` / `git.write` / `exec.bash` action against the live opencode binary. The live contract could not run in this environment; the unit tests over the rendered profile pin the withheld set. |
 
 ## What is saved as audit evidence
 

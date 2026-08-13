@@ -21,7 +21,7 @@ POST /tasks/{id}/start  → running  (enqueues a `run` job)
    ▸ paused_open_questions  → POST .../continue (resume, same session)
    ▸ paused_gate            → POST .../advance  (next stage, fresh session)
    ▸ paused_user_stop       → POST .../continue (resume)
-   ▸ awaiting_memory_commit → POST .../approve  (task done)
+   ▸ awaiting_final_review → POST .../approve  (task done)
 POST /tasks/{id}/cancel → cancelled (aborts in-flight run)
 ```
 
@@ -91,7 +91,7 @@ calls `Runner.Handle`, which dispatches by `kind`:
 7. **Evaluate the stop condition** (`04 §7.4`) → FSM event → `engine.Next`.
    - On a pause event → loop completes; task stays paused.
    - On advance → read the pack's transition; loop to step 1 with the next stage.
-   - On `reach_final_gate` → task moves to `awaiting_memory_commit`; loop completes.
+   - On `reach_final_gate` → task moves to `awaiting_final_review`; loop completes.
    - On terminal → worker tears down the worktree; loop completes.
 
 The loop honors `ctx` cancellation throughout: a cancel job or shutdown
@@ -109,11 +109,13 @@ happened (`04 §7.1.6`).
 | `status: blocked` + non-empty `open_questions` | `stop_open_questions` | `paused_open_questions` | `open_questions` |
 | `status: complete`, gate ∈ {human_approval, human_final, human_edit, auto_on_approval} | `stop_gate` | `paused_gate` | `gate` |
 | `status: complete`, gate ∈ {auto, auto_if_clean (and clean)} | `advance` | `running` | — |
-| final stage + final gate reached | `reach_final_gate` | `awaiting_memory_commit` | — |
+| final stage + final gate reached | `reach_final_gate` | `awaiting_final_review` | — |
 | `result.json` missing / invalid | `stop_user` | `paused_user_stop` | `parse_error` |
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
 | resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
+| a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_user` | `paused_user_stop` | `plan_not_approved` |
+| the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_user` | `paused_user_stop` | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
@@ -139,6 +141,58 @@ failures: nothing is torn down (the branch, checkpoint commits, artifact
 revisions, and the unsealed manifest all stay). From `paused_user_stop` a human
 can `continue` (the loop re-evaluates, hits the bound again, and stops again —
 bounded, not a runaway) or `cancel` (terminal, branch preserved).
+
+`plan_not_approved` and `plan_revision_drift` are the same controlled shape,
+and belong to the plan-approval lock below.
+
+### Plan-approval lock (ADR 0003)
+
+A pack may declare a `source_write` approval (see [docs/pack-format.md](pack-format.md#approvals)).
+While that approval is pending, no stage may write source. The lock is three
+layers, in order of authority:
+
+1. **Capability withholding (the guarantee).** While the run's `source_write`
+   approval is absent, the runner passes `SourceWriteCategories`
+   (`fs.write`, `git.write`, `exec.bash`) as `Input.Withheld` for **every**
+   stage, after the four-way intersection. The runtime refuses source writes
+   regardless of role — a pack that mislabels a source-writing stage as an
+   analyst gains nothing. See [docs/capabilities.md](capabilities.md).
+2. **Entry refusal + drift detection.** The runner refuses to *enter* a
+   source-writing stage (effective role implementer or fixer) while the unlock
+   is absent, as `plan_not_approved` — running a crippled implementer that
+   writes nothing and reports `complete` would burn a cycle and mislead. When
+   the unlock *is* granted, it checks the approval artifact's current revision
+   against the one the human approved; a mismatch (the plan was edited after
+   approval) is `plan_revision_drift`. This layer protects against a misleading
+   result; layer 1 is what actually stops the write.
+3. **Static validator.** At load time, the pack validator flags a graph where a
+   source-writing stage is reachable from `entry` without passing through the
+   approval stage. Advisory — it cannot see runtime state; layer 1 holds even
+   if this check is wrong.
+
+The guarantee is layer 1. Layers 2 and 3 turn a silent refusal into a named,
+human-actionable stop and catch authoring mistakes early.
+
+### Orchestrator-produced delivery diff (ADR 0003)
+
+Reviewer-role stages and the final gate do not run `git` themselves (the
+reviewer role grants no `exec.bash`). The orchestrator produces the change set
+for them: `diff.patch` (`git diff base..HEAD`, capped at a hunk boundary with a
+truncation marker) and `diff.stat` are written into the reviewer's artifact dir
+and captured as immutable revisions (`<stage>/diff.patch`, kind `diff`;
+`<stage>/diff.stat`, kind `diff_stat`). The routing block's "Delivery diff"
+section names the paths. The diff runs to the post-stage checkpoint the
+orchestrator authored, so it describes a real commit range.
+
+### `result_commit` at the final gate
+
+`result_commit` is recorded when the task reaches `awaiting_final_review`, not
+only at teardown — it names the commit the human is asked to review (the
+checkpoint the delivery checks verified). Teardown re-records only if it was
+unset. A divergence between the recorded `result_commit` and the live branch tip
+at teardown (something moved the branch between review and teardown) is recorded
+as an evidence gap + `task.delivery_commit_diverged` event; the human already
+approved, so the task is not failed.
 
 ## Job queue
 
@@ -176,7 +230,7 @@ that can't enqueue rolls back the transition):
 | `POST /tasks/{id}/start` | `created → running` | `run` |
 | `POST .../continue` | `paused_*→ running` | `continue` |
 | `POST .../advance` | `paused_gate → running` | `advance` |
-| `POST .../approve` | `awaiting_memory_commit → done` | `teardown` |
+| `POST .../approve` | `awaiting_final_review → done` | `teardown` |
 | `POST /tasks/{id}/cancel` | `*→ cancelled` | `teardown` |
 
 A `run` / `continue` / `advance` job is "advance until pause/terminal." Only one
@@ -257,11 +311,12 @@ Every task records its git lineage explicitly:
   base_commit IS NULL` no-op after the first capture). The worktree branches
   from this SHA, so a later move of `base_ref` cannot retcon the task's lineage.
 - **`result_commit`** (delivery): the tip of `agentum/<task-id>` captured at
-  terminal teardown. Immutable; the branch survives teardown so this is always
-  resolvable. `base_commit..result_commit` is the review/handoff diff.
+  the final gate (`awaiting_final_review`), naming the commit the human reviews.
+  Immutable; the branch survives teardown so this is always resolvable.
+  `base_commit..result_commit` is the review/handoff diff.
 
-`result_commit` is captured at teardown, after the human approval that advances
-the task past `awaiting_memory_commit`, while the delivery checks run earlier
+`result_commit` is captured at the final gate (the commit the human is asked to
+review) and re-confirmed at teardown, while the delivery checks run earlier
 (verifying the commit recorded as `body.checks.commit`). If the two diverge — a
 continue job, a human artifact edit, or a filesystem change moved the branch tip
 in between — teardown does not silently seal a manifest asserting "checks passed
@@ -459,7 +514,7 @@ checks by editing `.agentum.yaml` inside its worktree.
 
 The runner runs the resolved set once, at the **final delivery boundary**: after
 the last stage's checkpoint is recorded and before the task reaches the review
-gate (`awaiting_memory_commit`).
+gate (`awaiting_final_review`).
 
 **Commit binding.** The checks must verify exactly the commit they claim to. The
 runner resolves the worktree HEAD (the post-stage checkpoint commit the
