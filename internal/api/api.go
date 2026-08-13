@@ -8,6 +8,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -34,6 +35,11 @@ type API struct {
 	// mfst is the evidence manifest service. Nil when the server did not wire
 	// one; the manifest read handlers 404 then.
 	mfst *manifest.Service
+	// packs resolves pipeline packs by ref. Required for the gate handlers to
+	// detect a pack-declared approval and write the task_approvals row in the
+	// same tx as the advance transition (ADR 0003 D4). Nil when the server did
+	// not wire one; the approval write is skipped then.
+	packs pack.Source
 }
 
 // Option configures an API at construction. Used for the artifact store +
@@ -50,6 +56,13 @@ func WithArtifactStore(store artifacts.Store) Option {
 // Required for the manifest read handlers to do anything useful.
 func WithManifestService(service *manifest.Service) Option {
 	return func(apiInst *API) { apiInst.mfst = service }
+}
+
+// WithPackSource attaches a pipeline-pack resolver to the API (ADR 0003 D4).
+// Required for the gate handlers to detect a pack-declared approval and write
+// the matching task_approvals row in the same tx as the advance transition.
+func WithPackSource(source pack.Source) Option {
+	return func(apiInst *API) { apiInst.packs = source }
 }
 
 // New builds the API. db backs the transactional outbox; cancels lets the cancel
@@ -96,7 +109,9 @@ func (api *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/tasks/{id}", api.handleGetTask)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/start", api.handleStartTask)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", api.handleCancelTask)
+	mux.HandleFunc("POST /api/v1/tasks/{id}/reject", api.handleRejectTask)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cleanup", api.handleCleanupTask)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/final-review", api.handleFinalReview)
 
 	// Stage invocations (read-only for now).
 	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations", api.handleListInvocations)
@@ -124,9 +139,12 @@ func (api *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/ask-to-edit", api.handleInvocationAskToEdit)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/add-context", api.handleInvocationAddContext)
 
-	// Artifacts.
-	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}", api.handleArtifactGet)
-	mux.HandleFunc("PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}", api.handleArtifactPut)
+	// Artifacts. {name...} matches a multi-segment path so orchestrator-built
+	// names like "plan/plan.md", "review/verdict.json", and
+	// "<stage>/result.json" are addressable (ADR 0003 D2). Purely additive:
+	// single-segment names keep resolving identically.
+	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactGet)
+	mux.HandleFunc("PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactPut)
 
 	// Memory keyword-pull handle.
 	mux.HandleFunc("GET /api/v1/projects/{id}/memory", api.handleMemorySearch)

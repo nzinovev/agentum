@@ -24,7 +24,8 @@ const (
 // decision applied to; the diff/audit surface reads them, so they are stable.
 const (
 	gateAdvance       = "advance"
-	gateFinal         = "final"
+	gateFinal         = "final_review" // ADR 0003 D7: matches the approval row name
+	gateReject        = "reject"       // ADR 0003 D4: human reject at a gate
 	gateOpenQuestions = "open_questions"
 	gateUserStop      = "user_stop"
 	gateCancel        = "cancel"

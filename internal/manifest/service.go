@@ -47,6 +47,11 @@ const (
 	SealCancelled SealReason = "cancelled"
 	// SealFailed is the failure path (runner.failTask).
 	SealFailed SealReason = "failed"
+	// SealRejected is the terminal reject path (POST /tasks/{id}/reject — ADR
+	// 0003 D4). Reuse of EventCancel means the task lands in `cancelled`; this
+	// distinct seal reason keeps the sealed record from describing a rejected
+	// result as an undifferentiated abort.
+	SealRejected SealReason = "rejected"
 )
 
 // Service is the manifest lifecycle owner. It composes the sqlc.Queries index

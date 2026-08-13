@@ -104,7 +104,8 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 	})
 
 	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels(),
-		api.WithArtifactStore(artifactStore), api.WithManifestService(manifestService))
+		api.WithArtifactStore(artifactStore), api.WithManifestService(manifestService),
+		api.WithPackSource(packs))
 
 	return &Server{
 		cfg: cfg, log: log, store: dataStore,
