@@ -29,6 +29,12 @@ type fakeStore struct {
 	events      []sqlc.Event
 	enqueued    []string
 	checkpoints []sqlc.TaskCheckpoint
+	// approvals maps (taskID, name) -> decision row. ADR 0003 tests seed this to
+	// grant or withhold the source_write approval.
+	approvals map[string]sqlc.TaskApproval
+	// artifactRevisions maps revision name -> current revision. Used by the
+	// plan_revision_drift check.
+	artifactRevisions map[string]sqlc.ArtifactRevision
 }
 
 func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
@@ -173,6 +179,39 @@ func (store *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams)
 	return sqlc.Job{Kind: arg.Kind}, nil
 }
 
+// approvalKey is the map key for fakeStore.approvals: taskID + "/" + name.
+func approvalKey(taskID, name string) string { return taskID + "/" + name }
+
+func (store *fakeStore) GetApproval(_ context.Context, arg sqlc.GetApprovalParams) (sqlc.TaskApproval, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if row, ok := store.approvals[approvalKey(arg.TaskID, arg.Name)]; ok {
+		return row, nil
+	}
+	return sqlc.TaskApproval{}, sql.ErrNoRows
+}
+
+func (store *fakeStore) ListApprovalsForTask(_ context.Context, arg sqlc.ListApprovalsForTaskParams) ([]sqlc.TaskApproval, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var rows []sqlc.TaskApproval
+	for _, row := range store.approvals {
+		if row.TaskID == arg.TaskID && row.TenantID == arg.TenantID {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func (store *fakeStore) CurrentArtifactRevisionForName(_ context.Context, arg sqlc.CurrentArtifactRevisionForNameParams) (sqlc.ArtifactRevision, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if rev, ok := store.artifactRevisions[arg.Name]; ok {
+		return rev, nil
+	}
+	return sqlc.ArtifactRevision{}, sql.ErrNoRows
+}
+
 func (store *fakeStore) taskState() string {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -272,8 +311,8 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	if err := runner.Handle(t.Context(), job("advance", "T1", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
-	if got := store.taskState(); got != "awaiting_memory_commit" {
-		t.Fatalf("after advance, state = %q, want awaiting_memory_commit", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("after advance, state = %q, want awaiting_final_review", got)
 	}
 	// spec + impl invoked; done is a terminal marker (no invocation).
 	if count := len(store.invocations); count != 2 {

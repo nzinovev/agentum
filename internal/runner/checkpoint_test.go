@@ -50,8 +50,8 @@ func TestRunner_DeliveryChecksCommitBoundToCheckpoint(t *testing.T) {
 	if err := runner.Handle(context.Background(), job("run", "Tcb", "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if got := store.taskState(); got != "awaiting_memory_commit" {
-		t.Fatalf("state = %q, want awaiting_memory_commit", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("state = %q, want awaiting_final_review", got)
 	}
 
 	// The post-spec checkpoint is a real commit beyond the base (E1), and the
@@ -439,7 +439,7 @@ func TestRunner_AutoIfCleanGateAdvancesOnCleanTree(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Clean tree → gate auto-advances → terminal → delivery checks → final gate.
-	if got := store.taskState(); got != "awaiting_memory_commit" {
-		t.Fatalf("state = %q, want awaiting_memory_commit (clean tree under auto_if_clean must advance)", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("state = %q, want awaiting_final_review (clean tree under auto_if_clean must advance)", got)
 	}
 }

@@ -31,7 +31,7 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 		{
 			name:       "passing mandatory check reaches final gate",
 			checksYAML: "api: agentum/v1\nchecks:\n  - name: build\n    command: [\"true\"]\n    required: true\n",
-			wantState:  "awaiting_memory_commit",
+			wantState:  "awaiting_final_review",
 		},
 		{
 			name:       "failing mandatory check blocks delivery",
@@ -44,12 +44,12 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 			checksYAML: "api: agentum/v1\nchecks:\n" +
 				"  - name: build\n    command: [\"true\"]\n    required: true\n" +
 				"  - name: lint\n    command: [\"false\"]\n",
-			wantState: "awaiting_memory_commit",
+			wantState: "awaiting_final_review",
 		},
 		{
 			name:       "no registry means no checks and delivery proceeds",
 			checksYAML: "",
-			wantState:  "awaiting_memory_commit",
+			wantState:  "awaiting_final_review",
 		},
 	}
 	for _, tc := range cases {

@@ -105,8 +105,8 @@ func TestLoop_ChangesRequestedThenApproved(t *testing.T) {
 	if !equalStringSlices(adapter.calls, wantCalls) {
 		t.Errorf("stage call order = %v, want %v", adapter.calls, wantCalls)
 	}
-	if got := store.taskState(); got != "awaiting_memory_commit" {
-		t.Errorf("final state = %q, want awaiting_memory_commit (reached done)", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Errorf("final state = %q, want awaiting_final_review (reached done)", got)
 	}
 	// Each attempt is a separate invocation row.
 	if count := len(store.invocations); count != 4 {

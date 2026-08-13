@@ -279,8 +279,8 @@ func TestProfile_AllowedActionsRunToCompletion(t *testing.T) {
 	taskPack.PromptText["implement"] = "implement body"
 	store := newFakeStoreWithPack(t, taskPack)
 
-	if state := store.taskState(); state != "awaiting_memory_commit" {
-		t.Errorf("expected run to complete to awaiting_memory_commit, got state %q", state)
+	if state := store.taskState(); state != "awaiting_final_review" {
+		t.Errorf("expected run to complete to awaiting_final_review, got state %q", state)
 	}
 }
 

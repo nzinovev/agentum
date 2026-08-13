@@ -52,6 +52,19 @@ type Store interface {
 	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
+	// GetApproval reads one human-approval decision row by (tenant, task, name),
+	// or returns sql.ErrNoRows when undecided (ADR 0003 D3). The runner uses it
+	// to decide whether the source_write withholding applies.
+	GetApproval(ctx context.Context, arg sqlc.GetApprovalParams) (sqlc.TaskApproval, error)
+	// ListApprovalsForTask reads every approval decision for a task, oldest
+	// first (ADR 0003). Used by sealManifestAtTerminal to distinguish a reject
+	// (cancel fired from a human reject at a gate) from a plain cancel, and by
+	// the final-review payload.
+	ListApprovalsForTask(ctx context.Context, arg sqlc.ListApprovalsForTaskParams) ([]sqlc.TaskApproval, error)
+	// CurrentArtifactRevisionForName is the durable read of the current revision
+	// for a (task, name), used by the plan_revision_drift check. Shared with the
+	// artifacts sync path.
+	CurrentArtifactRevisionForName(ctx context.Context, arg sqlc.CurrentArtifactRevisionForNameParams) (sqlc.ArtifactRevision, error)
 }
 
 // Sink forwards a live stream chunk to subscribers (e.g. an in-memory SSE broker).
@@ -244,6 +257,12 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 		return fmt.Errorf("teardown: load project: %w", err)
 	}
 	runner.recordResultCommit(ctx, task, project.RepoPath)
+	// ADR 0003 D8: result_commit is now pinned at the final gate (the commit the
+	// human reviewed). Detect a divergence between the live branch tip and the
+	// recorded result_commit: something moved the branch between review and
+	// teardown. Same non-fatal treatment as the checks-commit divergence (gap +
+	// event); the human already approved.
+	runner.verifyResultCommitMatchesLiveTip(ctx, task, project.RepoPath)
 	// Refresh task state (recordResultCommit may have set result_commit) and
 	// detect any divergence between what was delivered and what the checks
 	// verified, before sealing. The seal captures the final git lineage; a sealed
@@ -320,7 +339,7 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 // verifyDeliveryCommitBinding detects a divergence between the commit the
 // delivery checks verified and the commit recorded as delivered (result_commit).
 // The two are separated by a human approval: the checks run before the task
-// reaches awaiting_memory_commit, teardown runs after approval, and in between a
+// reaches awaiting_final_review, teardown runs after approval, and in between a
 // continue job, a human artifact edit, or a filesystem change can move the
 // branch tip. Nothing previously compared the two, so the sealed manifest could
 // assert "mandatory checks passed at X" alongside "delivered Y" with no signal
@@ -338,7 +357,7 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 // The verified commit is read directly from body.checks.commit, not proxied
 // through the latest checkpoint. The proxy (last post-stage checkpoint == the
 // commit the checks verified) happens to hold today because the FSM has no path
-// from awaiting_memory_commit back into a stage, but that property is nowhere
+// from awaiting_final_review back into a stage, but that property is nowhere
 // asserted or tested, and a future ask-to-edit / add-context feature (Epic 2
 // stubs in internal/api/stubs.go) would add exactly that path — at which point a
 // post-checks stage would mint a new checkpoint, result_commit would match it,
@@ -393,6 +412,38 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc
 	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
 		"result_commit": task.ResultCommit.String,
 		"checks_commit": verifiedCommit,
+	})
+}
+
+// verifyResultCommitMatchesLiveTip detects a divergence between the recorded
+// result_commit and the live agentum/<task-id> branch tip at teardown (ADR 0003
+// D8). result_commit is pinned at the final gate (the commit the human
+// reviewed); if the branch moved between review and teardown, the recorded
+// commit no longer names what is actually delivered. Same non-fatal treatment
+// as verifyDeliveryCommitBinding: a gap + event, never a post-approval failure.
+// No-op when result_commit is unset or the branch is unresolvable (already
+// cleaned up).
+func (runner *Runner) verifyResultCommitMatchesLiveTip(ctx context.Context, task sqlc.Task, repoPath string) {
+	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
+		return
+	}
+	liveTip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(task.ID))
+	if err != nil {
+		// Branch not resolvable — already cleaned up, or never created. Nothing
+		// to compare; an absence, not a divergence.
+		return
+	}
+	if liveTip == task.ResultCommit.String {
+		return
+	}
+	cause := fmt.Errorf(
+		"result_commit %s != live branch tip %s; the branch moved between review and teardown",
+		task.ResultCommit.String, liveTip,
+	)
+	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
+	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
+		"result_commit": task.ResultCommit.String,
+		"live_tip":      liveTip,
 	})
 }
 
@@ -501,6 +552,12 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	defer runner.cancels.Unregister(job.TaskID)
 
 	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
+	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):
+	// whether the pack declares an approval, whether the human has recorded it,
+	// and the revision id the decision is bound to. A durable Postgres read, not
+	// process state — a worker restart, a worktree restore, and a Restore to a
+	// checkpoint all leave it intact.
+	run.sourceWriteUnlock = runner.readSourceWriteUnlock(ctx, task, taskPack)
 	// Prepare the project-context channel (ADR 0002): read .agentum.yaml from
 	// base_commit once, pin the declared + auto-injected instruction files,
 	// probe the runtime's skills, and resolve the check set for rendering. This
@@ -516,6 +573,45 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// produced. No-op for a fresh run (no revisions yet).
 	runner.syncRevisionsIntoWorktree(ctx, run, startStage)
 	return runner.runLoop(runCtx, run, startStage, resumeSession)
+}
+
+// readSourceWriteUnlock reads the durable approval state for the run (ADR 0003
+// D3). Required is true when the pack declares a source_write approval; Granted
+// is true when the matching task_approvals row exists; ApprovedRevisionID
+// carries the revision id the decision is bound to (used to detect
+// plan_revision_drift before entering a source-writing stage). A pack with no
+// approvals block yields the zero value — the withholding never applies and
+// every existing fixture behaves exactly as before.
+//
+// This is a Postgres read, not a manifest read: a security precondition must
+// not read from a store whose write path is allowed to fail quietly (manifest
+// AddEvidence failures are logged and turned into evidence gaps).
+func (runner *Runner) readSourceWriteUnlock(ctx context.Context, task sqlc.Task, taskPack *pack.Pack) approvalState {
+	approval, hasApproval := taskPack.SourceWriteApproval()
+	if !hasApproval {
+		return approvalState{}
+	}
+	state := approvalState{Required: true}
+	row, err := runner.store.GetApproval(ctx, sqlc.GetApprovalParams{
+		TenantID: task.TenantID, TaskID: task.ID, Name: approval.Name,
+	})
+	if err != nil {
+		// sql.ErrNoRows means "not yet decided" — the row is absent, which is
+		// the normal pre-approval state and not an error. Any other read failure
+		// is logged but fails closed (Granted stays false): the lock is the
+		// default, the approval is the exception.
+		if !errors.Is(err, sql.ErrNoRows) {
+			runner.log.Warn("read source_write approval", "task", task.ID, "name", approval.Name, "error", err)
+		}
+		return state
+	}
+	if row.Decision == "approved" {
+		state.Granted = true
+		if row.ArtifactRevisionID.Valid {
+			state.ApprovedRevisionID = row.ArtifactRevisionID.String
+		}
+	}
+	return state
 }
 
 // resolveBaseCommit resolves task.BaseRef to a full SHA exactly once and pins it
@@ -648,6 +744,30 @@ type stageRun struct {
 	// and resolve at the delivery boundary — sharing this cached value would
 	// re-open the commit-binding seam closed by PR #23.
 	resolvedChecks []routing.CheckRef
+	// sourceWriteUnlock records whether the run's source_write approval is in
+	// place (ADR 0003 D3). Read ONCE in drive() from the pack's approval
+	// declaration plus the durable task_approvals row, so a worker restart, a
+	// worktree restore, and a Restore to a checkpoint all leave the decision
+	// intact. While Required && !Granted, computeProfile withholds
+	// caps.SourceWriteCategories for every stage and processStage refuses entry
+	// to implementer/fixer stages.
+	sourceWriteUnlock approvalState
+	// diff carries the orchestrator-produced diff refs for the current reviewer
+	// stage (ADR 0003 D5). Produced by produceDiff at the start of a
+	// reviewer-role stage and rendered into that stage's routing block. nil for
+	// non-reviewer stages and before produceDiff runs.
+	diff *routing.DiffRef
+}
+
+// approvalState is the durable read of whether a pack-declared approval has
+// been recorded for this run (ADR 0003 D3). Required is true when the pack
+// declares a source_write approval; Granted is true when the task_approvals
+// row exists; ApprovedRevisionID is the artifact revision id the human bound
+// their decision to, used to detect plan_revision_drift.
+type approvalState struct {
+	Required           bool
+	Granted            bool
+	ApprovedRevisionID string
 }
 
 // haltDecision carries a pause Decision out of entryPoint without surfacing it
@@ -805,6 +925,140 @@ type stageOutcome struct {
 	transition stageTransition
 }
 
+// refuseSourceWriteBeforeApproval implements ADR 0003 D3 layer 2. It returns a
+// halt when the stage's effective role is implementer or fixer AND the run's
+// source_write approval is required but not granted — the runner refuses to
+// enter a source-writing stage under a withheld profile rather than running a
+// crippled agent. It also checks plan_revision_drift when the approval IS
+// granted: if the current revision of the approval artifact no longer matches
+// the one the human approved (someone edited the plan after approving it), the
+// implementer would work from a plan the human never saw, so the same
+// controlled-stop shape fires. Returns nil when the stage may proceed.
+//
+// Runs at the START of a stage, next to restoreInstructions, and strictly
+// before invokeStage — never between the isClean sample and the checkpoint
+// commit. The capability profile (layer 1) already withholds source-write
+// categories for every stage while the approval is pending; this layer protects
+// against an agent that would otherwise report a misleading "complete" without
+// writing anything.
+func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run stageRun, stageID string, stage pack.Stage) *haltDecision {
+	if !run.sourceWriteUnlock.Required {
+		return nil
+	}
+	role := pack.EffectiveRole(stageID, stage)
+	if role != "implementer" && role != "fixer" {
+		return nil
+	}
+	if !run.sourceWriteUnlock.Granted {
+		return &haltDecision{
+			stageID: stageID,
+			decision: Decision{
+				Action:     ActionPause,
+				FSMEvent:   engine.EventStopUser,
+				StopReason: "plan_not_approved",
+			},
+		}
+	}
+	// Granted — but the approval binds to a plan revision. If the current
+	// revision of the approval artifact no longer matches the approved one,
+	// someone edited the plan AFTER approving it; the implementer would then
+	// work within a plan the human never saw. That is a controlled stop too.
+	if runner.detectPlanRevisionDrift(ctx, run) {
+		return &haltDecision{
+			stageID: stageID,
+			decision: Decision{
+				Action:     ActionPause,
+				FSMEvent:   engine.EventStopUser,
+				StopReason: "plan_revision_drift",
+			},
+		}
+	}
+	return nil
+}
+
+// detectPlanRevisionDrift reports whether the approval artifact's current
+// revision differs from the one the human approved (ADR 0003 D3). The approval
+// record carries the revision id it bound to; the artifact store carries the
+// current revision. A mismatch means "the plan was edited after approval" and
+// the implementer must not proceed. Returns false when there is no approval
+// revision to compare against (the approval predates the revision-binding
+// feature, or the artifact has no current revision).
+func (runner *Runner) detectPlanRevisionDrift(ctx context.Context, run stageRun) bool {
+	approved := run.sourceWriteUnlock.ApprovedRevisionID
+	if approved == "" {
+		return false
+	}
+	approval, hasApproval := run.taskPack.SourceWriteApproval()
+	if !hasApproval {
+		return false
+	}
+	revisionName := approval.Stage + "/" + approval.Artifact
+	current, err := runner.store.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
+		TaskID: run.task.ID, TenantID: run.task.TenantID, Name: revisionName,
+	})
+	if err != nil {
+		// No current revision (sql.ErrNoRows) or a read failure — both mean we
+		// cannot prove drift, so we do not stop. A missing revision is the
+		// pre-write state; a read failure is logged elsewhere and fail-closed at
+		// the approval gate, not here.
+		return false
+	}
+	return current.ID != approved
+}
+
+// approvedPlanRef builds the routing pointer to the approved plan revision (ADR
+// 0003 D2). Returns nil when the approval is not granted or has no bound
+// revision, so the template renders nothing for stages before the gate. The
+// path is the materialized location inside the approval stage's artifact dir.
+func (runner *Runner) approvedPlanRef(ctx context.Context, run stageRun, approval pack.Approval) *routing.PlanRef {
+	if !run.sourceWriteUnlock.Granted || run.sourceWriteUnlock.ApprovedRevisionID == "" {
+		return nil
+	}
+	revisionName := approval.Stage + "/" + approval.Artifact
+	current, err := runner.store.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
+		TaskID: run.task.ID, TenantID: run.task.TenantID, Name: revisionName,
+	})
+	if err != nil {
+		return nil
+	}
+	return &routing.PlanRef{
+		Stage:       approval.Stage,
+		Path:        filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, approval.Stage), approval.Artifact),
+		RevisionID:  current.ID,
+		ContentHash: current.ContentHash,
+	}
+}
+
+// priorStageRefs builds the cross-stage artifact references for the routing
+// block (ADR 0003 D6.1). For every prior stage that has a current result.json
+// revision, render {Stage, Path} where Path is the artifact-dir location of
+// that stage's result.json. Read from the durable revision list (not a directory
+// walk) so it survives a worktree Restore and a worker restart. The current
+// stage is excluded — it has no "prior" self.
+func (runner *Runner) priorStageRefs(ctx context.Context, run stageRun, currentStage string) []routing.PriorStage {
+	revisions, err := runner.currentRevisionList(ctx, run.task.TenantID, run.task.ID)
+	if err != nil || len(revisions) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(revisions))
+	var refs []routing.PriorStage
+	for _, revision := range revisions {
+		if revision.Kind != "result_json" {
+			continue
+		}
+		stage, _, ok := splitArtifactRevisionName(revision.Name)
+		if !ok || stage == currentStage || seen[stage] {
+			continue
+		}
+		seen[stage] = true
+		refs = append(refs, routing.PriorStage{
+			Stage: stage,
+			Path:  filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stage), "result.json"),
+		})
+	}
+	return refs
+}
+
 // processStage runs one iteration: look up the stage, dispatch (terminal marker
 // vs adapter invocation), evaluate the outcome, and apply the resulting
 // decision. transitionIn is the edge that brought the run to stageID (empty for
@@ -827,7 +1081,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		if err := runner.reachTerminalStage(ctx, run.task, stageID); err != nil {
+		if err := runner.reachTerminalStage(ctx, run.task, run.project.RepoPath, stageID); err != nil {
 			return stageOutcome{}, err
 		}
 		return stageOutcome{done: true}, nil
@@ -844,6 +1098,19 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	run.task = updatedTask
 	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
 
+	// ADR 0003 D3 layer 2 — entry refusal. The capability withholding (layer 1)
+	// makes a pre-approval implementer refuse every write at the runtime layer,
+	// but running a crippled implementer that writes nothing and reports
+	// complete would be worse than stopping: it would burn a cycle and produce a
+	// misleading result. So the runner refuses to ENTER a source-writing stage
+	// (effective role implementer or fixer) while the source_write unlock is
+	// absent, as a controlled stop (plan_not_approved). This is the second line
+	// of defence; the guarantee is layer 1, which holds even if this check is
+	// wrong.
+	if halt := runner.refuseSourceWriteBeforeApproval(ctx, run, stageID, stage); halt != nil {
+		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, halt.decision, stageID)
+	}
+
 	// ADR 0002 D4 layer 2: restore any instruction files the worktree drifted
 	// off the pin BEFORE the invocation. The edit deny (layer 1) does not cover
 	// bash; this hash check is what catches a bash-side rewrite. Runs strictly
@@ -853,6 +1120,16 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// reading rewritten rules.
 	if restoreErr := runner.restoreInstructions(ctx, run, stageID); restoreErr != nil {
 		return stageOutcome{}, runner.failTask(ctx, run.task, restoreErr)
+	}
+
+	// ADR 0003 D5: produce the orchestrator-owned diff for reviewer-role
+	// stages before invoking the adapter. HEAD here is the post-stage
+	// checkpoint the orchestrator authored on the prior implementer/fixer, so
+	// the patch describes a real commit range; the reviewer reads it with
+	// fs.read alone (no exec.bash to run git). Runs strictly before
+	// invokeStage, never between the isClean sample and the checkpoint commit.
+	if pack.EffectiveRole(stageID, stage) == "reviewer" {
+		run.diff = runner.produceDiff(ctx, run, stageID)
 	}
 
 	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, transitionIn)
@@ -962,14 +1239,14 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, stageID)
+		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, run.project.RepoPath, stageID)
 	}
 	return stageOutcome{}, fmt.Errorf("runner: unknown decision action %d", decision.Action)
 }
 
 // reachTerminalStage pins current_stage on a terminal (no-transitions) stage,
 // then fires the final gate.
-func (runner *Runner) reachTerminalStage(ctx context.Context, task sqlc.Task, stageID string) error {
+func (runner *Runner) reachTerminalStage(ctx context.Context, task sqlc.Task, repoPath, stageID string) error {
 	updatedTask, err := runner.store.UpdateTaskStage(ctx, sqlc.UpdateTaskStageParams{
 		ID: task.ID, TenantID: task.TenantID,
 		CurrentStage: nullStr(stageID), State: string(engine.StateRunning),
@@ -977,7 +1254,7 @@ func (runner *Runner) reachTerminalStage(ctx context.Context, task sqlc.Task, st
 	if err != nil {
 		return fmt.Errorf("update current_stage (terminal): %w", err)
 	}
-	return runner.transitionToFinalState(ctx, updatedTask, stageID)
+	return runner.transitionToFinalState(ctx, updatedTask, repoPath, stageID)
 }
 
 // applyPauseDecision records the pause: pin current_stage, advance the FSM to
@@ -1009,11 +1286,18 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 	return nil
 }
 
-// transitionToFinalState advances the FSM to awaiting_memory_commit and emits
+// transitionToFinalState advances the FSM to awaiting_final_review and emits
 // the state change. Shared by reachTerminalStage (terminal marker reached) and
 // the ActionFinal path (complete outcome on a non-terminal stage) — both reach
 // the same final gate, only the pin-current_stage step differs.
-func (runner *Runner) transitionToFinalState(ctx context.Context, task sqlc.Task, stageID string) error {
+//
+// ADR 0003 D8: result_commit is recorded HERE, not only at teardown, so the
+// final-review payload can name the commit the human is asked to review. The
+// commit recorded is the branch tip at the gate — which is the checkpoint the
+// delivery checks verified. recordResultCommit is a no-op when result_commit
+// is already set, so a re-entry does not overwrite.
+func (runner *Runner) transitionToFinalState(ctx context.Context, task sqlc.Task, repoPath, stageID string) error {
+	runner.recordResultCommit(ctx, task, repoPath)
 	newState, fsmErr := engine.Next(engine.TaskState(task.State), engine.EventReachFinalGate)
 	if fsmErr != nil {
 		return runner.failTask(ctx, task, fmt.Errorf("fsm reach_final_gate: %w", fsmErr))
@@ -1061,9 +1345,18 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
 	// created so the profile is persisted even when the adapter refuses to
-	// start (an unenforceable profile is itself audit evidence).
+	// start (an unenforceable profile is itself audit evidence). The
+	// source-write withholding (ADR 0003 D3 layer 1) applies while the run's
+	// approval is pending — run-scoped, not role-scoped, so a pack that
+	// mislabels a source-writing stage gains nothing.
+	var withheld []caps.Category
+	var withheldReason string
+	if run.sourceWriteUnlock.Required && !run.sourceWriteUnlock.Granted {
+		withheld = caps.SourceWriteCategories
+		withheldReason = "plan approval not recorded"
+	}
 	profile := runner.computeProfile(run.taskPack, stageID, stage, runner.adapter.Supported(),
-		runner.hardTimeout, runner.idleTimeout)
+		runner.hardTimeout, runner.idleTimeout, withheld, withheldReason)
 	profileBytes := marshalProfile(profile)
 
 	// VerdictPath is set when this stage sources a verdict condition (detected
@@ -1079,6 +1372,25 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 	if stage.SourcesVerdict() {
 		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
+	}
+	// ADR 0003 D2/D6: the plan-approval routing pointers. PlanPath is set when
+	// this stage is the pack's approval stage (the planner writes plan.md to the
+	// path the orchestrator captures). ApprovedPlan is set for every stage after
+	// the approval, pointing at the approved revision. PriorStages lists every
+	// prior stage that produced a result.json, read from the durable revision
+	// list so it survives a worktree Restore and a worker restart.
+	if approval, hasApproval := run.taskPack.SourceWriteApproval(); hasApproval {
+		if approval.Stage == stageID {
+			routingBlock.PlanPath = filepath.Join(artifactDir, approval.Artifact)
+		}
+		routingBlock.ApprovedPlan = runner.approvedPlanRef(ctx, run, approval)
+	}
+	routingBlock.PriorStages = runner.priorStageRefs(ctx, run, stageID)
+	// ADR 0003 D5: the orchestrator-produced diff is rendered for reviewer-role
+	// stages. The produceDiff call runs at the start of the reviewer stage,
+	// before invokeStage, so by the time we reach here the diff revisions exist.
+	if pack.EffectiveRole(stageID, stage) == "reviewer" {
+		routingBlock.Diff = run.diff
 	}
 	if transitionIn.verdict != "" && transitionIn.verdictPath != "" {
 		routingBlock.ReviewFindings = &routing.ReviewRef{

@@ -903,3 +903,58 @@ func TestStageInstructionFiles_EditDeniesAGENTSForImplementer(t *testing.T) {
 		t.Error("opencodeMatch says ** does not match AGENTS.md — matcher model is off")
 	}
 }
+
+// TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash (ADR 0003 D3/D5,
+// step 5): a withheld implementer profile — the one a stage sees before a human
+// approves the plan — must deny bash outright (exec.bash was withheld, so
+// bashRules returns the bare "deny") and deny every edit except the artifact
+// floor that lets the stage write result.json. Withholding only fs.write would
+// be theatre, since bash allows shell redirects; exec.bash is withheld
+// alongside it. The artifact floor still permits result.json, which is the
+// contract every stage must meet.
+func TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	declared := []caps.Token{
+		caps.Token(caps.CatFsRead), caps.Token(caps.CatFsWrite), caps.Token(caps.CatGitWrite),
+		caps.Token(caps.CatExecBash), caps.Token(caps.CatArtifactWrite),
+	}
+	withheld := caps.Effective(caps.Input{
+		Host:     opencodeSupported,
+		Pack:     declared,
+		Stage:    declared,
+		Role:     caps.RoleImplementer,
+		Withheld: caps.SourceWriteCategories,
+	})
+	if withheld.Has(caps.CatFsWrite) || withheld.Has(caps.CatGitWrite) || withheld.Has(caps.CatExecBash) {
+		t.Fatalf("withheld implementer still carries source-write categories: %v", withheld.Grants)
+	}
+	if !withheld.Has(caps.CatArtifactWrite) {
+		t.Fatalf("withheld implementer lost artifact.write floor: %v", withheld.Grants)
+	}
+	rendered := mustRender(t, withheld, testSubst(dir))
+	permissions := decodePermissions(t, rendered)
+	// bash must be the bare string "deny" — exec.bash was withheld, so bashRules
+	// returns actionDeny rather than a rule list. This is the load-bearing
+	// assertion: a withheld profile cannot run any command.
+	if permissions["bash"] != actionDeny {
+		t.Errorf("bash = %v, want bare %q (withheld profile must deny every command)", permissions["bash"], actionDeny)
+	}
+	// edit is a rule list (or bare deny) whose deny baseline is present, so no
+	// worktree edit survives. fs.write was withheld, so the implementer's
+	// worktree scope is gone; whatever shape edit takes (a bare deny when no
+	// scopes survive, or a rule list with a deny baseline + artifact allow when
+	// the floor is applied) the baseline must deny the whole tree.
+	switch editValue := permissions["edit"].(type) {
+	case string:
+		if editValue != actionDeny {
+			t.Errorf("edit = %q, want bare %q", editValue, actionDeny)
+		}
+	case map[string]any:
+		if editValue[anyPath] != actionDeny {
+			t.Errorf("edit[*] = %v, want %q (withheld profile must deny the worktree)", editValue[anyPath], actionDeny)
+		}
+	default:
+		t.Errorf("edit = %v, want a string or rule map", permissions["edit"])
+	}
+}

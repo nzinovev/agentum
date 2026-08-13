@@ -24,7 +24,7 @@ const (
 	// paused state and awaits a human (continue/advance/cancel).
 	ActionPause
 	// ActionFinal: the terminal stage completed; fire reach_final_gate so the
-	// task moves to awaiting_memory_commit ahead of final approval.
+	// task moves to awaiting_final_review ahead of final approval.
 	ActionFinal
 )
 
@@ -127,7 +127,7 @@ func Evaluate(input StageInput) (Decision, error) {
 	complete := input.Result.Status == "complete" || input.Result.Status == "partial"
 
 	// A terminal stage (no transitions) that completes reaches the final gate,
-	// regardless of its declared gate value — the awaiting_memory_commit state
+	// regardless of its declared gate value — the awaiting_final_review state
 	// IS the final approval.
 	if complete && input.Stage.Terminal() {
 		return Decision{Action: ActionFinal, FSMEvent: engine.EventReachFinalGate}, nil
