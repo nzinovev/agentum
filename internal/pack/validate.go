@@ -17,6 +17,7 @@ func (p *Pack) Validate() error {
 	problems = append(problems, p.validateMemory()...)
 	problems = append(problems, p.validateBudgets()...)
 	problems = append(problems, validateCheckPolicy(p.Checks)...)
+	problems = append(problems, p.validateApprovals()...)
 
 	// reachability + terminal-exit + bounded cycles (only meaningful once the
 	// structural checks already passed, so we can assume refs resolve and
@@ -24,6 +25,10 @@ func (p *Pack) Validate() error {
 	if len(problems) == 0 {
 		problems = append(problems, validateGraph(p)...)
 		problems = append(problems, validateBoundedCycles(p)...)
+		// Approval reachability depends on the graph being well-formed, so it
+		// runs last (ADR 0003 D3 layer 3 — static, advisory; the runtime lock
+		// in computeProfile is the real guarantee).
+		problems = append(problems, validateApprovalReachability(p)...)
 	}
 
 	if len(problems) > 0 {
@@ -493,6 +498,96 @@ func parseUint(s string) (int, error) {
 
 func joinErrors(msgs []string) string {
 	return strings.Join(msgs, "; ")
+}
+
+// validateApprovals checks each approval declaration is well-formed: names are
+// non-empty and unique; the stage is defined and non-terminal (a terminal stage
+// has no gate to advance past); the artifact is a bare file name (no path
+// separators — it lives in the stage's orchestrator-constructed artifact dir);
+// and unlocks is a known member of the closed set. Collected into the existing
+// multi-error pass so a pack author sees every issue at once.
+func (p *Pack) validateApprovals() []string {
+	if len(p.Approvals) == 0 {
+		return nil // a pack with no approvals behaves exactly as today
+	}
+	var problems []string
+	seenNames := make(map[string]bool, len(p.Approvals))
+	for index, approval := range p.Approvals {
+		if strings.TrimSpace(approval.Name) == "" {
+			problems = append(problems, fmt.Sprintf("approvals[%d].name is empty", index))
+		} else if seenNames[approval.Name] {
+			problems = append(problems, fmt.Sprintf("approvals lists name %q more than once", approval.Name))
+		}
+		seenNames[approval.Name] = true
+
+		stage, stageDefined := p.Stages[approval.Stage]
+		if !stageDefined {
+			problems = append(problems, fmt.Sprintf("approvals[%d].stage %q is not a defined stage", index, approval.Stage))
+		} else if stage.Terminal() {
+			// A terminal stage has no outgoing transition; a human cannot
+			// "advance past" it, so it cannot be an approval gate.
+			problems = append(problems, fmt.Sprintf("approvals[%d].stage %q is terminal and cannot host an approval gate", index, approval.Stage))
+		}
+
+		if approval.Artifact == "" {
+			problems = append(problems, fmt.Sprintf("approvals[%d].artifact is empty", index))
+		} else if strings.ContainsAny(approval.Artifact, `/\`) {
+			// The artifact names a file inside the stage's artifact dir, not a
+			// path. A separator here would let an approval name a file outside
+			// the orchestrator-constructed dir, re-opening the containment seam.
+			problems = append(problems, fmt.Sprintf("approvals[%d].artifact %q must be a bare file name, not a path", index, approval.Artifact))
+		}
+
+		if !knownUnlocks[Unlock(approval.Unlocks)] {
+			problems = append(problems, fmt.Sprintf("approvals[%d].unlocks %q is not one of the known unlock names {source_write}", index, approval.Unlocks))
+		}
+	}
+	return problems
+}
+
+// validateApprovalReachability enforces ADR 0003 D3 layer 3: when a
+// source_write approval exists, every path from entry to a source-writing stage
+// (implementer or fixer role) must pass through the approval stage. This is a
+// static, advisory check that catches authoring mistakes at load time — the
+// real guarantee is the capability withholding in computeProfile, which holds
+// even if this rule is wrong. It runs only after the graph is known well-formed
+// (every stage reachable, no dangling refs).
+func validateApprovalReachability(p *Pack) []string {
+	sourceApproval, hasSourceApproval := p.SourceWriteApproval()
+	if !hasSourceApproval {
+		return nil
+	}
+	sourceStages := p.SourceWritingStages()
+	if len(sourceStages) == 0 {
+		return nil // nothing to protect; the withholding would be a no-op
+	}
+	// Walk from entry; a stage is "reachable without approval" if there is a
+	// path from entry to it that never traverses the approval stage. The
+	// approval stage itself is the gate, so we stop expanding through it.
+	approvalStage := sourceApproval.Stage
+	reachableWithoutApproval := map[string]bool{}
+	var walk func(stageID string)
+	walk = func(stageID string) {
+		if reachableWithoutApproval[stageID] {
+			return
+		}
+		reachableWithoutApproval[stageID] = true
+		if stageID == approvalStage {
+			return // do not expand through the gate
+		}
+		for _, transition := range p.Stages[stageID].Transitions {
+			walk(transition.To)
+		}
+	}
+	walk(p.Entry)
+
+	var problems []string
+	for _, stageID := range sourceStages {
+		if reachableWithoutApproval[stageID] {
+			problems = append(problems, fmt.Sprintf("source-writing stage %q is reachable from entry %q without passing the approval stage %q", stageID, p.Entry, approvalStage))
+		}
+	}
+	return problems
 }
 
 // validateCheckPolicy checks the pack's check references are well-formed: names

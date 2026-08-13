@@ -56,6 +56,7 @@ type Pack struct {
 	Checks       CheckPolicy       `yaml:"checks"`
 	Entry        string            `yaml:"entry"`
 	Stages       map[string]Stage  `yaml:"stages"`
+	Approvals    []Approval        `yaml:"approvals,omitempty"`
 	PromptText   map[string]string `yaml:"-"` // keyed by stage id; populated by Load
 
 	// Dir is the absolute path the pack was loaded from. Empty for packs built
@@ -206,6 +207,85 @@ func containsWord(stageID, word string) bool {
 		}
 	}
 	return false
+}
+
+// Unlock is a closed-vocabulary name for what a human approval releases. v1 has
+// exactly one member: source_write, the subtractive capability withholding that
+// gates fs.write / git.write / exec.bash until a human approves the plan
+// artifact. A pack with no approvals block behaves exactly as today — the
+// withholding is never applied.
+type Unlock string
+
+const (
+	// UnlockSourceWrite re-enables the source-writing capability categories for
+	// every stage of the run. The runner records a durable task_approvals row
+	// when a human advances past the approval stage, and removes the withholding
+	// only when that row exists. See ADR 0003 D3.
+	UnlockSourceWrite Unlock = "source_write"
+)
+
+// knownUnlocks is the closed set of approval unlock names. Inlined here for the
+// same reason knownStageRoles is inlined in validate.go: the pack package stays
+// a pure data format with no import of the runner's enforcement code.
+var knownUnlocks = map[Unlock]bool{UnlockSourceWrite: true}
+
+// Approval declares a human gate whose decision unlocks a capability subset for
+// the rest of the run (ADR 0003 D3). The approval is recorded as a durable,
+// orchestrator-owned task_approvals row keyed unique on (task, name), so a
+// worker restart, a worktree restore, and a Restore to a checkpoint all leave
+// the decision intact and a repeated approve is idempotent by construction.
+type Approval struct {
+	// Name is the approval's unique identifier and the key the durable
+	// task_approvals row is keyed on. It is also the value the runner reads back
+	// to decide whether the unlock applies.
+	Name string `yaml:"name"`
+	// Stage is the stage whose gate, when advanced past by a human, IS the
+	// approval decision. Advancing past a stage that declares an approval writes
+	// the approval row in the same transaction as the FSM transition (ADR 0003
+	// D4) — there is no second verb for the same click.
+	Stage string `yaml:"stage"`
+	// Artifact names the file (relative to the stage's artifact dir) the
+	// approval binds to. The runner captures it as an immutable revision and the
+	// approval row stores the revision id, so "the implementer works within the
+	// approved plan" is a property: a mismatch between the current revision and
+	// the approved one is a controlled stop (plan_revision_drift). It must be a
+	// bare file name — not a path — because it names a file inside the
+	// orchestrator-constructed artifact dir.
+	Artifact string `yaml:"artifact"`
+	// Unlocks is the closed-vocabulary capability subset the approval releases.
+	// v1 has one member, source_write; the field is a slice so a future approval
+	// can release a narrower set without a model change.
+	Unlocks string `yaml:"unlocks"`
+}
+
+// SourceWriteApproval returns the pack's source_write approval declaration, if
+// any. A pack declares at most one such approval; the validator enforces
+// uniqueness. The runner uses this to decide whether to apply the source-write
+// withholding for the run and to resolve the approval row when a human advances
+// past the approval stage.
+func (p *Pack) SourceWriteApproval() (Approval, bool) {
+	for _, approval := range p.Approvals {
+		if Unlock(approval.Unlocks) == UnlockSourceWrite {
+			return approval, true
+		}
+	}
+	return Approval{}, false
+}
+
+// SourceWritingStages returns the ids of stages whose effective role is
+// implementer or fixer — the roles that carry fs.write / git.write /
+// exec.bash. The runner uses this to refuse entry to such stages when the
+// source_write unlock is absent (layer 2 of the ADR 0003 D3 lock) and the
+// validator uses it for the static reachability check (layer 3).
+func (p *Pack) SourceWritingStages() []string {
+	var sourceStages []string
+	for stageID, stage := range p.Stages {
+		role := EffectiveRole(stageID, stage)
+		if role == "implementer" || role == "fixer" {
+			sourceStages = append(sourceStages, stageID)
+		}
+	}
+	return sourceStages
 }
 
 // FixerStages returns the ids of stages whose effective role is fixer. The
