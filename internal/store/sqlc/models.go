@@ -120,6 +120,17 @@ type Task struct {
 	ResultCommit sql.NullString  `json:"result_commit"`
 }
 
+type TaskApproval struct {
+	ID                 string         `json:"id"`
+	TenantID           string         `json:"tenant_id"`
+	TaskID             string         `json:"task_id"`
+	Name               string         `json:"name"`
+	Decision           string         `json:"decision"`
+	ArtifactRevisionID sql.NullString `json:"artifact_revision_id"`
+	Actor              string         `json:"actor"`
+	CreatedAt          time.Time      `json:"created_at"`
+}
+
 type TaskCheckpoint struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenant_id"`
