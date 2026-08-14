@@ -941,6 +941,20 @@ type stageOutcome struct {
 // categories for every stage while the approval is pending; this layer protects
 // against an agent that would otherwise report a misleading "complete" without
 // writing anything.
+//
+// Both halts pin current_stage to the APPROVAL stage, not the refused stage.
+// This is load-bearing: the advance job resolves the CURRENT stage's
+// transition (entryPoint's advance branch), so a paused_gate stop must sit at a
+// stage that already ran. Pinning the refused (never-invoked) stage made
+// advance resolve that stage's transition — silently skipping the implementer
+// and reaching review against an empty diff. Pinning the approval stage makes
+// recovery exactly the ordinary plan-gate advance: the handler's
+// planApprovalForStage guard matches (current_stage == approval.Stage), the
+// approval row is written bound to the current plan revision, and entryPoint
+// resolves the approval stage's transition — the implementer runs with the
+// grant. For drift the approval row already exists (CreateApproval is a no-op
+// on conflict), so advance re-checks, drifts again, and pauses here once more —
+// a visible no-op retry whose exit is cancel, never a skip.
 func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run stageRun, stageID string, stage pack.Stage) *haltDecision {
 	if !run.sourceWriteUnlock.Required {
 		return nil
@@ -949,14 +963,22 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 	if role != "implementer" && role != "fixer" {
 		return nil
 	}
+	approval, hasApproval := run.taskPack.SourceWriteApproval()
+	if !hasApproval {
+		// Unreachable in practice: sourceWriteUnlock.Required is derived from
+		// this same pack's declaration. If it ever diverges, do not halt —
+		// layer 1 (the capability withholding) is the guarantee, and a halt
+		// without a rewind target would pin a never-run stage.
+		return nil
+	}
 	if !run.sourceWriteUnlock.Granted {
-		// EventStopGate (not EventStopUser): a gate is what this is — the human
-		// resolves it by approving the plan (advance, which re-enters drive() and
-		// now finds the granted approval) or by rejecting. paused_user_stop's only
-		// forward action is continue, which loops straight back into this refusal;
-		// paused_gate carries advance + reject + cancel, the actual exit set.
+		// EventStopGate (not EventStopUser): a gate is what this is. The human
+		// resolves it by advancing (which records the plan approval, because the
+		// pause sits at the approval stage) or by rejecting/cancelling.
+		// paused_user_stop's only forward action is continue, which would resume
+		// the PLANNER's session — not an exit at all.
 		return &haltDecision{
-			stageID: stageID,
+			stageID: approval.Stage,
 			decision: Decision{
 				Action:     ActionPause,
 				FSMEvent:   engine.EventStopGate,
@@ -967,13 +989,14 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 	// Granted — but the approval binds to a plan revision. If the current
 	// revision of the approval artifact no longer matches the approved one,
 	// someone edited the plan AFTER approving it; the implementer would then
-	// work within a plan the human never saw. That is a controlled stop too:
-	// paused_gate so reject/cancel remain exits (advance will loop here until
-	// the plan is re-approved or the run is abandoned — drift is a genuine
-	// stuck state, and surfacing it as a gate lets a human act on it).
+	// work within a plan the human never saw. Same rewind: advance re-checks
+	// and pauses here again (the approval row exists, so the advance write is a
+	// no-op and the drift persists) — visible, bounded, and never a skip of the
+	// implementer. Cancel is the exit; reject 409s here because the plan gate
+	// was already decided approved.
 	if runner.detectPlanRevisionDrift(ctx, run) {
 		return &haltDecision{
-			stageID: stageID,
+			stageID: approval.Stage,
 			decision: Decision{
 				Action:     ActionPause,
 				FSMEvent:   engine.EventStopGate,
@@ -1116,7 +1139,10 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// of defence; the guarantee is layer 1, which holds even if this check is
 	// wrong.
 	if halt := runner.refuseSourceWriteBeforeApproval(ctx, run, stageID, stage); halt != nil {
-		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, halt.decision, stageID)
+		// halt.stageID is the APPROVAL stage (the rewind target), not the
+		// refused stage — see refuseSourceWriteBeforeApproval for why the pause
+		// must sit there for advance to resolve the right transition.
+		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, halt.decision, halt.stageID)
 	}
 
 	// ADR 0002 D4 layer 2: restore any instruction files the worktree drifted

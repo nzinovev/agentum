@@ -114,8 +114,8 @@ happened (`04 §7.1.6`).
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
 | resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
-| a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_user` | `paused_user_stop` | `plan_not_approved` |
-| the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_user` | `paused_user_stop` | `plan_revision_drift` |
+| a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_gate` | `paused_gate` (pinned to the **approval stage**, not the refused stage) | `plan_not_approved` |
+| the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
@@ -172,6 +172,22 @@ layers, in order of authority:
 
 The guarantee is layer 1. Layers 2 and 3 turn a silent refusal into a named,
 human-actionable stop and catch authoring mistakes early.
+
+**Where the layer-2 stop pauses matters.** Both stops pin `current_stage` to
+the **approval stage**, not the refused stage. The advance job resolves the
+*current stage's* transition, so a `paused_gate` stop must sit at a stage that
+already ran; pinning the never-invoked implementer would make advance resolve
+the implementer's transition and silently skip it — reaching review against an
+empty diff with no plan approval ever recorded. Pinned to the approval stage,
+recovery is exactly the ordinary plan-gate advance:
+
+- `plan_not_approved` → advance records the plan approval (the pause sits at
+  the approval stage, so the handler's stage guard matches) and the
+  implementer runs with the grant. Reject and cancel also work from this stop.
+- `plan_revision_drift` → the approval row already exists, so advance's write
+  is a no-op; the run re-checks, drifts again, and pauses at the same place —
+  a visible, bounded no-op retry. Cancel is the exit (reject returns 409: the
+  plan gate was already decided approved).
 
 ### Orchestrator-produced delivery diff (ADR 0003)
 

@@ -329,33 +329,28 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 
 // TestRunner_PlanApprovalNotApprovedStopsAtPausedGate (ADR 0003 D3/F9): a pack
 // declaring a source_write approval, whose task has no approval row, must refuse
-// to enter the implementer stage and stop in paused_gate (plan_not_approved) —
-// NOT paused_user_stop, whose only forward action (continue) would loop straight
-// back into the refusal. The plan stage runs with gate:auto here so the loop
-// reaches the implementer without a human pause; the refusal is what stops it.
+// to enter the implementer stage and stop in paused_gate (plan_not_approved)
+// pinned to the APPROVAL stage — not the refused stage. The pause point is
+// load-bearing: the advance job resolves the current stage's transition, so
+// pinning the never-invoked implementer made advance skip it entirely (straight
+// to review against an empty diff). Pinned to the plan stage, advance is the
+// ordinary plan-gate approval. The plan stage runs with gate:auto here so the
+// loop reaches the implementer without a human pause; the refusal is what stops
+// it.
 func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := &pack.Pack{
-		API: "agentum/v1", Pack: pack.Meta{Name: "test", Version: "0.1.0"},
-		Tiers: pack.Tiers{Default: "fast"}, Entry: "plan",
-		Approvals: []pack.Approval{{Name: "plan", Stage: "plan", Artifact: "plan.md", Unlocks: "source_write"}},
-		Stages: map[string]pack.Stage{
-			"plan":      {Gate: pack.GateAuto, Role: "analyst", Prompt: "plan.md", Transitions: []pack.Transition{{To: "implement"}}},
-			"implement": {Gate: pack.GateAuto, Role: "implementer", Prompt: "implement.md", Transitions: []pack.Transition{{To: "done"}}},
-			"done":      {},
-		},
-		PromptText: map[string]string{"plan": "plan", "implement": "implement"},
-	}
+	taskPack := approvalGatePack()
 	task := sqlc.Task{ID: "Tpa", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
 	store := newFakeStore(task, proj)
 	// No approvals map seeded → GetApproval returns sql.ErrNoRows → unlock absent.
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
-		"plan": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
 
@@ -369,12 +364,149 @@ func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 	if count := len(store.invocations); count != 1 {
 		t.Fatalf("expected 1 invocation (plan only; implementer refused), got %d", count)
 	}
-	// Confirm the stop reason is recorded.
+	// The pause is pinned to the APPROVAL stage, not the refused implementer.
+	// advance resolves the current stage's transition; pinning "implement"
+	// (never invoked) there made advance skip the implementer.
 	store.mu.Lock()
 	currentStage := store.task.CurrentStage.String
 	store.mu.Unlock()
-	if currentStage != "implement" {
-		t.Fatalf("current_stage = %q, want implement (the refused stage)", currentStage)
+	if currentStage != "plan" {
+		t.Fatalf("current_stage = %q, want plan (the approval stage — pausing at the refused stage makes advance skip it)", currentStage)
+	}
+}
+
+// TestRunner_PlanApprovalAdvanceRunsImplementer (F9 regression): after the
+// plan_not_approved stop, an advance must run the implementer — not resolve the
+// never-run stage's transition and skip to review. The test simulates what the
+// advance handler's transaction does (write the approval row bound to the plan
+// revision) and then drives the advance job, asserting the run lands at the
+// final gate WITH the implementer having actually run.
+func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := approvalGatePack()
+	task := sqlc.Task{ID: "Tpa2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "Tpa2", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("setup: state = %q, want paused_gate before advance", got)
+	}
+
+	// What POST .../advance does in its tx: write the approval row bound to the
+	// plan artifact's current revision, then enqueue the advance job. The runner
+	// test seeds the row and drives the job directly.
+	store.mu.Lock()
+	store.approvals = map[string]sqlc.TaskApproval{
+		approvalKey("Tpa2", "plan"): {TaskID: "Tpa2", TenantID: "tn", Name: "plan", Decision: "approved"},
+	}
+	store.mu.Unlock()
+
+	if err := runner.Handle(t.Context(), job("advance", "Tpa2", "tn", "us")); err != nil {
+		t.Fatalf("advance job: %v", err)
+	}
+	// THE anti-regression assertion: the implementer actually ran. With the
+	// pin-the-refused-stage bug, advance resolved implement's transition and the
+	// run reached the final gate with only the plan invocation.
+	if count := len(store.invocations); count != 2 {
+		t.Fatalf("after advance, invocations = %d, want 2 (plan + implement; the implementer must run, not be skipped)", count)
+	}
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("after advance, state = %q, want awaiting_final_review (implement → done terminal → final gate)", got)
+	}
+	store.mu.Lock()
+	currentStage := store.task.CurrentStage.String
+	store.mu.Unlock()
+	if currentStage != "done" {
+		t.Fatalf("current_stage = %q, want done", currentStage)
+	}
+}
+
+// TestRunner_PlanRevisionDriftAdvanceDoesNotSkip (F9): when the approval is
+// granted but the plan was edited after approval, the drift stop must not let
+// advance skip the implementer. Advance re-enters, drifts again, and pauses at
+// the approval stage once more — a visible no-op retry. Cancel is the exit.
+func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := approvalGatePack()
+	task := sqlc.Task{ID: "Tdr", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	// Approval granted, bound to a plan revision that is no longer current.
+	store.approvals = map[string]sqlc.TaskApproval{
+		approvalKey("Tdr", "plan"): {TaskID: "Tdr", TenantID: "tn", Name: "plan", Decision: "approved",
+			ArtifactRevisionID: nullStr("rev-approved-long-ago")},
+	}
+	store.artifactRevisions = map[string]sqlc.ArtifactRevision{
+		"plan/plan.md": {ID: "rev-edited-after-approval", Name: "plan/plan.md", Kind: "plan_md"},
+	}
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+
+	if err := runner.Handle(t.Context(), job("run", "Tdr", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("setup: state = %q, want paused_gate (drift stop)", got)
+	}
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("setup: invocations = %d, want 1 (implementer refused on drift)", count)
+	}
+
+	// Advance (the handler's approval write is a no-op here — the row exists and
+	// CreateApproval is ON CONFLICT DO NOTHING — so the runner job alone models
+	// the post-request state faithfully).
+	if err := runner.Handle(t.Context(), job("advance", "Tdr", "tn", "us")); err != nil {
+		t.Fatalf("advance job: %v", err)
+	}
+	// Drift persists: paused again at the approval stage, implementer still
+	// never invoked. Advance must not resolve the never-run stage's transition.
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("after advance on drift, state = %q, want paused_gate (drift re-fires; advance is a visible no-op retry)", got)
+	}
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("after advance on drift, invocations = %d, want 1 (the implementer must not be skipped past)", count)
+	}
+	store.mu.Lock()
+	currentStage := store.task.CurrentStage.String
+	store.mu.Unlock()
+	if currentStage != "plan" {
+		t.Fatalf("after advance on drift, current_stage = %q, want plan", currentStage)
+	}
+}
+
+// approvalGatePack is the F9 fixture: a plan stage with gate:auto (so the loop
+// reaches the implementer without a human pause — isolating the refusal) and a
+// declared source_write approval the test seeds or leaves absent.
+func approvalGatePack() *pack.Pack {
+	return &pack.Pack{
+		API: "agentum/v1", Pack: pack.Meta{Name: "test", Version: "0.1.0"},
+		Tiers: pack.Tiers{Default: "fast"}, Entry: "plan",
+		Approvals: []pack.Approval{{Name: "plan", Stage: "plan", Artifact: "plan.md", Unlocks: "source_write"}},
+		Stages: map[string]pack.Stage{
+			"plan":      {Gate: pack.GateAuto, Role: "analyst", Prompt: "plan.md", Transitions: []pack.Transition{{To: "implement"}}},
+			"implement": {Gate: pack.GateAuto, Role: "implementer", Prompt: "implement.md", Transitions: []pack.Transition{{To: "done"}}},
+			"done":      {},
+		},
+		PromptText: map[string]string{"plan": "plan", "implement": "implement"},
 	}
 }
 

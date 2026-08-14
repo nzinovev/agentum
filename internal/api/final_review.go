@@ -8,10 +8,10 @@ import (
 	"net/http"
 
 	"github.com/nzinovev/agentum/internal/agent"
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/pack"
-	"github.com/nzinovev/agentum/internal/runner"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -243,32 +243,37 @@ func isStageScopedKind(kind string) bool {
 	return false
 }
 
-// finalReviewDiffAndVerdict scans the current revisions for the latest diff and
-// verdict artifacts. The diff's Truncated flag is read from the patch bytes
-// (the orchestrator appends an explicit marker when it caps the patch — a size
+// finalReviewDiffAndVerdict reads the reviewer stage's current diff and verdict
+// revisions. A review ⇄ fix loop re-enters the SAME reviewer stage id, so there
+// is exactly one current "review/diff.patch" and one "review/diff.stat" — the
+// pair is taken together from the first stage that has a patch, never mixed
+// across stages. The diff's Truncated flag is read from the patch bytes (the
+// orchestrator appends an explicit marker when it caps the patch — a size
 // comparison would not distinguish a cap-sized patch from a truncated one). The
-// review verdict is parsed from the latest reviewer's verdict.json so the
-// payload carries the actual verdict + findings, not an empty struct. Both are
+// review verdict is parsed from the reviewer's verdict.json so the payload
+// carries the actual verdict + findings, not an empty struct. Both are
 // best-effort: a missing store, a missing revision, or an unparseable verdict
 // yield nil rather than failing the whole payload.
 func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, stages []finalReviewStage) (*finalReviewDiff, *finalReviewVerdict) {
 	var diff *finalReviewDiff
-	// Collect the diff revisions across reviewer stages (each reviewer stage
-	// produced its own diff against base_commit; the payload surfaces all of
-	// them by revision id, and flags truncation if ANY patch was capped).
 	for _, stage := range stages {
+		patchID, statID := "", ""
 		for _, artifact := range stage.Artifacts {
-			if artifact.Kind == "diff" && diff == nil {
-				diff = &finalReviewDiff{PatchRevisionID: artifact.RevisionID}
+			switch artifact.Kind {
+			case "diff":
+				patchID = artifact.RevisionID
+			case "diff_stat":
+				statID = artifact.RevisionID
 			}
-			if artifact.Kind == "diff_stat" && diff != nil {
-				diff.StatRevisionID = artifact.RevisionID
-			}
+		}
+		if patchID != "" {
+			diff = &finalReviewDiff{PatchRevisionID: patchID, StatRevisionID: statID}
+			break
 		}
 	}
 	if diff != nil && diff.PatchRevisionID != "" && api.art != nil {
 		if patchBytes, err := api.art.GetBytes(ctx, task.TenantID, diff.PatchRevisionID); err == nil {
-			diff.Truncated = bytes.Contains(patchBytes, []byte(runner.DiffTruncationMarker))
+			diff.Truncated = bytes.Contains(patchBytes, []byte(artifacts.DiffTruncationMarker))
 		}
 	}
 	// Review verdict: read the latest reviewer's verdict.json content and parse

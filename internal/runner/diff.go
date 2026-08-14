@@ -112,16 +112,9 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 	return ref
 }
 
-// DiffTruncationMarker is the byte sequence produceDiff appends to a capped
-// diff.patch so a reader can tell the patch was cut at the size cap. Exported
-// because the final-review payload (internal/api) detects truncation by
-// scanning the stored patch bytes for this marker — the only durable signal
-// (content_size is the truncated size, not the original). Changing this string
-// is a wire-format change that breaks truncation detection; keep it stable.
-const DiffTruncationMarker = "\n--- diff truncated by Agentum at the size cap; see diff.stat and read named files directly ---\n"
-
 // capDiffPatch truncates patch to at most cap bytes on a hunk boundary ("@@"),
-// appending DiffTruncationMarker so a reader knows the patch was cut. Returns
+// appending artifacts.DiffTruncationMarker so a reader knows the patch was cut
+// (the final-review payload detects the marker in the stored bytes). Returns
 // (body, truncated). When the patch fits, it is returned verbatim and truncated
 // is false. Truncating on a hunk boundary keeps every retained hunk complete and
 // reviewable, rather than cutting mid-hunk.
@@ -136,7 +129,7 @@ func capDiffPatch(patch []byte, cap int) (body []byte, truncated bool) {
 	if lastHunk > 0 {
 		cutoff = lastHunk + 1 // include the newline before the hunk header
 	}
-	marker := []byte(DiffTruncationMarker)
+	marker := []byte(artifacts.DiffTruncationMarker)
 	truncated = true
 	return append(patch[:cutoff], marker...), truncated
 }

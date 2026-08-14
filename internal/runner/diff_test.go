@@ -3,6 +3,8 @@ package runner
 import (
 	"bytes"
 	"testing"
+
+	"github.com/nzinovev/agentum/internal/artifacts"
 )
 
 // TestCapDiffPatch_PreservesSmallPatches: a patch under the cap is returned
@@ -20,10 +22,10 @@ func TestCapDiffPatch_PreservesSmallPatches(t *testing.T) {
 }
 
 // TestCapDiffPatch_TruncatesOnHunkBoundaryWithMarker: a patch over the cap is
-// cut on a hunk boundary and carries DiffTruncationMarker, so the final-review
-// payload (which scans for the marker) reports Truncated=true. The marker is
-// the durable wire signal — content_size cannot distinguish a cap-sized patch
-// from a truncated one.
+// cut on a hunk boundary and carries artifacts.DiffTruncationMarker, so the
+// final-review payload (which scans for the marker) reports Truncated=true. The
+// marker is the durable wire signal — content_size cannot distinguish a
+// cap-sized patch from a truncated one.
 func TestCapDiffPatch_TruncatesOnHunkBoundaryWithMarker(t *testing.T) {
 	t.Parallel()
 	// Build a patch with two hunks where the first is well under a tiny cap and
@@ -35,7 +37,7 @@ func TestCapDiffPatch_TruncatesOnHunkBoundaryWithMarker(t *testing.T) {
 	if !truncated {
 		t.Fatal("over-cap patch not marked truncated")
 	}
-	if !bytes.Contains(body, []byte(DiffTruncationMarker)) {
+	if !bytes.Contains(body, []byte(artifacts.DiffTruncationMarker)) {
 		t.Errorf("truncated patch missing DiffTruncationMarker; the final-review payload would not detect truncation. body ends: %q", body[len(body)-80:])
 	}
 	// The body must end on a hunk boundary: the retained portion is hunkOne
@@ -45,16 +47,5 @@ func TestCapDiffPatch_TruncatesOnHunkBoundaryWithMarker(t *testing.T) {
 	}
 	if !bytes.Contains(body, hunkOne) {
 		t.Errorf("truncated body lost the first (fitting) hunk")
-	}
-}
-
-// TestDiffTruncationMarker_StableWireContract: the marker is a stable wire
-// string shared between the runner (producer) and the API (consumer). Changing
-// it is a wire-format break. This test exists so a rename trips CI.
-func TestDiffTruncationMarker_StableWireContract(t *testing.T) {
-	t.Parallel()
-	want := "\n--- diff truncated by Agentum at the size cap; see diff.stat and read named files directly ---\n"
-	if DiffTruncationMarker != want {
-		t.Errorf("DiffTruncationMarker changed:\n got = %q\nwant = %q", DiffTruncationMarker, want)
 	}
 }
