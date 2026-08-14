@@ -10,10 +10,18 @@ import (
 
 // computeProfile derives the effective capability profile for one stage
 // invocation: host support ∩ pack capabilities ∩ (stage capabilities or
-// inherited pack) ∩ role template. The role comes from the stage's explicit
-// role field, falling back to caps.DeriveRole(stageID). The result is
-// deny-by-default: a stage whose pack/stage omit a category receives nothing
-// for it.
+// inherited pack) ∩ role template, minus an explicit withholding. The role
+// comes from the stage's explicit role field, falling back to
+// caps.DeriveRole(stageID). The result is deny-by-default: a stage whose
+// pack/stage omit a category receives nothing for it.
+//
+// withheld removes categories AFTER the four-way intersection (ADR 0003 D3).
+// The runner passes caps.SourceWriteCategories while the run's source_write
+// approval is pending, so fs.write / git.write / exec.bash are refused even
+// though the role and the pack grant them — the capability layer of the
+// plan-approval lock. withheldReason is recorded on the profile's Source so an
+// audit reader sees why the grants were narrowed. Empty withheld reproduces the
+// pre-ADR-0003 profile byte-for-byte.
 //
 // hardBudget and idleBudget are the configured per-invocation timeouts applied
 // via the adapter's ctx (zero = no cap). They are taken as-is: config owns the
@@ -24,6 +32,8 @@ func (runner *Runner) computeProfile(
 	stage pack.Stage,
 	supported []caps.Category,
 	hardBudget, idleBudget time.Duration,
+	withheld []caps.Category,
+	withheldReason string,
 ) caps.Profile {
 	packTokens := toTokens(taskPack.Capabilities)
 	stageTokens := toTokens(stage.Capabilities)
@@ -38,12 +48,14 @@ func (runner *Runner) computeProfile(
 		role = caps.DeriveRole(stageID)
 	}
 	profile := caps.Effective(caps.Input{
-		Host:        supported,
-		Pack:        packTokens,
-		Stage:       stageTokens,
-		Role:        role,
-		HardTimeout: hardBudget,
-		IdleTimeout: idleBudget,
+		Host:           supported,
+		Pack:           packTokens,
+		Stage:          stageTokens,
+		Role:           role,
+		HardTimeout:    hardBudget,
+		IdleTimeout:    idleBudget,
+		Withheld:       withheld,
+		WithheldReason: withheldReason,
 	})
 	// Contract floor: every stage MUST write result.json to its artifact dir —
 	// that file is the orchestrator's signal to advance, pause, or gate. So

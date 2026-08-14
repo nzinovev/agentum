@@ -273,6 +273,31 @@ func (manager *Manager) IsClean(ctx context.Context, wtRoot string) (bool, error
 	return len(strings.TrimSpace(string(out))) == 0, nil
 }
 
+// Diff runs `git diff [--stat] from..to` in the worktree and returns the raw
+// output. Used by the orchestrator-produced diff (ADR 0003 D5): the reviewer
+// reads the real change set without needing exec.bash to run git itself. stat
+// selects the --stat form (a compact summary, never truncated by the caller);
+// the default is the full patch (which the caller caps on a hunk boundary).
+// Both commits must be resolvable in the worktree's repo.
+func (manager *Manager) Diff(ctx context.Context, wtRoot, from, to string, stat bool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		return nil, errors.New("worktree: Diff requires non-empty from and to commits")
+	}
+	args := []string{"diff"}
+	if stat {
+		args = append(args, "--stat")
+	}
+	args = append(args, from+".."+to)
+	out, err := git(ctx, wtRoot, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git diff %s..%s: %w (%s)", from, to, err, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
 // Restore moves the worktree's checked-out branch, its index, its working tree,
 // AND removes untracked files to the given commit. Used by the reconciler when a
 // crashed worktree is classified as restorable: it restores the last checkpoint

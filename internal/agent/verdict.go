@@ -33,15 +33,49 @@ const (
 	SeverityMinor   Severity = "minor"
 )
 
+// FindingCategory is the optional advisory taxonomy a reviewer may attach to a
+// finding (ADR 0003 D9.5). It is recorded and rendered, never routed on: the
+// "plan defect must not go to the fixer" rule is enforced by status: "blocked"
+// + open_questions, which Evaluate handles before any transition. The category
+// exists so the orchestrator can read back what kind of finding each one is
+// without parsing prose.
+type FindingCategory string
+
+const (
+	// CategoryImplementationDefect — code does not correctly satisfy an
+	// acceptance criterion or repository invariant.
+	CategoryImplementationDefect FindingCategory = "implementation_defect"
+	// CategoryPlanDeviation — implementation materially departed from the
+	// approved plan without a justified equivalent solution.
+	CategoryPlanDeviation FindingCategory = "plan_deviation"
+	// CategoryPlanDefect — the approved plan or acceptance criteria are
+	// themselves inconsistent with the task or repository.
+	CategoryPlanDefect FindingCategory = "plan_defect"
+	// CategoryRequirementAmbiguity — newly discovered ambiguity requires a human
+	// product or architectural decision.
+	CategoryRequirementAmbiguity FindingCategory = "requirement_ambiguity"
+)
+
+// knownFindingCategories is the closed set ParseVerdictJSON validates against
+// when category is present. Empty/absent category is always allowed.
+var knownFindingCategories = map[FindingCategory]bool{
+	CategoryImplementationDefect: true,
+	CategoryPlanDeviation:        true,
+	CategoryPlanDefect:           true,
+	CategoryRequirementAmbiguity: true,
+}
+
 // Finding is one concrete change request the fixer should act on. Path and
 // Detail give the fixer a target; ID lets the fixer reference it in its own
-// result. Line is 1-based; 0 means "unspecified".
+// result. Line is 1-based; 0 means "unspecified". Category is optional and
+// advisory (ADR 0003 D9.5) — recorded and rendered, never routed on.
 type Finding struct {
-	ID       string   `json:"id"`
-	Severity Severity `json:"severity"`
-	Path     string   `json:"path,omitempty"`
-	Line     int      `json:"line,omitempty"`
-	Detail   string   `json:"detail"`
+	ID       string          `json:"id"`
+	Severity Severity        `json:"severity"`
+	Path     string          `json:"path,omitempty"`
+	Line     int             `json:"line,omitempty"`
+	Detail   string          `json:"detail"`
+	Category FindingCategory `json:"category,omitempty"`
 }
 
 // VerdictJSON is the file-derived reviewer verdict, parsed from
@@ -107,6 +141,13 @@ func ParseVerdictJSON(data []byte) (VerdictJSON, error) {
 		case SeverityBlocker, SeverityMajor, SeverityMinor:
 		default:
 			return VerdictJSON{}, fmt.Errorf("verdict.json: findings[%d].severity %q is not one of {blocker, major, minor}", index, finding.Severity)
+		}
+		// category is optional (ADR 0003 D9.5); when present it must be a known
+		// member of the advisory taxonomy. An unknown value is a contract
+		// violation rather than a silent drop, so a typo does not masquerade as
+		// "no category".
+		if finding.Category != "" && !knownFindingCategories[finding.Category] {
+			return VerdictJSON{}, fmt.Errorf("verdict.json: findings[%d].category %q is not one of {implementation_defect, plan_deviation, plan_defect, requirement_ambiguity}", index, finding.Category)
 		}
 	}
 	// A changes_requested verdict with no findings is a contract violation: the

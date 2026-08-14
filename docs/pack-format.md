@@ -95,6 +95,7 @@ stages:
 | `checks` | object | Optional. Adds project checks to every run of this pack **by name only** — `required` makes a check mandatory (failure blocks delivery), `optional` runs it without blocking. Names must exist in the project registry (`.agentum.yaml`); `checks.Resolve` rejects unknown names at run time. A pack can never supply a command, remove a baseline check, or weaken an already-mandatory check. |
 | `entry` | string | The stage the run starts at. Must be defined in `stages`. |
 | `stages` | map | Named map of stage id → stage definition. See below. |
+| `approvals` | list | Optional. Pack-level human-gate declarations that gate a capability unlock. See [Approvals](#approvals). |
 
 ### Stages
 
@@ -128,6 +129,59 @@ stages:
 
 A **terminal stage** (no `transitions`) is an engine state, not an agent
 invocation: it has no prompt and no gate. It is the pipeline's exit.
+
+### Approvals
+
+The optional top-level `approvals:` list declares a human gate whose decision
+unlocks a capability for the rest of the run. A pack with no `approvals` block
+behaves exactly as before — every stage runs under its role profile from the
+first run.
+
+```yaml
+approvals:
+  - name: plan            # unique, non-empty
+    stage: plan           # a defined non-terminal stage
+    artifact: plan.md     # bare file name (no path separators); lives in the stage's artifact dir
+    unlocks: [source_write]   # closed set; v1 has one member
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | Unique within the list, non-empty. Recorded on the `task_approvals` row as the decision's name. |
+| `stage` | yes | A defined non-terminal stage. The approval is recorded when the run advances past this stage's gate. |
+| `artifact` | yes | A **bare file name** — no path separators. It lives in the stage's artifact dir and is captured as an immutable revision the human may edit via `PUT` before approving. |
+| `unlocks` | yes | Closed set of unlock names. v1 has exactly one member: `source_write`. |
+
+**`source_write` unlock.** While a `source_write` approval is pending (the run
+has not yet advanced past the approval stage), the runner withholds
+`SourceWriteCategories` from every stage's effective profile, so no stage can
+write source until a human approves the named artifact. The approval binds to
+the artifact revision the human saw, and a later edit to that artifact is
+detected as drift. See [docs/capabilities.md](capabilities.md) and
+[docs/execution.md](execution.md) § "Plan-approval lock".
+
+**`auto_if_clean` is the wrong gate for a source-writing stage.** A stage that
+writes code under `auto_if_clean` pauses on every successful run, because any
+porcelain entry the agent's write produced counts as dirty and the gate holds
+for review. Use `auto` for implement/fix stages; the plan-approval lock is what
+gates source writes, not the cleanliness signal.
+
+Validation (collected with the rest in one pass):
+
+- `name` values are unique and non-empty.
+- `stage` references a defined, **non-terminal** stage.
+- `artifact` is a bare file name (no path separators).
+- every `unlocks` entry is a known name (`source_write` in v1).
+- when a `source_write` approval exists, every source-writing stage (effective
+  role `implementer` or `fixer`) is reachable from `entry` only through the
+  approval stage. This reachability check is **static and advisory** — it flags
+  a pack that could bypass the gate by graph shape. The real guarantee is the
+  runtime capability withholding (layer 1), which holds regardless of what the
+  static check concludes.
+
+The shipped [`packs/backend-development`](../packs/backend-development/manifest.yaml)
+pack is the worked example: `plan → implement → review → (fix → review)* → done`,
+with `approvals: [{name: plan, stage: plan, artifact: plan.md, unlocks: [source_write]}]`.
 
 ### Transition conditions
 
@@ -207,6 +261,10 @@ A pack is rejected at load/resolve time if any of these fail:
 - At least one terminal stage is reachable from `entry` (the pipeline has an
   exit).
 - Terminal stages declare no `prompt`.
+- `approvals[*]` satisfies the [Approvals](#approvals) rules (unique non-empty
+  names; defined non-terminal `stage`; bare-file-name `artifact`; known
+  `unlocks`; and when a `source_write` approval exists, every source-writing
+  stage is reachable from `entry` only through the approval stage).
 - `memory.reads` ⊆ `{project, user, org}`, no duplicates.
 - `budgets.fix_cycles` and `budgets.ask_to_edit` are ≥ 0.
 

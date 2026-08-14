@@ -63,6 +63,15 @@ const (
 	ActorSystem Actor = "system"
 )
 
+// DiffTruncationMarker is the byte sequence the runner appends to a diff.patch
+// revision capped at the size cap, so a reader can tell the patch was cut.
+// Defined here (not in the runner) because two packages need it — the runner
+// produces the marker and the final-review payload detects it by scanning the
+// stored bytes; content_size cannot distinguish a capped patch from a
+// cap-sized one. Changing this string is a wire-format break that breaks
+// truncation detection; keep it stable.
+const DiffTruncationMarker = "\n--- diff truncated by Agentum at the size cap; see diff.stat and read named files directly ---\n"
+
 // Revision is the Go-shaped view of an artifact_revisions row.
 type Revision struct {
 	ID          string

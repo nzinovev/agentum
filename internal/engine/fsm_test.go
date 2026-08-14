@@ -22,7 +22,7 @@ func TestNext_LegalTransitions(t *testing.T) {
 		{StateRunning, EventStopOpenQ, StatePausedOpenQuestions},
 		{StateRunning, EventStopGate, StatePausedGate},
 		{StateRunning, EventStopUser, StatePausedUserStop},
-		{StateRunning, EventReachFinalGate, StateAwaitingMemoryCommit},
+		{StateRunning, EventReachFinalGate, StateAwaitingFinalReview},
 		{StateRunning, EventFail, StateFailed},
 		{StateRunning, EventCancel, StateCancelled},
 
@@ -35,8 +35,8 @@ func TestNext_LegalTransitions(t *testing.T) {
 		{StatePausedGate, EventAdvance, StateRunning},
 		{StatePausedGate, EventCancel, StateCancelled},
 
-		{StateAwaitingMemoryCommit, EventApprove, StateDone},
-		{StateAwaitingMemoryCommit, EventCancel, StateCancelled},
+		{StateAwaitingFinalReview, EventApprove, StateDone},
+		{StateAwaitingFinalReview, EventCancel, StateCancelled},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.from)+"--"+string(tc.event)+"-->", func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestNext_NoSpuriousEdges(t *testing.T) {
 	allStates := []TaskState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
-		StateAwaitingMemoryCommit,
+		StateAwaitingFinalReview,
 		StateDone, StateFailed, StateCancelled,
 	}
 	allEvents := []TaskEvent{
@@ -125,7 +125,7 @@ func TestIsTerminal(t *testing.T) {
 	nonTerminal := []TaskState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
-		StateAwaitingMemoryCommit,
+		StateAwaitingFinalReview,
 	}
 	for _, s := range terminal {
 		if !IsTerminal(s) {
@@ -157,7 +157,7 @@ func TestIsPaused(t *testing.T) {
 	all := []TaskState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
-		StateAwaitingMemoryCommit,
+		StateAwaitingFinalReview,
 		StateDone, StateFailed, StateCancelled,
 	}
 	for _, s := range all {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -19,6 +20,7 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // ErrArtifactEscapesWorktree is returned by captureStageOutputs when the agent
@@ -80,6 +82,16 @@ func (runner *Runner) captureStageOutputs(
 	// worktree restore or a worker restart: the verdict is read from the store,
 	// not from a file that may have been reset by Restore.
 	outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, agent.VerdictFileName, "verdict_json", outputs)
+	// Capture the pack-declared approval artifact (plan.md) when this stage is
+	// the approval stage (ADR 0003 D2). The path is orchestrator-constructed
+	// (inside the stage's artifact dir, next to result.json), so it needs no
+	// containment check — the same exemption verdict.json relies on. The kind
+	// plan_md is what the sync redirect and the drift check key on.
+	if run.taskPack != nil {
+		if approval, hasApproval := run.taskPack.SourceWriteApproval(); hasApproval && approval.Stage == stageID {
+			outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, approval.Artifact, "plan_md", outputs)
+		}
+	}
 	for _, artifact := range declared {
 		bytes, readErr := container.ReadFile(artifact.name)
 		if readErr != nil {
@@ -105,7 +117,7 @@ func (runner *Runner) captureIngest(
 	bytes []byte,
 	outputs []manifest.ArtifactRef,
 ) []manifest.ArtifactRef {
-	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes, artifacts.ActorAgent)
 	if !stored {
 		return outputs
 	}
@@ -183,7 +195,7 @@ func (runner *Runner) captureFile(
 		return outputs
 	}
 	revisionName := stageID + "/" + name
-	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes)
+	revision, stored := runner.ingest(ctx, run, stageID, invocationID, revisionName, kind, bytes, artifacts.ActorAgent)
 	if !stored {
 		return outputs
 	}
@@ -216,6 +228,7 @@ func (runner *Runner) ingest(
 	run stageRun,
 	stageID, invocationID, revisionName, kind string,
 	bytes []byte,
+	actor artifacts.Actor,
 ) (artifacts.Revision, bool) {
 	revision, putErr := runner.art.Put(ctx, artifacts.PutParams{
 		TenantID: run.task.TenantID,
@@ -225,7 +238,7 @@ func (runner *Runner) ingest(
 		Kind:     kind,
 		Bytes:    bytes,
 		Source:   invocationID,
-		Actor:    artifacts.ActorAgent,
+		Actor:    actor,
 	})
 	if putErr != nil {
 		runner.log.Warn("capture artifact: put",
@@ -426,6 +439,20 @@ func (runner *Runner) sealManifestAtTerminal(ctx context.Context, task sqlc.Task
 	switch engine.TaskState(task.State) {
 	case engine.StateCancelled:
 		reason = manifest.SealCancelled
+		// ADR 0003 D4: a reject fires EventCancel (→ cancelled) but records a
+		// task_approvals row with decision="rejected". Distinguish the two so a
+		// sealed record does not describe a rejected result as an undifferentiated
+		// abort. Read the approval rows; a rejected decision flips the seal reason.
+		if approvals, apErr := runner.store.ListApprovalsForTask(ctx, sqlc.ListApprovalsForTaskParams{
+			TaskID: task.ID, TenantID: task.TenantID,
+		}); apErr == nil {
+			for _, approval := range approvals {
+				if approval.Decision == "rejected" {
+					reason = manifest.SealRejected
+					break
+				}
+			}
+		}
 	case engine.StateFailed:
 		reason = manifest.SealFailed
 	}
@@ -458,17 +485,40 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	targets := make([]artifacts.SyncTarget, 0, len(currentRevisions))
 	revisionByName := make(map[string]artifacts.Revision, len(currentRevisions))
 	for _, revision := range currentRevisions {
-		// Skip the per-stage result_json and verdict_json blobs — those live
-		// under .agentum/<task>/.ag-artifacts/<stage>/, not the worktree proper.
-		// The agent reads them by path from the artifact dir; writing them into
-		// the worktree would put <stage>/verdict.json into the delivery tree.
-		if revision.Kind == "result_json" || revision.Kind == "verdict_json" {
+		// Artifact-dir-resident kinds (result_json, verdict_json, plan_md,
+		// diff, diff_stat) live under .agentum/<task>/.ag-artifacts/<stage>/,
+		// not the worktree proper. ADR 0003 D6.2: instead of skipping them,
+		// materialize them at their artifact-dir path. The revision name is
+		// "<stage>/<file>", so the destination is the stage's artifact dir +
+		// the file. This is what makes a human edit to plan/plan.md reach the
+		// implementer after an advance: the edit lands as a new revision, and
+		// the next drive() materializes the NEW bytes into the plan stage's
+		// artifact dir, replacing the stale file the planner left on disk.
+		// Without it the plan gate is broken end to end.
+		//
+		// The write still goes through the artifacts.Container rooted at the
+		// worktree; the artifact dir is inside the worktree, so containment is
+		// unchanged. The .agentum/ tree is in the repo's local excludes, so
+		// nothing here enters the delivery diff.
+		targetPath := worktreeArtifactPath(run, revision.Name)
+		if isArtifactDirKind(revision.Kind) && targetPath != "" {
+			targets = append(targets, artifacts.SyncTarget{
+				Path: targetPath, Name: revision.Name,
+			})
+			revisionByName[revision.Name] = revision
+			continue
+		}
+		if isArtifactDirKind(revision.Kind) {
+			// An artifact-dir kind whose name we could not split into
+			// <stage>/<file> — defensively skipped rather than written to the
+			// worktree proper (which would put <stage>/verdict.json into the
+			// delivery tree, the original reason for the skip).
 			continue
 		}
 		// The revision name is the in-tree path (the agent wrote it there in a
 		// prior stage). Materialize at the same path so the next stage reads
 		// the same content.
-		targetPath := filepath.Join(run.worktree.Root, revision.Name)
+		targetPath = filepath.Join(run.worktree.Root, revision.Name)
 		targets = append(targets, artifacts.SyncTarget{
 			Path: targetPath, Name: revision.Name,
 		})
@@ -509,6 +559,49 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	if len(inputs) > 0 {
 		runner.recordArtifactInputs(ctx, run, stageID, inputs)
 	}
+}
+
+// isArtifactDirKind reports whether a revision kind lives in the per-stage
+// artifact dir rather than the worktree proper. Such revisions have names of
+// the form "<stage>/<file>" and are materialized at the artifact-dir path on
+// sync (ADR 0003 D6.2) instead of being skipped — a human edit to plan/plan.md
+// must reach the implementer after an advance, which the old skip prevented.
+func isArtifactDirKind(kind string) bool {
+	switch kind {
+	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat":
+		return true
+	}
+	return false
+}
+
+// worktreeArtifactPath returns the absolute path inside the worktree where an
+// artifact-dir-resident revision should be materialized, or "" if the revision
+// name is not "<stage>/<file>". The destination is the stage's artifact dir +
+// the file name; the artifact dir is inside the worktree, so containment is
+// unchanged and the .agentum/ local excludes keep it out of the delivery diff.
+func worktreeArtifactPath(run stageRun, revisionName string) string {
+	stage, file, split := splitArtifactRevisionName(revisionName)
+	if !split {
+		return ""
+	}
+	return filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stage), file)
+}
+
+// splitArtifactRevisionName splits "<stage>/<file>" into its two parts. Returns
+// ok=false when the name has no slash or has an empty stage/file — those are not
+// artifact-dir revisions and must not be redirected.
+func splitArtifactRevisionName(name string) (stage, file string, ok bool) {
+	idx := strings.IndexByte(name, '/')
+	if idx <= 0 || idx == len(name)-1 {
+		return "", "", false
+	}
+	// Reject names with a second slash (e.g. "a/b/c") — those are not the
+	// "<stage>/<file>" shape the artifact dir redirect expects.
+	remainder := name[idx+1:]
+	if strings.Contains(remainder, "/") {
+		return "", "", false
+	}
+	return name[:idx], remainder, true
 }
 
 // recordArtifactInputs records the artifact revisions materialized into the

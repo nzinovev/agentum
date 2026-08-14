@@ -66,7 +66,9 @@ auto-discovered, the configured set is the security boundary.
 | `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
 | `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
+| `POST` | `/tasks/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Task` / `409 illegal_transition` |
 | `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Task` / `409 illegal_transition` |
+| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. |
 | `POST` | `/tasks/{id}/cleanup` | ✅ | terminal task → branch deleted (idempotent, audited) → `202 Task` / `409 illegal_transition` (if not terminal) |
 
 `base_ref` is the git ref the task builds against (branch / tag / SHA / `HEAD`).
@@ -80,6 +82,22 @@ survive for review. `cleanup` is the **explicit, post-terminal disposal** that
 deletes the branch; it is a distinct verb because cancel and cleanup must not be
 ambiguous with each other or with pause.
 
+`reject` is a **terminal reject at a human gate** — the plan gate
+(`paused_gate`) or the final gate (`awaiting_final_review`). It reuses `cancel`'s
+FSM event (the task lands in `cancelled`, branch preserved) but records a
+`rejected` decision on `task_approvals` and seals the manifest with
+`SealRejected`, so a sealed record cannot describe a rejected result as a plain
+abort. At the plan gate nothing ever unlocked source-write, so there is no
+source change to undo. Idempotent: a repeat reject matching the recorded
+decision returns `200`, a conflicting one returns `409`.
+
+The pre-final-review state is `awaiting_final_review` (the previous
+memory-commit state name was retired; migration 0009 rewrites existing rows).
+
+`result_commit` is now pinned at the final gate (the commit the human reviews),
+not only at teardown — see `docs/execution.md` § "`result_commit` at the final
+gate".
+
 ### Task
 
 ```json
@@ -89,10 +107,10 @@ ambiguous with each other or with pause.
   "pipeline_pack": "java-spring@1",
   "title": "Add auth to /settings",
   "input": {},
-  "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_memory_commit | done | failed | cancelled",
+  "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_final_review | done | failed | cancelled",
   "base_ref": "main",
   "base_commit": "a1b2... full SHA the task branched from, set on first run",
-  "result_commit": "c3d4... full SHA captured at terminal teardown; empty until then",
+  "result_commit": "c3d4... full SHA pinned at the final gate (the commit the human reviews); empty before the gate",
   "branch": "agentum/<task-id>",
   "created_at": "2026-07-05T...",
   "updated_at": "2026-07-05T..."
@@ -134,7 +152,7 @@ The three gate **actions** from §3.4:
 |---|---|---|---|
 | `POST` | `/tasks/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job) |
 | `POST` | `/tasks/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
-| `POST` | `/tasks/{id}/invocations/{iid}/approve` | stub | final approval → task done + memory commits. Epic 2 |
+| `POST` | `/tasks/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → task done + memory commits. Pins `result_commit` at the gate. Idempotent. |
 | `POST` | `/tasks/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
 | `POST` | `/tasks/{id}/invocations/{iid}/ask-to-edit` | stub | scoped agent-mediated edit; re-stops for review. Epic 2 |
 | `POST` | `/tasks/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
@@ -146,16 +164,21 @@ The three gate **actions** from §3.4:
 
 ## Artifacts
 
-Two surfaces: the legacy stubs under `/tasks/{id}/invocations/{iid}/artifacts/{name}`
-(Epic 2) and the F.7 immutable revisions surface.
+Two surfaces: the per-invocation edit surface under
+`/tasks/{id}/invocations/{iid}/artifacts/{name...}` and the F.7 immutable
+revisions surface.
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
 | `GET` | `/tasks/{id}/artifacts` | ✅ | list revisions for a task. `?current=true` narrows to current revisions. |
 | `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
 | `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
-| `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | ✅ | current revision of `(task, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
-| `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
+| `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | current revision of `(task, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
+| `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
+
+The artifact route uses `{name...}` (multi-segment) so orchestrator-built names
+like `plan/plan.md`, `review/verdict.json`, and `<stage>/result.json` are
+addressable. Purely additive: single-segment names keep resolving identically.
 
 #### Artifact edit request
 

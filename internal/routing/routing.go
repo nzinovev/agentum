@@ -59,11 +59,54 @@ type Block struct {
 	// Detected via pack.Stage.SourcesVerdict(), never by substring-scanning.
 	VerdictPath string
 
+	// PlanPath is the absolute path to the plan.md a plan-sourcing stage must
+	// write (ADR 0003 D2). Empty unless this stage is the pack's approval
+	// stage; when set, the template renders the plan contract so the agent
+	// writes its Planning Bundle to the exact path the orchestrator captures as
+	// an immutable revision and the human approves.
+	PlanPath string
+
+	// ApprovedPlan points every stage after the approval at the approved plan
+	// revision, so the implementer and the reviewer read the exact revision the
+	// human approved (ADR 0003 D2). Nil before the approval or for a pack with
+	// no approval block.
+	ApprovedPlan *PlanRef
+
+	// Diff points a reviewer-role stage (and the final gate) at the
+	// orchestrator-produced diff against the task's base commit (ADR 0003 D5).
+	// Nil for non-reviewer stages; the reviewer reads the real change set with
+	// fs.read alone, since RoleReviewer grants no exec.bash to run git itself.
+	Diff *DiffRef
+
 	// ReviewFindings, when set, points a stage entered through a verdict-
 	// conditioned transition at the predecessor's findings artifact, so the
 	// fixer reads structured findings rather than a log. Nil for a stage not
 	// entered via a verdict edge.
 	ReviewFindings *ReviewRef
+}
+
+// PlanRef points a post-approval stage at the approved plan. Path is the
+// absolute worktree location of the materialized revision; RevisionID lets an
+// agent or a human verify the exact revision without re-reading the file.
+type PlanRef struct {
+	Stage       string // the approval stage id whose plan.md was approved
+	Path        string // absolute path to the materialized plan.md
+	RevisionID  string // the immutable revision id the human approved
+	ContentHash string // sha256 hex of the approved content, for quick comparison
+}
+
+// DiffRef points a reviewer at the orchestrator-produced change set (ADR 0003
+// D5). The patch is capped (1 MiB) with an explicit truncation marker on a hunk
+// boundary; the stat is never truncated. Both are immutable revisions outside
+// any worktree, so they survive teardown and stay reviewable.
+type DiffRef struct {
+	PatchPath       string // absolute path to the materialized diff.patch
+	StatPath        string // absolute path to the materialized diff.stat
+	PatchRevisionID string
+	StatRevisionID  string
+	BaseCommit      string // the base_commit the diff is against
+	HeadCommit      string // the checkpoint the diff runs to
+	Truncated       bool   // true when the patch was capped at the 1 MiB limit
 }
 
 // ReviewRef points a fixer stage at the reviewer's findings. The count lets the

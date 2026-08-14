@@ -21,10 +21,16 @@ const (
 )
 
 // Gate identifiers recorded on a HumanDecision. These name the kind of gate the
-// decision applied to; the diff/audit surface reads them, so they are stable.
+// decision applied to; the diff/audit surface reads them, so they are stable
+// across releases. They are GATE LABELS (the audit vocabulary), distinct from
+// the task_approvals.name key (the durable approval namespace) — the two must
+// not be conflated. gateFinal stays "final" to match the pre-existing gate
+// vocabulary; the approval row for the same action is "final_review"
+// (approvalNameFinalReview in lifecycle.go).
 const (
 	gateAdvance       = "advance"
 	gateFinal         = "final"
+	gateReject        = "reject" // ADR 0003 D4: human reject at a gate
 	gateOpenQuestions = "open_questions"
 	gateUserStop      = "user_stop"
 	gateCancel        = "cancel"

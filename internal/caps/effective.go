@@ -30,6 +30,21 @@ type Input struct {
 	// survive pack ∩ stage ∩ host.
 	Invocation []Token
 
+	// Withheld removes categories from the effective profile AFTER the four-way
+	// intersection, as a subtractive input (ADR 0003 D3). A withheld category
+	// drops every grant whose enforcement category matches, regardless of scope.
+	// The motivating use is the plan-approval lock: while no human has approved
+	// the plan, the runner passes SourceWriteCategories here so the runtime
+	// refuses fs.write / git.write / exec.bash even though the role and the pack
+	// grant them. Empty means "no withholding" and reproduces the pre-ADR-0003
+	// profile byte-for-byte.
+	Withheld []Category
+	// WithheldReason is a human-readable explanation recorded on Source so a
+	// reviewer of the stored profile can see not just what was removed but why.
+	// Empty alongside an empty Withheld; the runner sets it to a stable phrase
+	// such as "plan approval not recorded".
+	WithheldReason string
+
 	// HardTimeout and IdleTimeout are optional per-invocation caps. Zero means
 	// "no cap from this input"; the effective cap is the minimum non-zero value
 	// across the inputs the runner considered.
@@ -38,13 +53,17 @@ type Input struct {
 }
 
 // Effective computes the effective capability profile as the intersection of
-// all inputs. The algorithm:
+// all inputs, minus an explicit withholding. The algorithm:
 //
 //  1. Base = RoleTemplate(role) ∪ Invocation — the capabilities the role
 //     grants (scoped) plus anything the run explicitly adds.
 //  2. For each base token, keep it iff its enforcement category is supported
 //     by Host AND its grant is matched by both Pack and Stage.
-//  3. Timeouts: the minimum non-zero HardTimeout / IdleTimeout wins; all-zero
+//  3. Withholding: drop any surviving grant whose enforcement category is in
+//     Withheld (ADR 0003 D3). Applied after the intersection so a withheld
+//     category is removed regardless of role, pack, or stage — it is the one
+//     subtractive input in an otherwise additive-then-intersecting model.
+//  4. Timeouts: the minimum non-zero HardTimeout / IdleTimeout wins; all-zero
 //     means no cap.
 //
 // The result is normalized (grants de-duplicated and sorted) so two equal
@@ -55,6 +74,11 @@ func Effective(input Input) Profile {
 	hostSupported := make(map[Category]struct{}, len(input.Host))
 	for _, category := range input.Host {
 		hostSupported[category] = struct{}{}
+	}
+
+	withheld := make(map[Category]struct{}, len(input.Withheld))
+	for _, category := range input.Withheld {
+		withheld[category] = struct{}{}
 	}
 
 	grants := make([]Token, 0, len(base))
@@ -69,6 +93,9 @@ func Effective(input Input) Profile {
 		if !grantedBy(token, input.Stage) {
 			continue
 		}
+		if _, withheldCategory := withheld[category]; withheldCategory {
+			continue
+		}
 		grants = append(grants, token)
 	}
 
@@ -77,11 +104,13 @@ func Effective(input Input) Profile {
 		HardTimeout: input.HardTimeout,
 		IdleTimeout: input.IdleTimeout,
 		Source: Sources{
-			Host:       categoriesLabel(input.Host),
-			Pack:       append([]Token(nil), input.Pack...),
-			Stage:      append([]Token(nil), input.Stage...),
-			Role:       input.Role,
-			Invocation: append([]Token(nil), input.Invocation...),
+			Host:           categoriesLabel(input.Host),
+			Pack:           append([]Token(nil), input.Pack...),
+			Stage:          append([]Token(nil), input.Stage...),
+			Role:           input.Role,
+			Invocation:     append([]Token(nil), input.Invocation...),
+			Withheld:       append([]Category(nil), input.Withheld...),
+			WithheldReason: input.WithheldReason,
 		},
 	}
 	return profile.normalized()

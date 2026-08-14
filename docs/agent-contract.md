@@ -122,7 +122,7 @@ and stream text cannot move a verdict-conditioned pipeline.
   "verdict": "approved | changes_requested",
   "summary": "one-line rationale",
   "findings": [
-    {"id": "F1", "severity": "blocker|major|minor", "path": "internal/x/y.go", "line": 42, "detail": "..."}
+    {"id": "F1", "severity": "blocker|major|minor", "path": "internal/x/y.go", "line": 42, "detail": "...", "category": "implementation_defect|plan_deviation|plan_defect|requirement_ambiguity"}
   ]
 }
 ```
@@ -133,6 +133,14 @@ retryable shape as a `parse_error`):
 - `schema_version` and `verdict` are required; `verdict` ∈ {`approved`,
   `changes_requested`}.
 - `findings[].severity` ∈ {`blocker`, `major`, `minor`}.
+- `findings[].category` is **optional**; when present it must be one of
+  `implementation_defect`, `plan_deviation`, `plan_defect`,
+  `requirement_ambiguity`. **Advisory** — recorded on the finding and rendered
+  in the review surface, never routed on. The routing decision is the `verdict`
+  field alone. The "a plan defect must not go to the fixer" intent is enforced
+  by `status: "blocked"` + `open_questions`: a reviewer who finds a plan defect
+  sets a blocked status with an open question rather than requesting changes,
+  so the pipeline pauses for a human instead of looping a fixer.
 - `changes_requested` with zero findings is a contract violation: a fixer with
   no findings has nothing to act on. `approved` with no findings is the normal
   clean-pass shape.
@@ -146,6 +154,40 @@ The orchestrator captures `verdict.json` as an immutable artifact revision
 verdict from the store rather than a file Restore may have reset. A fixer stage
 entered through a `changes_requested` transition is pointed at the findings in
 its routing block.
+
+`result.json` has **no** `verdict` field. Only reviewer stages write
+`verdict.json`; a non-reviewer stage that put a `verdict` key in its
+`result.json` would have it ignored as an unknown field.
+
+## plan.md (plan/approval stages)
+
+A pack may declare a `source_write` approval whose `artifact` is a plan file
+(typically `plan.md`). A plan or approval stage writes its **Planning Bundle**
+(Markdown) to the exact path the routing block's "Implementation plan
+(REQUIRED for this stage)" section names — **not** into `result.json.notes` or
+under `artifacts`. The orchestrator captures that file as an immutable revision
+(`<stage>/plan.md`, kind `plan_md`) from the path it gave the agent, so the
+agent does not need to list it.
+
+The captured revision is the artifact the human approves. The human **may edit
+it via `PUT`** before approving — the edit creates a new revision that becomes
+the approved one, and every later stage (implementer, reviewer) reads back that
+exact revision through the routing block's "Approved implementation plan"
+section. The approval binds to the revision id the human saw; a later edit to
+the same artifact is detected as `plan_revision_drift`. See
+[docs/execution.md](execution.md) § "Plan-approval lock".
+
+## Delivery diff (reviewer stages and the final gate)
+
+Reviewer-role stages and the final review gate read the change set from the
+**orchestrator-produced diff**, not by running `git` themselves (the reviewer
+role grants no `exec.bash`). The routing block's "Delivery diff" section names
+two paths — `diff.patch` and `diff.stat` — that the orchestrator writes into
+the reviewer's artifact dir and captures as immutable revisions (`diff` /
+`diff_stat`). The patch runs from `base_commit` to the post-stage checkpoint;
+when it exceeds the size cap it is truncated at a hunk boundary with a marker,
+and the reviewer is told to read the stat and the named files directly. The
+reviewer needs only `fs.read`.
 
 ## Event stream (reference: opencode)
 

@@ -59,6 +59,13 @@ package they cover.
   `skill.*` is an inert capability token (no role grants it; a grant is
   unenforceable, like `mcp.*`) kept as a seam so narrowing becomes a config
   change later.
+- **Plan-approval gates source-write.** A pack may declare an `approvals` block
+  (ADR 0003). While a `source_write` approval is pending, the runner withholds
+  `{fs.write, git.write, exec.bash}` from EVERY stage's capability profile (a
+  subtractive input applied after the four-way intersection), refuses to enter
+  implementer/fixer stages, and detects `plan_revision_drift`. The shipped
+  `packs/backend-development` pack is the worked example: plan → human approval
+  → implement → review ⇄ fix → final human review.
 - **Orchestrator-owned project checks.** The project ships a versioned registry
   of named checks (`.agentum.yaml`, tracked in the repo). Commands live ONLY in
   that registry (an arg vector; no shell injection). Packs and task input add
