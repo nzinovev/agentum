@@ -186,8 +186,15 @@ recovery is exactly the ordinary plan-gate advance:
   implementer runs with the grant. Reject and cancel also work from this stop.
 - `plan_revision_drift` → the approval row already exists, so advance's write
   is a no-op; the run re-checks, drifts again, and pauses at the same place —
-  a visible, bounded no-op retry. Cancel is the exit (reject returns 409: the
-  plan gate was already decided approved).
+  never a skip, and cancel is the exit (reject returns 409: the plan gate was
+  already decided approved). Drift cannot be cleared by advance: re-editing the
+  plan mints a revision the approval is not bound to. The retry is free only
+  when the approval stage transitions straight into the source-writing stage
+  (the shipped pack's shape); with intermediate stages between them —
+  well-formed under the validator's pass-through rule — each advance re-runs
+  those stages before re-hitting the refusal, so each retry costs real
+  invocations. A pack author adding a stage between plan and implement is
+  buying that.
 
 ### Orchestrator-produced delivery diff (ADR 0003)
 

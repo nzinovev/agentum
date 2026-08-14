@@ -953,8 +953,14 @@ type stageOutcome struct {
 // approval row is written bound to the current plan revision, and entryPoint
 // resolves the approval stage's transition — the implementer runs with the
 // grant. For drift the approval row already exists (CreateApproval is a no-op
-// on conflict), so advance re-checks, drifts again, and pauses here once more —
-// a visible no-op retry whose exit is cancel, never a skip.
+// on conflict), so advance re-checks, drifts again, and pauses here once more
+// — never a skip, and cancel is the exit (drift cannot be cleared by advance:
+// re-editing the plan mints a revision the approval is not bound to). Note the
+// retry is free only when the approval stage transitions straight into the
+// source-writing stage (the shipped pack's shape); with intermediate stages —
+// well-formed under the validator's layer-3 pass-through rule — each advance
+// re-runs them before re-hitting the refusal, so each retry costs real
+// invocations.
 func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run stageRun, stageID string, stage pack.Stage) *haltDecision {
 	if !run.sourceWriteUnlock.Required {
 		return nil
