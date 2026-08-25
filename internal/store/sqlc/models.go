@@ -110,7 +110,6 @@ type Task struct {
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
 	Title        string          `json:"title"`
-	Input        json.RawMessage `json:"input"`
 	State        string          `json:"state"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
@@ -118,6 +117,8 @@ type Task struct {
 	BaseRef      string          `json:"base_ref"`
 	BaseCommit   sql.NullString  `json:"base_commit"`
 	ResultCommit sql.NullString  `json:"result_commit"`
+	Description  string          `json:"description"`
+	Overrides    json.RawMessage `json:"overrides"`
 }
 
 type TaskApproval struct {

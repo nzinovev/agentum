@@ -19,7 +19,8 @@ a human approves your plan, so an attempted edit will be refused.
 
 Use all of the following, and distinguish observed facts from assumptions:
 
-1. The immutable task title and structured input in the routing block.
+1. The **Task** section of the routing block — the task's title and
+   description. This is the requested behaviour and it is immutable.
 2. `AGENTS.md` and any applicable nested repository instructions.
 3. Relevant code, tests, schemas, migrations, and nearby implementation
    patterns. Inspect them before proposing changes.

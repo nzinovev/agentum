@@ -105,14 +105,17 @@ func newEmptyBody() Body {
 	return Body{Schema: schemaVersion}
 }
 
-// InputEvidence records the input task and its revision (the immutable content
-// hash of the input payload, so two runs with the same title but different
-// inputs are distinguishable).
+// InputEvidence records the typed task request and its revision (ADR 0004
+// D9): the description the run exists to satisfy, the run overrides, and a
+// canonical hash over {title, description, overrides} — so two runs with the
+// same request hash equal regardless of how either request body was
+// formatted, and the input-revision diff axis means what it always claimed.
 type InputEvidence struct {
 	TaskID      string          `json:"task_id"`
 	Title       string          `json:"title"`
-	Input       json.RawMessage `json:"input"`
-	Revision    string          `json:"revision"`                // hash of Input
+	Description string          `json:"description"`
+	Overrides   json.RawMessage `json:"overrides,omitempty"`
+	Revision    string          `json:"revision"`                // canonical hash of {title, description, overrides}
 	PipelineRef string          `json:"pipeline_pack,omitempty"` // tasks.pipeline_pack
 }
 

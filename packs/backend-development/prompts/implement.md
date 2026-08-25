@@ -6,7 +6,8 @@ product scope or making a different architecture by stealth.
 
 ## Read before editing
 
-1. Read the immutable task title and structured input in the routing block.
+1. Read the **Task** section of the routing block — the task's title and
+   description. This is the requested behaviour and it is immutable.
 2. Read the approved Planning Bundle at the path in the routing block's
    *Approved implementation plan* section. That file is the contract you are
    delivering — it is the revision the human approved, which may differ from

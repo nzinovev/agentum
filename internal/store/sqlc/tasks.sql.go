@@ -12,9 +12,10 @@ import (
 )
 
 const createTask = `-- name: CreateTask :one
-INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack, title, input, base_ref, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'created')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack,
+                   title, description, overrides, base_ref, state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created')
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
 `
 
 type CreateTaskParams struct {
@@ -23,7 +24,8 @@ type CreateTaskParams struct {
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
 	Title        string          `json:"title"`
-	Input        json.RawMessage `json:"input"`
+	Description  string          `json:"description"`
+	Overrides    json.RawMessage `json:"overrides"`
 	BaseRef      string          `json:"base_ref"`
 }
 
@@ -34,7 +36,8 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		arg.ProjectID,
 		arg.PipelinePack,
 		arg.Title,
-		arg.Input,
+		arg.Description,
+		arg.Overrides,
 		arg.BaseRef,
 	)
 	var i Task
@@ -45,7 +48,6 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -53,12 +55,14 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
 
 const findOrphanedRunningTasks = `-- name: FindOrphanedRunningTasks :many
-SELECT t.id, t.tenant_id, t.user_id, t.project_id, t.pipeline_pack, t.title, t.input, t.state, t.created_at, t.updated_at, t.current_stage, t.base_ref, t.base_commit, t.result_commit FROM tasks t
+SELECT t.id, t.tenant_id, t.user_id, t.project_id, t.pipeline_pack, t.title, t.state, t.created_at, t.updated_at, t.current_stage, t.base_ref, t.base_commit, t.result_commit, t.description, t.overrides FROM tasks t
 WHERE t.tenant_id = $1
   AND t.state = 'running'
   AND NOT EXISTS (
@@ -91,7 +95,6 @@ func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string)
 			&i.ProjectID,
 			&i.PipelinePack,
 			&i.Title,
-			&i.Input,
 			&i.State,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -99,6 +102,8 @@ func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string)
 			&i.BaseRef,
 			&i.BaseCommit,
 			&i.ResultCommit,
+			&i.Description,
+			&i.Overrides,
 		); err != nil {
 			return nil, err
 		}
@@ -114,7 +119,7 @@ func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string)
 }
 
 const getTask = `-- name: GetTask :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks WHERE id = $1 AND tenant_id = $2
 `
 
 type GetTaskParams struct {
@@ -132,7 +137,6 @@ func (q *Queries) GetTask(ctx context.Context, arg GetTaskParams) (Task, error) 
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -140,12 +144,14 @@ func (q *Queries) GetTask(ctx context.Context, arg GetTaskParams) (Task, error) 
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
 
 const getTaskForUpdate = `-- name: GetTaskForUpdate :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE
 `
 
 type GetTaskForUpdateParams struct {
@@ -166,7 +172,6 @@ func (q *Queries) GetTaskForUpdate(ctx context.Context, arg GetTaskForUpdatePara
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -174,12 +179,14 @@ func (q *Queries) GetTaskForUpdate(ctx context.Context, arg GetTaskForUpdatePara
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
 
 const listTasksByProject = `-- name: ListTasksByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit FROM tasks
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks
 WHERE tenant_id = $1 AND project_id = $2
 ORDER BY created_at DESC
 LIMIT $3 OFFSET $4
@@ -213,7 +220,6 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 			&i.ProjectID,
 			&i.PipelinePack,
 			&i.Title,
-			&i.Input,
 			&i.State,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -221,6 +227,8 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 			&i.BaseRef,
 			&i.BaseCommit,
 			&i.ResultCommit,
+			&i.Description,
+			&i.Overrides,
 		); err != nil {
 			return nil, err
 		}
@@ -238,7 +246,7 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 const setBaseCommit = `-- name: SetBaseCommit :one
 UPDATE tasks SET base_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
 `
 
 type SetBaseCommitParams struct {
@@ -261,7 +269,6 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (T
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -269,6 +276,8 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (T
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
@@ -276,7 +285,7 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (T
 const setResultCommit = `-- name: SetResultCommit :one
 UPDATE tasks SET result_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
 `
 
 type SetResultCommitParams struct {
@@ -297,7 +306,6 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -305,6 +313,8 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
@@ -312,7 +322,7 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 const updateTaskStage = `-- name: UpdateTaskStage :one
 UPDATE tasks SET current_stage = $3, state = $4, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
 `
 
 type UpdateTaskStageParams struct {
@@ -340,7 +350,6 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -348,6 +357,8 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }
@@ -355,7 +366,7 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 const updateTaskState = `-- name: UpdateTaskState :one
 UPDATE tasks SET state = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, input, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
 `
 
 type UpdateTaskStateParams struct {
@@ -374,7 +385,6 @@ func (q *Queries) UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams
 		&i.ProjectID,
 		&i.PipelinePack,
 		&i.Title,
-		&i.Input,
 		&i.State,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -382,6 +392,8 @@ func (q *Queries) UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams
 		&i.BaseRef,
 		&i.BaseCommit,
 		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
 	)
 	return i, err
 }

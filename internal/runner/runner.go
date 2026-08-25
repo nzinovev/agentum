@@ -1403,10 +1403,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// via parsed conditions, never substring-scanned). ReviewFindings is set
 	// when the stage was entered through a verdict-conditioned transition, so
 	// the fixer is pointed at the predecessor's findings artifact rather than a
-	// log. Both render nothing when unset.
+	// log. Both render nothing when unset. Title/Description carry the task
+	// request into the block's first section (ADR 0004 D8) — the ONLY delivery
+	// path from tasks.title/description to any agent prompt. There is
+	// deliberately no Overrides on this literal (D2): the overrides are
+	// orchestrator-only, and the resolved Checks below already render the
+	// effective set.
 	routingBlock := routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
+		Title:        run.task.Title,
+		Description:  run.task.Description,
 		Capabilities: profileTokens(profile),
 		Checks:       run.resolvedChecks,
 	}
