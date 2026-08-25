@@ -12,7 +12,8 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 		Schema: "1",
 		Input: &InputEvidence{
 			TaskID: "T1", Title: "title", Revision: "abc",
-			Input: []byte(`{"foo":"bar"}`),
+			Description: "the requested behaviour",
+			Overrides:   []byte(`{"checks":{"required":["verify"],"optional":[]}}`),
 		},
 		Prompts: []PromptRevision{{StageID: "spec", Hash: "h1"}},
 		Missing: []string{"memory"},
@@ -30,6 +31,14 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	}
 	if decoded.Input == nil || decoded.Input.Revision != "abc" {
 		t.Errorf("Input not preserved: %+v", decoded.Input)
+	}
+	// ADR 0004 D9: the typed request round-trips — a reviewer reads the
+	// description the run existed to satisfy straight off the manifest.
+	if decoded.Input.Description != "the requested behaviour" {
+		t.Errorf("Input.Description not preserved: %+v", decoded.Input)
+	}
+	if string(decoded.Input.Overrides) != `{"checks":{"required":["verify"],"optional":[]}}` {
+		t.Errorf("Input.Overrides not preserved: %s", decoded.Input.Overrides)
 	}
 	if len(decoded.Prompts) != 1 || decoded.Prompts[0].StageID != "spec" {
 		t.Errorf("Prompts not preserved: %+v", decoded.Prompts)

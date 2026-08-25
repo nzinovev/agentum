@@ -10,6 +10,66 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **The task request as a typed contract, delivered to the agent** (ADR 0004).
+  The first `backend-development` run stopped at `paused_open_questions`
+  because the task's title and description never reached any agent prompt —
+  two defects, both fixed: nothing delivered the request, and `tasks.input`
+  was an untyped, best-effort container.
+  - **`internal/taskinput`** (new, pure): `Request{Title, Description,
+    Overrides}` with strict validation (description required, ≤ 32 KiB;
+    title ≤ 200 bytes; over-budget is a `400`, never a truncation — a
+    truncated request is a *different* request), strict override decoding
+    (`DisallowUnknownFields`; a typo'd key is a `400`, not a silently smaller
+    check set), and a canonical `Revision()` hash over {title, description,
+    overrides} so the same request always hashes the same regardless of body
+    formatting.
+  - **`## Task` routing-block section** (`internal/routing`,
+    `internal/runner`): the block's FIRST section renders the title and
+    description; an empty description renders an explicit unknown-request
+    marker. `agent.Invocation` is unchanged — the request travels inside
+    `RoutingBlock` like every other orchestrator-owned context.
+  - **Typed storage** (migration `0010`): `description text NOT NULL` +
+    `overrides jsonb NOT NULL` replace `input jsonb` (backfilled from
+    `input.description` / `input.checks`; the column is dropped, not
+    deprecated — while an untyped container exists, the next ill-fitting field
+    lands in it).
+  - **Run overrides are orchestrator-only** (D2): nothing in `overrides` is
+    ever rendered into a routing block; the resolved `## Project checks`
+    section remains the only check information an agent sees. A malformed
+    stored `overrides` column now FAILS the run (the old lenient parse
+    swallowed the error and silently resolved a smaller check set).
+  - **Secret scan at the boundary** (`internal/api`, `internal/artifacts`):
+    credential material in the `title` OR the `description` is a `422
+    bad_input` before any row exists — both are delivered verbatim to a model
+    and recorded verbatim in the manifest, the two leak surfaces the scanner
+    guards. The scan uses the new `artifacts.NewProseScanner`, which runs only
+    the self-identifying rules (AWS key ids, GitHub PATs, PEM blocks,
+    `aws_secret_access_key` with its value). The label-context rules are
+    excluded from prose: under `PolicyReject` they rejected ordinary task
+    descriptions ("Add Bearer authentication to /settings" matched
+    `bearer-token`) with no override path for the author. The artifact path is
+    unchanged — `NewDefaultScanner` still runs the full rule set.
+  - **Request text is fenced as data** (`internal/routing`): the title and
+    description render between explicit `--- BEGIN/END TASK REQUEST ---`
+    markers with a note that they are data, not instructions. `text/template`
+    escapes nothing, so a description containing `## Approved implementation
+    plan` would otherwise render as a peer of the real block sections. The
+    text itself is never mutated.
+  - **Typed evidence** (`internal/manifest`): `InputEvidence` carries
+    `description` + `overrides` and hashes the canonical form, so the
+    `input-revision` diff axis no longer reports a spurious delta for
+    identical requests formatted differently.
+  - **Breaking**: `POST /api/v1/tasks` and the `Task` response drop `input`
+    for `description` + `overrides`; the body is decoded strictly (the old
+    `input` blob is now an unknown-field `400`). Consumers: the two request
+    bodies in `tmp/task-04` (updated) and the dev database (migrated in
+    place; the blocked baseline task was backfilled). The create handler uses
+    `http.MaxBytesReader` sized for worst-case ASCII escaping: `io.LimitReader`
+    at budget + 4 KiB truncated an in-budget Cyrillic description (a client
+    that escapes non-ASCII sends it at ~2.5x its UTF-8 size) and reported it as
+    invalid JSON. A task with no overrides carries `{}`, not a skeleton of
+    empty lists.
+
 - **Backend Development pack, the plan-approval lock, and the final-review gate**
   (ADR 0003). A stack-neutral five-stage pipeline (plan → human approval →
   implement → review ⇄ fix → final human review) plus three load-bearing

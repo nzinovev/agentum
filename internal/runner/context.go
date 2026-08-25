@@ -11,6 +11,7 @@ import (
 	"github.com/nzinovev/agentum/internal/instructions"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/routing"
+	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
 // prepareProjectContext wires the project-context channel for the run (ADR
@@ -36,8 +37,15 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 	// Resolve the check set ONCE for rendering. enforceProjectChecks keeps its
 	// own independent load+resolve at the delivery boundary (D8 / PR #23): the
 	// cached set here never reaches the gate, only the routing block.
+	// The strict overrides decode lives here (ADR 0004 D7): after the API
+	// boundary guarantees well-formed overrides, a malformed column is an
+	// invariant break and this error reaches failTask through drive.
+	taskOverrides, overridesErr := taskinput.ParseOverrides(run.task.Overrides)
+	if overridesErr != nil {
+		return fmt.Errorf("project context: parse task overrides: %w", overridesErr)
+	}
 	packRequests := packCheckRequests(run.taskPack)
-	taskRequests := taskCheckRequests(run.task.Input)
+	taskRequests := taskCheckRequests(taskOverrides)
 	set, resolveErr := checks.Resolve(registry, packRequests, taskRequests)
 	if resolveErr != nil {
 		return fmt.Errorf("project context: resolve checks: %w", resolveErr)

@@ -17,6 +17,12 @@ type DefaultScanner struct {
 	// Policy decides what a finding does. Zero value is PolicyRedact, so a
 	// DefaultScanner{} behaves like the pre-policy redactor.
 	Policy ScanPolicy
+
+	// proseOnly restricts the rule set to the credential-shape rules, for
+	// human-authored text rather than machine-written config (ADR 0004 D6).
+	// Unexported so the zero value keeps the full rule set: a bare
+	// DefaultScanner{} scans artifacts exactly as it always did.
+	proseOnly bool
 }
 
 // NewDefaultScanner returns a DefaultScanner with the given policy. An empty
@@ -26,6 +32,26 @@ func NewDefaultScanner(policy ScanPolicy) *DefaultScanner {
 		policy = PolicyRedact
 	}
 	return &DefaultScanner{Policy: policy}
+}
+
+// NewProseScanner returns a scanner for human-authored text — a task title or
+// description (ADR 0004 D6), not a config file an agent produced. It runs only
+// the credentialShape rules.
+//
+// The label-context rules must not run here. They exist to catch `token: <20
+// chars>` in a machine-written config, and in prose they fire on a sentence
+// that merely *discusses* credentials: "Add Bearer authentication to
+// /settings" matches bearer-token, and "secret: AGENTUM_WEBHOOK_SECRET_ENV
+// should be read from env" matches labeled-secret. Under PolicyReject that
+// makes an ordinary auth-related backend task impossible to create, with no
+// override path for the author — a false positive that costs more than the
+// false negative it prevents, which is the trade this package already declares
+// it makes.
+func NewProseScanner(policy ScanPolicy) *DefaultScanner {
+	if policy == "" {
+		policy = PolicyRedact
+	}
+	return &DefaultScanner{Policy: policy, proseOnly: true}
 }
 
 // secretRule is one pattern plus the template that replaces each match. The
@@ -41,6 +67,18 @@ type secretRule struct {
 	// context-sensitive rule (a "token:" label) produces noise in a binary
 	// stream, while an AKIA prefix or a PEM header does not.
 	literal bool
+	// credentialShape marks rules whose pattern matches the credential
+	// material itself — a key prefix, a PEM block, a canonical key name
+	// together with its fixed-width value — rather than a label followed by
+	// arbitrary text. Only these run against prose (NewProseScanner): a rule
+	// that keys off the word "secret" or "bearer" cannot tell a pasted
+	// credential from a sentence about credentials, and human-authored text is
+	// full of the latter.
+	//
+	// Distinct from literal, which is about binary streams: every literal rule
+	// is a credential shape, but aws-secret-access-key is a credential shape
+	// that is not literal (it needs its label to bound the 40-char value).
+	credentialShape bool
 }
 
 // secretRules are applied in order. The list is deliberately short and
@@ -70,30 +108,34 @@ var secretRules = []secretRule{
 	},
 	// AWS access key id (AKIA...) — no label needed, the prefix is the signal.
 	{
-		name:      "aws-access-key-id",
-		pattern:   regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-		replaceBy: `[REDACTED:aws-akid]`,
-		literal:   true,
+		name:            "aws-access-key-id",
+		pattern:         regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+		replaceBy:       `[REDACTED:aws-akid]`,
+		literal:         true,
+		credentialShape: true,
 	},
 	// AWS secret access key (40-char base64) under the canonical label.
 	{
-		name:      "aws-secret-access-key",
-		pattern:   regexp.MustCompile(`(?i)(aws_secret_access_key\s*[:=]\s*"?)([A-Za-z0-9/+=]{40})"?`),
-		replaceBy: `${1}[REDACTED]`,
+		name:            "aws-secret-access-key",
+		pattern:         regexp.MustCompile(`(?i)(aws_secret_access_key\s*[:=]\s*"?)([A-Za-z0-9/+=]{40})"?`),
+		replaceBy:       `${1}[REDACTED]`,
+		credentialShape: true,
 	},
 	// GitHub PATs (classic and fine-grained).
 	{
-		name:      "github-pat",
-		pattern:   regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36,}`),
-		replaceBy: `[REDACTED:github-pat]`,
-		literal:   true,
+		name:            "github-pat",
+		pattern:         regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36,}`),
+		replaceBy:       `[REDACTED:github-pat]`,
+		literal:         true,
+		credentialShape: true,
 	},
 	// Generic private key PEM blocks.
 	{
-		name:      "pem-private-key",
-		pattern:   regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----`),
-		replaceBy: `[REDACTED:pem-private-key]`,
-		literal:   true,
+		name:            "pem-private-key",
+		pattern:         regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----`),
+		replaceBy:       `[REDACTED:pem-private-key]`,
+		literal:         true,
+		credentialShape: true,
 	},
 }
 
@@ -202,6 +244,12 @@ func (scanner *DefaultScanner) Scan(name string, kind string, bytes []byte) (Sca
 		// changes its length and corrupts the artifact. Detection still matters,
 		// because PolicyReject can then stop the write.
 		if !textual && !rule.literal {
+			continue
+		}
+		// Prose runs only against rules that match credential material itself.
+		// A label-context rule cannot distinguish a pasted secret from a
+		// sentence about secrets (ADR 0004 D6).
+		if scanner.proseOnly && !rule.credentialShape {
 			continue
 		}
 		// Detection runs against the original text and rewriting against the

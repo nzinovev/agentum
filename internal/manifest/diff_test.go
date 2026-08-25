@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"testing"
+
+	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
 func TestDiffManifests_IdenticalEmpty(t *testing.T) {
@@ -22,6 +24,44 @@ func TestDiffManifests_InputRevision(t *testing.T) {
 	}
 	if diff.Input.Reason != "input-revision" {
 		t.Errorf("Reason = %q", diff.Input.Reason)
+	}
+}
+
+// TestDiffManifests_InputRevisionCanonicalAcrossFormatting is the ADR 0004 D9
+// acceptance: two runs whose request bodies differ only in key order and
+// whitespace produce the same canonical revision, so the input diff axis
+// reports NO delta — the fix the axis has always claimed to mean. A different
+// description still reports input-revision.
+func TestDiffManifests_InputRevisionCanonicalAcrossFormatting(t *testing.T) {
+	t.Parallel()
+	inputEvidenceFor := func(description, overridesJSON string) *InputEvidence {
+		overrides, parseErr := taskinput.ParseOverrides([]byte(overridesJSON))
+		if parseErr != nil {
+			t.Fatalf("parse %q: %v", overridesJSON, parseErr)
+		}
+		request := taskinput.Request{
+			Title:       "Baseline run for pack stack-neutrality validation",
+			Description: description,
+			Overrides:   overrides,
+		}
+		return &InputEvidence{
+			TaskID: "T1", Title: request.Title,
+			Description: request.Description,
+			Revision:    request.Revision(),
+			PipelineRef: "backend-development@0.1.0",
+		}
+	}
+	compact := Body{Input: inputEvidenceFor("Log /healthz at Debug.", `{"checks":{"required":["verify"],"optional":[]}}`)}
+	reformatted := Body{Input: inputEvidenceFor("Log /healthz at Debug.", `{
+		"checks": { "optional": [], "required": ["verify"] }
+	}`)}
+	if delta := DiffManifests(compact, reformatted).Input; delta != nil {
+		t.Errorf("same request, different formatting: unexpected input delta %+v", delta)
+	}
+
+	changed := Body{Input: inputEvidenceFor("Log /healthz AND /readyz at Debug.", `{"checks":{"required":["verify"],"optional":[]}}`)}
+	if delta := DiffManifests(compact, changed).Input; delta == nil || delta.Reason != "input-revision" {
+		t.Errorf("changed description: want input-revision delta, got %+v", delta)
 	}
 }
 

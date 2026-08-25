@@ -12,6 +12,7 @@ import (
 	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
 // TestRunner_DeliveryChecks proves the orchestrator runs its own project checks
@@ -191,17 +192,23 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 			t.Error("nil pack must yield nil requests")
 		}
 	})
-	t.Run("task input", func(t *testing.T) {
-		requests := taskCheckRequests(json.RawMessage(`{"checks":{"required":["t1"],"optional":["t2"]}}`))
+	t.Run("task overrides", func(t *testing.T) {
+		// The typed mapping must produce exactly the requests the old lenient
+		// JSON parse did for a well-formed input — same names, same flags.
+		overrides, parseErr := taskinput.ParseOverrides(
+			json.RawMessage(`{"checks":{"required":["t1"],"optional":["t2"]}}`))
+		if parseErr != nil {
+			t.Fatalf("parse: %v", parseErr)
+		}
+		requests := taskCheckRequests(overrides)
 		if len(requests) != 2 {
 			t.Fatalf("expected 2 requests, got %d", len(requests))
 		}
 		assertRequest(t, requests[0], "t1", true)
-		if taskCheckRequests(nil) != nil {
-			t.Error("nil input must yield nil")
-		}
-		if taskCheckRequests(json.RawMessage(`{not json`)) != nil {
-			t.Error("malformed input must yield nil")
+		assertRequest(t, requests[1], "t2", false)
+		// The zero value (a task with no overrides) yields no requests.
+		if taskCheckRequests(taskinput.Overrides{}) != nil {
+			t.Error("zero overrides must yield nil")
 		}
 	})
 }
@@ -215,6 +222,48 @@ func assertRequest(t *testing.T, req checks.Request, name string, required bool)
 	}
 	if req.Required != required {
 		t.Errorf("request %q required = %v, want %v", name, req.Required, required)
+	}
+}
+
+// TestRunner_MalformedStoredOverridesFailRun is the ADR 0004 D7 regression
+// test: a corrupt tasks.overrides column must fail the run loudly, not
+// silently resolve a smaller check set than the operator asked for. The old
+// lenient parse swallowed the unmarshal error and returned nil — the run
+// continued gated on less than the operator believed. The assertion is on the
+// FAILURE (state failed + Handle error), never on an absent request list.
+func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	// A column only writable by something that bypassed the API (the boundary
+	// rejects this shape with a 400) — the invariant break D7 exists for.
+	task := sqlc.Task{
+		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+		PipelinePack: "test@0.1.0", Overrides: json.RawMessage(`{not json`),
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
+	}}
+	runner := New(Deps{
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+	})
+
+	handleErr := runner.Handle(context.Background(), job("run", "Tm", "tn", "us"))
+	if handleErr == nil {
+		t.Fatal("expected Handle error for malformed stored overrides, got nil")
+	}
+	if got := store.taskState(); got != "failed" {
+		t.Fatalf("state = %q, want failed (malformed overrides must not shrink the check set)", got)
 	}
 }
 

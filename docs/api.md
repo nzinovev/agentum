@@ -62,7 +62,7 @@ auto-discovered, the configured set is the security boundary.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, input?, base_ref?}` → `201 Task` |
+| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Task`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the pre-ADR-0004 `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
 | `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
@@ -106,7 +106,8 @@ gate".
   "project_id": "uuid",
   "pipeline_pack": "java-spring@1",
   "title": "Add auth to /settings",
-  "input": {},
+  "description": "Problem. … What to do. …",
+  "overrides": {},
   "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_final_review | done | failed | cancelled",
   "base_ref": "main",
   "base_commit": "a1b2... full SHA the task branched from, set on first run",
@@ -250,7 +251,7 @@ sealed row is never edited.
 ```json
 {
   "schema_version": "1",
-  "input":            { "task_id": "…", "title": "…", "input": {}, "revision": "…", "pipeline_pack": "…" },
+  "input":            { "task_id": "…", "title": "…", "description": "…", "overrides": {}, "revision": "…", "pipeline_pack": "…" },
   "project":          { "project_id": "…", "repo_path": "…", "name": "…", "base_ref": "…", "base_commit": "…" },
   "pack":             { "ref": "…", "name": "…", "version": "1.0.0", "content_hash": "…", "forked": false },
   "prompts":          [{ "stage_id": "spec", "hash": "…" }],
