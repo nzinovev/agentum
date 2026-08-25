@@ -1,6 +1,7 @@
 -- name: CreateTask :one
-INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack, title, input, base_ref, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'created')
+INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack,
+                   title, description, overrides, base_ref, state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created')
 RETURNING *;
 
 -- name: GetTask :one

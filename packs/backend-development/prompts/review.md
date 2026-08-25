@@ -13,7 +13,8 @@ never alter what it is reviewing. Everything you need is a file you can read.
 
 Read and reconcile all of the following:
 
-1. The immutable task title and structured input in the routing block.
+1. The **Task** section of the routing block — the task's title and
+   description. This is the requested behaviour and it is immutable.
 2. The approved Planning Bundle at the path in the routing block's *Approved
    implementation plan* section.
 3. The **orchestrator-produced diff** at the paths in the routing block's

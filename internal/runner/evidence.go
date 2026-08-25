@@ -20,6 +20,7 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/taskinput"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
 
@@ -350,12 +351,25 @@ func (runner *Runner) recordInitialEvidence(
 			packHash = hash
 		}
 	}
+	// The revision is the canonical hash of the typed request (ADR 0004 D9),
+	// computed from the parsed value so a backfilled or reformatted overrides
+	// column cannot perturb it. A malformed column is an invariant break (the
+	// API guarantees well-formed overrides): fail the provenance root rather
+	// than record a revision nobody can reproduce.
+	taskOverrides, overridesErr := taskinput.ParseOverrides(task.Overrides)
+	if overridesErr != nil {
+		return fmt.Errorf("record initial evidence: parse task overrides: %w", overridesErr)
+	}
+	taskRequest := taskinput.Request{
+		Title: task.Title, Description: task.Description, Overrides: taskOverrides,
+	}
 	patch := manifest.Body{
 		Input: &manifest.InputEvidence{
 			TaskID:      task.ID,
 			Title:       task.Title,
-			Input:       task.Input,
-			Revision:    hashForEvidenceBytes(task.Input),
+			Description: task.Description,
+			Overrides:   task.Overrides,
+			Revision:    taskRequest.Revision(),
 			PipelineRef: task.PipelinePack,
 		},
 		Project: &manifest.ProjectEvidence{

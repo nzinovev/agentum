@@ -281,3 +281,79 @@ func bytesEqual(left, right []byte) bool {
 	}
 	return true
 }
+
+// TestProseScanner_OnlyCredentialShapes pins the ADR 0004 D6 rule split.
+// NewProseScanner must ignore the label-context rules — they cannot tell a
+// pasted credential from a sentence discussing one, and human-authored task
+// text is full of the latter — while still catching material that identifies
+// itself by its own shape.
+//
+// fullRejects records what the unchanged artifact scanner does with the same
+// text, so the table doubles as the documented difference between the two.
+// It is not uniformly true: "Authorization: Bearer header upstream" trips
+// neither scanner, because both label rules need 8+ credential-ish characters
+// after the label and "header" is six.
+func TestProseScanner_OnlyCredentialShapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		text         string
+		proseRejects bool
+		fullRejects  bool
+	}{
+		{
+			name:        "bearer in prose",
+			text:        "Add Bearer authentication to the /settings endpoint.",
+			fullRejects: true,
+		},
+		{
+			name:        "labeled env var",
+			text:        "secret: AGENTUM_WEBHOOK_SECRET_ENV should be read from env.",
+			fullRejects: true,
+		},
+		{
+			name:        "api_key assignment to an env name",
+			text:        "Rename the config key api_key = AGENTUM_WEBHOOK_SECRET_ENV",
+			fullRejects: true,
+		},
+		{
+			name: "authorization header in prose",
+			text: "Send the Authorization: Bearer header upstream.",
+		},
+		{
+			name:         "github pat",
+			text:         "Paste ghp_0123456789abcdefghijklmnopqrstuvwxyz0123456789 into the config.",
+			proseRejects: true,
+			fullRejects:  true,
+		},
+		{
+			name:         "aws access key id",
+			text:         "The key AKIAIOSFODNN7EXAMPLE leaked.",
+			proseRejects: true,
+			fullRejects:  true,
+		},
+		{
+			name:         "pem block",
+			text:         "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+			proseRejects: true,
+			fullRejects:  true,
+		},
+	}
+	prose := NewProseScanner(PolicyReject)
+	full := NewDefaultScanner(PolicyReject)
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, proseErr := prose.Scan("description", "task_request", []byte(testCase.text))
+			if rejected := proseErr != nil; rejected != testCase.proseRejects {
+				t.Errorf("prose scanner rejected = %v, want %v (err=%v)", rejected, testCase.proseRejects, proseErr)
+			}
+			// The artifact path is unchanged by the narrowing.
+			_, fullErr := full.Scan("artifact.json", "config", []byte(testCase.text))
+			if rejected := fullErr != nil; rejected != testCase.fullRejects {
+				t.Errorf("full scanner rejected = %v, want %v (err=%v)", rejected, testCase.fullRejects, fullErr)
+			}
+		})
+	}
+}

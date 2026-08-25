@@ -29,9 +29,18 @@ stages read earlier stages' outputs that way).
 
 ## Project context the agent sees
 
-Beyond the role-pure prompt from the pack, a stage receives two pieces of
-project context that are **not** pack-owned (ADR 0002):
+Beyond the role-pure prompt from the pack, a stage receives three pieces of
+context that are **not** pack-owned (ADR 0002, ADR 0004):
 
+- **The task request.** The routing block's **Task** section carries the
+  task's immutable title and description — the requested behaviour and the
+  source of truth for what the task must deliver. It is the first section of
+  the block, and it is the only channel through which the request reaches the
+  agent. Run overrides (`overrides.checks` and anything else under
+  `overrides`) are orchestrator-only and are never rendered into the block:
+  the agent learns *what* the checks are from the resolved section below; it
+  cannot change *which* checks gate delivery, and it has no say in how the run
+  is configured.
 - **Pinned instruction files.** The repository's `AGENTS.md` and any files
   declared under `instructions:` in `.agentum.yaml`, pinned from the task's
   `base_commit`. These are read-only from the agent's perspective: the `edit`

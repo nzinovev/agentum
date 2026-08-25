@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
 // runDeliveryChecks enforces the orchestrator-owned project checks at the final
@@ -71,8 +71,17 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 	if err != nil {
 		return checks.Report{}, false, fmt.Errorf("load registry: %w", err)
 	}
+	// Independent strict parse, for the same reason this function keeps its own
+	// registry load (ADR 0002 D8 / PR #23): the value cached for rendering
+	// never reaches the delivery gate. After the API boundary guarantees
+	// well-formed overrides, a decode failure here is an invariant break and
+	// must be loud (ADR 0004 D7).
+	taskOverrides, overridesErr := taskinput.ParseOverrides(run.task.Overrides)
+	if overridesErr != nil {
+		return checks.Report{}, false, fmt.Errorf("parse task overrides: %w", overridesErr)
+	}
 	packRequests := packCheckRequests(run.taskPack)
-	taskRequests := taskCheckRequests(run.task.Input)
+	taskRequests := taskCheckRequests(taskOverrides)
 	set, err := checks.Resolve(registry, packRequests, taskRequests)
 	if err != nil {
 		return checks.Report{}, false, err
@@ -232,30 +241,21 @@ func packCheckRequests(taskPack *pack.Pack) []checks.Request {
 	return requests
 }
 
-// taskCheckRequests reads optional per-task check requests from the task input
-// JSON. A task may carry `{"checks": {"required": [...], "optional": [...]}}` to
-// add checks for this run; the names must exist in the project registry (the
-// resolve step rejects unknown names). Absent or malformed input yields no
-// requests — task input is agent-shaped, so a missing field is the common case.
-func taskCheckRequests(input json.RawMessage) []checks.Request {
-	if len(input) == 0 {
-		return nil
-	}
-	var decoded struct {
-		Checks struct {
-			Required []string `json:"required"`
-			Optional []string `json:"optional"`
-		} `json:"checks"`
-	}
-	if err := json.Unmarshal(input, &decoded); err != nil {
-		return nil
-	}
-	requests := make([]checks.Request, 0, len(decoded.Checks.Required)+len(decoded.Checks.Optional))
-	for _, name := range decoded.Checks.Required {
+// taskCheckRequests maps the typed task overrides (ADR 0004 D7) onto the
+// checks Request list. The names must exist in the project registry — the
+// resolve step rejects unknown ones. The caller owns the strict decode: this
+// function never sees raw bytes, so the old lenient `return nil` on a
+// malformed column cannot come back through it.
+func taskCheckRequests(overrides taskinput.Overrides) []checks.Request {
+	requests := make([]checks.Request, 0, len(overrides.Checks.Required)+len(overrides.Checks.Optional))
+	for _, name := range overrides.Checks.Required {
 		requests = append(requests, checks.Request{Name: name, Required: true})
 	}
-	for _, name := range decoded.Checks.Optional {
+	for _, name := range overrides.Checks.Optional {
 		requests = append(requests, checks.Request{Name: name, Required: false})
+	}
+	if len(requests) == 0 {
+		return nil
 	}
 	return requests
 }
