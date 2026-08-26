@@ -295,7 +295,7 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	}}
 
 	src := &staticSource{pk: taskPack}
-	runner := New(Deps{Store: store, Packs: src, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: src, Adapter: adapter})
 
 	// run: spec completes but the human_approval gate pauses.
 	if err := runner.Handle(t.Context(), job("run", "T1", "tn", "us")); err != nil {
@@ -353,7 +353,7 @@ func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tpa", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -396,7 +396,7 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tpa2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -460,7 +460,7 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tdr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -527,7 +527,7 @@ func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusBlocked, OpenQuestions: []string{"which framework?"}},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "T2", "tn", "us")); err != nil {
 		t.Fatalf("run: %v", err)
@@ -555,7 +555,7 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 	adapter := &slowAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	done := make(chan error, 1)
 	go func() { done <- runner.Handle(t.Context(), job("run", "T3", "tn", "us")) }()

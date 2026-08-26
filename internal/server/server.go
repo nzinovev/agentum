@@ -70,18 +70,16 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		Log:              log,
 	})
 	runnerInst := runner.New(runner.Deps{
-		Store:          runnerStore{queries},
-		Packs:          packs,
-		Adapter:        adapter,
-		Models:         modelsCfg,
-		Artifacts:      artifactStore,
-		Manifest:       manifestService,
-		CheckExec:      checkExecutor,
-		AgentName:      "opencode",
-		AdapterVersion: agentOpencodeVersion,
-		HardTimeout:    time.Duration(cfg.HardTimeoutSeconds) * time.Second,
-		IdleTimeout:    time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
-		Log:            log,
+		Store:       runnerStore{queries},
+		Packs:       packs,
+		Adapter:     adapter,
+		Models:      modelsCfg,
+		Artifacts:   artifactStore,
+		Manifest:    manifestService,
+		CheckExec:   checkExecutor,
+		HardTimeout: time.Duration(cfg.HardTimeoutSeconds) * time.Second,
+		IdleTimeout: time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
+		Log:         log,
 	})
 
 	worker := jobs.New(jobs.Deps{
@@ -114,12 +112,6 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		pool: cfg.WorkerPoolSize,
 	}
 }
-
-// agentOpencodeVersion is the static adapter version recorded in the manifest.
-// A live lookup (e.g. shelling out to `opencode --version`) would land here
-// when the adapter learns to report it; today it is a fixed string so two runs
-// against the same build hash the same value.
-const agentOpencodeVersion = "opencode-adapter-v1"
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
 // This is the single front door: the UI and every external caller use the same

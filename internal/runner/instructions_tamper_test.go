@@ -148,8 +148,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 	store := newFakeStore(task, proj)
 
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
@@ -289,8 +288,7 @@ func TestInstructions_NoTamperIsNoOp(t *testing.T) {
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "CleanProj"}
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake

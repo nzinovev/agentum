@@ -50,7 +50,7 @@ func TestRunnerLive_EndToEnd(t *testing.T) {
 
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: taskPack},
-		Adapter: agent.NewOpencodeAdapter("opencode"), AgentName: "opencode",
+		Adapter: agent.NewOpencodeAdapter("opencode"),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
