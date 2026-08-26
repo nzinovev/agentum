@@ -51,6 +51,12 @@ type Adapter interface {
 	// running it comes from here — callers never hard-code an executor name
 	// or version (ADR 0005 D1).
 	Describe() Descriptor
+
+	// Probe reports the external runtime's readiness and version (ADR 0005
+	// D2). It is memoized per process, returns a value and never an error,
+	// and a failed probe is a recorded fact (Ready=false + Reason), not a
+	// start failure — the invocation that needs the runtime surfaces it.
+	Probe(ctx context.Context) Readiness
 }
 
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives

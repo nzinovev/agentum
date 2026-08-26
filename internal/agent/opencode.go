@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,11 @@ import (
 // pass an absolute path to pin it.
 type OpencodeAdapter struct {
 	binary string // path to the opencode executable
+
+	// probeOnce / readiness memoize the runtime version probe: one subprocess
+	// per process lifetime, shared by every consumer (ADR 0005 D2).
+	probeOnce sync.Once
+	readiness Readiness
 }
 
 // NewOpencodeAdapter returns an adapter that invokes the named binary. The
