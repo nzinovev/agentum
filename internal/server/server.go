@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -29,6 +30,7 @@ type Server struct {
 	cfg        config.Config
 	log        *slog.Logger
 	store      *store.Store
+	adapter    agent.Adapter
 	artifacts  *artifacts.SQLStore
 	manifest   *manifest.Service
 	api        *api.API
@@ -41,17 +43,31 @@ type Server struct {
 // New constructs the server and all execution-model dependencies. The worker
 // and reconciler are not started here — Run starts them after recovery so no
 // job runs before stale ones are reconciled.
-func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
+//
+// New returns an error for configuration the process must not start on
+// (ADR 0005 D4, the first refusal point): a malformed models.yaml (anything
+// other than "no file"), an unknown execution adapter id, or a model option
+// the selected adapter does not declare. Each error names its cause; none of
+// them silently falls back to a default.
+func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, error) {
+	// Operator model override. ErrNoConfig is the common case (fall back to
+	// the adapter descriptor's tiers); any other load failure is a broken
+	// configuration that must stop the process.
+	modelsCfg, err := models.Load()
+	if err != nil && !errors.Is(err, models.ErrNoConfig) {
+		return nil, fmt.Errorf("load models config: %w", err)
+	}
+	adapter, adapterErr := executionAdapter(cfg, modelsCfg)
+	if adapterErr != nil {
+		return nil, adapterErr
+	}
+
 	queries := sqlc.New(dataStore.DB)
 
-	// Operator model override (optional; nil → built-in per-agent defaults).
-	modelsCfg, _ := models.Load() // ErrNoConfig is expected in the common case
-
-	// The execution model: pack source over a configured root, the opencode
-	// adapter, per-task worktrees, the artifact revisions store, the evidence
-	// manifest service, and the runner that composes them.
+	// The execution model: pack source over a configured root, the resolved
+	// execution adapter, per-task worktrees, the artifact revisions store,
+	// the evidence manifest service, and the runner that composes them.
 	packs := pack.NewDirSource(cfg.PacksDir)
-	adapter := agent.NewOpencodeAdapter(cfg.OpencodeBinary)
 	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
 		DB:         dataStore.DB,
 		Queries:    queries,
@@ -106,51 +122,87 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) *Server {
 		api.WithPackSource(packs))
 
 	return &Server{
-		cfg: cfg, log: log, store: dataStore,
+		cfg: cfg, log: log, store: dataStore, adapter: adapter,
 		artifacts: artifactStore, manifest: manifestService,
 		api: apiInst, runner: runnerInst, worker: worker, reconciler: reconciler,
 		pool: cfg.WorkerPoolSize,
+	}, nil
+}
+
+// executionAdapter resolves the configured execution adapter through the
+// registry (ADR 0005 D1) and validates the operator's model configuration
+// against its descriptor (D4): an unknown adapter id — the registry error
+// lists the known ones — and a tier resolving to options the adapter does not
+// declare both stop the process at boot. The executor is named only inside
+// internal/agent; this function works from ids.
+func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapter, error) {
+	registry := agent.NewRegistry(agent.RegistryOptions{
+		DefaultAdapter: agent.AdapterID(cfg.ExecutionAdapter),
+		RuntimeBinary:  cfg.RuntimeBinary,
+	})
+	resolved, err := registry.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("select execution adapter: %w", err)
 	}
+	descriptor := resolved.Describe()
+	if modelsCfg != nil {
+		for tier := range modelsCfg.Tiers {
+			selection, resolveErr := models.Resolve(modelsCfg, descriptor.DefaultTiers, tier)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("validate models config, tier %q: %w", tier, resolveErr)
+			}
+			if optionErr := selection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
+				return nil, fmt.Errorf("validate models config, tier %q: execution adapter %q: %w", tier, descriptor.ID, optionErr)
+			}
+		}
+	}
+	return resolved, nil
 }
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
 // This is the single front door: the UI and every external caller use the same
 // handler; nothing internal bypasses authz.
-func (s *Server) Handler() http.Handler {
+func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	s.registerRoutes(mux)
-	return applyBoundary(mux, s.cfg, s.log)
+	server.registerRoutes(mux)
+	return applyBoundary(mux, server.cfg, server.log)
 }
 
 // Run serves HTTP, the job worker, and the periodic reconciler until ctx is
 // cancelled, then shuts down gracefully. The reconciler runs its first pass
 // before the worker starts, so a crashed worker's stale jobs and any orphaned
 // tasks are repaired before any new job is claimed.
-func (s *Server) Run(ctx context.Context) error {
+func (server *Server) Run(ctx context.Context) error {
+	// Warm the runtime probe before the worker starts (ADR 0005 D2): the
+	// first task never pays the subprocess, and the boot log records the
+	// runtime version — or the failure, which is a probe result, not a boot
+	// failure; the run that needs the runtime surfaces it.
+	server.warmRuntimeProbe(ctx)
+
 	reconcilerCtx, cancelReconciler := context.WithCancel(ctx)
 	defer cancelReconciler()
-	go s.reconciler.Start(reconcilerCtx, jobs.DefaultReconcileInterval)
+	go server.reconciler.Start(reconcilerCtx, jobs.DefaultReconcileInterval)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
-	for workerIndex := 0; workerIndex < s.pool; workerIndex++ {
-		go s.worker.Start(workerCtx)
+	for workerIndex := 0; workerIndex < server.pool; workerIndex++ {
+		go server.worker.Start(workerCtx)
 	}
 
-	srv := &http.Server{
-		Addr:              s.cfg.HTTPAddr,
-		Handler:           s.Handler(),
+	httpServer := &http.Server{
+		Addr:              server.cfg.HTTPAddr,
+		Handler:           server.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
+	go func() { errCh <- httpServer.ListenAndServe() }()
 
-	s.log.Info("http server listening", "addr", s.cfg.HTTPAddr, "workers", s.pool)
+	server.log.Info("http server listening", "addr", server.cfg.HTTPAddr, "workers", server.pool)
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
 		return nil
@@ -160,6 +212,21 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+// warmRuntimeProbe runs the adapter's memoized readiness probe once and logs
+// the outcome. The descriptor supplies the id; no executor name is a literal
+// here.
+func (server *Server) warmRuntimeProbe(ctx context.Context) {
+	descriptor := server.adapter.Describe()
+	readiness := server.adapter.Probe(ctx)
+	if readiness.Ready {
+		server.log.Info("execution runtime ready",
+			"adapter", string(descriptor.ID), "runtime_version", readiness.RuntimeVersion)
+		return
+	}
+	server.log.Warn("execution runtime not ready",
+		"adapter", string(descriptor.ID), "reason", readiness.Reason)
 }
 
 // runnerStore adapts *sqlc.Queries to the runner's Store interface (a typed

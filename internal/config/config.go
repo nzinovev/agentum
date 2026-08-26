@@ -21,7 +21,13 @@ type Config struct {
 	PacksDir       string // directory holding <name>/manifest.yaml packs
 	WorkerPoolSize int    // concurrent job workers (1 is fine for single-host MVP)
 	JobMaxAttempts int    // poison bound before a job is failed (04 §7.5)
-	OpencodeBinary string // path to the opencode binary the adapter shells out to
+	// ExecutionAdapter selects the execution adapter by registry id; empty
+	// selects the registry's default entry (ADR 0005 D1). Adapter-neutral on
+	// purpose: config names no executor.
+	ExecutionAdapter string
+	// RuntimeBinary overrides the selected adapter descriptor's default
+	// binary; empty keeps Descriptor.Binary.
+	RuntimeBinary string
 
 	// Per-invocation capability timeouts (Epic 6). Zero means no cap; the
 	// values are layered onto every effective capability profile and enforced
@@ -58,11 +64,12 @@ func Load() (Config, error) {
 		TenantID:          getenv("AGENTUM_TENANT_ID", "00000000-0000-0000-0000-000000000001"),
 		TenantOwnerUserID: getenv("AGENTUM_OWNER_USER_ID", "00000000-0000-0000-0000-000000000001"),
 
-		PacksDir:       getenv("AGENTUM_PACKS_DIR", "packs"),
-		WorkerPoolSize: getenvInt("AGENTUM_WORKER_POOL_SIZE", 1),
-		JobMaxAttempts: getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
-		OpencodeBinary: getenv("AGENTUM_OPENCODE_BINARY", "opencode"),
-		ArtifactRoot:   getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
+		PacksDir:         getenv("AGENTUM_PACKS_DIR", "packs"),
+		WorkerPoolSize:   getenvInt("AGENTUM_WORKER_POOL_SIZE", 1),
+		JobMaxAttempts:   getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
+		ExecutionAdapter: getenv("AGENTUM_EXECUTION_ADAPTER", ""),
+		RuntimeBinary:    getenv("AGENTUM_RUNTIME_BINARY", ""),
+		ArtifactRoot:     getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
 
 		ArtifactScanPolicy: getenv("AGENTUM_ARTIFACT_SCAN_POLICY", "redact"),
 
