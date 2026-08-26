@@ -1380,7 +1380,12 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	if tier == "" {
 		tier = run.taskPack.Tiers.Default
 	}
-	model, _ := models.Resolve(runner.models, runner.agentName, tier) // best-effort; empty is acceptable
+	// Temporary step-1 shape: the fallback tiers move onto the adapter
+	// descriptor in the next steps; until then resolution without an operator
+	// override yields an empty model, which the adapter already treats as
+	// "runtime default" (no --model flag).
+	selection, _ := models.Resolve(runner.models, models.Config{}, tier) // best-effort; empty is acceptable
+	model := selection.Options.Model
 
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
