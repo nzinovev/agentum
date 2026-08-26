@@ -127,7 +127,9 @@ func (registry *Registry) Resolve(id AdapterID) (Adapter, error) {
 	}
 	constructor, found := registry.constructors[resolvedID]
 	if !found {
-		return nil, fmt.Errorf("agent: unknown execution adapter %q (known: %s)", id, joinAdapterIDs(registry.IDs()))
+		// Name the id that failed to resolve — for an empty id that is the
+		// configured default, which is the id the operator must fix.
+		return nil, fmt.Errorf("agent: unknown execution adapter %q (known: %s)", resolvedID, joinAdapterIDs(registry.IDs()))
 	}
 	// The operator's binary override beats the descriptor's default. The
 	// default itself is asked of a throwaway construction — construction is a
