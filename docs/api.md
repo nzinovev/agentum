@@ -230,10 +230,12 @@ edit creates a new immutable revision that chains to the prior one; the
 ## Evidence manifest
 
 One manifest per task. Records the inputs that shaped the run (input task +
-revision, project + base commit, pack + version + hash, prompt revisions,
-adapter + declared capabilities, model + tier, effective capability profile,
-memory slice, input/output artifact revisions, check set version + results,
-human gate decisions, branch + checkpoints + result commits).
+revision, project + base commit, pack + version + hash, one invocation record
+per stage attempt — adapter + runtime versions, model selection, both prompt
+hashes, effective capability profile, telemetry — the adapter wiring and its
+runtime probe, memory slice, input/output artifact revisions, check set
+version + results, human gate decisions, branch + checkpoints + result
+commits).
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
@@ -244,29 +246,53 @@ human gate decisions, branch + checkpoints + result commits).
 The manifest body is filled append-only while the run is in flight and sealed
 at terminal state (`done | failed | cancelled | interrupted`). Corrections
 after sealing are linked rows with a `reason` and a fresh body snapshot; the
-sealed row is never edited.
+sealed row is never edited. The write path speaks schema `"2"` only; a
+correction carrying the schema-1 sections (`prompts`, `model`,
+`capabilities.effective`, `adapter.name`/`version`) is rejected with a `400`.
 
 ### Manifest body shape
 
+Schema `"2"` (ADR 0005). Schema-1 manifests stay readable forever — their
+legacy sections are retained verbatim on read and synthesized into equivalent
+invocation records for the diff.
+
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "input":            { "task_id": "…", "title": "…", "description": "…", "overrides": {}, "revision": "…", "pipeline_pack": "…" },
   "project":          { "project_id": "…", "repo_path": "…", "name": "…", "base_ref": "…", "base_commit": "…" },
   "pack":             { "ref": "…", "name": "…", "version": "1.0.0", "content_hash": "…", "forked": false },
-  "prompts":          [{ "stage_id": "spec", "hash": "…" }],
-  "adapter":          { "name": "opencode", "version": "…", "declared_capabilities": [] },
-  "model":            { "tier": "strong", "model": "…", "agent_name": "opencode" },
+  "adapter":          { "id": "opencode", "adapter_version": "1.0.0", "declared_capabilities": ["fs.read", "…"], "runtime_probe": "ok" },
+  "invocations": [
+    {
+      "invocation_id": "6f1c…",
+      "stage": "review",
+      "sequence": 7,
+      "cycle": 1,
+      "adapter":  { "id": "opencode", "adapter_version": "1.0.0", "runtime_version": "1.18.11" },
+      "model":    { "tier": "strong", "provider": "zai-coding-plan", "options": { "model": "zai-coding-plan/glm-5.3" } },
+      "prompt":   { "stage_prompt_hash": "…", "rendered_hash": "…" },
+      "capabilities": { "role": "reviewer", "profile": { "grants": [] } },
+      "telemetry": { "tokens": { "total": 0, "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0 }, "cost": 0.0 },
+      "stop_reason": ""
+    }
+  ],
   "capabilities":     { "declared": [], "granted": [] },
   "memory":           { "scope": "project", "hashes": [], "entries": 0 },
-  "artifacts":        { "inputs": [], "outputs": [] },
+  "artifacts":        { "inputs": [], "outputs": [{ "name": "review/result.json", "revision_id": "…", "content_hash": "…", "stage": "review", "invocation_id": "6f1c…" }] },
   "checks":           { "set_version": "", "results": [] },
   "human_gates":      [{ "stage": "…", "gate": "…", "decision": "approved | rejected | edited | continued", "actor": "…", "timestamp": "…" }],
   "git":              { "branch": "agentum/…", "base_commit": "…", "result_commit": "…", "checkpoints": [] },
   "execution_coordinate": { "delivery_step": "", "execution_unit": "", "phase": "" },
-  "missing":          ["memory", "checks", "capabilities", "human_gates"]
+  "missing":          ["memory", "checks", "human_gates"]
 }
 ```
+
+The unit of evidence is the invocation (ADR 0005 D6): one record per stage
+ATTEMPT, keyed by `invocation_id`. The record opens before the adapter starts
+and closes after the stream drains, so a crashed, timed-out, or refused
+attempt still records the model, prompts, and profile it was going to run.
+Output artifact refs carry the `invocation_id` that produced them.
 
 ### Diff response
 
@@ -283,7 +309,23 @@ match):
 ```
 
 The diff is **input-level only**. Outputs (artifacts produced) and human
-decisions are not compared — those are results, not inputs.
+decisions are not compared — those are results, not inputs. The per-attempt
+axes (prompts / model / capabilities / adapter) index each run's invocation
+records by `(stage, cycle)` and compare shared keys before set differences.
+Reason strings:
+
+| Axis | Reasons |
+|---|---|
+| `prompts` | `prompt-hash` (differing `stage_prompt_hash` on a shared attempt), `prompt-set` |
+| `model` | `model-id`, `model-tier`, `model-provider`, `model-options`, `model-set` |
+| `capabilities` | `capability-declared`, `capability-granted`, `capability-effective` |
+| `adapter` | `adapter-id`, `adapter-version`, `adapter-runtime-version`, `adapter-capabilities` |
+
+`adapter-runtime-version` compares the set of runtime versions observed
+across each run's invocations: two runs on the same tier and model but
+different runtime builds differ on this axis and no other. The rendered
+prompt hash is never a diff axis — it embeds the task id and absolute paths,
+so it never repeats across runs.
 
 ## Memory
 

@@ -10,6 +10,39 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Provider-neutral execution target and per-invocation evidence** (ADR 0005).
+  The executor, the model, and the shape of the model's parameters leave the
+  domain model: they are a registry entry plus a self-describing adapter.
+  - **Execution adapter registry** (`internal/agent`): adapters are selected
+    by id (`AGENTUM_EXECUTION_ADAPTER`, empty = the registry default) and
+    describe themselves — `Describe()` (id, adapter implementation version,
+    default binary, understood model options, baked-in tier defaults) and
+    `Probe()` (`<binary> --version`, memoized once per process, sticky
+    including failure; unavailability is a probe result, not a boot failure).
+    Adapter id and version are never literals in calling code;
+    `AGENTUM_RUNTIME_BINARY` replaces `AGENTUM_OPENCODE_BINARY`.
+  - **Typed model options** (`internal/models`): `Selection{Tier, Provider,
+    Options}` with `Options.SupportedBy` mirroring `caps.EnforceableBy`. An
+    option the descriptor does not declare is refused at three points — boot
+    (malformed/unknown-key `models.yaml` now also stops the process), run
+    start (every stage's tier validated before the first invocation), and
+    Invoke. Nothing is silently dropped or substituted.
+  - **Per-invocation evidence** (manifest schema `"2"`): `body.invocations`
+    replaces `prompts` / `model.per_stage` / `capabilities.effective` — one
+    record per stage ATTEMPT, keyed by `invocation_id`, opened before
+    `Invoke` and closed with telemetry + stop reason on every terminal path.
+    Two prompt hashes per record (`stage_prompt_hash` is the diff axis;
+    `rendered_hash` distinguishes attempts and is never a diff axis). The
+    runtime version is probed and recorded per invocation; a failed probe
+    records an `adapter.runtime` evidence gap. Output artifact refs carry the
+    producing `invocation_id`. Schema-1 manifests stay readable (legacy
+    sections retained verbatim; the diff synthesizes equivalent records), and
+    the v1→v2 upgrade happens once, inside the write transaction.
+  - **Cross-run diff** recomputed from invocation records indexed by
+    `(stage, cycle)`: shared keys compare values before set differences (a
+    differing `(review, 1)` model reports `model-id`, an extra attempt
+    reports `model-set`); new axes `adapter-runtime-version` (the SET of
+    runtime versions across a run) and `capability-effective`.
 - **The task request as a typed contract, delivered to the agent** (ADR 0004).
   The first `backend-development` run stopped at `paused_open_questions`
   because the task's title and description never reached any agent prompt —

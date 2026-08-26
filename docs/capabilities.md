@@ -73,6 +73,13 @@ effective = (host ∩ pack ∩ stage ∩ (role ∪ invocation-grant)) \ withheld
 | **role** | `stage.role` or derived from the stage id | The scoped baseline template (the only input that carries path/command scopes). |
 | **invocation** | per-run grant (resume, explicit add) | Widens the role; still must survive pack ∩ stage ∩ host. |
 
+`Supported()` is unchanged and stays the capability surface. Its companion on
+the same adapter is `Describe()` (ADR 0005 D1): the adapter's self-description
+— id, implementation version, default binary, understood model options, and
+baked-in tier defaults — which everything knowable about the executor without
+running it comes from. Callers never hard-code an executor name or version;
+they read the descriptor.
+
 **Deny by default.** A capability absent from any input is absent from the
 result. An empty input set yields an empty profile — the agent may only write
 its structured `result.json`.
