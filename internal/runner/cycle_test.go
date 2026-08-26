@@ -15,7 +15,7 @@ func TestNextCycleForStage(t *testing.T) {
 	t.Parallel()
 	task := sqlc.Task{ID: "T-cycle", TenantID: "tn", UserID: "us", State: "running"}
 	store := newFakeStore(task, sqlc.Project{})
-	runner := New(Deps{Store: store, AgentName: "opencode"})
+	runner := New(Deps{Store: store})
 	ctx := t.Context()
 
 	// Fresh entry into "fix": no invocations yet -> cycle 0.

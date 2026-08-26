@@ -131,7 +131,7 @@ func runSingleStageOnce(t *testing.T, taskPack *pack.Pack, supported []caps.Cate
 		},
 		claimed: supported,
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "C1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -316,7 +316,7 @@ func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
 		claimed: fullSupport,
 		actual:  []caps.Category{caps.CatFsRead, caps.CatArtifactWrite, caps.CatGitRead},
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "U1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -404,7 +404,7 @@ func newFakeStoreWithPack(t *testing.T, taskPack *pack.Pack) *fakeStore {
 		},
 		claimed: fullSupport,
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 	if err := runner.Handle(t.Context(), job("run", "A1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}

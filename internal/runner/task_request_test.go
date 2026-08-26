@@ -67,7 +67,7 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	adapter := &requestCapturingAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "planned"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(context.Background(), job("run", "Tr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)

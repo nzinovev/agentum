@@ -76,16 +76,14 @@ type Sink func(taskID, stageID, chunk string)
 // worker's Handler: the worker claims a job and calls Handle, which runs the
 // stage loop (04 §7.2) until a pause point or terminal state.
 type Runner struct {
-	store     Store
-	packs     pack.Source
-	adapter   agent.Adapter
-	models    *models.Config // nil → built-in default for AgentName
-	wt        *worktree.Manager
-	cancels   *CancelRegistry
-	sink      Sink
-	agentName string
-	adapterV  string // adapter binary version, best-effort; recorded in manifest
-	log       *slog.Logger
+	store   Store
+	packs   pack.Source
+	adapter agent.Adapter
+	models  *models.Config // operator override (models.yaml); nil → the adapter descriptor's DefaultTiers
+	wt      *worktree.Manager
+	cancels *CancelRegistry
+	sink    Sink
+	log     *slog.Logger
 
 	// hardTimeout / idleTimeout are the per-invocation caps the runner layers
 	// onto every effective capability profile (zero = no cap). Sourced from
@@ -139,8 +137,9 @@ func manifestServiceOrNil(service *manifest.Service) manifestService {
 	return service
 }
 
-// Deps bundles Runner construction. AgentName is the adapter's identity for
-// model resolution (e.g. "opencode"); Models may be nil to use built-in defaults.
+// Deps bundles Runner construction. The adapter's identity (id, version,
+// default tiers, model options) is read from adapter.Describe() — never
+// passed separately and never a literal in calling code (ADR 0005 D1).
 type Deps struct {
 	Store     Store
 	Packs     pack.Source
@@ -149,11 +148,7 @@ type Deps struct {
 	Worktrees *worktree.Manager
 	Cancels   *CancelRegistry
 	Sink      Sink
-	AgentName string
-	// AdapterVersion is the adapter binary version, surfaced in the manifest
-	// for cross-run comparison. Empty when unknown.
-	AdapterVersion string
-	Log            *slog.Logger
+	Log       *slog.Logger
 
 	// Artifacts is the durable artifact revisions store. May be nil in unit
 	// tests; capture and sync become no-ops then.
@@ -201,8 +196,7 @@ func New(deps Deps) *Runner {
 	}
 	return &Runner{
 		store: deps.Store, packs: deps.Packs, adapter: deps.Adapter, models: deps.Models,
-		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
-		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
+		wt: worktreeManager, cancels: cancels, sink: deps.Sink, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: manifestServiceOrNil(deps.Manifest),
 		checkExec:   deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
@@ -494,6 +488,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return runner.failTask(ctx, task, fmt.Errorf("resolve pack %q: %w", task.PipelinePack, err))
 	}
 
+	// Resolve the execution target for EVERY stage up front (ADR 0005 D4,
+	// point two): a tier no configuration defines, or an option the selected
+	// adapter does not declare, must fail the run before the first invocation
+	// — not four stages in, after source has been written. This is also the
+	// seam MVP task 13's RunSpec pins: one value, computed at run start.
+	executionPlan, planErr := runner.resolveExecutionPlan(taskPack)
+	if planErr != nil {
+		return runner.failTask(ctx, task, planErr)
+	}
+
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
 	// from and what checkpoints diff against; recording it immutably before any
 	// work means a later move of base_ref cannot retcon the task's lineage.
@@ -551,7 +555,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	runner.cancels.Register(job.TaskID, cancel)
 	defer runner.cancels.Unregister(job.TaskID)
 
-	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
+	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree, executionPlan: executionPlan}
 	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):
 	// whether the pack declares an approval, whether the human has recorded it,
 	// and the revision id the decision is bound to. A durable Postgres read, not
@@ -573,6 +577,36 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// produced. No-op for a fresh run (no revisions yet).
 	runner.syncRevisionsIntoWorktree(ctx, run, startStage)
 	return runner.runLoop(runCtx, run, startStage, resumeSession)
+}
+
+// resolveExecutionPlan resolves the model selection for every stage the pack
+// declares, before the stage loop runs (ADR 0005 D4, point two). A tier is
+// chosen per stage, so validation must cover every stage — a models.yaml whose
+// reasoning tier declares an option the adapter cannot take must not fail four
+// stages into a run that has already written source. The fallback tiers come
+// from the adapter's descriptor; the runner names no executor itself.
+func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]models.Selection, error) {
+	descriptor := runner.adapter.Describe()
+	plan := make(map[string]models.Selection, len(taskPack.Stages))
+	for stageID, stage := range taskPack.Stages {
+		if stage.Terminal() {
+			// An engine marker, not an invocation: no selection to resolve.
+			continue
+		}
+		tier := stage.Tier
+		if tier == "" {
+			tier = taskPack.Tiers.Default
+		}
+		selection, resolveErr := models.Resolve(runner.models, descriptor.DefaultTiers, tier)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve execution plan, stage %q: %w", stageID, resolveErr)
+		}
+		if optionErr := selection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
+			return nil, fmt.Errorf("resolve execution plan, stage %q: execution adapter %q: %w", stageID, descriptor.ID, optionErr)
+		}
+		plan[stageID] = selection
+	}
+	return plan, nil
 }
 
 // readSourceWriteUnlock reads the durable approval state for the run (ADR 0003
@@ -729,6 +763,12 @@ type stageRun struct {
 	project  sqlc.Project
 	taskPack *pack.Pack
 	worktree *worktree.Worktree
+
+	// executionPlan is the per-stage resolved model selection, computed once
+	// at run start (ADR 0005 D4). invokeStage looks the stage's selection up
+	// here; it never resolves on the fly, so a pack that names an
+	// unresolvable tier cannot start a run at all.
+	executionPlan map[string]models.Selection
 
 	// instructionFiles is the pinned project-instruction set for the run (ADR
 	// 0002): bytes read from base_commit, capped/truncated, with source and
@@ -1369,6 +1409,14 @@ type invocationOutcome struct {
 // creates the stage_invocation row at start (so a crash leaves a partial
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
 // row with session_id / stop_reason / parsed result.
+//
+// The manifest's invocation record is written in the same two passes (ADR 0005
+// D7): the OPEN half — identity, adapter + runtime versions, the model
+// selection, both prompt hashes, the effective profile — lands before
+// adapter.Invoke, so a crashed, timed-out, or refused attempt still records
+// what it was going to run (a failed attempt is when "which runtime, which
+// model" matters most). The CLOSE half — telemetry and stop reason — lands on
+// every terminal path after the drain.
 func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -1376,16 +1424,9 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		return invocationOutcome{adapterErr: true}
 	}
 
-	tier := stage.Tier
-	if tier == "" {
-		tier = run.taskPack.Tiers.Default
-	}
-	// Temporary step-4 shape: the fallback tiers move onto the adapter
-	// descriptor's DefaultTiers and resolution is validated for the whole pack
-	// at run start in step 7; until then resolution without an operator
-	// override yields an empty selection, which the adapter renders as "no
-	// --model" (the runtime default).
-	selection, _ := models.Resolve(runner.models, models.Config{}, tier)
+	// The run-start execution plan already validated this stage's tier and
+	// options; the lookup cannot miss for a non-terminal stage.
+	selection := run.executionPlan[stageID]
 
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
@@ -1486,6 +1527,15 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		return invocationOutcome{adapterErr: true}
 	}
 
+	// OPEN the invocation record before the adapter starts (D7): identity,
+	// adapter + runtime versions, the model selection, both prompt hashes, and
+	// the effective profile land now, so every terminal path — success, crash,
+	// timeout, refused start — carries what the attempt was going to run.
+	// The rendered hash covers exactly what the adapter is handed below
+	// (prompt + "\n\n" + routing block); it distinguishes two attempts at the
+	// same stage in evidence but is never a diff axis (D8).
+	runner.openInvocationEvidence(ctx, run, invocation, stageID, stage, selection, block, profile)
+
 	// Record the effective profile as audit evidence before the run starts. A
 	// denied capability is as much a part of the record as a granted one: this
 	// is what makes "the invocation was deny-by-default" reconstructible later.
@@ -1511,6 +1561,9 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			stopReason = "capability_unenforceable"
 		}
 		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
+		// CLOSE with the stop reason and no telemetry: nothing ran, so there
+		// is nothing to bill (D7 — a refused start still produces a record).
+		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, stopReason, nil)
 		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
 		return invocationOutcome{adapterErr: true}
 	}
@@ -1536,15 +1589,16 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		artifactOutputs, captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
 		if captureErr != nil {
 			runner.finalize(ctx, invocation, run.task, sessionID, "artifact_rejected", nil)
+			runner.closeInvocationEvidence(ctx, run.task, invocation.ID, "artifact_rejected", &telemetry)
 			runner.log.Error("stage output rejected",
 				"task", run.task.ID, "stage", stageID, "error", captureErr)
 			return invocationOutcome{rejected: true}
 		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
-		// Record evidence of the prompt + model + effective capability profile
-		// the adapter saw, plus the artifact revisions this stage produced. The
-		// manifest service is nil in unit tests; AddEvidence is a no-op then.
-		runner.recordStageEvidence(ctx, run, stageID, stage, selection.Options.Model, profile, artifactOutputs)
+		// CLOSE the invocation record: telemetry and the (empty) stop reason
+		// of a successful run. Plus the artifact revisions this stage produced.
+		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, "", &telemetry)
+		runner.recordStageEvidence(ctx, run, stageID, artifactOutputs)
 		// ADR 0002: record the project-context channel (pinned instructions +
 		// enumerated skills) and emit the live pinning signal. The section is
 		// written on every successful stage so an empty project still seals
@@ -1563,6 +1617,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// error (crash, stream failure, cancellation).
 	reason := classifyAdapterFailure(terminalEr)
 	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
+	runner.closeInvocationEvidence(ctx, run.task, invocation.ID, reason, &telemetry)
 	return invocationOutcome{
 		adapterErr: reason == "adapter_error",
 		parseErr:   reason == "parse_error",

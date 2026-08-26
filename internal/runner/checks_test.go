@@ -80,8 +80,7 @@ func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
@@ -164,8 +163,7 @@ func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 	}}
 	executor := checks.NewExecutor(checks.ExecutorDeps{})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: executor,
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: executor,
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tu", "tn", "us")); err == nil {
@@ -254,8 +252,7 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tm", "tn", "us"))

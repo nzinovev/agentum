@@ -9,13 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
-	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -34,6 +34,9 @@ type recordingArtifactStore struct {
 	// Current + GetBytes can serve the verdict artifact the capture path
 	// ingested. Updated on every Put.
 	currentByName map[string][]byte
+	// kindByName remembers each name's kind so ListCurrent can report it
+	// (priorStageRefs filters revisions by kind).
+	kindByName map[string]string
 	// failWith, when set, is returned from every Put.
 	failWith error
 }
@@ -53,6 +56,10 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 	stashed := make([]byte, len(params.Bytes))
 	copy(stashed, params.Bytes)
 	store.currentByName[params.Name] = stashed
+	if store.kindByName == nil {
+		store.kindByName = make(map[string]string)
+	}
+	store.kindByName[params.Name] = params.Kind
 	// A stable, distinct id + content hash per ingest so the manifest-ref
 	// assertions can distinguish revisions by more than name. Hash mirrors the
 	// real store: the bytes determine the hash.
@@ -114,8 +121,23 @@ func (store *recordingArtifactStore) Current(_ context.Context, _ string, _ stri
 func (*recordingArtifactStore) ListForTask(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")
 }
-func (*recordingArtifactStore) ListCurrent(context.Context, string, string) ([]artifacts.Revision, error) {
-	return nil, errors.New("not used")
+func (store *recordingArtifactStore) ListCurrent(context.Context, string, string) ([]artifacts.Revision, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	names := make([]string, 0, len(store.currentByName))
+	for name := range store.currentByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]artifacts.Revision, 0, len(names))
+	for _, name := range names {
+		out = append(out, artifacts.Revision{
+			ID:   "rev-" + name,
+			Name: name,
+			Kind: store.kindByName[name],
+		})
+	}
+	return out, nil
 }
 func (*recordingArtifactStore) ListForInvocation(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")
@@ -165,9 +187,11 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
 	events := newFakeStore(task, sqlc.Project{})
 	store := &recordingArtifactStore{}
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{}}
 	runner := New(Deps{
 		Store:     events,
 		Artifacts: store,
+		Adapter:   adapter,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return &captureFixture{
@@ -535,17 +559,20 @@ func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.
 		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 	})
 	run := stageRun{task: task, taskPack: taskPack}
-	stage := taskPack.Stages[fixtureStage]
 
 	// Must not panic or fail the stage; the run continues.
-	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, stage, "model-x", caps.Profile{}, nil)
+	outputs := []manifest.ArtifactRef{{
+		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
+		Stage: fixtureStage, InvocationID: "inv-1",
+	}}
+	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, outputs)
 
 	gaps := fake.gapSections()
 	if len(gaps) != 1 {
 		t.Fatalf("AddEvidence failure recorded %d gaps, want 1: %v", len(gaps), gaps)
 	}
-	if gaps[0] != "prompts_model_capabilities" {
-		t.Errorf("gap section = %q, want prompts_model_capabilities", gaps[0])
+	if gaps[0] != "artifacts" {
+		t.Errorf("gap section = %q, want artifacts", gaps[0])
 	}
 }
 
