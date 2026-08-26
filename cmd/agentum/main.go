@@ -39,6 +39,9 @@ func run() error {
 		}
 	}()
 
-	srv := server.New(cfg, log, st)
+	srv, err := server.New(cfg, log, st)
+	if err != nil {
+		return err
+	}
 	return srv.Run(ctx)
 }
