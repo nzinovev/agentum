@@ -113,7 +113,9 @@ func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
 	if positionOf(baseline, "--model") >= 0 {
 		emits[models.OptionModel] = true
 	}
-	withModel := buildOpencodeArgs("opencode", Invocation{Model: "provider/model"})
+	withModel := buildOpencodeArgs("opencode", Invocation{
+		Model: models.Selection{Options: models.Options{Model: "provider/model"}},
+	})
 	if positionOf(withModel, "--model") < 0 {
 		t.Fatal("a populated model option must emit --model")
 	}

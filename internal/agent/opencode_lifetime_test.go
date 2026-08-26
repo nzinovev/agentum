@@ -312,7 +312,7 @@ func TestInvoke_CallerCancellationStopsRun(t *testing.T) {
 func TestInvoke_CleansUpConfigAfterRun(t *testing.T) {
 	adapter, invocation := fakeInvocation(t, fakeWorks, 50*time.Millisecond, caps.Profile{})
 
-	plan, err := prepareEnforcement(invocation)
+	plan, err := adapter.prepareEnforcement(invocation)
 	if err != nil {
 		t.Fatalf("prepareEnforcement: %v", err)
 	}
