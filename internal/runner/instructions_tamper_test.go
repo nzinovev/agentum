@@ -25,6 +25,7 @@ import (
 // The review stage then runs under restoreInstructions, which should detect the
 // drift and restore the pinned bytes before the review invocation sees them.
 type tamperAdapter struct {
+	stubExecution
 	mu                  sync.Mutex
 	scripts             map[string]agent.ResultJSON
 	worktreeRoot        string

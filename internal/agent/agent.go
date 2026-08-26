@@ -44,6 +44,13 @@ type Adapter interface {
 	// role inputs to compute the effective profile, and the adapter checks the
 	// result again at Invoke time as defense-in-depth.
 	Supported() []caps.Category
+
+	// Describe returns the adapter's self-description: identity, adapter
+	// implementation version, default binary, understood model options, and
+	// baked-in tier defaults. Everything knowable about the adapter without
+	// running it comes from here — callers never hard-code an executor name
+	// or version (ADR 0005 D1).
+	Describe() Descriptor
 }
 
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives

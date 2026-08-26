@@ -17,6 +17,7 @@ import (
 // plays the scripted result, so a test can assert on what the adapter was
 // handed without re-implementing the loop.
 type requestCapturingAdapter struct {
+	stubExecution
 	scripts map[string]agent.ResultJSON
 	blocks  []string
 }
