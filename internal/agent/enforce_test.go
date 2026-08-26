@@ -433,7 +433,7 @@ func TestPrepareEnforcement_RefusesUnenforceableProfile(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := prepareEnforcement(Invocation{
+			_, err := NewOpencodeAdapter("opencode").prepareEnforcement(Invocation{
 				Workdir:     t.TempDir(),
 				ArtifactDir: filepath.Join(t.TempDir(), "artifacts"),
 				Profile:     caps.Profile{Grants: []caps.Token{grant}},
@@ -457,7 +457,7 @@ func TestPrepareEnforcement_ConfigLivesOutsideWorktree(t *testing.T) {
 	workdir := t.TempDir()
 	subst := testSubst(workdir)
 
-	plan, err := prepareEnforcement(Invocation{
+	plan, err := NewOpencodeAdapter("opencode").prepareEnforcement(Invocation{
 		Workdir: workdir, ArtifactDir: subst.artifact, Profile: implementerProfile(t),
 	})
 	if err != nil {
@@ -488,7 +488,7 @@ func TestPrepareEnforcement_AuditKeepsAbsoluteScopes(t *testing.T) {
 	workdir := t.TempDir()
 	subst := testSubst(workdir)
 
-	plan, err := prepareEnforcement(Invocation{
+	plan, err := NewOpencodeAdapter("opencode").prepareEnforcement(Invocation{
 		Workdir: workdir, ArtifactDir: subst.artifact, Profile: implementerProfile(t),
 	})
 	if err != nil {
@@ -511,7 +511,7 @@ func TestPrepareEnforcement_AuditKeepsAbsoluteScopes(t *testing.T) {
 func TestPrepareEnforcement_CleanupRemovesConfig(t *testing.T) {
 	t.Parallel()
 	workdir := t.TempDir()
-	plan, err := prepareEnforcement(Invocation{
+	plan, err := NewOpencodeAdapter("opencode").prepareEnforcement(Invocation{
 		Workdir: workdir, ArtifactDir: testSubst(workdir).artifact, Profile: analystProfile(t),
 	})
 	if err != nil {
@@ -810,7 +810,7 @@ func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) 
 			{RepoPath: "docs/conventions.md", Content: []byte("conventions\n")},
 		},
 	}
-	plan, err := prepareEnforcement(inv)
+	plan, err := NewOpencodeAdapter("opencode").prepareEnforcement(inv)
 	if err != nil {
 		t.Fatalf("prepareEnforcement: %v", err)
 	}
@@ -865,7 +865,7 @@ func TestStageInstructionFiles_EmptyContentNotStaged(t *testing.T) {
 			{RepoPath: "empty.md", Content: nil},
 		},
 	}
-	plan, err := prepareEnforcement(inv)
+	plan, err := NewOpencodeAdapter("opencode").prepareEnforcement(inv)
 	if err != nil {
 		t.Fatalf("prepareEnforcement: %v", err)
 	}

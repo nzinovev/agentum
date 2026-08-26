@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 // Adapter is the boundary to an external coding agent. Implementations MUST
@@ -62,13 +63,13 @@ type Adapter interface {
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives
 // on the Principal in the caller's context; the adapter is identity-agnostic.
 type Invocation struct {
-	Workdir       string   // the task worktree root (the agent's working directory)
-	ArtifactDir   string   // per-stage dir; result.json is read here after the run
-	Prompt        string   // role-pure system prompt, loaded from the pack
-	RoutingBlock  string   // rendered: stage/gate/memory/capabilities + result.json contract
-	Capabilities  []string // pack∩stage capability subset (declared = passed at MVP)
-	ResumeSession string   // non-empty → resume that session id; empty → fresh invocation
-	Model         string   // optional provider/model override (BYO-models, F.4)
+	Workdir       string           // the task worktree root (the agent's working directory)
+	ArtifactDir   string           // per-stage dir; result.json is read here after the run
+	Prompt        string           // role-pure system prompt, loaded from the pack
+	RoutingBlock  string           // rendered: stage/gate/memory/capabilities + result.json contract
+	Capabilities  []string         // pack∩stage capability subset (declared = passed at MVP)
+	ResumeSession string           // non-empty → resume that session id; empty → fresh invocation
+	Model         models.Selection // resolved tier + typed options; an option the adapter does not declare refuses the start
 
 	// Instructions are the pinned project-instruction files for this run (ADR
 	// 0002): each carries the repo-relative path it occupies in the project and

@@ -1380,12 +1380,12 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	if tier == "" {
 		tier = run.taskPack.Tiers.Default
 	}
-	// Temporary step-1 shape: the fallback tiers move onto the adapter
-	// descriptor in the next steps; until then resolution without an operator
-	// override yields an empty model, which the adapter already treats as
-	// "runtime default" (no --model flag).
-	selection, _ := models.Resolve(runner.models, models.Config{}, tier) // best-effort; empty is acceptable
-	model := selection.Options.Model
+	// Temporary step-4 shape: the fallback tiers move onto the adapter
+	// descriptor's DefaultTiers and resolution is validated for the whole pack
+	// at run start in step 7; until then resolution without an operator
+	// override yields an empty selection, which the adapter renders as "no
+	// --model" (the runtime default).
+	selection, _ := models.Resolve(runner.models, models.Config{}, tier)
 
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
@@ -1498,7 +1498,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	eventCh, invokeErr := runner.adapter.Invoke(ctx, agent.Invocation{
 		Workdir: run.worktree.Root, ArtifactDir: artifactDir,
 		Prompt: stage.PromptText(), RoutingBlock: block,
-		ResumeSession: resumeSession, Model: model,
+		ResumeSession: resumeSession, Model: selection,
 		Instructions: agentInstructionFiles(run.instructionFiles),
 		Profile:      profile,
 	})
@@ -1544,7 +1544,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		// Record evidence of the prompt + model + effective capability profile
 		// the adapter saw, plus the artifact revisions this stage produced. The
 		// manifest service is nil in unit tests; AddEvidence is a no-op then.
-		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile, artifactOutputs)
+		runner.recordStageEvidence(ctx, run, stageID, stage, selection.Options.Model, profile, artifactOutputs)
 		// ADR 0002: record the project-context channel (pinned instructions +
 		// enumerated skills) and emit the live pinning signal. The section is
 		// written on every successful stage so an empty project still seals
