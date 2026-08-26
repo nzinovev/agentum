@@ -2,12 +2,12 @@
 
 Agentum is a **coordinator, not a credential manager.** It does not handle API
 keys, provider endpoints, or base URLs. You install and configure the coding
-agent (`opencode`, `claude-code`, …) yourself, exactly as you would if you were
-running it standalone. Agentum's only model-handling job is to decide which
-**model string** to pass to the agent binary's `--model` flag.
+agent (`opencode`) yourself, exactly as you would if you were running it
+standalone. Agentum's only model-handling job is to decide which **model string**
+to pass to the agent binary's `--model` flag.
 
-The intended UX: clone, `make run`, and Agentum works — because your opencode or
-claude-code is already configured on your machine.
+The intended UX: clone, `make run`, and Agentum works — because your opencode is
+already configured on your machine.
 
 ## How it works
 
@@ -16,12 +16,11 @@ claude-code is already configured on your machine.
 2. At run time Agentum resolves the tier to a model string and passes
    `--model <string>` to the agent subprocess.
 3. The **agent binary** resolves that string to a real provider + endpoint +
-   credentials using **your** configuration (`opencode auth`,
-   `~/.claude/settings.json`, env vars, …).
+   credentials using **your** configuration (`opencode auth`, env vars, …).
 
 Agentum never touches credentials. If your agent is configured so that the model
-string `"sonnet"` routes to z.ai's GLM, that's where it routes — Agentum just
-handed it `"sonnet"`.
+string `"zai-coding-plan/glm-5.1"` routes to your z.ai coding plan, that's where
+it routes — Agentum just handed it the string.
 
 ## Defaults (no configuration needed)
 
@@ -30,14 +29,14 @@ Agentum ships per-agent defaults so the common case needs no `models.yaml`:
 | Agent | `fast` | `strong` | `reasoning` | default |
 |---|---|---|---|---|
 | `opencode` | `opencode/deepseek-v4-flash-free` | `opencode/north-mini-code-free` | `opencode/nemotron-3-ultra-free` | `strong` |
-| `claude-code` | `haiku` | `sonnet` | `opus` | `strong` |
 
 The `opencode` defaults use the **free models on opencode Zen** (the `-free`
 suffix is explicit), so a fresh install works without a paid provider once you
-connect Zen (`/connect opencode` in the TUI, or `opencode auth login`). The
-`claude-code` short aliases (`haiku`/`sonnet`/`opus`) are intentionally
-remappable — your `~/.claude/settings.json` can point them at any compatible
-provider.
+connect Zen (`/connect opencode` in the TUI, or `opencode auth login`).
+
+Defaults belong to the execution adapter that runs them: opencode is the only
+adapter Agentum ships, so it is the only set of defaults there is. A second
+adapter brings its own tiers with it, in the same change that adds it.
 
 ## Override (optional)
 
@@ -55,23 +54,41 @@ tiers:
 default: strong
 ```
 
-When `models.yaml` is present it **replaces** the built-in defaults for all
-agents. Per-agent overrides are a future addition; today the file applies
-globally, so pick strings your active agent understands.
+When `models.yaml` is present it **replaces** the built-in defaults. Per-adapter
+overrides are a future addition; today the file applies globally, so pick strings
+your active agent understands.
 
 ## Resolution rules
 
 - Operator override (`models.yaml`) wins when present.
-- Otherwise the built-in default for the active agent is used.
+- Otherwise the active execution adapter's built-in defaults are used — the
+  tier table travels with the adapter's descriptor, because "these model
+  strings work with this runtime" is runtime knowledge (ADR 0005 D5).
 - An empty tier falls back to the configured default.
-- An unknown tier is an **error** — Agentum never silently picks a model.
-- An unknown agent with no override is also an error.
+- An unknown tier is an **error** — Agentum never silently picks a model, and
+  never substitutes a default for a name it could not resolve. A task whose
+  pack names an unresolvable tier fails at run start, before the first
+  invocation.
+- The resolved model selection is a typed struct (`tier`, derived `provider`,
+  options). A model option the active adapter does not declare is an **error**
+  naming the adapter and the option — at boot for configured tiers, at run
+  start for the pack, and again at Invoke as defence in depth. Nothing is
+  silently dropped.
+
+## Strict loading
+
+`models.yaml` is decoded strictly: an unknown key (a `teirs:` typo, a
+misspelled `defualt:`), a tier whose model string is empty, or a nested object
+where a string is expected are load **errors** that stop the process at boot
+with the file named — never a silent fall-back to the defaults while your
+configuration sits unapplied. A missing file is the one non-error: no
+`models.yaml` means "use the adapter's defaults".
 
 ## What's explicitly not Agentum's job
 
 - API keys, OAuth tokens, refresh tokens.
 - Provider base URLs / custom endpoints.
-- Generating or placing `opencode.json`, `.claude/settings.json`, auth files.
+- Generating or placing the agent's own `opencode.json` or auth files.
 - Per-task credential isolation (the agent binary owns its own auth).
 
 If your agent binary needs configuration to reach a provider, configure that

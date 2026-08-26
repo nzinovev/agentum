@@ -667,12 +667,13 @@ into two pieces:
   teardown.
 - **Evidence manifest** — one row per task that records everything that went
   into the run: input task + revision, project + base commit, pack + version +
-  hash, prompt revisions, adapter + declared capabilities, model + tier,
-  effective capability profile, memory slice, input/output artifact revisions,
-  check set version + results, human gate decisions, branch / checkpoints /
-  result commits. The manifest is append-only while a run is in flight and
-  sealed at terminal state; corrections after sealing are linked rows that
-  supersede rather than rewrite.
+  hash, one invocation record per stage attempt (adapter + runtime versions,
+  model selection, both prompt hashes, effective capability profile,
+  telemetry), the adapter wiring + runtime probe, memory slice, input/output
+  artifact revisions, check set version + results, human gate decisions,
+  branch / checkpoints / result commits. The manifest is append-only while a
+  run is in flight and sealed at terminal state; corrections after sealing
+  are linked rows that supersede rather than rewrite.
 
 ### Storage layout
 
@@ -851,10 +852,31 @@ evidence chains off.
 section) therefore cannot survive to seal time. `memory` stays reported as
 missing because the memory subsystem is genuinely not wired yet.
 
-**Per-stage model.** `body.model.per_stage` records which model served each
-stage, so "which model wrote this code" is answerable per stage rather than only
-for whichever stage ran last. The scalar `model` / `tier` remain the run-level
-summary that the cross-run diff compares.
+**Per-invocation evidence (ADR 0005).** The unit of evidence is the
+invocation: `body.invocations` carries one record per stage ATTEMPT, keyed by
+`invocation_id` (`stage` / `sequence` / `cycle` are coordinates for a reader,
+never merge keys). Each record opens before the adapter starts — invocation
+id, adapter id + implementation version + probed runtime version, the model
+selection, both prompt hashes, the effective capability profile — and closes
+after the stream drains with telemetry and the stop reason. A fix cycle's
+second `review` therefore leaves a second record with its own model, profile,
+and rendered prompt hash; nothing is overwritten. Two prompt hashes are
+recorded per attempt (D8): `stage_prompt_hash` (the pack's stage prompt — the
+cross-run diff axis) and `rendered_hash` (prompt + routing block — what makes
+two attempts at the same stage distinguishable; deliberately never a diff
+axis, because the routing block embeds the task id and absolute paths).
+Telemetry (tokens, cost) is recorded per invocation and only there. Output
+artifact refs carry the `invocation_id` that produced them.
+
+**Runtime version.** The external runtime's own version (e.g. the CLI's) is
+probed once per process (`adapter.Probe`, memoized — sticky, including a
+failure) and recorded on every invocation record. The run-level `adapter`
+section carries the wiring instead: id, the adapter implementation's version,
+declared capabilities, and the probe outcome label (`runtime_probe`: `ok` or
+`failed: <reason>`; a failed probe additionally records an `adapter.runtime`
+evidence gap). A run resumed in a new process after a runtime upgrade
+genuinely has two runtime versions, which is exactly why the version is not
+a run-level scalar.
 
 ### Comparing two runs
 
@@ -865,19 +887,33 @@ differences only — the things that meaningfully change what an agent would do:
 - input task + revision
 - project + base_commit
 - pack (name, version, content hash)
-- prompt revisions (per stage)
-- adapter (name, version, declared capabilities)
-- model + tier
-- effective capability profile
+- per-attempt prompts (the `stage_prompt_hash` on each invocation record)
+- adapter (id, adapter implementation version, the SET of runtime versions
+  observed across the run's invocations, declared capabilities)
+- model (per attempt: id, tier, provider, options)
+- declared / granted capability sets and each shared attempt's effective profile
 - memory slice (entry hashes)
 - input artifact revisions
 - check set version
 - git base
 - execution coordinate (when set)
 
+The per-attempt axes index each run's invocation records by `(stage, cycle)` —
+the semantic coordinate of an attempt, since invocation ids are UUIDs and
+never repeat across runs — and compare shared keys before set differences: a
+fix cycle whose second `review` ran a different model reports `model-id`
+(the specific answer), while a run with an extra attempt reports `model-set`.
+Two runs on the same tier and model but different runtime builds differ on
+`adapter-runtime-version` and nothing else — the axis that answers
+"identical configuration, different result".
+
 Outputs (artifacts produced) and human decisions are **not** compared — those
 are *results*, not inputs. Two runs that produced different output but had
-identical inputs are the same comparable run; the diff is empty.
+identical inputs are the same comparable run; the diff is empty. The rendered
+prompt hash is never an axis (it embeds the task id and absolute paths, so it
+never repeats across runs). A schema-1 manifest against a schema-2 manifest
+of the same run diffs empty: both go through the same invocation-record
+accessor.
 
 ### Read surface
 
