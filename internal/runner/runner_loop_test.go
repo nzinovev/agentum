@@ -221,6 +221,7 @@ func (store *fakeStore) taskState() string {
 // scriptAdapter emits a scripted Result per stage. The map stageID→ResultJSON
 // defines what each invocation "produces"; an absent stage yields EventError.
 type scriptAdapter struct {
+	stubExecution
 	scripts map[string]agent.ResultJSON
 }
 
@@ -590,6 +591,7 @@ func (src *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error
 
 // slowAdapter emits its result only after a release signal; used to test cancel.
 type slowAdapter struct {
+	stubExecution
 	scripts map[string]agent.ResultJSON
 }
 

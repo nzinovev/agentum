@@ -278,6 +278,7 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 // call count, so a loop test can say "first review = changes_requested, second
 // = approved" without a per-call key collision.
 type countingVerdictAdapter struct {
+	stubExecution
 	results        map[string]agent.ResultJSON
 	reviewSequence []agent.VerdictJSON
 	reviewCount    int

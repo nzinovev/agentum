@@ -164,6 +164,7 @@ func TestRunner_DeliveryChecksFailOnMissingBaseCommit(t *testing.T) {
 // since no agent role carries git.delivery). Used to force the orchestrator to
 // commit the checkpoint itself.
 type writingAdapter struct {
+	stubExecution
 	scripts   map[string]agent.ResultJSON
 	writeName string
 	writeBody string

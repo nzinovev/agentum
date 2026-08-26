@@ -49,6 +49,7 @@ import (
 // the adapter between compute and invoke). That is exactly the scenario the
 // per-invocation EnforceableBy check exists for.
 type recordingAdapter struct {
+	stubExecution
 	scripts   map[string]agent.ResultJSON
 	claimed   []caps.Category
 	actual    []caps.Category // nil → same as claimed
