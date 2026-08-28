@@ -1425,8 +1425,18 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 
 	// The run-start execution plan already validated this stage's tier and
-	// options; the lookup cannot miss for a non-terminal stage.
-	selection := run.executionPlan[stageID]
+	// options, and it covers every non-terminal stage of the resolved pack —
+	// so this lookup cannot miss today. It is checked anyway, because the
+	// failure mode of a miss is the one this ADR exists to remove: a zero
+	// Selection carries no model, the adapter then omits --model, and the
+	// runtime silently picks its own. An invariant held by an argument that
+	// spans three functions is worth one branch at the point of use.
+	selection, planned := run.executionPlan[stageID]
+	if !planned {
+		runner.log.Error("stage missing from the execution plan",
+			"task", run.task.ID, "stage", stageID)
+		return invocationOutcome{adapterErr: true}
+	}
 
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
@@ -1595,16 +1605,11 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			return invocationOutcome{rejected: true}
 		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
-		// CLOSE the invocation record: telemetry and the (empty) stop reason
-		// of a successful run. Plus the artifact revisions this stage produced.
-		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, "", &telemetry)
-		runner.recordStageEvidence(ctx, run, stageID, artifactOutputs)
-		// ADR 0002: record the project-context channel (pinned instructions +
-		// enumerated skills) and emit the live pinning signal. The section is
-		// written on every successful stage so an empty project still seals
-		// evidence_complete; a failed skill probe additionally records an
-		// evidence gap.
-		runner.recordContextEvidence(ctx, run, stageID)
+		// One manifest write closes the whole successful attempt: the CLOSE
+		// half of the invocation record, the artifact revisions the stage
+		// produced, and the ADR 0002 project-context section. Emit the live
+		// pinning signal separately — it is a stream event, not evidence.
+		runner.completeStageEvidence(ctx, run, stageID, invocation.ID, telemetry, artifactOutputs)
 		runner.emit(ctx, run.task, EvContextPinned, contextPinnedPayload(stageID, run))
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
@@ -1617,7 +1622,12 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// error (crash, stream failure, cancellation).
 	reason := classifyAdapterFailure(terminalEr)
 	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
-	runner.closeInvocationEvidence(ctx, run.task, invocation.ID, reason, &telemetry)
+	// CLOSE with the stop reason and NO telemetry. The adapter reports its
+	// accumulated cost only on the terminal EventResult, so on this path there
+	// is no measurement to record — and a zero-valued telemetry object would
+	// not read as "unknown", it would read as "this attempt was free", which is
+	// exactly the wrong thing to tell someone auditing an expensive failure.
+	runner.closeInvocationEvidence(ctx, run.task, invocation.ID, reason, nil)
 	return invocationOutcome{
 		adapterErr: reason == "adapter_error",
 		parseErr:   reason == "parse_error",

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -49,6 +50,12 @@ func (readiness Readiness) Label() string {
 // environment from buildChildEnv, probeTimeout, and the process-group kill —
 // because the no-output hang ADR 0002 documented is a property of the binary,
 // not of the `debug skill` subcommand.
+//
+// ctx contributes its values but not its cancellation (see runVersionProbe):
+// the memoized answer outlives the caller that happened to ask first, so it
+// must not be decided by that caller's lifetime. The cost is that a hanging
+// runtime holds the first caller for up to probeTimeout even if that caller is
+// cancelled — bounded, and the reason probeTimeout exists.
 func (adapter *OpencodeAdapter) Probe(ctx context.Context) Readiness {
 	adapter.probeOnce.Do(func() {
 		adapter.readiness = adapter.runVersionProbe(ctx)
@@ -64,7 +71,13 @@ func (adapter *OpencodeAdapter) runVersionProbe(ctx context.Context) Readiness {
 	descriptor := adapter.Describe()
 	readiness := Readiness{AdapterID: descriptor.ID, CheckedAt: time.Now().UTC()}
 
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	// The probe's result is PROCESS-scoped, not request-scoped: it is memoized
+	// for the lifetime of the process, so it must not inherit the cancellation
+	// of whichever caller happened to reach it first. Without this, cancelling
+	// the task that triggered the first probe would pin "runtime not ready"
+	// for every later run until a restart. Values are kept (tracing); only
+	// cancellation is dropped, and probeTimeout remains the bound.
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeTimeout)
 	defer cancel()
 
 	bin, err := exec.LookPath(adapter.binary)
@@ -96,7 +109,14 @@ func (adapter *OpencodeAdapter) runVersionProbe(ctx context.Context) Readiness {
 	<-watcherDone
 
 	if ctxErr := probeCtx.Err(); ctxErr != nil {
+		// Only the deadline can fire now (the parent's cancellation is
+		// detached above), but the two are still reported apart: a recorded
+		// reason is evidence, and "timeout" for something that was cancelled
+		// would send a reader looking for a slow runtime that never existed.
 		readiness.Reason = "timeout"
+		if !errors.Is(ctxErr, context.DeadlineExceeded) {
+			readiness.Reason = fmt.Sprintf("cancelled: %v", ctxErr)
+		}
 		return readiness
 	}
 	if runErr != nil {

@@ -543,12 +543,16 @@ func (service *fakeManifestService) gapSections() []string {
 	return out
 }
 
-// TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5: when
-// AddEvidence fails mid-run, the runner must record the failure as an
+// TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5:
+// when AddEvidence fails mid-run, the runner must record the failure as an
 // EvidenceGap on the manifest rather than swallow it, and the stage must
 // survive. A sealed manifest that swallows the failure (degrading silently) is
 // worse than an absent record because a reviewer cannot tell the two apart.
-func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
+//
+// The successful attempt's evidence is one write covering three sections, so a
+// failure records a gap against EACH of them: a reviewer asks whether the
+// artifacts section is trustworthy, not which call failed.
+func TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 	fake := &fakeManifestService{addErr: errors.New("db connection lost")}
@@ -565,14 +569,64 @@ func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.
 		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
 		Stage: fixtureStage, InvocationID: "inv-1",
 	}}
-	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, outputs)
+	fixture.runner.completeStageEvidence(context.Background(), run, fixtureStage, "inv-1", agent.Telemetry{}, outputs)
 
 	gaps := fake.gapSections()
-	if len(gaps) != 1 {
-		t.Fatalf("AddEvidence failure recorded %d gaps, want 1: %v", len(gaps), gaps)
+	recorded := make(map[string]bool, len(gaps))
+	for _, section := range gaps {
+		recorded[section] = true
 	}
-	if gaps[0] != "artifacts" {
-		t.Errorf("gap section = %q, want artifacts", gaps[0])
+	for _, want := range []string{"invocations", "context", "artifacts"} {
+		if !recorded[want] {
+			t.Errorf("no gap recorded for the %q section: %v", want, gaps)
+		}
+	}
+	if len(gaps) != 3 {
+		t.Errorf("AddEvidence failure recorded %d gaps, want one per covered section: %v", len(gaps), gaps)
+	}
+}
+
+// TestCompleteStageEvidence_WritesOnce pins the fold: a successful attempt
+// leaves ONE manifest transaction carrying the invocation close, the artifact
+// outputs and the context section. AddEvidence is a full-document
+// read-modify-write under the row lock, so an extra call is an extra decode
+// and re-encode of a body that grows for the life of the run — and three
+// separate writes could leave the attempt closed with its artifacts missing.
+func TestCompleteStageEvidence_WritesOnce(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fake := &fakeManifestService{}
+	fixture.runner.mfst = fake
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+	run := stageRun{task: task, taskPack: taskPack}
+	outputs := []manifest.ArtifactRef{{
+		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
+		Stage: fixtureStage, InvocationID: "inv-1",
+	}}
+
+	telemetry := agent.Telemetry{Cost: 0.25}
+	telemetry.Tokens.Total = 1234
+	fixture.runner.completeStageEvidence(context.Background(), run, fixtureStage, "inv-1", telemetry, outputs)
+
+	if len(fake.addEvidence) != 1 {
+		t.Fatalf("manifest writes = %d, want 1: %+v", len(fake.addEvidence), fake.addEvidence)
+	}
+	patch := fake.addEvidence[0]
+	if len(patch.Invocations) != 1 || patch.Invocations[0].InvocationID != "inv-1" {
+		t.Errorf("patch carries no invocation close: %+v", patch.Invocations)
+	}
+	if patch.Invocations[0].Telemetry == nil || patch.Invocations[0].Telemetry.Tokens.Total != 1234 {
+		t.Errorf("measured telemetry must reach the record: %+v", patch.Invocations[0].Telemetry)
+	}
+	if patch.Artifacts == nil || len(patch.Artifacts.Outputs) != 1 {
+		t.Errorf("patch carries no artifact outputs: %+v", patch.Artifacts)
+	}
+	if patch.Context == nil {
+		t.Error("patch carries no context section")
 	}
 }
 

@@ -56,6 +56,11 @@ type Config struct {
 	ArtifactScanPolicy string
 }
 
+// retiredBinaryEnv is the pre-ADR-0005 name for the runtime binary override.
+// It is still recognised — only to refuse it by name, so an operator who set
+// it learns that it moved rather than losing the override silently.
+const retiredBinaryEnv = "AGENTUM_OPENCODE_BINARY"
+
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:          getenv("AGENTUM_HTTP_ADDR", ":8080"),
@@ -81,6 +86,15 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
+	}
+	// AGENTUM_OPENCODE_BINARY named an executor in configuration and was
+	// replaced by the adapter-neutral AGENTUM_RUNTIME_BINARY (ADR 0005 D1).
+	// Refused rather than ignored, for the same reason an unsupported model
+	// option is refused: a pinned binary that silently stops applying does not
+	// surface as a configuration change, it surfaces as the runtime failing in
+	// ways that look like agent bugs.
+	if retired, set := os.LookupEnv(retiredBinaryEnv); set {
+		return cfg, fmt.Errorf("%s is no longer read; set AGENTUM_RUNTIME_BINARY=%s instead", retiredBinaryEnv, retired)
 	}
 	switch cfg.ArtifactScanPolicy {
 	case "redact", "reject":

@@ -59,6 +59,36 @@ func TestLoad_EmptyModelRejected(t *testing.T) {
 	}
 }
 
+// TestLoad_EmptyFileRejectedWithTheFix: a present-but-empty override — the
+// shape an operator produces by commenting their tiers out — is refused, and
+// the message says what to do about it. The strict decoder reports io.EOF for
+// this input, and a boot failure whose entire explanation is "EOF" is a
+// support ticket, not a configuration error.
+func TestLoad_EmptyFileRejectedWithTheFix(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty file":      "",
+		"comments only":   "# tiers:\n#   fast: some-model\n",
+		"empty tiers map": "tiers: {}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeConfig(t, content)
+			_, err := Load()
+			if err == nil {
+				t.Fatal("an override declaring no tiers must fail Load")
+			}
+			if strings.Contains(err.Error(), "EOF") {
+				t.Errorf("the reason must be the empty file, not the decoder's EOF: %v", err)
+			}
+			if !strings.Contains(err.Error(), "declares no tiers") || !strings.Contains(err.Error(), "delete the file") {
+				t.Errorf("error must name the cause and the fix: %v", err)
+			}
+			if !strings.Contains(err.Error(), modelsConfigFile) {
+				t.Errorf("error must name the file: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoad_AbsentReturnsErrNoConfig(t *testing.T) {
 	// Non-parallel: mutates env.
 	t.Setenv("AGENTUM_MODELS_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))

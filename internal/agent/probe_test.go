@@ -138,6 +138,34 @@ func TestProbe_MemoizedPerProcess(t *testing.T) {
 	}
 }
 
+// TestProbe_SurvivesACancelledCaller: the memoized answer is process-scoped,
+// so it must not be decided by the lifetime of whichever caller reached it
+// first. Without the detached context, cancelling the task that triggered the
+// first probe would pin "runtime not ready" for every later run in the
+// process, with an empty runtime_version in all of their evidence, until a
+// restart.
+func TestProbe_SurvivesACancelledCaller(t *testing.T) {
+	adapter, counterPath := fakeVersionAdapter(t, "print")
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	readiness := adapter.Probe(cancelledCtx)
+	if !readiness.Ready {
+		t.Fatalf("readiness = %+v; want Ready despite the caller's cancelled context", readiness)
+	}
+	if readiness.RuntimeVersion != "1.18.11" {
+		t.Errorf("RuntimeVersion = %q; want 1.18.11", readiness.RuntimeVersion)
+	}
+	// And the poisoned answer is not what later callers see either.
+	if again := adapter.Probe(context.Background()); !again.Ready {
+		t.Errorf("later probe = %+v; want the memoized ready result", again)
+	}
+	if count := probeCount(t, counterPath); count != 1 {
+		t.Errorf("fake executed %d times; want exactly 1", count)
+	}
+}
+
 // TestProbe_MissingBinaryIsAProbeResultNotAnError: an absent binary yields
 // Ready=false with a reason, and Probe never returns an error by contract.
 func TestProbe_MissingBinaryIsAProbeResultNotAnError(t *testing.T) {

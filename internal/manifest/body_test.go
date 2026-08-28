@@ -571,6 +571,94 @@ func TestMergeBodies_V1ExistingUpgradesToV2(t *testing.T) {
 	}
 }
 
+// TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted (ADR 0005 D9): a v1 body
+// whose only legacy content is the run-level adapter section — a run that
+// recorded its provenance root and then stopped before its first stage —
+// still loses those fields on the upgrade. Stamping it schema 2 while leaving
+// adapter.name/version behind would store the mixed-shape body the upgrade
+// exists to prevent, and it would leave a v2 reader looking at an adapter
+// section with no id.
+func TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema:       schemaVersionV1,
+		Adapter:      &AdapterEvidence{Name: "stub", Version: "opencode-adapter-v1"},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+	}
+
+	encoded, err := encodeBody(v1)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := decodeBody(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Schema != schemaVersion {
+		t.Fatalf("Schema = %q, want 2", decoded.Schema)
+	}
+	if decoded.CarriesLegacySections() {
+		t.Errorf("a body stamped schema 2 still carries schema-1 fields: %+v", decoded.Adapter)
+	}
+	if decoded.Capabilities == nil || len(decoded.Capabilities.Declared) != 1 {
+		t.Errorf("the declared ceiling must survive the upgrade: %+v", decoded.Capabilities)
+	}
+	// The upgrade must not reach back into the caller's body: v1 still holds
+	// the pointers it was built with.
+	if v1.Adapter.Name != "stub" {
+		t.Errorf("upgrade mutated the caller's adapter section: %+v", v1.Adapter)
+	}
+}
+
+// TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts (ADR 0005 D9):
+// schema 1 deduplicated prompts on (stage, hash), so two entries for one stage
+// are two genuinely different prompts — two attempts under an edited pack.
+// Collapsing them into one record would delete evidence during the very
+// upgrade that exists to stop evidence being deleted.
+func TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema: schemaVersionV1,
+		Prompts: []PromptRevision{
+			{StageID: "review", Hash: "first-prompt"},
+			{StageID: "review", Hash: "second-prompt"},
+		},
+		Model: &ModelEvidence{
+			PerStage: []StageModel{{Stage: "review", Tier: "strong", Model: "stub/model"}},
+		},
+		Capabilities: &CapabilityProfile{
+			Declared:  []string{"fs.read"},
+			Effective: []StageCapabilityProfile{{Stage: "review", Role: "reviewer", Profile: json.RawMessage(`{"grants":[]}`)}},
+		},
+	}
+
+	records := v1.InvocationRecords()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want one per distinct prompt hash: %+v", len(records), records)
+	}
+	if records[0].Prompt.StagePromptHash != "first-prompt" || records[1].Prompt.StagePromptHash != "second-prompt" {
+		t.Errorf("prompt hashes lost their append order: %+v", records)
+	}
+	if records[0].Cycle != 0 || records[1].Cycle != 1 {
+		t.Errorf("cycles = %d / %d, want 0 / 1", records[0].Cycle, records[1].Cycle)
+	}
+	// Schema 1 replaced the model and profile by stage on every write, so the
+	// surviving snapshot belongs to the LAST attempt. The earlier attempt
+	// carries its prompt alone — what it ran under is what schema 1 overwrote,
+	// and inventing an attribution would be worse than recording none.
+	if records[1].Model.Options.Model != "stub/model" || records[1].Capabilities.Role != "reviewer" {
+		t.Errorf("the surviving snapshots must attach to the last attempt: %+v", records[1])
+	}
+	if records[0].Model.Options.Model != "" || records[0].Capabilities.Role != "" {
+		t.Errorf("the earlier attempt must not claim the later attempt's snapshot: %+v", records[0])
+	}
+	// And the same records survive the write path.
+	upgraded := upgradeLegacySections(v1)
+	if len(upgraded.Invocations) != 2 || len(upgraded.Prompts) != 0 {
+		t.Errorf("upgrade dropped an attempt: %+v", upgraded.Invocations)
+	}
+}
+
 // TestEncodeBody_NeverWritesLegacyFields (ADR 0005 D9): the write path speaks
 // one schema - even a decoded v1 body re-encodes as schema 2 with its legacy
 // sections converted, never alongside invocations.

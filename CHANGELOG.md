@@ -20,7 +20,10 @@ Once tagged releases begin, this project adheres to
     `Probe()` (`<binary> --version`, memoized once per process, sticky
     including failure; unavailability is a probe result, not a boot failure).
     Adapter id and version are never literals in calling code;
-    `AGENTUM_RUNTIME_BINARY` replaces `AGENTUM_OPENCODE_BINARY`.
+    `AGENTUM_RUNTIME_BINARY` replaces `AGENTUM_OPENCODE_BINARY`, and the
+    retired name is refused at boot (naming its replacement) rather than
+    silently ignored — a binary override that stops applying surfaces as the
+    runtime failing, not as a configuration change.
   - **Typed model options** (`internal/models`): `Selection{Tier, Provider,
     Options}` with `Options.SupportedBy` mirroring `caps.EnforceableBy`. An
     option the descriptor does not declare is refused at three points — boot
@@ -31,6 +34,10 @@ Once tagged releases begin, this project adheres to
     replaces `prompts` / `model.per_stage` / `capabilities.effective` — one
     record per stage ATTEMPT, keyed by `invocation_id`, opened before
     `Invoke` and closed with telemetry + stop reason on every terminal path.
+    Telemetry is recorded only where it was measured: a refused start and an
+    attempt that died mid-stream carry none, rather than a zero that would
+    read as "this attempt was free". A successful attempt's close, artifact
+    outputs and context section are one manifest transaction.
     Two prompt hashes per record (`stage_prompt_hash` is the diff axis;
     `rendered_hash` distinguishes attempts and is never a diff axis). The
     runtime version is probed and recorded per invocation; a failed probe

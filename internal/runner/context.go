@@ -177,46 +177,29 @@ func (runner *Runner) restoreInstructions(ctx context.Context, run stageRun, sta
 	return nil
 }
 
-// recordContextEvidence writes the context section into the manifest: the
+// contextEvidenceSection builds the context section for one stage: the
 // instruction refs (from the pinned set), the enumerated skills (from the
-// probe), the skills probe label, and the missing list. Called once per
-// successful stage invocation; merge is append-unique so a re-pin under a retry
-// collapses and a skill-set change between jobs surfaces.
+// probe), the skills probe label, and the paths declared but absent at
+// base_commit. Pure — the write happens in completeStageEvidence, folded into
+// the one manifest transaction that closes a successful attempt.
 //
-// A failed skill probe additionally records an EvidenceGap(context.skills),
-// which makes evidence_complete false — the honest reading that we do not know
-// what knowledge was in play. An unsupported probe (adapter has no prober)
-// records no gap: it is a permanent capability gap, like memory.
-func (runner *Runner) recordContextEvidence(ctx context.Context, run stageRun, stageID string) {
-	if runner.mfst == nil {
-		return
-	}
+// The section is built on every successful stage, even when it is empty: a
+// project with no AGENTS.md and no skills gets a section that says exactly
+// that, which is what lets an empty project still seal evidence_complete.
+// Merge is append-unique, so a re-pin under a retry collapses and a skill set
+// that changed between jobs surfaces.
+func contextEvidenceSection(run stageRun) *manifest.ContextEvidence {
 	section := &manifest.ContextEvidence{
-		SkillsProbe: run.contextReport.SkillsProbe,
+		SkillsProbe:  run.contextReport.SkillsProbe,
+		Instructions: instructionRefsForEvidence(run.instructionFiles),
+		Skills:       skillRefsForManifest(run.contextReport.Skills),
 	}
-	section.Instructions = instructionRefsForEvidence(run.instructionFiles)
-	section.Skills = skillRefsForManifest(run.contextReport.Skills)
 	for _, file := range run.instructionFiles {
 		if file.MissingAtCommit {
 			section.Missing = append(section.Missing, file.RepoPath)
 		}
 	}
-	patch := manifest.Body{Context: section}
-	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
-		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("record context evidence: manifest sealed", "task", run.task.ID)
-			return
-		}
-		runner.log.Warn("record context evidence", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "context", stageID, err)
-		return
-	}
-	// A failed probe is an evidence gap (degraded this run). An unsupported
-	// probe is not — it is a permanent capability gap recorded in the section.
-	if probe := run.contextReport.SkillsProbe; probeFailed(probe) {
-		runner.recordEvidenceGap(ctx, run.task, "context.skills", stageID,
-			fmt.Errorf("skill probe failed: %s", run.contextReport.SkillsError))
-	}
+	return section
 }
 
 // recordRestorationEvidence appends the tamper-reversal history to the
