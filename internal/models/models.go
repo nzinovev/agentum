@@ -21,8 +21,10 @@
 package models
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,6 +41,11 @@ var ErrNoConfig = errors.New("models: no " + modelsConfigFile + "; using adapter
 // candidate directory. A const so the error message and every search path
 // agree on it.
 const modelsConfigFile = "models.yaml"
+
+// errEmptyConfig is the reason a present-but-empty override is refused: it
+// carries the fix, because "delete the file" is the difference between a boot
+// failure and a working default. Wrapped with the path by Load.
+var errEmptyConfig = errors.New("declares no tiers; delete the file to use the execution adapter's built-in tiers")
 
 // Config is a tier→model mapping plus the default tier. The file format is
 // unchanged from schema day one: tiers stay map[string]string, and the object
@@ -165,10 +172,25 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("models: read %s: %w", path, err)
 		}
 		var config Config
-		decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
 		decoder.KnownFields(true)
 		if err := decoder.Decode(&config); err != nil {
+			// An empty or comment-only file decodes as io.EOF. That is not a
+			// syntax error and must not surface as the bare word "EOF" on a
+			// refused boot: the operator commented their tiers out, and the
+			// actionable answer is that an empty override file is not one.
+			if errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("models: %s: %w", path, errEmptyConfig)
+			}
 			return nil, fmt.Errorf("models: parse %s: %w", path, err)
+		}
+		// A file that declares no tiers is the same case reached through a
+		// different door (`tiers: {}`), and it is worse than useless: a non-nil
+		// override REPLACES the adapter's defaults, so every tier resolution
+		// would fail at run start with "unknown tier" instead of here, where
+		// the file is named.
+		if len(config.Tiers) == 0 {
+			return nil, fmt.Errorf("models: %s: %w", path, errEmptyConfig)
 		}
 		for tier, model := range config.Tiers {
 			if strings.TrimSpace(model) == "" {

@@ -10,8 +10,10 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // invocationRecordsFromPatches folds the Invocations patches a fake manifest
@@ -234,6 +236,102 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 		}
 		if record.Model.Tier == "" || record.Prompt.RenderedHash == "" || record.Capabilities.Role == "" {
 			t.Errorf("the open half must have landed before the refusal: %+v", record)
+		}
+	}
+}
+
+// TestInvokeStage_MissingExecutionPlanEntryRefuses: the run-start plan covers
+// every non-terminal stage, so this cannot happen through the stage loop — the
+// guard exists because of what a miss would DO. A zero Selection carries no
+// model, the adapter would then omit --model, and the runtime would silently
+// pick its own: the exact silent default the execution plan exists to prevent.
+// The stage is refused before any invocation row is created.
+func TestInvokeStage_MissingExecutionPlanEntryRefuses(t *testing.T) {
+	t.Parallel()
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "T-no-plan", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running"}
+	store := newFakeStore(task, sqlc.Project{ID: "P1", TenantID: "tn", Name: "P"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &refusingAdapter{}})
+
+	// A run whose plan is empty — the shape a future stage source that mutates
+	// the pack after run start would produce.
+	run := stageRun{
+		task:          task,
+		taskPack:      taskPack,
+		worktree:      &worktree.Worktree{Root: t.TempDir()},
+		executionPlan: map[string]models.Selection{},
+	}
+	outcome := runner.invokeStage(t.Context(), run, "spec", taskPack.Stages["spec"], "", stageTransition{})
+
+	if !outcome.adapterErr {
+		t.Errorf("outcome = %+v; want an adapter error rather than a run on an unresolved model", outcome)
+	}
+	if outcome.result != nil {
+		t.Errorf("a stage with no execution plan entry must not produce a result: %+v", outcome.result)
+	}
+	if created := len(store.invocations); created != 0 {
+		t.Errorf("stage invocations created = %d, want 0 (refused before the row)", created)
+	}
+}
+
+// failingStreamAdapter starts, then dies mid-stream without ever emitting a
+// result — the shape a crashed, cancelled, or timed-out runtime produces.
+type failingStreamAdapter struct {
+	stubExecution
+}
+
+func (adapter *failingStreamAdapter) Supported() []caps.Category { return fullSupport }
+
+func (adapter *failingStreamAdapter) Invoke(_ context.Context, _ agent.Invocation) (<-chan agent.Event, error) {
+	events := make(chan agent.Event, 1)
+	events <- agent.Event{Kind: agent.EventError, Err: errors.New("stream died mid-run")}
+	close(events)
+	return events, nil
+}
+
+// TestInvocationEvidence_StreamFailureRecordsNoTelemetry: an attempt that
+// started and then failed mid-stream records its stop reason and NO telemetry.
+// The adapter reports accumulated cost only on the terminal EventResult, so on
+// this path there is no measurement — and a zero-valued telemetry object does
+// not read as "unknown", it reads as "this attempt was free", which is the
+// wrong thing to tell someone auditing an expensive failure.
+func TestInvocationEvidence_StreamFailureRecordsNoTelemetry(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "T-stream-fail", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	fakeManifest := &fakeManifestService{}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &failingStreamAdapter{}})
+	runner.mfst = fakeManifest
+
+	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+
+	records := invocationRecordsFromPatches(fakeManifest.addEvidence)
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want exactly the failed attempt: %+v", len(records), records)
+	}
+	for _, record := range records {
+		if record.StopReason != "adapter_error" {
+			t.Errorf("StopReason = %q, want adapter_error", record.StopReason)
+		}
+		if record.Telemetry != nil {
+			t.Errorf("an unmeasured attempt must record no telemetry, not a zero one: %+v", record.Telemetry)
+		}
+		if record.Model.Tier == "" || record.Prompt.RenderedHash == "" || record.Capabilities.Role == "" {
+			t.Errorf("the open half must have landed before the failure: %+v", record)
 		}
 	}
 }

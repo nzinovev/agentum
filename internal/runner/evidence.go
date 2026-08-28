@@ -332,19 +332,7 @@ func (runner *Runner) closeInvocationEvidence(
 	record := manifest.InvocationEvidence{
 		InvocationID: invocationID,
 		StopReason:   stopReason,
-	}
-	if telemetry != nil {
-		record.Telemetry = &manifest.InvocationTelemetry{
-			Tokens: manifest.TokenUsage{
-				Total:      telemetry.Tokens.Total,
-				Input:      telemetry.Tokens.Input,
-				Output:     telemetry.Tokens.Output,
-				Reasoning:  telemetry.Tokens.Reasoning,
-				CacheRead:  telemetry.Tokens.CacheRead,
-				CacheWrite: telemetry.Tokens.CacheWrite,
-			},
-			Cost: telemetry.Cost,
-		}
+		Telemetry:    invocationTelemetry(telemetry),
 	}
 	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{record}}
 	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
@@ -357,32 +345,92 @@ func (runner *Runner) closeInvocationEvidence(
 	}
 }
 
-// recordStageEvidence folds the output-artifact revisions one stage captured
-// into the manifest. The prompt / model / capability / adapter evidence lives
-// on the per-invocation records now (openInvocationEvidence /
-// closeInvocationEvidence, ADR 0005 D6); this is the artifact-output half of
-// the old per-stage write, kept as its own patch because it only exists on
-// the success path. No-op when the manifest service is nil (unit tests).
-func (runner *Runner) recordStageEvidence(
+// invocationTelemetry maps the adapter's accumulated cost onto the manifest
+// shape, or returns nil when there is nothing measured. nil and a zero value
+// are NOT interchangeable here: the adapter reports its accumulated cost only
+// on the terminal EventResult, so an attempt that was refused or died
+// mid-stream has no measurement — and a zero-valued object would read as
+// "this attempt was free", not as "unknown".
+func invocationTelemetry(telemetry *agent.Telemetry) *manifest.InvocationTelemetry {
+	if telemetry == nil {
+		return nil
+	}
+	return &manifest.InvocationTelemetry{
+		Tokens: manifest.TokenUsage{
+			Total:      telemetry.Tokens.Total,
+			Input:      telemetry.Tokens.Input,
+			Output:     telemetry.Tokens.Output,
+			Reasoning:  telemetry.Tokens.Reasoning,
+			CacheRead:  telemetry.Tokens.CacheRead,
+			CacheWrite: telemetry.Tokens.CacheWrite,
+		},
+		Cost: telemetry.Cost,
+	}
+}
+
+// completeStageEvidence writes everything a SUCCESSFUL attempt leaves behind,
+// in ONE manifest transaction: the CLOSE half of the invocation record
+// (telemetry; the stop reason is empty on this path), the artifact revisions
+// the stage captured, and the ADR 0002 project-context section.
+//
+// One write rather than three because AddEvidence is a full-document
+// read-modify-write under the manifest row's lock — it decodes the whole body,
+// merges, and writes the whole body back — so each extra call re-encodes an
+// evidence document that grows for the life of the run. It is also atomic:
+// three separate writes could leave the attempt closed with its artifacts
+// missing, which reads as a stage that produced nothing.
+//
+// The OPEN half stays its own write, before the adapter starts, because that
+// is what it is for: a crash between open and close must leave the record of
+// what the attempt was going to run (ADR 0005 D7).
+//
+// No-op when the manifest service is nil (unit tests).
+func (runner *Runner) completeStageEvidence(
 	ctx context.Context,
 	run stageRun,
-	stageID string,
+	stageID, invocationID string,
+	telemetry agent.Telemetry,
 	artifactOutputs []manifest.ArtifactRef,
 ) {
-	if runner.mfst == nil || len(artifactOutputs) == 0 {
+	if runner.mfst == nil {
 		return
 	}
-	patch := manifest.Body{Artifacts: &manifest.ArtifactEvidence{Outputs: artifactOutputs}}
+	patch := manifest.Body{
+		Invocations: []manifest.InvocationEvidence{{
+			InvocationID: invocationID,
+			Telemetry:    invocationTelemetry(&telemetry),
+		}},
+		Context: contextEvidenceSection(run),
+	}
+	// The sections this one write covers, so a failure records a gap against
+	// each of them: a reviewer asks "is the artifacts section trustworthy",
+	// not "which call failed", and a single compound section name would not
+	// answer that question.
+	sections := []string{"invocations", "context"}
+	if len(artifactOutputs) > 0 {
+		patch.Artifacts = &manifest.ArtifactEvidence{Outputs: artifactOutputs}
+		sections = append(sections, "artifacts")
+	}
 	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
 		// Sealed manifest is unexpected mid-run; logged but not fatal — the
 		// run continues and the gap is recorded in the manifest's evidence
 		// gaps at seal time.
 		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("record evidence: manifest sealed", "task", run.task.ID)
+			runner.log.Warn("complete stage evidence: manifest sealed", "task", run.task.ID)
 			return
 		}
-		runner.log.Warn("record evidence", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", stageID, err)
+		runner.log.Warn("complete stage evidence", "task", run.task.ID, "stage", stageID, "error", err)
+		for _, section := range sections {
+			runner.recordEvidenceGap(ctx, run.task, section, stageID, err)
+		}
+		return
+	}
+	// A failed skill probe is an evidence gap (this run's context evidence is
+	// degraded — we do not know what knowledge was in play). An unsupported
+	// probe is not: it is a permanent capability gap recorded in the section.
+	if probeFailed(run.contextReport.SkillsProbe) {
+		runner.recordEvidenceGap(ctx, run.task, "context.skills", stageID,
+			fmt.Errorf("skill probe failed: %s", run.contextReport.SkillsError))
 	}
 }
 

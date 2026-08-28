@@ -505,15 +505,33 @@ func (body Body) InvocationRecords() []InvocationEvidence {
 }
 
 // legacyInvocationRecords synthesizes invocation records from the schema-1
-// sections. Each stage that appears in prompts, per-stage models, or the
-// effective capability list becomes one record, cycle 0, empty invocation id;
-// the adapter facts come from the run-level section. RenderedHash is empty —
-// schema 1 never recorded it.
+// sections, with an empty invocation id (schema 1 never recorded one) and an
+// empty RenderedHash (it never recorded that either). The adapter facts come
+// from the run-level section.
+//
+// A stage contributes one record per DISTINCT prompt hash it carried, in the
+// order schema 1 appended them, numbered as cycles 0…n-1. Schema 1's prompt
+// list deduplicated on (stage, hash), so two entries for one stage are two
+// genuinely different prompts — two attempts under an edited pack — and
+// collapsing them to one record would delete evidence during the very upgrade
+// that exists to stop evidence being deleted. The per-stage model and
+// capability snapshots attach to the LAST record: schema 1 replaced those by
+// stage on every write, so the surviving snapshot is the most recent attempt's.
+// Earlier records carry the prompt hash alone, which is the honest reading —
+// what those attempts ran under is what schema 1 overwrote.
 func (body Body) legacyInvocationRecords() []InvocationEvidence {
-	promptHashByStage := make(map[string]string, len(body.Prompts))
+	promptHashesByStage := make(map[string][]string, len(body.Prompts))
 	for _, prompt := range body.Prompts {
-		if _, seen := promptHashByStage[prompt.StageID]; !seen {
-			promptHashByStage[prompt.StageID] = prompt.Hash
+		hashes := promptHashesByStage[prompt.StageID]
+		duplicate := false
+		for _, present := range hashes {
+			if present == prompt.Hash {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			promptHashesByStage[prompt.StageID] = append(hashes, prompt.Hash)
 		}
 	}
 	modelByStage := make(map[string]StageModel)
@@ -532,9 +550,9 @@ func (body Body) legacyInvocationRecords() []InvocationEvidence {
 			}
 		}
 	}
-	stages := make([]string, 0, len(promptHashByStage)+len(modelByStage)+len(capsByStage))
+	stages := make([]string, 0, len(promptHashesByStage)+len(modelByStage)+len(capsByStage))
 	seenStage := make(map[string]bool)
-	for stage := range promptHashByStage {
+	for stage := range promptHashesByStage {
 		if !seenStage[stage] {
 			stages = append(stages, stage)
 			seenStage[stage] = true
@@ -560,22 +578,38 @@ func (body Body) legacyInvocationRecords() []InvocationEvidence {
 	}
 	records := make([]InvocationEvidence, 0, len(stages))
 	for _, stage := range stages {
-		record := InvocationEvidence{
-			Stage:   stage,
-			Adapter: runAdapter,
-			Prompt:  InvocationPrompt{StagePromptHash: promptHashByStage[stage]},
+		hashes := promptHashesByStage[stage]
+		// A stage known only from a model or capability snapshot still gets one
+		// record — with no prompt hash, which is what the body actually says.
+		attempts := len(hashes)
+		if attempts == 0 {
+			attempts = 1
 		}
-		if stageModel, found := modelByStage[stage]; found {
-			record.Model = models.Selection{
-				Tier:     stageModel.Tier,
-				Provider: models.SplitProvider(stageModel.Model),
-				Options:  models.Options{Model: stageModel.Model},
+		for attempt := 0; attempt < attempts; attempt++ {
+			record := InvocationEvidence{
+				Stage:   stage,
+				Cycle:   int32(attempt),
+				Adapter: runAdapter,
 			}
+			if attempt < len(hashes) {
+				record.Prompt = InvocationPrompt{StagePromptHash: hashes[attempt]}
+			}
+			// The surviving snapshots belong to the last attempt (schema 1
+			// replaced them by stage on every write).
+			if attempt == attempts-1 {
+				if stageModel, found := modelByStage[stage]; found {
+					record.Model = models.Selection{
+						Tier:     stageModel.Tier,
+						Provider: models.SplitProvider(stageModel.Model),
+						Options:  models.Options{Model: stageModel.Model},
+					}
+				}
+				if effective, found := capsByStage[stage]; found {
+					record.Capabilities = InvocationCaps{Role: effective.Role, Profile: effective.Profile}
+				}
+			}
+			records = append(records, record)
 		}
-		if effective, found := capsByStage[stage]; found {
-			record.Capabilities = InvocationCaps{Role: effective.Role, Profile: effective.Profile}
-		}
-		records = append(records, record)
 	}
 	return records
 }
@@ -599,30 +633,39 @@ func (body Body) CarriesLegacySections() bool {
 
 // upgradeLegacySections converts a schema-1 body into the schema-2 shape: the
 // legacy sections become invocation records (via the same synthesis
-// InvocationRecords performs), the legacy fields are cleared, and the schema
-// version moves to 2. A body can never hold both shapes (ADR 0005 D9). A body
-// with no legacy sections is returned unchanged apart from the version bump,
-// which makes this safe to call from every write path — the upgrade happens
-// inside the same transaction, under the same row lock, as the write.
+// InvocationRecords performs), EVERY legacy field is cleared, and the schema
+// version moves to 2. A body can never hold both shapes (ADR 0005 D9), which
+// is why the guard is CarriesLegacySections rather than "did the synthesis
+// produce records": a run that recorded its adapter section and then stopped
+// before its first stage has legacy fields and no records, and stamping it
+// schema 2 while leaving adapter.name/version behind would store exactly the
+// mixed body this function exists to prevent.
+//
+// A body with no legacy sections is returned unchanged apart from the version
+// stamp, which makes this safe to call from every write path — the upgrade
+// happens inside the same transaction, under the same row lock, as the write.
+// The pointer sections are copied before they are cleared: the caller still
+// holds those pointers, and an upgrade must not reach back into the body it
+// was handed.
 func upgradeLegacySections(body Body) Body {
-	records := body.legacyInvocationRecords()
-	if len(records) == 0 {
-		if body.Schema == "" || body.Schema == schemaVersionV1 {
-			body.Schema = schemaVersion
-		}
+	body.Schema = schemaVersion
+	if !body.CarriesLegacySections() {
 		return body
 	}
-	body.Invocations = append(body.Invocations, records...)
+	body.Invocations = append(body.Invocations, body.legacyInvocationRecords()...)
 	body.Prompts = nil
 	body.Model = nil
 	if body.Capabilities != nil {
-		body.Capabilities.Effective = nil
+		capabilities := *body.Capabilities
+		capabilities.Effective = nil
+		body.Capabilities = &capabilities
 	}
 	if body.Adapter != nil {
-		body.Adapter.Name = ""
-		body.Adapter.Version = ""
+		adapter := *body.Adapter
+		adapter.Name = ""
+		adapter.Version = ""
+		body.Adapter = &adapter
 	}
-	body.Schema = schemaVersion
 	return body
 }
 

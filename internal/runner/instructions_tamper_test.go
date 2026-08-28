@@ -209,7 +209,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		}
 	}
 	if !contextSectionSeen {
-		t.Error("manifest context section was never written — recordContextEvidence did not run")
+		t.Error("manifest context section was never written — the stage's evidence write did not run")
 	}
 	if restorationCount == 0 {
 		t.Error("manifest context section recorded no restorations; the tamper reversal is missing from evidence")
