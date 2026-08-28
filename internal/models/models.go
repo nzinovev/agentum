@@ -39,8 +39,11 @@ var ErrNoConfig = errors.New("models: no " + modelsConfigFile + "; using adapter
 
 // modelsConfigFile is the operator-override filename Load looks for in each
 // candidate directory. A const so the error message and every search path
-// agree on it.
-const modelsConfigFile = "models.yaml"
+// agree on it. modelsConfigEnv names the explicit override path.
+const (
+	modelsConfigFile = "models.yaml"
+	modelsConfigEnv  = "AGENTUM_MODELS_CONFIG"
+)
 
 // errEmptyConfig is the reason a present-but-empty override is refused: it
 // carries the fix, because "delete the file" is the difference between a boot
@@ -140,10 +143,10 @@ type Selection struct {
 	Options  Options `json:"options"`
 }
 
-// SplitProvider splits a model string into its provider half and returns the
-// whole string as the model. The first slash wins ("a/b/c" → provider "a"), and
-// a bare name yields an empty provider. The model string itself is returned
-// unchanged — the runtime receives it exactly as configured.
+// SplitProvider returns the provider half of a model string: the part before
+// the first slash ("a/b/c" → "a"), or "" for a bare name. The model string
+// itself is never rewritten — the runtime receives it exactly as configured,
+// so this derives the provider for evidence and comparison, nothing more.
 func SplitProvider(model string) (provider string) {
 	index := strings.IndexByte(model, '/')
 	if index < 0 {
@@ -159,13 +162,28 @@ func SplitProvider(model string) (provider string) {
 // adapter's defaults. Decoding is strict (unknown keys are errors), and a tier
 // whose model string is empty is refused: a file that was already broken must
 // stop the process rather than silently not apply.
+//
+// AGENTUM_MODELS_CONFIG is the one path whose absence is an error rather than
+// a miss: naming a file that is not there is a broken configuration, and
+// searching past it would run the process on tiers the operator did not pick.
 func Load() (*Config, error) {
-	for _, path := range candidatePaths() {
+	for _, candidate := range candidatePaths() {
+		path := candidate.path
 		if path == "" {
 			continue
 		}
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
+			// A path the operator named explicitly is a statement of intent,
+			// not a place to look: falling through to <cwd>/models.yaml or
+			// ~/.config would run on tiers they did not choose, and the only
+			// visible symptom would be the wrong model. The implicit
+			// candidates are searched, so an absent one is just absent.
+			if candidate.explicit {
+				return nil, fmt.Errorf(
+					"models: %s=%s does not exist; create it, or unset %s to search the default locations",
+					modelsConfigEnv, path, modelsConfigEnv)
+			}
 			continue
 		}
 		if err != nil {
@@ -207,19 +225,27 @@ func Load() (*Config, error) {
 	return nil, ErrNoConfig
 }
 
-func candidatePaths() []string {
-	out := []string{}
-	if env := os.Getenv("AGENTUM_MODELS_CONFIG"); env != "" {
-		out = append(out, env)
+// candidate is one place Load looks. explicit marks the path the operator
+// named through the environment: it is searched first and, unlike the
+// conventional locations, its absence is an error rather than a miss.
+type candidate struct {
+	path     string
+	explicit bool
+}
+
+func candidatePaths() []candidate {
+	out := []candidate{}
+	if env := os.Getenv(modelsConfigEnv); env != "" {
+		out = append(out, candidate{path: env, explicit: true})
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(cwd, modelsConfigFile))
+		out = append(out, candidate{path: filepath.Join(cwd, modelsConfigFile)})
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		out = append(out, filepath.Join(xdg, "agentum", modelsConfigFile))
+		out = append(out, candidate{path: filepath.Join(xdg, "agentum", modelsConfigFile)})
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		out = append(out, filepath.Join(home, ".config", "agentum", modelsConfigFile))
+		out = append(out, candidate{path: filepath.Join(home, ".config", "agentum", modelsConfigFile)})
 	}
 	return out
 }

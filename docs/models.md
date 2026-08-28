@@ -81,8 +81,26 @@ your active agent understands.
 misspelled `defualt:`), a tier whose model string is empty, or a nested object
 where a string is expected are load **errors** that stop the process at boot
 with the file named — never a silent fall-back to the defaults while your
-configuration sits unapplied. A missing file is the one non-error: no
-`models.yaml` means "use the adapter's defaults".
+configuration sits unapplied.
+
+Three more refusals follow from the same rule, and each one names its fix:
+
+- **A present but empty file** — commented out entirely, or `tiers: {}` — is
+  refused with *"declares no tiers; delete the file to use the execution
+  adapter's built-in tiers"*. An override **replaces** the defaults rather
+  than extending them, so an empty one is not "use the defaults": it is a
+  configuration with no tiers at all, and every stage would fail later with
+  `unknown tier` and no mention of the file that caused it.
+- **`default:` naming a tier that is not declared** is refused at load, not at
+  the first run that needs the default.
+- **`AGENTUM_MODELS_CONFIG` pointing at a file that does not exist** is
+  refused rather than searched past. The other locations are a *search*, so an
+  absent one is simply a miss; a path you named is a statement of intent, and
+  falling through to `<cwd>/models.yaml` or `~/.config` would run the process
+  on tiers you did not pick — with the wrong model as the only symptom.
+
+**No `models.yaml` at all is the one non-error**: it means "use the adapter's
+built-in defaults", which is the common case.
 
 ## What's explicitly not Agentum's job
 

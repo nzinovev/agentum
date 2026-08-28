@@ -1136,11 +1136,16 @@ func appendUniqueStop(base []StopRecord, additions []StopRecord) []StopRecord {
 // no writer produces it.
 func mergeCapabilityProfile(existing *CapabilityProfile, patch *CapabilityProfile) *CapabilityProfile {
 	if existing == nil {
-		patched := patch
-		if patched != nil {
-			patched.Effective = nil
+		if patch == nil {
+			return nil
 		}
-		return patched
+		// Copy before clearing: the caller still holds this pointer, and a
+		// merge must not reach back into the patch it was handed. Every other
+		// merge helper builds a fresh value; this one used to be the
+		// exception, for no reason but the shortcut.
+		adopted := *patch
+		adopted.Effective = nil
+		return &adopted
 	}
 	merged := &CapabilityProfile{
 		Declared: existing.Declared,

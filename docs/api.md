@@ -330,6 +330,15 @@ different runtime builds differ on this axis and no other. The rendered
 prompt hash is never a diff axis — it embeds the task id and absolute paths,
 so it never repeats across runs.
 
+Independently of the value reasons above, any axis whose section is present on
+one manifest and absent on the other reports `<axis>-missing`:
+`input-missing`, `project-missing`, `pack-missing`, `adapter-missing`,
+`capabilities-missing`, `memory-missing`, `context-missing`,
+`artifacts-missing`, `checks-missing`, `git-missing`, `coordinate-missing`.
+One run recorded the section and the other did not, so the two are not
+comparable on that axis — this is a different statement from "the values
+differ", and a client should say so rather than rendering a value delta.
+
 ## Memory
 
 | Method | Path | Status | Notes |

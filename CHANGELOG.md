@@ -29,7 +29,13 @@ Once tagged releases begin, this project adheres to
     option the descriptor does not declare is refused at three points — boot
     (malformed/unknown-key `models.yaml` now also stops the process), run
     start (every stage's tier validated before the first invocation), and
-    Invoke. Nothing is silently dropped or substituted.
+    Invoke. Nothing is silently dropped or substituted. A present-but-empty
+    `models.yaml` is refused with its fix ("delete the file"), and an
+    `AGENTUM_MODELS_CONFIG` naming a file that does not exist is an error
+    rather than a fall-through to the other search paths — a named path is a
+    statement of intent, and searching past it would run on tiers nobody
+    picked. When several tiers or stages are misconfigured, the one named in
+    the error is deterministic.
   - **Per-invocation evidence** (manifest schema `"2"`): `body.invocations`
     replaces `prompts` / `model.per_stage` / `capabilities.effective` — one
     record per stage ATTEMPT, keyed by `invocation_id`, opened before

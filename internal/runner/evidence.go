@@ -850,8 +850,9 @@ func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, re
 }
 
 // hashForEvidence returns the sha256 hex of the bytes of the prompt text.
-// Centralized so two callers (recordStageEvidence, the manifest diff) agree on
-// the canonical hashing scheme.
+// Centralized so every caller — both prompt hashes on the invocation record,
+// and the instruction/skill hashes in the context section — agrees on the
+// canonical hashing scheme.
 func hashForEvidence(text string) string {
 	return hashForEvidenceBytes([]byte(text))
 }

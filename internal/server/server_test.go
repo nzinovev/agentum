@@ -58,7 +58,13 @@ func TestNew_UnknownAdapterIDFailsBootAndListsKnown(t *testing.T) {
 // executor is named in config or in the server, and a missing runtime binary
 // is NOT a boot failure (D2: unavailability is a probe result).
 func TestNew_DefaultBootResolvesTheRegistryDefault(t *testing.T) {
-	t.Setenv("AGENTUM_MODELS_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
+	// No override named, and the XDG search path pointed somewhere empty. A
+	// personal models.yaml in cwd or home would still be loaded and would
+	// still have to boot — which is what this test asserts either way. (The
+	// old isolation, naming an absent file, is now itself a boot error: a
+	// named path that does not exist is a broken configuration.)
+	t.Setenv("AGENTUM_MODELS_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.Config{RuntimeBinary: filepath.Join(t.TempDir(), "no-such-runtime")}
 	instance, err := New(cfg, quietLogger(), &store.Store{})
 	if err != nil {

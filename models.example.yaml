@@ -15,8 +15,15 @@
 # Decoding is STRICT: an unknown key or an empty model string fails boot with
 # the file named rather than silently falling back to these defaults.
 #
-# Copy to models.yaml (gitignored) ONLY to override those defaults. Example
-# below: a z.ai / GLM setup using the coding-plan subscription. See
+# Copy to models.yaml (gitignored) ONLY to override those defaults, and only
+# if you mean to replace them: a models.yaml REPLACES the built-in tiers, so a
+# copy of this file with every tier commented out is not "use the defaults" —
+# it is a configuration with no tiers, and it fails boot with
+# "declares no tiers; delete the file …". To go back to the defaults, delete
+# the file. AGENTUM_MODELS_CONFIG pointing at a file that does not exist fails
+# boot too, rather than quietly searching elsewhere.
+#
+# Example below: a z.ai / GLM setup using the coding-plan subscription. See
 # docs/models.md.
 
 # Example: GLM via the z.ai coding plan (swap tiers to taste).

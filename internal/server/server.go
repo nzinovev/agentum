@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -146,7 +147,15 @@ func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapte
 	}
 	descriptor := resolved.Describe()
 	if modelsCfg != nil {
+		// Sorted, not map order: with two broken tiers the operator would
+		// otherwise get a different one named on each boot, and "fix the
+		// error, hit the next one" is a worse loop than it looks.
+		tiers := make([]string, 0, len(modelsCfg.Tiers))
 		for tier := range modelsCfg.Tiers {
+			tiers = append(tiers, tier)
+		}
+		sort.Strings(tiers)
+		for _, tier := range tiers {
 			selection, resolveErr := models.Resolve(modelsCfg, descriptor.DefaultTiers, tier)
 			if resolveErr != nil {
 				return nil, fmt.Errorf("validate models config, tier %q: %w", tier, resolveErr)

@@ -89,18 +89,43 @@ func TestLoad_EmptyFileRejectedWithTheFix(t *testing.T) {
 	}
 }
 
-func TestLoad_AbsentReturnsErrNoConfig(t *testing.T) {
+// TestLoad_ExplicitPathThatDoesNotExistIsAnError: the one path the operator
+// named is a statement of intent. Searching past it to <cwd>/models.yaml or
+// ~/.config would run the process on tiers nobody chose, and the only visible
+// symptom would be the wrong model — the silent-fallback class this ADR
+// removes everywhere else.
+func TestLoad_ExplicitPathThatDoesNotExistIsAnError(t *testing.T) {
 	// Non-parallel: mutates env.
-	t.Setenv("AGENTUM_MODELS_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
+	absent := filepath.Join(t.TempDir(), "absent.yaml")
+	t.Setenv("AGENTUM_MODELS_CONFIG", absent)
 	_, err := Load()
 	if err == nil {
-		t.Fatal("absent config must error")
+		t.Fatal("a named config path that does not exist must error")
 	}
-	// Other candidate paths (cwd, home) may exist on some machines; only
-	// assert strictly when Load returned something other than ErrNoConfig.
-	if err != ErrNoConfig && !strings.Contains(err.Error(), "no models.yaml") {
-		t.Logf("Load returned %v (acceptable when other candidate paths exist)", err)
+	if errors.Is(err, ErrNoConfig) {
+		t.Fatalf("Load fell through to the search paths: %v", err)
 	}
+	// The message must name both the variable and the path, so the operator
+	// can see which of the two is wrong.
+	if !strings.Contains(err.Error(), "AGENTUM_MODELS_CONFIG") || !strings.Contains(err.Error(), absent) {
+		t.Errorf("error %q must name the variable and the path", err)
+	}
+}
+
+// TestLoad_NothingConfiguredReturnsErrNoConfig: no override anywhere is the
+// common case and the one non-error — callers fall back to the adapter's
+// built-in tiers.
+func TestLoad_NothingConfiguredReturnsErrNoConfig(t *testing.T) {
+	// Non-parallel: mutates env.
+	t.Setenv("AGENTUM_MODELS_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	_, err := Load()
+	if errors.Is(err, ErrNoConfig) {
+		return
+	}
+	// cwd and the home directory are outside this test's control; a real
+	// models.yaml in either is a legitimate reason not to see ErrNoConfig.
+	t.Logf("Load returned %v (acceptable when a models.yaml exists in cwd or home)", err)
 }
 
 func TestLoad_ValidOverride(t *testing.T) {
