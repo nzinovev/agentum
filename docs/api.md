@@ -311,8 +311,11 @@ match):
 The diff is **input-level only**. Outputs (artifacts produced) and human
 decisions are not compared — those are results, not inputs. The per-attempt
 axes (prompts / model / capabilities / adapter) index each run's invocation
-records by `(stage, cycle)` and compare shared keys before set differences.
-Reason strings:
+records by `(stage, cycle, ordinal)` and compare shared keys before set
+differences. The ordinal counts attempts sharing a `(stage, cycle)` in
+`sequence` order — a resumed stage produces a second attempt at the same
+cycle — and is derived when the diff is computed; it is not part of the
+manifest body. Reason strings:
 
 | Axis | Reasons |
 |---|---|

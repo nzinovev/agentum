@@ -42,14 +42,19 @@ Once tagged releases begin, this project adheres to
     `rendered_hash` distinguishes attempts and is never a diff axis). The
     runtime version is probed and recorded per invocation; a failed probe
     records an `adapter.runtime` evidence gap. Output artifact refs carry the
-    producing `invocation_id`. Schema-1 manifests stay readable (legacy
+    producing `invocation_id` and are de-duplicated by revision id, so a
+    repeat attempt that wrote byte-identical output keeps its own
+    attribution instead of inheriting the earlier attempt's. Schema-1
+    manifests stay readable (legacy
     sections retained verbatim; the diff synthesizes equivalent records), and
     the v1→v2 upgrade happens once, inside the write transaction.
   - **Cross-run diff** recomputed from invocation records indexed by
-    `(stage, cycle)`: shared keys compare values before set differences (a
-    differing `(review, 1)` model reports `model-id`, an extra attempt
-    reports `model-set`); new axes `adapter-runtime-version` (the SET of
-    runtime versions across a run) and `capability-effective`.
+    `(stage, cycle, ordinal)`: shared keys compare values before set
+    differences (a differing `(review, 1)` model reports `model-id`, an extra
+    attempt reports `model-set`); new axes `adapter-runtime-version` (the SET
+    of runtime versions across a run) and `capability-effective`. The ordinal
+    distinguishes attempts sharing a cycle — a resume inherits the resumed
+    attempt's cycle — so a resumed stage is not erased from the comparison.
 - **The task request as a typed contract, delivered to the agent** (ADR 0004).
   The first `backend-development` run stopped at `paused_open_questions`
   because the task's title and description never reached any agent prompt —

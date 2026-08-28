@@ -387,3 +387,60 @@ func TestDiffManifests_RenderedHashIsNotADiffAxis(t *testing.T) {
 		t.Errorf("a rendered-hash-only difference must light no axis, got %+v", diff)
 	}
 }
+
+// TestDiffManifests_ResumeDoesNotCollapseAnAttempt (ADR 0005 D10): a resume
+// inherits the resumed attempt's cycle (ADR 0001 D4) but gets its own
+// stage_invocations row, so one run can hold two records sharing (stage,
+// cycle). Keying the index on that pair alone dropped the earlier record and
+// made every per-attempt axis blind to it at once. The ordinal — derived from
+// Sequence at index time — is what keeps both comparable.
+func TestDiffManifests_ResumeDoesNotCollapseAnAttempt(t *testing.T) {
+	t.Parallel()
+	leftFirst := testInvocation("inv-left-1", "plan", 0)
+	leftFirst.Sequence = 1
+	leftResume := testInvocation("inv-left-2", "plan", 0)
+	leftResume.Sequence = 2
+	left := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{leftFirst, leftResume}}
+
+	// The right run differs ONLY in its first attempt; its resume matches.
+	rightFirst := testInvocation("inv-right-1", "plan", 0)
+	rightFirst.Sequence = 1
+	rightFirst.Prompt.StagePromptHash = "hash-plan-edited"
+	rightFirst.Model.Options.Model = "other/model"
+	rightResume := testInvocation("inv-right-2", "plan", 0)
+	rightResume.Sequence = 2
+	right := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{rightFirst, rightResume}}
+
+	if indexed := indexInvocations(left.Invocations); len(indexed) != 2 {
+		t.Fatalf("indexInvocations kept %d of 2 records; the resumed attempt was collapsed", len(indexed))
+	}
+	diff := DiffManifests(left, right)
+	if diff.Prompts == nil || diff.Prompts.Reason != "prompt-hash" {
+		t.Errorf("Prompts delta = %+v, want prompt-hash from the first attempt", diff.Prompts)
+	}
+	if diff.Model == nil || diff.Model.Reason != "model-id" {
+		t.Errorf("Model delta = %+v, want model-id from the first attempt", diff.Model)
+	}
+}
+
+// TestDiffManifests_ResumeIsAnAttemptInTheSetDiff (ADR 0005 D10): a run whose
+// stage was resumed carries one more attempt at the same coordinate than a run
+// that was not, and the set difference must say so rather than reporting the
+// two runs as equal.
+func TestDiffManifests_ResumeIsAnAttemptInTheSetDiff(t *testing.T) {
+	t.Parallel()
+	first := testInvocation("inv-left-1", "plan", 0)
+	first.Sequence = 1
+	resume := testInvocation("inv-left-2", "plan", 0)
+	resume.Sequence = 2
+	withResume := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{first, resume}}
+	withoutResume := diffBodyOfOneAttempt(testInvocation("inv-right-1", "plan", 0))
+
+	diff := DiffManifests(withResume, withoutResume)
+	if diff.Prompts == nil || diff.Prompts.Reason != "prompt-set" {
+		t.Errorf("Prompts delta = %+v, want prompt-set", diff.Prompts)
+	}
+	if diff.Model == nil || diff.Model.Reason != "model-set" {
+		t.Errorf("Model delta = %+v, want model-set", diff.Model)
+	}
+}

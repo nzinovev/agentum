@@ -114,20 +114,47 @@ func DiffManifests(left, right Body) Diff {
 
 // invocationKey is the semantic coordinate of one attempt. Invocation ids are
 // UUIDs and never equal between two runs, so the diff indexes records by
-// (stage, cycle) instead — the coordinate that IS shared when two runs made
-// the same attempt (ADR 0005 D10).
+// (stage, cycle, ordinal) instead — the coordinate that IS shared when two
+// runs made the same attempt (ADR 0005 D10).
+//
+// Ordinal is the third part because (stage, cycle) is NOT unique within a run:
+// a resume inherits the resumed attempt's cycle (ADR 0001 D4) while
+// invokeStage still creates a fresh stage_invocations row, so a `continue` job
+// leaves two records sharing a coordinate. Keying on the pair collapsed them
+// and made the earlier attempt invisible on every per-attempt axis at once —
+// the same "a coarse key erases an attempt" defect schema 2 exists to fix, one
+// level up.
 type invocationKey struct {
+	Stage   string
+	Cycle   int32
+	Ordinal int32
+}
+
+// stageCycle is the (stage, cycle) coordinate an ordinal counts within.
+type stageCycle struct {
 	Stage string
 	Cycle int32
 }
 
-// indexInvocations maps records by their (stage, cycle) coordinate. Within
-// one run the coordinate is unique: every fresh entry into a stage increments
-// its cycle, and a resume inherits the resumed attempt's cycle.
+// indexInvocations maps records by their (stage, cycle, ordinal) coordinate.
+// Ordinal is derived at index time from Sequence — it is never stored in
+// evidence and never appears in the API — so two attempts sharing a
+// (stage, cycle) are compared pairwise in run order: a resume lines up with
+// the other run's resume rather than with its original attempt. Records with
+// no Sequence (synthesized from schema 1) sort stably and keep their append
+// order.
 func indexInvocations(records []InvocationEvidence) map[invocationKey]InvocationEvidence {
-	out := make(map[invocationKey]InvocationEvidence, len(records))
-	for _, record := range records {
-		out[invocationKey{Stage: record.Stage, Cycle: record.Cycle}] = record
+	ordered := append([]InvocationEvidence(nil), records...)
+	sort.SliceStable(ordered, func(left, right int) bool {
+		return ordered[left].Sequence < ordered[right].Sequence
+	})
+	attempts := make(map[stageCycle]int32, len(ordered))
+	out := make(map[invocationKey]InvocationEvidence, len(ordered))
+	for _, record := range ordered {
+		coordinate := stageCycle{Stage: record.Stage, Cycle: record.Cycle}
+		ordinal := attempts[coordinate]
+		attempts[coordinate] = ordinal + 1
+		out[invocationKey{Stage: record.Stage, Cycle: record.Cycle, Ordinal: ordinal}] = record
 	}
 	return out
 }
@@ -143,7 +170,10 @@ func sortedInvocationKeys(indexed map[invocationKey]InvocationEvidence) []invoca
 		if keys[left].Stage != keys[right].Stage {
 			return keys[left].Stage < keys[right].Stage
 		}
-		return keys[left].Cycle < keys[right].Cycle
+		if keys[left].Cycle != keys[right].Cycle {
+			return keys[left].Cycle < keys[right].Cycle
+		}
+		return keys[left].Ordinal < keys[right].Ordinal
 	})
 	return keys
 }

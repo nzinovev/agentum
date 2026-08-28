@@ -902,3 +902,69 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
 	}
 }
+
+// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef (ADR 0005 D11): two
+// attempts at one stage can produce byte-identical output, and artifacts.Put
+// is a plain INSERT — each capture is a real revision row carrying its own
+// source invocation. De-duplicating on (name, content) dropped the second ref
+// and left the surviving one naming the FIRST attempt as the producer, so
+// grouping by invocation_id answered "nothing" for the repeat attempt and the
+// manifest disagreed with artifact_revisions.
+func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(t *testing.T) {
+	firstAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+		Outputs: []ArtifactRef{{
+			Name: "result.json", Kind: "result_json", RevisionID: "rev-1",
+			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-1",
+		}},
+	}}
+	repeatAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+		Outputs: []ArtifactRef{{
+			Name: "result.json", Kind: "result_json", RevisionID: "rev-2",
+			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-2",
+		}},
+	}}
+
+	merged := mergeBodies(firstAttempt, repeatAttempt)
+	outputs := merged.Artifacts.Outputs
+	if len(outputs) != 2 {
+		t.Fatalf("outputs = %d, want 2 (identical bytes from two attempts are two revisions): %+v", len(outputs), outputs)
+	}
+	producers := map[string]string{}
+	for _, ref := range outputs {
+		producers[ref.InvocationID] = ref.RevisionID
+	}
+	if producers["inv-1"] != "rev-1" || producers["inv-2"] != "rev-2" {
+		t.Errorf("each ref must keep its own producer and revision, got %+v", producers)
+	}
+}
+
+// TestMergeBodies_SameRevisionRecordedTwiceStaysOne (ADR 0005 D11): the
+// revision id is what identifies a recorded artifact, so a patch replaying a
+// ref the body already holds does not duplicate it.
+func TestMergeBodies_SameRevisionRecordedTwiceStaysOne(t *testing.T) {
+	ref := ArtifactRef{
+		Name: "plan.md", RevisionID: "rev-1", ContentHash: "hash",
+		Stage: "plan", InvocationID: "inv-1",
+	}
+	base := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Outputs: []ArtifactRef{ref}}}
+	replay := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Outputs: []ArtifactRef{ref}}}
+
+	merged := mergeBodies(base, replay)
+	if got := len(merged.Artifacts.Outputs); got != 1 {
+		t.Errorf("outputs = %d, want 1 (same revision id is the same artifact)", got)
+	}
+}
+
+// TestMergeBodies_InputRefsDedupeUnchanged (ADR 0005 D11): inputs never carry
+// an invocation (the worktree sync runs before any invocation row exists), so
+// the new key must not start duplicating them.
+func TestMergeBodies_InputRefsDedupeUnchanged(t *testing.T) {
+	input := ArtifactRef{Name: "plan.md", ContentHash: "hash", Stage: "plan"}
+	base := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{input}}}
+	again := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{input}}}
+
+	merged := mergeBodies(base, again)
+	if got := len(merged.Artifacts.Inputs); got != 1 {
+		t.Errorf("inputs = %d, want 1 (unchanged de-duplication for refs with no invocation)", got)
+	}
+}
