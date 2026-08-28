@@ -898,9 +898,14 @@ differences only — the things that meaningfully change what an agent would do:
 - git base
 - execution coordinate (when set)
 
-The per-attempt axes index each run's invocation records by `(stage, cycle)` —
-the semantic coordinate of an attempt, since invocation ids are UUIDs and
-never repeat across runs — and compare shared keys before set differences: a
+The per-attempt axes index each run's invocation records by
+`(stage, cycle, ordinal)` — the semantic coordinate of an attempt, since
+invocation ids are UUIDs and never repeat across runs. The ordinal is the
+third part because a resume inherits the resumed attempt's cycle while still
+getting its own invocation row, so `(stage, cycle)` alone is not unique within
+a run; it counts attempts at one coordinate in `sequence` order, is derived at
+comparison time, and never appears in the manifest body. The axes compare
+shared keys before set differences: a
 fix cycle whose second `review` ran a different model reports `model-id`
 (the specific answer), while a run with an extra attempt reports `model-set`.
 Two runs on the same tier and model but different runtime builds differ on

@@ -1007,18 +1007,14 @@ func mergeArtifactEvidence(existing *ArtifactEvidence, patch *ArtifactEvidence) 
 }
 
 // appendUniqueArtifactRef appends refs not already in base (matched by
-// RevisionID).
+// sameArtifactRef).
 func appendUniqueArtifactRef(base []ArtifactRef, additions []ArtifactRef) []ArtifactRef {
 	out := make([]ArtifactRef, 0, len(base)+len(additions))
 	out = append(out, base...)
 	for _, addition := range additions {
 		found := false
 		for _, present := range base {
-			if present.RevisionID == addition.RevisionID && present.RevisionID != "" {
-				found = true
-				break
-			}
-			if present.Name == addition.Name && present.ContentHash == addition.ContentHash && present.ContentHash != "" {
+			if sameArtifactRef(present, addition) {
 				found = true
 				break
 			}
@@ -1028,6 +1024,29 @@ func appendUniqueArtifactRef(base []ArtifactRef, additions []ArtifactRef) []Arti
 		}
 	}
 	return out
+}
+
+// sameArtifactRef reports whether two refs describe the same recorded
+// artifact. The revision id decides whenever both carry one: two distinct
+// revisions are two records even when their bytes are identical, because
+// artifacts.Put is a plain INSERT with no content de-duplication — a repeat
+// attempt that produced a byte-identical output has its OWN revision row with
+// its own source_invocation_id, and dropping the ref would leave the manifest
+// naming the earlier attempt as the producer (ADR 0005 D11) and disagreeing
+// with artifact_revisions.
+//
+// The (name, content) fallback covers refs carrying no revision id, and it
+// carries the invocation for the same reason. Inputs leave InvocationID empty
+// on both sides (the worktree sync runs before any invocation row exists), so
+// their de-duplication is unchanged.
+func sameArtifactRef(present, addition ArtifactRef) bool {
+	if present.RevisionID != "" && addition.RevisionID != "" {
+		return present.RevisionID == addition.RevisionID
+	}
+	return present.ContentHash != "" &&
+		present.Name == addition.Name &&
+		present.ContentHash == addition.ContentHash &&
+		present.InvocationID == addition.InvocationID
 }
 
 // mergeGitEvidence merges git lineage. Patch overwrites scalars (latest wins)
