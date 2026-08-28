@@ -44,14 +44,20 @@ type Descriptor struct {
 }
 
 // clone returns a deep copy so a caller cannot mutate the adapter's declared
-// defaults through the value Describe handed it. The tiers map is the only
-// mutable part.
+// defaults through the value Describe handed it. The slice and the tiers map
+// are the only mutable parts, and a nil one stays nil: "declares no tiers" and
+// "declares an empty tier set" are different claims, and models.Resolve reads
+// them differently.
 func (descriptor Descriptor) clone() Descriptor {
 	out := descriptor
-	out.ModelOptions = append([]models.OptionName(nil), descriptor.ModelOptions...)
-	out.DefaultTiers.Tiers = make(map[string]string, len(descriptor.DefaultTiers.Tiers))
-	for tier, model := range descriptor.DefaultTiers.Tiers {
-		out.DefaultTiers.Tiers[tier] = model
+	if descriptor.ModelOptions != nil {
+		out.ModelOptions = append([]models.OptionName(nil), descriptor.ModelOptions...)
+	}
+	if descriptor.DefaultTiers.Tiers != nil {
+		out.DefaultTiers.Tiers = make(map[string]string, len(descriptor.DefaultTiers.Tiers))
+		for tier, model := range descriptor.DefaultTiers.Tiers {
+			out.DefaultTiers.Tiers[tier] = model
+		}
 	}
 	return out
 }
@@ -91,17 +97,27 @@ type RegistryOptions struct {
 // construction — an id and a constructor — and everything else is asked of the
 // constructed adapter via Describe.
 type Registry struct {
-	constructors  map[AdapterID]func(binary string) Adapter
-	orderedIDs    []AdapterID
-	defaultID     AdapterID
-	runtimeBinary string
+	adapters   map[AdapterID]Adapter
+	orderedIDs []AdapterID
+	defaultID  AdapterID
 }
 
 // NewRegistry builds the registry with every adapter this compile ships. In the
 // MVP it holds exactly one entry — that is the point of it being a table.
+//
+// Each entry is constructed ONCE, here, and Resolve hands out that instance.
+// The readiness probe memoizes on the adapter value (ADR 0005 D2), so "one
+// subprocess per process" is only true while there is one instance per id;
+// constructing per Resolve made that invariant depend on nobody calling
+// Resolve twice. Construction is a struct literal — building the table eagerly
+// costs nothing and spawns nothing.
+//
+// An empty RuntimeBinary is passed through as empty: the adapter substitutes
+// its own descriptor default. Asking a throwaway construction for that default
+// worked, but it made the caller responsible for a fact the adapter owns.
 func NewRegistry(options RegistryOptions) *Registry {
-	constructors := map[AdapterID]func(binary string) Adapter{
-		AdapterOpencode: func(binary string) Adapter { return NewOpencodeAdapter(binary) },
+	adapters := map[AdapterID]Adapter{
+		AdapterOpencode: NewOpencodeAdapter(options.RuntimeBinary),
 	}
 	orderedIDs := []AdapterID{AdapterOpencode}
 	defaultID := options.DefaultAdapter
@@ -109,36 +125,29 @@ func NewRegistry(options RegistryOptions) *Registry {
 		defaultID = orderedIDs[0]
 	}
 	return &Registry{
-		constructors:  constructors,
-		orderedIDs:    orderedIDs,
-		defaultID:     defaultID,
-		runtimeBinary: options.RuntimeBinary,
+		adapters:   adapters,
+		orderedIDs: orderedIDs,
+		defaultID:  defaultID,
 	}
 }
 
 // Resolve returns the adapter registered under id. An empty id resolves to the
 // registry's default entry, so "no configuration" and "the default
 // configuration" are one code path. An unknown id is an error naming it — the
-// executor is never silently substituted.
+// executor is never silently substituted. Repeated calls return the same
+// instance, so they share its memoized readiness probe.
 func (registry *Registry) Resolve(id AdapterID) (Adapter, error) {
 	resolvedID := id
 	if resolvedID == "" {
 		resolvedID = registry.defaultID
 	}
-	constructor, found := registry.constructors[resolvedID]
+	adapter, found := registry.adapters[resolvedID]
 	if !found {
 		// Name the id that failed to resolve — for an empty id that is the
 		// configured default, which is the id the operator must fix.
 		return nil, fmt.Errorf("agent: unknown execution adapter %q (known: %s)", resolvedID, joinAdapterIDs(registry.IDs()))
 	}
-	// The operator's binary override beats the descriptor's default. The
-	// default itself is asked of a throwaway construction — construction is a
-	// struct literal, and Describe is the one record of the adapter's identity.
-	binary := registry.runtimeBinary
-	if binary == "" {
-		binary = constructor("").Describe().Binary
-	}
-	return constructor(binary), nil
+	return adapter, nil
 }
 
 // IDs returns the registered adapter ids in registration order. A future

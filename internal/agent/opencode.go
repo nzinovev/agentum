@@ -33,9 +33,15 @@ type OpencodeAdapter struct {
 	readiness Readiness
 }
 
-// NewOpencodeAdapter returns an adapter that invokes the named binary. The
-// binary is resolved lazily via exec.LookPath on each Invoke.
+// NewOpencodeAdapter returns an adapter that invokes the named binary. An
+// empty name selects the descriptor's default — "which executable am I" is
+// the adapter's own knowledge, so a caller with no operator override passes
+// nothing rather than looking the default up first. The binary is resolved
+// lazily via exec.LookPath on each Invoke.
 func NewOpencodeAdapter(binary string) *OpencodeAdapter {
+	if binary == "" {
+		binary = opencodeDescriptor.Binary
+	}
 	return &OpencodeAdapter{binary: binary}
 }
 
@@ -60,25 +66,25 @@ func (adapter *OpencodeAdapter) errPrefix() string {
 // hard/idle timeouts wrap ctx. A profile that grants a capability the adapter
 // cannot enforce — or a selection carrying an undeclared option — returns an
 // error here; the invocation does not start.
-func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
-	descriptor := a.Describe()
+func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
+	descriptor := adapter.Describe()
 	// Defence in depth (ADR 0005 D4, point three): re-check what was handed
 	// in, regardless of what the caller believed. An option outside the
 	// descriptor's set is refused and no subprocess starts.
 	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}
-	if err := a.validateInvocation(inv); err != nil {
+	if err := adapter.validateInvocation(inv); err != nil {
 		return nil, err
 	}
-	plan, err := a.prepareEnforcement(inv)
+	plan, err := adapter.prepareEnforcement(inv)
 	if err != nil {
 		return nil, err
 	}
-	bin, err := exec.LookPath(a.binary)
+	bin, err := exec.LookPath(adapter.binary)
 	if err != nil {
 		plan.cleanup()
-		return nil, fmt.Errorf("%sbinary %q not found: %w", a.errPrefix(), a.binary, err)
+		return nil, fmt.Errorf("%sbinary %q not found: %w", adapter.errPrefix(), adapter.binary, err)
 	}
 
 	// The run outlives Invoke: the subprocess is still working when we hand the
@@ -103,7 +109,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	if err != nil {
 		control.release()
 		plan.cleanup()
-		return nil, fmt.Errorf("%sstdout pipe: %w", a.errPrefix(), err)
+		return nil, fmt.Errorf("%sstdout pipe: %w", adapter.errPrefix(), err)
 	}
 	// stderr is discarded for MVP; the print-logs flag is the debug path later.
 	cmd.Stderr = io.Discard
@@ -111,11 +117,11 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	if err := cmd.Start(); err != nil {
 		control.release()
 		plan.cleanup()
-		return nil, fmt.Errorf("%sstart: %w", a.errPrefix(), err)
+		return nil, fmt.Errorf("%sstart: %w", adapter.errPrefix(), err)
 	}
 
 	ch := make(chan Event, 16)
-	go a.run(control, cmd, stdout, inv, ch, plan)
+	go adapter.run(control, cmd, stdout, inv, ch, plan)
 	return ch, nil
 }
 
@@ -165,11 +171,11 @@ func (control *runControl) stopReason(idleTimeout time.Duration) error {
 // inputs; the adapter re-checks the effective profile at Invoke time as
 // defense-in-depth (a profile built by any other path must still be enforceable
 // before the subprocess may start).
-func (a *OpencodeAdapter) Supported() []caps.Category {
+func (adapter *OpencodeAdapter) Supported() []caps.Category {
 	return append([]caps.Category(nil), opencodeSupported...)
 }
 
-func (a *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
+func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
 	// Ownership of the run context and of the materialized enforcement plan
 	// transfers here from Invoke. Both are released only after the process is
 	// reaped: the rendered config backs the child's permission set for as long

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -588,7 +589,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]models.Selection, error) {
 	descriptor := runner.adapter.Describe()
 	plan := make(map[string]models.Selection, len(taskPack.Stages))
-	for stageID, stage := range taskPack.Stages {
+	// Sorted, not map order: when more than one stage is misconfigured the
+	// run must fail naming the same one every time, or the operator fixes a
+	// different error on each attempt.
+	stageIDs := make([]string, 0, len(taskPack.Stages))
+	for stageID := range taskPack.Stages {
+		stageIDs = append(stageIDs, stageID)
+	}
+	sort.Strings(stageIDs)
+	for _, stageID := range stageIDs {
+		stage := taskPack.Stages[stageID]
 		if stage.Terminal() {
 			// An engine marker, not an invocation: no selection to resolve.
 			continue
@@ -1579,17 +1589,15 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 
 	var (
-		sessionID  string
-		telemetry  agent.Telemetry
 		terminal   *agent.Result
 		terminalEr error
 	)
 	for event := range eventCh {
-		sessionID, telemetry, terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, sessionID, telemetry, terminal, terminalEr)
+		terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, terminal, terminalEr)
 	}
 	if terminal != nil {
-		sessionID = terminal.SessionID
-		telemetry = terminal.Telemetry
+		sessionID := terminal.SessionID
+		telemetry := terminal.Telemetry
 		// Capture produced artifacts (result.json + the agent-declared artifact
 		// paths) into the durable revisions store. This runs before the
 		// invocation is finalized as successful, because a declared path that
@@ -1621,7 +1629,11 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// (the agent ran but its output was unusable); anything else is an adapter
 	// error (crash, stream failure, cancellation).
 	reason := classifyAdapterFailure(terminalEr)
-	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
+	// No session id on this path: the adapter reports it on the terminal
+	// EventResult, which is exactly what did not arrive. It was always empty
+	// here — the drain loop never captured one — and passing "" says so
+	// instead of passing a variable that looks like it might hold something.
+	runner.finalize(ctx, invocation, run.task, "", reason, nil)
 	// CLOSE with the stop reason and NO telemetry. The adapter reports its
 	// accumulated cost only on the terminal EventResult, so on this path there
 	// is no measurement to record — and a zero-valued telemetry object would
@@ -1638,10 +1650,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 // loop carries. Stream chunks are forwarded live to the sink; result and error
 // events are captured for post-loop classification. The accumulator is returned
 // so the loop body stays a single expression with no local branching state.
+//
+// Session id and telemetry are deliberately NOT part of the accumulator: the
+// adapter accumulates the cost in its own stream state and reports both on the
+// terminal EventResult, so carrying them through here would be two parameters
+// that are returned exactly as they arrived — and next to the two-pass
+// evidence write (ADR 0005 D7), a telemetry parameter that is never touched
+// reads as if the drain loop were the thing that measures.
 func (runner *Runner) observeEvent(
-	event agent.Event, taskID, stageID, sessionID string,
-	telemetry agent.Telemetry, terminal *agent.Result, terminalEr error,
-) (string, agent.Telemetry, *agent.Result, error) {
+	event agent.Event, taskID, stageID string,
+	terminal *agent.Result, terminalEr error,
+) (*agent.Result, error) {
 	switch event.Kind {
 	case agent.EventStream:
 		if runner.sink != nil && event.Chunk != "" {
@@ -1652,7 +1671,7 @@ func (runner *Runner) observeEvent(
 	case agent.EventError:
 		terminalEr = event.Err
 	}
-	return sessionID, telemetry, terminal, terminalEr
+	return terminal, terminalEr
 }
 
 // classifyAdapterFailure maps an adapter error to a stop reason. A result.json

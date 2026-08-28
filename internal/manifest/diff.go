@@ -562,11 +562,10 @@ func eitherNilDelta(leftNil, rightNil bool, reason string) *SectionDelta {
 // sameStringSet reports whether two string slices contain the same elements,
 // ignoring order and duplicates. Used for capability sets and memory hashes —
 // "same elements" is what matters, not the order they were enumerated in.
+// Lengths are deliberately NOT compared up front: different lengths may still
+// be the same set after de-duplication, so the comparison is always made on
+// the deduped forms.
 func sameStringSet(left, right []string) bool {
-	if len(left) != len(right) {
-		// Different lengths may still be the same set after dedup, so fall
-		// through to the map comparison rather than returning false here.
-	}
 	leftSet := dedupeAndSort(left)
 	rightSet := dedupeAndSort(right)
 	if len(leftSet) != len(rightSet) {
