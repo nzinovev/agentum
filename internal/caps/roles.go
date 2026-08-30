@@ -108,7 +108,7 @@ func RoleTemplate(role Role) []Token {
 		// outright (reviewer omits it).
 		return []Token{
 			Token(CatFsRead),
-			Token(CatArtifactWrite) + Token(":"+ArtifactScope+"/**"),
+			Token(CatArtifactWrite) + ":" + ArtifactScope + "/**",
 			Token(CatGitRead),
 		}
 	case RoleImplementer, RoleFixer:
@@ -118,17 +118,17 @@ func RoleTemplate(role Role) []Token {
 		// git.delivery is deliberately absent.
 		return []Token{
 			Token(CatFsRead),
-			Token(CatFsWrite) + Token(":"+worktreeScope+"/**"),
-			Token(CatArtifactWrite) + Token(":"+ArtifactScope+"/**"),
+			Token(CatFsWrite) + ":" + worktreeScope + "/**",
+			Token(CatArtifactWrite) + ":" + ArtifactScope + "/**",
 			Token(CatGitRead),
-			Token(CatGitWrite) + Token(":"+worktreeScope),
+			Token(CatGitWrite) + ":" + worktreeScope,
 			Token(CatExecBash),
 		}
 	case RoleSystem:
 		// Orchestrator-internal. Never returned to an agent invocation.
 		return []Token{
 			Token(CatGitDelivery),
-			Token(CatFsWrite) + Token(":${artifact-root}/**"),
+			Token(CatFsWrite) + (":${artifact-root}/**"),
 			Token(CatGitWrite),
 		}
 	default:
