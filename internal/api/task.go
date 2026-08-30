@@ -189,6 +189,13 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// with no error, so an oversized body arrives silently truncated and fails
 	// as "invalid JSON" — a message that sends the author looking for a syntax
 	// error that is not there. MaxBytesReader returns a real error instead.
+	//
+	// The wrapper is deliberately not closed: its Close forwards to
+	// r.Body.Close and nothing else, and net/http closes the request body
+	// itself once the handler returns. It holds no descriptor or buffer of its
+	// own, so the leak inspection is suppressed rather than answered with a
+	// Close that would imply an ownership this handler does not have.
+	//noinspection GoResourceLeak
 	bodyBytes, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTaskCreateBytes))
 	if readErr != nil {
 		var toolarge *http.MaxBytesError
