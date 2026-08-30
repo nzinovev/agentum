@@ -83,7 +83,7 @@ func authzGate() func(http.Handler) http.Handler {
 				http.Error(w, "unresolved principal", http.StatusUnauthorized)
 				return
 			}
-			if d := authz.Can(r.Context(), p, "access", r.URL.Path); !d.Allowed {
+			if d := authz.Can(r.Context(), p, authz.ActionAccess, r.URL.Path); !d.Allowed {
 				http.Error(w, d.Reason, http.StatusForbidden)
 				return
 			}

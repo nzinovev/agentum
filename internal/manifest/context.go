@@ -110,24 +110,10 @@ func mergeContextEvidence(existing, patch *ContextEvidence) *ContextEvidence {
 // collapses to one entry; a re-pin that truncated differently surfaces as a new
 // entry.
 func appendUniqueInstructionRef(base, additions []InstructionRef) []InstructionRef {
-	if len(additions) == 0 {
-		return base
-	}
-	seen := make(map[instructionRefKey]bool, len(base)+len(additions))
-	out := make([]InstructionRef, 0, len(base)+len(additions))
-	for _, ref := range base {
-		seen[instructionRefKey{ref.Path, ref.DeliveredHash}] = true
-		out = append(out, ref)
-	}
-	for _, ref := range additions {
-		key := instructionRefKey{ref.Path, ref.DeliveredHash}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, ref)
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(ref InstructionRef) instructionRefKey {
+			return instructionRefKey{ref.Path, ref.DeliveredHash}
+		}, nil)
 }
 
 type instructionRefKey struct {
@@ -139,24 +125,10 @@ type instructionRefKey struct {
 // (name, hash). A skill whose body changed between jobs adds a new entry rather
 // than replacing the old one — the change is itself the evidence.
 func appendUniqueSkillRef(base, additions []SkillRef) []SkillRef {
-	if len(additions) == 0 {
-		return base
-	}
-	seen := make(map[skillRefKey]bool, len(base)+len(additions))
-	out := make([]SkillRef, 0, len(base)+len(additions))
-	for _, ref := range base {
-		seen[skillRefKey{ref.Name, ref.Hash}] = true
-		out = append(out, ref)
-	}
-	for _, ref := range additions {
-		key := skillRefKey{ref.Name, ref.Hash}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, ref)
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(ref SkillRef) skillRefKey {
+			return skillRefKey{ref.Name, ref.Hash}
+		}, nil)
 }
 
 type skillRefKey struct {
@@ -168,24 +140,10 @@ type skillRefKey struct {
 // (stage, path, at) so a restoration recorded once per stage does not duplicate
 // under a retry that re-ran the same stage at the same time.
 func appendUniqueRestoration(base, additions []InstructionRestoration) []InstructionRestoration {
-	if len(additions) == 0 {
-		return base
-	}
-	seen := make(map[restorationKey]bool, len(base)+len(additions))
-	out := make([]InstructionRestoration, 0, len(base)+len(additions))
-	for _, restoration := range base {
-		seen[restorationKey{restoration.Stage, restoration.Path, restoration.At}] = true
-		out = append(out, restoration)
-	}
-	for _, restoration := range additions {
-		key := restorationKey{restoration.Stage, restoration.Path, restoration.At}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, restoration)
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(restoration InstructionRestoration) restorationKey {
+			return restorationKey{restoration.Stage, restoration.Path, restoration.At}
+		}, nil)
 }
 
 type restorationKey struct {

@@ -75,17 +75,6 @@ func nullStringOr(value sql.NullString) string {
 	return ""
 }
 
-// requirePrincipal extracts the Principal, writing a structured error on failure.
-// Returns false when the caller should return.
-func requirePrincipal(w http.ResponseWriter, r *http.Request) (authz.Principal, bool) {
-	principal, ok := authz.PrincipalFrom(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unresolved principal")
-		return authz.Principal{}, false
-	}
-	return principal, true
-}
-
 // taskCreateRequest is the POST /tasks body. The request half — title +
 // description — reaches the model; the overrides half configures the run and
 // is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
@@ -191,12 +180,8 @@ func writeTaskCreateError(w http.ResponseWriter, err error) {
 // are the canonical serialization, so two identically-valued requests produce
 // identical rows and identical revisions.
 func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, ok := requireAccess(w, r, authz.ActionTaskCreate, "")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:create", ""); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -270,23 +255,8 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 // handleGetTask GET /api/v1/tasks/{id}
 func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	_, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskRead, "GetTask")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:read", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
-			return
-		}
-		logUnexpected(api.log, err, "GetTask")
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
@@ -294,12 +264,8 @@ func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 // handleListTasks GET /api/v1/tasks?project_id=...&limit=...&offset=...
 func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, ok := requireAccess(w, r, authz.ActionTaskList, "")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:list", ""); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -334,24 +300,8 @@ func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 // The worker (not this request) drives the stages; the handler returns as soon
 // as the job is queued. An illegal transition is a 409, never a silent write.
 func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskStart, "GetTask")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:start", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-
-	id := r.PathValue("id")
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
-			return
-		}
-		logUnexpected(api.log, err, "GetTask")
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 

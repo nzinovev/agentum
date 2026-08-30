@@ -929,27 +929,64 @@ func fillInvocationEvidence(existing InvocationEvidence, patch InvocationEvidenc
 	return existing
 }
 
+// appendUniqueKeyed appends the additions whose key is not already present.
+// base is copied first, so the caller's slice is neither aliased nor mutated,
+// and each addition is matched against the GROWING result — an addition that
+// repeats an earlier addition in the same patch collapses too. When an addition
+// collides, refresh (when non-nil) updates the record already in the result;
+// that is how the merges which keep the latest occurrence's timestamp are
+// expressed. A nil refresh simply drops the collision, keeping the first record.
+//
+// The siblings that match against `base` alone (appendUniqueString,
+// appendUniqueHumanDecision, appendUniqueCheckpoint, appendUniqueArtifactRef)
+// are deliberately not expressed here: they let a repeat WITHIN one patch
+// through, and collapsing that would change what they record. Two of them could
+// not use a comparable key anyway — appendUniqueHumanDecision compares
+// timestamps with time.Time.Equal, and appendUniqueArtifactRef matches on a
+// conditional predicate rather than a fixed tuple.
+func appendUniqueKeyed[T any, K comparable](base, additions []T, key func(T) K, refresh func(present *T, addition T)) []T {
+	out := make([]T, 0, len(base)+len(additions))
+	out = append(out, base...)
+	position := make(map[K]int, len(out)+len(additions))
+	for index, present := range out {
+		presentKey := key(present)
+		if _, seen := position[presentKey]; !seen {
+			position[presentKey] = index // first occurrence wins, as a linear scan would
+		}
+	}
+	for _, addition := range additions {
+		additionKey := key(addition)
+		index, seen := position[additionKey]
+		if !seen {
+			position[additionKey] = len(out)
+			out = append(out, addition)
+			continue
+		}
+		if refresh != nil {
+			refresh(&out[index], addition)
+		}
+	}
+	return out
+}
+
 // appendUniqueEvidenceGap appends gaps not already in base, matched by
 // (Section, Stage, Reason) so the same failure recorded twice (a retry that
 // failed the same way) does not duplicate. At is taken from the addition so
 // the latest occurrence is kept on a duplicate.
 func appendUniqueEvidenceGap(base []EvidenceGap, additions []EvidenceGap) []EvidenceGap {
-	out := make([]EvidenceGap, 0, len(base)+len(additions))
-	out = append(out, base...)
-	for _, addition := range additions {
-		found := false
-		for index, present := range out {
-			if present.Section == addition.Section && present.Stage == addition.Stage && present.Reason == addition.Reason {
-				out[index].At = addition.At
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, addition)
-		}
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(gap EvidenceGap) evidenceGapKey {
+			return evidenceGapKey{gap.Section, gap.Stage, gap.Reason}
+		},
+		func(present *EvidenceGap, addition EvidenceGap) { present.At = addition.At })
+}
+
+// evidenceGapKey identifies one recorded gap: the same section failing the same
+// way at the same stage is one gap, however many times it was recorded.
+type evidenceGapKey struct {
+	section string
+	stage   string
+	reason  string
 }
 
 // appendUniqueHumanDecision appends decisions not already in base (matched by
@@ -1086,45 +1123,39 @@ func appendUniqueCheckpoint(base []CheckpointRef, additions []CheckpointRef) []C
 // retry collapses to one record. At is taken from the addition so the latest
 // occurrence is kept on a duplicate.
 func appendUniqueTransition(base []TransitionRecord, additions []TransitionRecord) []TransitionRecord {
-	out := make([]TransitionRecord, 0, len(base)+len(additions))
-	out = append(out, base...)
-	for _, addition := range additions {
-		found := false
-		for index, present := range out {
-			if present.From == addition.From && present.To == addition.To &&
-				present.Condition == addition.Condition && present.Cycle == addition.Cycle {
-				out[index].At = addition.At
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, addition)
-		}
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(record TransitionRecord) transitionKey {
+			return transitionKey{record.From, record.To, record.Condition, record.Cycle}
+		},
+		func(present *TransitionRecord, addition TransitionRecord) { present.At = addition.At })
+}
+
+// transitionKey identifies one resolved edge: the same edge re-resolved under a
+// retry in the same cycle is one record.
+type transitionKey struct {
+	from      string
+	to        string
+	condition string
+	cycle     int
 }
 
 // appendUniqueStop appends stops not already in base, matched by
 // (Stage, Reason, Cycle) so a repeat pause (e.g. budget re-hit on continue)
 // collapses to one record. At is taken from the addition.
 func appendUniqueStop(base []StopRecord, additions []StopRecord) []StopRecord {
-	out := make([]StopRecord, 0, len(base)+len(additions))
-	out = append(out, base...)
-	for _, addition := range additions {
-		found := false
-		for index, present := range out {
-			if present.Stage == addition.Stage && present.Reason == addition.Reason && present.Cycle == addition.Cycle {
-				out[index].At = addition.At
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, addition)
-		}
-	}
-	return out
+	return appendUniqueKeyed(base, additions,
+		func(record StopRecord) stopKey {
+			return stopKey{record.Stage, record.Reason, record.Cycle}
+		},
+		func(present *StopRecord, addition StopRecord) { present.At = addition.At })
+}
+
+// stopKey identifies one pause: a repeat pause for the same reason at the same
+// stage in the same cycle is one record.
+type stopKey struct {
+	stage  string
+	reason string
+	cycle  int
 }
 
 // mergeCapabilityProfile combines existing with patch. Declared and Granted

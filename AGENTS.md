@@ -22,22 +22,39 @@ non-negotiable architecture seams.
 | Build | `go build ./...` |
 | Run (needs Postgres) | `make docker-up && make run` |
 | Tests | `go test ./...` |
+| Integration tests (needs `opencode` + credentials) | `go test -tags integration ./...` |
 | Vet | `go vet ./...` |
 | Format | `gofmt -s -w .` |
 | Generate sqlc | `make sqlc-gen` (needs `sqlc` installed) |
 
-Before any change is considered done: run `go vet ./...` and `go build ./...`.
-There are no tests yet; when adding them, write table-driven tests alongside the
-package they cover.
+Before any change is considered done: run `go vet ./...`, `go build ./...`, and
+`go test ./...`. Tests live alongside the package they cover and are
+table-driven by default. The tests that drive a real `opencode` subprocess sit
+behind the `integration` build tag — they need the binary and provider
+credentials, so a plain `go test ./...` excludes them; run them locally with
+`go test -tags integration ./...`.
 
 ## Architecture seams — do not violate
 
 - **Single front door.** Every external call hits the HTTP boundary in
   `internal/server` (`middleware.go`). Internal callers (future workers, any
   future CLI) must also traverse `internal/authz`. Never bypass it.
-- **One authz function.** All permission decisions go through `authz.Can`. Today
-  it returns true for the single owner; SSO/RBAC grow inside that function, not
-  around it.
+- **One authz function, one action vocabulary.** All permission decisions go
+  through `authz.Can`. Today it returns true for the single owner; SSO/RBAC grow
+  inside that function, not around it. The `action` argument is ALWAYS an
+  `authz.Action*` constant — never a string literal at the call site. A new
+  permission is declared in that `const` block in `internal/authz/authz.go`
+  first, then used; a literal makes the permission surface unenumerable, and
+  RBAC then has no fixed set of rules to attach to. Handlers do not hand-roll
+  the check either: the guards live in `internal/api/access.go`, and every
+  handler enters through `requireAccess` (principal + permission) or through one
+  built on it — `requireTaskRead` for `task:read` on `{id}`,
+  `requireTaskForAction` when the task row is needed too, `authorize` when a
+  second resource must be cleared. `authz.Can` is therefore reached from exactly
+  two places, `authorize` and the route gate in `internal/server`; a third call
+  site is a bug. That is what makes every route answer an unauthenticated,
+  forbidden, or missing resource with the same status and code. Adding a route
+  means reusing a guard or adding one beside them, never copying a preamble.
 - **Multi-tenancy seam.** Every DB row carries `tenant_id` and `user_id`. Never
   write a query that omits them; never assume single-tenant outside `authz`.
 - **Explicit FSM.** Task lifecycle transitions live in `internal/engine/fsm.go`.

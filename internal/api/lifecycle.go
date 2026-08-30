@@ -6,17 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
-
-// msgTaskNotFound is the user-facing message for a missing task. Shared across
-// the lifecycle handlers so the wording stays stable.
-const msgTaskNotFound = "task not found"
 
 // handleInvocationContinue POST /api/v1/tasks/{id}/invocations/{iid}/continue
 // Resume after open_questions / user_stop (session-id resume). The body carries
@@ -55,10 +50,8 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 	_ = json.NewDecoder(r.Body).Decode(&body) // optional; ignored at MVP
 	payload, _ := json.Marshal(body)
 
-	updated, err := api.applyResume(r, task, event, "continue", payload, humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gate, decisionContinued,
-		principal.UserID, time.Now().UTC(),
-	), planApproval{}, principal)
+	updated, err := api.applyResume(r, task, event, "continue", payload,
+		gateDecisionPatch(task, principal, gate, decisionContinued), planApproval{}, principal)
 	if err != nil {
 		if isHumanDecisionRecordFailure(err) {
 			writeError(w, http.StatusInternalServerError, codeInternal,
@@ -160,21 +153,8 @@ func (api *API) decisionIsIdempotent(w http.ResponseWriter, r *http.Request, tas
 // that matches the recorded decision returns 200 and writes nothing; a
 // conflicting decision on an already-decided gate stays a 409.
 func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskAdvance, "GetTask(advance)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:advance", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	planName := api.planApprovalName(r.Context(), task)
@@ -190,10 +170,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 			"advance requires paused_gate; task is "+task.State)
 		return
 	}
-	decision := humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gateAdvance, decisionApproved,
-		principal.UserID, time.Now().UTC(),
-	)
+	decision := gateDecisionPatch(task, principal, gateAdvance, decisionApproved)
 	// Write the task_approvals row only when the task is AT the approval stage.
 	approvalPlan, _ := api.planApprovalForStage(r.Context(), task, currentStageOr(task.CurrentStage, ""))
 	updated, err := api.applyResume(r, task, engine.EventAdvance, "advance", nil, decision, approvalPlan, principal)
@@ -220,21 +197,8 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 // manifest sealed. Idempotent: a repeat reject matching the recorded decision
 // returns 200.
 func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskReject, "GetTask(reject)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:reject", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	// Reject is valid at either human gate: awaiting_final_review (final gate)
@@ -278,34 +242,19 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeIllegalTransition, "task is already terminal: "+task.State)
 		return
 	}
-	// Abort the in-flight run first so the worker stops touching the task.
-	if api.cancels != nil {
-		api.cancels.Cancel(task.ID)
-	}
-	next, err := engine.Next(engine.TaskState(task.State), engine.EventCancel)
-	if err != nil {
-		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
+	next, ok := api.beginTerminalAbort(w, task)
+	if !ok {
 		return
 	}
-	decision := humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gateReject, decisionRejected,
-		principal.UserID, time.Now().UTC(),
-	)
+	decision := gateDecisionPatch(task, principal, gateReject, decisionRejected)
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
+			task: task, next: next, jobKind: jobKindTeardown,
+			decision: decision, policy: recordLenient,
 		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordLenient); err != nil {
-			return err
+		if txErr != nil {
+			return txErr
 		}
 		// Record the durable reject decision under the resolved name. A prior
 		// approve under the SAME name (same gate) is a conflicting decision — but
@@ -359,21 +308,8 @@ func (conflict conflictingGateDecision) Error() string {
 // job records result_commit (the agentum/<task-id> tip) and removes the worktree
 // only — the branch + result_commit remain resolvable for review (F.6.1 AC #3).
 func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskApprove, "GetTask(approve)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:approve", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	if engine.TaskState(task.State) != engine.StateAwaitingFinalReview {
@@ -400,25 +336,15 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	// approval decision rides in the same tx as the transition it gates: a
 	// crash between them cannot leave a task that advanced past final approval
 	// with no record of who let it through.
-	decision := humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gateFinal, decisionApproved,
-		principal.UserID, time.Now().UTC(),
-	)
+	decision := gateDecisionPatch(task, principal, gateFinal, decisionApproved)
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
+			task: task, next: next, jobKind: jobKindTeardown,
+			decision: decision, policy: recordStrict,
 		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordStrict); err != nil {
-			return err
+		if txErr != nil {
+			return txErr
 		}
 		// ADR 0003 D4: record the durable final_review approval row in the same
 		// tx. No bound artifact — final_review approves the run, not a document.
@@ -450,23 +376,8 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 // removes the worktree only — the agentum/<task-id> branch and any committed
 // recovery work survive for review (AC #4).
 func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskCancel, "GetTask(cancel)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:cancel", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	id := r.PathValue("id")
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		logUnexpected(api.log, err, "GetTask")
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	if engine.IsTerminal(engine.TaskState(task.State)) {
@@ -474,15 +385,8 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Abort the in-flight run first so the worker stops touching the task. The
-	// registry returns false when no run is active (a paused task) — that's fine.
-	if api.cancels != nil {
-		api.cancels.Cancel(task.ID)
-	}
-
-	next, err := engine.Next(engine.TaskState(task.State), engine.EventCancel)
-	if err != nil {
-		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
+	next, ok := api.beginTerminalAbort(w, task)
+	if !ok {
 		return
 	}
 	// Transactional outbox: abort transition + teardown enqueue in one tx. The
@@ -491,25 +395,15 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	// manifest mid-flight) is absorbed so the cancel still lands — cancel is an
 	// emergency exit and must be the most tolerant handler. A real write error
 	// still fails the tx, which is correct: the transition did not commit.
-	decision := humanDecisionPatch(
-		currentStageOr(task.CurrentStage, ""), gateCancel, decisionRejected,
-		principal.UserID, time.Now().UTC(),
-	)
+	decision := gateDecisionPatch(task, principal, gateCancel, decisionRejected)
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
+			task: task, next: next, jobKind: jobKindTeardown,
+			decision: decision, policy: recordLenient,
 		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordLenient); err != nil {
-			return err
+		if txErr != nil {
+			return txErr
 		}
 		updated = transitioned
 		return nil
@@ -519,6 +413,75 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
+}
+
+// jobKindTeardown is the job every terminal transition enqueues: it captures
+// result_commit and removes the worktree, leaving the branch resolvable.
+const jobKindTeardown = "teardown"
+
+// lifecycleTransition is the shape every lifecycle write shares: the state the
+// FSM lands in, the job that drives what happens next, and the human decision
+// that authorized it. Grouping them keeps applyTransition's signature readable
+// at the call sites, which differ only in these fields.
+type lifecycleTransition struct {
+	task sqlc.Task
+	next engine.TaskState
+	// jobKind is the driving job to enqueue ("teardown" for the terminal
+	// transitions, the resume kind for continue/advance).
+	jobKind string
+	// jobPayload is the job body. Empty (or a literal JSON null, which is what
+	// an absent request body decodes to) becomes "{}" — a job row always
+	// carries a valid JSON object.
+	jobPayload []byte
+	decision   manifest.Body
+	policy     recordPolicy
+}
+
+// applyTransition performs the three writes every lifecycle transaction opens
+// with — the FSM state update, the driving job enqueue, and the human-decision
+// evidence — and returns the updated task row. It runs inside the caller's
+// runInTx closure, so the decision commits atomically with the state change it
+// describes; callers add whatever else belongs in their own transaction (an
+// approval row, a conflicting-decision check) after it returns.
+func (api *API) applyTransition(ctx context.Context, qtx *sqlc.Queries, principal authz.Principal, transition lifecycleTransition) (sqlc.Task, error) {
+	jobPayload := transition.jobPayload
+	if len(jobPayload) == 0 || string(jobPayload) == "null" {
+		jobPayload = []byte("{}")
+	}
+	transitioned, transitionErr := qtx.UpdateTaskState(ctx, sqlc.UpdateTaskStateParams{
+		ID: transition.task.ID, TenantID: principal.TenantID, State: string(transition.next),
+	})
+	if transitionErr != nil {
+		return sqlc.Task{}, transitionErr
+	}
+	if _, enqueueErr := qtx.EnqueueJob(ctx, sqlc.EnqueueJobParams{
+		TenantID: principal.TenantID, UserID: principal.UserID,
+		TaskID: transition.task.ID, Kind: transition.jobKind, Payload: jobPayload,
+	}); enqueueErr != nil {
+		return sqlc.Task{}, enqueueErr
+	}
+	if err := api.recordHumanDecisionTx(ctx, qtx, principal, transition.task.ID, transition.decision, transition.policy); err != nil {
+		return sqlc.Task{}, err
+	}
+	return transitioned, nil
+}
+
+// beginTerminalAbort aborts the in-flight run and resolves the state EventCancel
+// lands the task in. Shared by reject and cancel — the two terminal aborts,
+// which differ in what they record, not in how they stop the run. The in-flight
+// run is aborted first so the worker stops touching the task; the cancel
+// registry reports false when no run is active (a paused task), which is fine.
+// Writes the 409 itself, so ok=false means the handler must return.
+func (api *API) beginTerminalAbort(w http.ResponseWriter, task sqlc.Task) (engine.TaskState, bool) {
+	if api.cancels != nil {
+		api.cancels.Cancel(task.ID)
+	}
+	next, err := engine.Next(engine.TaskState(task.State), engine.EventCancel)
+	if err != nil {
+		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
+		return "", false
+	}
+	return next, true
 }
 
 // applyResume runs the FSM transition and enqueues the driving job, carrying an
@@ -534,25 +497,14 @@ func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEv
 	if err != nil {
 		return sqlc.Task{}, err
 	}
-	jobPayload := []byte("{}")
-	if len(payload) > 0 && string(payload) != "null" {
-		jobPayload = payload
-	}
 	var updated sqlc.Task
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: principal.TenantID, State: string(next),
+		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
+			task: task, next: next, jobKind: kind, jobPayload: payload,
+			decision: decision, policy: recordStrict,
 		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: kind, Payload: jobPayload,
-		}); enqueueErr != nil {
-			return enqueueErr
-		}
-		if err := api.recordHumanDecisionTx(r.Context(), qtx, principal, task.ID, decision, recordStrict); err != nil {
-			return err
+		if txErr != nil {
+			return txErr
 		}
 		// ADR 0003 D4: when this resume advances past the pack's approval stage,
 		// the task_approvals row joins the same tx. CreateApproval's
@@ -609,23 +561,8 @@ func (api *API) resolveApprovalRevisionID(ctx context.Context, qtx *sqlc.Queries
 // that performs the git branch deletion); the job is idempotent, so re-posting
 // is safe. Audited via the task.cleanup_done event.
 func (api *API) handleCleanupTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskCleanup, "GetTask(cleanup)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "task:cleanup", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	id := r.PathValue("id")
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: id, TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		logUnexpected(api.log, err, "GetTask(cleanup)")
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	// Cleanup is post-terminal only. A running/paused task's branch is live
@@ -653,10 +590,4 @@ func statusForTransition(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-}
-
-// principalTenant returns the tenant id from the request's principal.
-func principalTenant(r *http.Request) string {
-	principal, _ := authz.PrincipalFrom(r.Context())
-	return principal.TenantID
 }

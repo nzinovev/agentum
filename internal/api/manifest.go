@@ -74,17 +74,11 @@ func toManifestResponse(taskID string, body manifest.Body, seal manifest.SealInf
 // handleGetManifest GET /api/v1/tasks/{id}/manifest
 // Returns the manifest body, seal metadata, and any corrections.
 func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
+	if !api.requireManifestService(w) {
 		return
 	}
 	body, seal, corrections, err := api.mfst.Get(r.Context(), principal.TenantID, taskID)
@@ -106,13 +100,8 @@ func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 // human decisions are NOT compared — those are results, not inputs. The
 // response is empty when the two manifests are equivalent on the input axes.
 func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, leftID, ok := requireTaskRead(w, r)
 	if !ok {
-		return
-	}
-	leftID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, leftID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	rightID := r.URL.Query().Get("other")
@@ -120,12 +109,12 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "other query parameter (task id) is required")
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, rightID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+	// The comparison reads a second task, so it needs its own read decision —
+	// being allowed to read the left task says nothing about the right one.
+	if !authorize(w, r, principal, authz.ActionTaskRead, rightID) {
 		return
 	}
-	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
+	if !api.requireManifestService(w) {
 		return
 	}
 	leftBody, _, _, err := api.mfst.Get(r.Context(), principal.TenantID, leftID)
@@ -158,17 +147,11 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 // yet sealed (the caller should use AddEvidence via the runner — there is no
 // public AddEvidence path yet).
 func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	if api.mfst == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
+	if !api.requireManifestService(w) {
 		return
 	}
 	var req struct {
@@ -212,4 +195,15 @@ func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "recorded"})
+}
+
+// requireManifestService guards the handlers that cannot work without the
+// manifest service, writing the 404 itself when the server was built without
+// one.
+func (api *API) requireManifestService(w http.ResponseWriter) bool {
+	if api.mfst == nil {
+		writeError(w, http.StatusNotFound, codeNotFound, msgManifestServiceNotConfigured)
+		return false
+	}
+	return true
 }

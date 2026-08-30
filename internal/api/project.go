@@ -70,12 +70,8 @@ func validateGitRepo(path string) error {
 // Principal. Idempotent: re-registering an existing repo_path updates name and
 // the related set rather than failing.
 func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, ok := requireAccess(w, r, authz.ActionProjectCreate, "")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "project:create", ""); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -120,12 +116,8 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 
 // handleGetProject GET /api/v1/projects/{id}
 func (api *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, ok := requireAccess(w, r, authz.ActionProjectRead, r.PathValue("id"))
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "project:read", r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
@@ -144,12 +136,8 @@ func (api *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
 
 // handleListProjects GET /api/v1/projects?limit=...&offset=...
 func (api *API) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, ok := requireAccess(w, r, authz.ActionProjectList, "")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, "project:list", ""); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
