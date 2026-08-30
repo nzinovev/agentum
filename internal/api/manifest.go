@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/manifest"
 )
 
@@ -110,7 +111,7 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	// The comparison reads a second task, so it needs its own read decision —
 	// being allowed to read the left task says nothing about the right one.
-	if !authorizeTaskRead(w, r, principal, rightID) {
+	if !authorize(w, r, principal, authz.ActionTaskRead, rightID) {
 		return
 	}
 	if !api.requireManifestService(w) {

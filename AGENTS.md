@@ -46,12 +46,15 @@ credentials, so a plain `go test ./...` excludes them; run them locally with
   permission is declared in that `const` block in `internal/authz/authz.go`
   first, then used; a literal makes the permission surface unenumerable, and
   RBAC then has no fixed set of rules to attach to. Handlers do not hand-roll
-  the check either: `internal/api` resolves principal + permission (+ the task
-  row, where one is needed) through the shared guards — `requireTaskRead`,
-  `authorizeTaskRead`, `requireTaskForAction` — so every route answers an
-  unauthenticated, forbidden, or missing resource with the same status and code.
-  Adding a route means reusing a guard or adding one beside them, not copying a
-  preamble.
+  the check either: the guards live in `internal/api/access.go`, and every
+  handler enters through `requireAccess` (principal + permission) or through one
+  built on it — `requireTaskRead` for `task:read` on `{id}`,
+  `requireTaskForAction` when the task row is needed too, `authorize` when a
+  second resource must be cleared. `authz.Can` is therefore reached from exactly
+  two places, `authorize` and the route gate in `internal/server`; a third call
+  site is a bug. That is what makes every route answer an unauthenticated,
+  forbidden, or missing resource with the same status and code. Adding a route
+  means reusing a guard or adding one beside them, never copying a preamble.
 - **Multi-tenancy seam.** Every DB row carries `tenant_id` and `user_id`. Never
   write a query that omits them; never assume single-tenant outside `authz`.
 - **Explicit FSM.** Task lifecycle transitions live in `internal/engine/fsm.go`.

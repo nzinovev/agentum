@@ -13,10 +13,6 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// msgTaskNotFound is the user-facing message for a missing task. Shared across
-// the lifecycle handlers so the wording stays stable.
-const msgTaskNotFound = "task not found"
-
 // handleInvocationContinue POST /api/v1/tasks/{id}/invocations/{iid}/continue
 // Resume after open_questions / user_stop (session-id resume). The body carries
 // optional answers/context appended to the resumed session.
@@ -419,38 +415,6 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// requireTaskForAction is the preamble every lifecycle handler opens with:
-// resolve the principal, authorize action on the {id} path value, then load the
-// task. It writes the 401 / 403 / 404 / 400 itself, so ok=false means the
-// response is already written and the handler must return.
-//
-// A store error that is not a missing row is logged under where before the 400,
-// because nothing downstream reports it: the caller sees only the status.
-// handleInvocationContinue deliberately keeps its own preamble — it checks no
-// action and answers a missing task with a different code.
-func (api *API) requireTaskForAction(w http.ResponseWriter, r *http.Request, action, where string) (authz.Principal, sqlc.Task, bool) {
-	principal, ok := requirePrincipal(w, r)
-	if !ok {
-		return authz.Principal{}, sqlc.Task{}, false
-	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, action, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return authz.Principal{}, sqlc.Task{}, false
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return authz.Principal{}, sqlc.Task{}, false
-		}
-		logUnexpected(api.log, err, where)
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
-		return authz.Principal{}, sqlc.Task{}, false
-	}
-	return principal, task, true
-}
-
 // jobKindTeardown is the job every terminal transition enqueues: it captures
 // result_commit and removes the worktree, leaving the branch resolvable.
 const jobKindTeardown = "teardown"
@@ -626,10 +590,4 @@ func statusForTransition(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-}
-
-// principalTenant returns the tenant id from the request's principal.
-func principalTenant(r *http.Request) string {
-	principal, _ := authz.PrincipalFrom(r.Context())
-	return principal.TenantID
 }

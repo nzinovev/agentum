@@ -51,13 +51,8 @@ func (api *API) handleTaskEventStream(w http.ResponseWriter, r *http.Request) {
 // runSSE serves the SSE contract: replay events with id > Last-Event-ID, then
 // live-tail new rows. taskID == "" means tenant-global; otherwise scoped.
 func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where string) {
-	principal, ok := authz.PrincipalFrom(r.Context())
+	principal, ok := requireAccess(w, r, authz.ActionEventStream, taskID)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unresolved principal")
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, authz.ActionEventStream, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 
