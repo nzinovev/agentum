@@ -62,7 +62,7 @@ auto-discovered, the configured set is the security boundary.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Task`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the pre-ADR-0004 `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Task`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
 | `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
@@ -252,7 +252,7 @@ correction carrying the schema-1 sections (`prompts`, `model`,
 
 ### Manifest body shape
 
-Schema `"2"` (ADR 0005). Schema-1 manifests stay readable forever — their
+Schema `"2"`. Schema-1 manifests stay readable forever — their
 legacy sections are retained verbatim on read and synthesized into equivalent
 invocation records for the diff.
 
@@ -288,7 +288,7 @@ invocation records for the diff.
 }
 ```
 
-The unit of evidence is the invocation (ADR 0005 D6): one record per stage
+The unit of evidence is the invocation: one record per stage
 ATTEMPT, keyed by `invocation_id`. The record opens before the adapter starts
 and closes after the stream drains, so a crashed, timed-out, or refused
 attempt still records the model, prompts, and profile it was going to run.

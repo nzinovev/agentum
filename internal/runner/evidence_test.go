@@ -543,8 +543,8 @@ func (service *fakeManifestService) gapSections() []string {
 	return out
 }
 
-// TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5:
-// when AddEvidence fails mid-run, the runner must record the failure as an
+// TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives: when
+// AddEvidence fails mid-run, the runner must record the failure as an
 // EvidenceGap on the manifest rather than swallow it, and the stage must
 // survive. A sealed manifest that swallows the failure (degrading silently) is
 // worse than an absent record because a reviewer cannot tell the two apart.

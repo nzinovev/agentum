@@ -1,7 +1,7 @@
 -- +goose Up
 -- +goose StatementBegin
 
--- ADR 0004: the task request becomes a typed contract. `description` is the
+-- The task request becomes a typed contract. `description` is the
 -- requested behaviour delivered to the agent; `overrides` is the
 -- orchestrator-facing run configuration. The untyped `input` container is
 -- removed rather than deprecated: while it exists, the next ill-fitting field
@@ -16,9 +16,9 @@ ALTER TABLE tasks
 --
 -- The check request is rebuilt field by field rather than copied wholesale.
 -- The old reader was a lenient json.Unmarshal that ignored unknown keys and
--- non-conforming shapes; the new one rejects them (ADR 0004 D3/D7). Copying
+-- non-conforming shapes; the new one rejects them. Copying
 -- `input->'checks'` verbatim would migrate a row that ran fine for months into
--- one that fails its next run — the loudness D7 wants belongs on new writes at
+-- one that fails its next run — that loudness belongs on new writes at
 -- the API boundary, not retroactively on rows nobody can go back and fix.
 -- So: keep only `required`/`optional` when they are arrays, keep only their
 -- string elements, and fall back to `{}`. A legacy check request too malformed

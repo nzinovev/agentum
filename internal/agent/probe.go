@@ -48,8 +48,8 @@ func (readiness Readiness) Label() string {
 //
 // The probe reuses the context probe's machinery verbatim — the scrubbed child
 // environment from buildChildEnv, probeTimeout, and the process-group kill —
-// because the no-output hang ADR 0002 documented is a property of the binary,
-// not of the `debug skill` subcommand.
+// because the no-output hang is a property of the binary itself, not of the
+// `debug skill` subcommand.
 //
 // ctx contributes its values but not its cancellation (see runVersionProbe):
 // the memoized answer outlives the caller that happened to ask first, so it

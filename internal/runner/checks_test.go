@@ -223,12 +223,12 @@ func assertRequest(t *testing.T, req checks.Request, name string, required bool)
 	}
 }
 
-// TestRunner_MalformedStoredOverridesFailRun is the ADR 0004 D7 regression
-// test: a corrupt tasks.overrides column must fail the run loudly, not
-// silently resolve a smaller check set than the operator asked for. The old
-// lenient parse swallowed the unmarshal error and returned nil — the run
-// continued gated on less than the operator believed. The assertion is on the
-// FAILURE (state failed + Handle error), never on an absent request list.
+// TestRunner_MalformedStoredOverridesFailRun is the regression test: a corrupt
+// tasks.overrides column must fail the run loudly, not silently resolve a
+// smaller check set than the operator asked for. The old lenient parse
+// swallowed the unmarshal error and returned nil — the run continued gated on
+// less than the operator believed. The assertion is on the FAILURE (state
+// failed + Handle error), never on an absent request list.
 func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -241,7 +241,7 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		"done": {},
 	})
 	// A column only writable by something that bypassed the API (the boundary
-	// rejects this shape with a 400) — the invariant break D7 exists for.
+	// rejects this shape with a 400) — the invariant break this guards.
 	task := sqlc.Task{
 		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", Overrides: json.RawMessage(`{not json`),

@@ -1,8 +1,8 @@
-// Package taskinput is the typed shape of a task request (ADR 0004): the
-// requested behaviour (title + description) and the run overrides, which have
-// different audiences. The request reaches the model through the routing
-// block's Task section; the overrides reach the orchestrator only and are
-// never rendered to the agent (D2).
+// Package taskinput is the typed shape of a task request: the requested
+// behaviour (title + description) and the run overrides, which have different
+// audiences. The request reaches the model through the routing block's Task
+// section; the overrides reach the orchestrator only and are never rendered to
+// the agent.
 //
 // The package is standard-library-only by design, like internal/instructions:
 // the mapping from Overrides onto checks.Request stays with the runner (its
@@ -20,9 +20,9 @@ import (
 	"strings"
 )
 
-// Byte budgets for the request fields (D4). Over-budget input is rejected at
-// the boundary, not truncated: a truncated request is a *different* request,
-// and the agent has no way to know which half it lost. 32 KiB sits below the
+// Byte budgets for the request fields. Over-budget input is rejected at the
+// boundary, not truncated: a truncated request is a *different* request, and
+// the agent has no way to know which half it lost. 32 KiB sits below the
 // per-instruction-file budget because the description is prepended to every
 // stage's context for the life of the run, unlike an instruction file with no
 // degradation path.
@@ -32,18 +32,18 @@ const (
 )
 
 // Overrides is the orchestrator-facing half of a task request: how this run
-// differs from the project defaults. It is never rendered into a routing block
-// (ADR 0004 D2), so every member must be safe to withhold from the model. A
-// named container with one member today keeps a future `overrides.model`
-// unambiguous rather than indistinguishable from part of the request.
+// differs from the project defaults. It is never rendered into a routing
+// block, so every member must be safe to withhold from the model. A named
+// container with one member today keeps a future `overrides.model` unambiguous
+// rather than indistinguishable from part of the request.
 type Overrides struct {
 	Checks ChecksOverride `json:"checks"`
 }
 
 // ChecksOverride adds registered checks to this run BY NAME. A command is
-// never accepted here; the project registry is the only source of commands
-// (ADR 0002 D8), and typing this shape must not become an opportunity to let
-// one in. Names are validated against the registry at resolve time.
+// never accepted here; the project registry is the only source of commands,
+// and typing this shape must not become an opportunity to let one in. Names
+// are validated against the registry at resolve time.
 type ChecksOverride struct {
 	Required []string `json:"required"`
 	Optional []string `json:"optional"`
@@ -56,9 +56,9 @@ type Request struct {
 	Overrides   Overrides
 }
 
-// Validate enforces D3 + D4: title and description must be present and
-// non-empty after trimming, and each within its byte budget. Errors name the
-// offending field so a 400 message tells the author what to fix.
+// Validate enforces the request rules: title and description must be present
+// and non-empty after trimming, and each within its byte budget. Errors name
+// the offending field so a 400 message tells the author what to fix.
 func (request Request) Validate() error {
 	if strings.TrimSpace(request.Title) == "" {
 		return errors.New("title is required")
@@ -75,7 +75,7 @@ func (request Request) Validate() error {
 	return nil
 }
 
-// Revision is the canonical hash of the whole request (D9): sha256 over a
+// Revision is the canonical hash of the whole request: sha256 over a
 // serialization with fixed field order, no incidental whitespace, and trimmed
 // strings, so the same request always hashes the same regardless of how the
 // source JSON was formatted. This is what the manifest's input-revision diff
@@ -153,8 +153,8 @@ func canonicalNames(names []string) []string {
 	return unique
 }
 
-// ParseOverrides strictly decodes stored or submitted override bytes (D3/D7):
-// an unknown field is an error, never a silently dropped key — the typo that
+// ParseOverrides strictly decodes stored or submitted override bytes: an
+// unknown field is an error, never a silently dropped key — the typo that
 // decodes into a zero value is the failure mode this package exists to close.
 // Absent or empty bytes are the zero Overrides: a task created with no
 // overrides at all is the common case, not an error.

@@ -22,8 +22,8 @@ type Config struct {
 	WorkerPoolSize int    // concurrent job workers (1 is fine for single-host MVP)
 	JobMaxAttempts int    // poison bound before a job is failed (04 §7.5)
 	// ExecutionAdapter selects the execution adapter by registry id; empty
-	// selects the registry's default entry (ADR 0005 D1). Adapter-neutral on
-	// purpose: config names no executor.
+	// selects the registry's default entry. Adapter-neutral on purpose: config
+	// names no executor.
 	ExecutionAdapter string
 	// RuntimeBinary overrides the selected adapter descriptor's default
 	// binary; empty keeps Descriptor.Binary.
@@ -56,9 +56,9 @@ type Config struct {
 	ArtifactScanPolicy string
 }
 
-// retiredBinaryEnv is the pre-ADR-0005 name for the runtime binary override.
-// It is still recognised — only to refuse it by name, so an operator who set
-// it learns that it moved rather than losing the override silently.
+// retiredBinaryEnv is the retired name for the runtime binary override. It is
+// still recognised — only to refuse it by name, so an operator who set it
+// learns that it moved rather than losing the override silently.
 const retiredBinaryEnv = "AGENTUM_OPENCODE_BINARY"
 
 func Load() (Config, error) {
@@ -87,12 +87,11 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
 	}
-	// AGENTUM_OPENCODE_BINARY named an executor in configuration and was
-	// replaced by the adapter-neutral AGENTUM_RUNTIME_BINARY (ADR 0005 D1).
-	// Refused rather than ignored, for the same reason an unsupported model
-	// option is refused: a pinned binary that silently stops applying does not
-	// surface as a configuration change, it surfaces as the runtime failing in
-	// ways that look like agent bugs.
+	// AGENTUM_OPENCODE_BINARY named an executor in configuration and was replaced
+	// by the adapter-neutral AGENTUM_RUNTIME_BINARY. Refused rather than ignored,
+	// for the same reason an unsupported model option is refused: a pinned binary
+	// that silently stops applying does not surface as a configuration change, it
+	// surfaces as the runtime failing in ways that look like agent bugs.
 	if retired, set := os.LookupEnv(retiredBinaryEnv); set {
 		return cfg, fmt.Errorf("%s is no longer read; set AGENTUM_RUNTIME_BINARY=%s instead", retiredBinaryEnv, retired)
 	}

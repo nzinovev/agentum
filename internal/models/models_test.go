@@ -92,8 +92,8 @@ func TestLoad_EmptyFileRejectedWithTheFix(t *testing.T) {
 // TestLoad_ExplicitPathThatDoesNotExistIsAnError: the one path the operator
 // named is a statement of intent. Searching past it to <cwd>/models.yaml or
 // ~/.config would run the process on tiers nobody chose, and the only visible
-// symptom would be the wrong model — the silent-fallback class this ADR
-// removes everywhere else.
+// symptom would be the wrong model — the silent-fallback class model
+// resolution removes everywhere else.
 func TestLoad_ExplicitPathThatDoesNotExistIsAnError(t *testing.T) {
 	// Non-parallel: mutates env.
 	absent := filepath.Join(t.TempDir(), "absent.yaml")

@@ -65,7 +65,7 @@ func (diff Diff) Empty() bool {
 // The per-attempt axes (prompts, model, capabilities, adapter) are recomputed
 // from InvocationRecords() — the accessor that reads `invocations` on a
 // schema-2 body and synthesizes the same shape from a schema-1 body — so a v1
-// manifest and a v2 manifest of the same run diff to empty (ADR 0005 D10).
+// manifest and a v2 manifest of the same run diff to empty.
 func DiffManifests(left, right Body) Diff {
 	leftRecords := left.InvocationRecords()
 	rightRecords := right.InvocationRecords()
@@ -115,15 +115,14 @@ func DiffManifests(left, right Body) Diff {
 // invocationKey is the semantic coordinate of one attempt. Invocation ids are
 // UUIDs and never equal between two runs, so the diff indexes records by
 // (stage, cycle, ordinal) instead — the coordinate that IS shared when two
-// runs made the same attempt (ADR 0005 D10).
+// runs made the same attempt.
 //
 // Ordinal is the third part because (stage, cycle) is NOT unique within a run:
-// a resume inherits the resumed attempt's cycle (ADR 0001 D4) while
-// invokeStage still creates a fresh stage_invocations row, so a `continue` job
-// leaves two records sharing a coordinate. Keying on the pair collapsed them
-// and made the earlier attempt invisible on every per-attempt axis at once —
-// the same "a coarse key erases an attempt" defect schema 2 exists to fix, one
-// level up.
+// a resume inherits the resumed attempt's cycle while invokeStage still
+// creates a fresh stage_invocations row, so a `continue` job leaves two
+// records sharing a coordinate. Keying on the pair collapsed them and made the
+// earlier attempt invisible on every per-attempt axis at once — the same "a
+// coarse key erases an attempt" defect schema 2 exists to fix, one level up.
 type invocationKey struct {
 	Stage   string
 	Cycle   int32
@@ -180,9 +179,9 @@ func sortedInvocationKeys(indexed map[invocationKey]InvocationEvidence) []invoca
 
 // sharedKeyDelta walks the shared (stage, cycle) keys in deterministic order
 // and returns the first non-nil delta the per-field comparison produces, or
-// nil. Shared keys are compared BEFORE set differences (ADR 0005 D10): the
-// value difference is the more specific answer, and the attempt count alone
-// is closer to a result than to an input.
+// nil. Shared keys are compared BEFORE set differences: the value difference
+// is the more specific answer, and the attempt count alone is closer to a
+// result than to an input.
 func sharedKeyDelta(
 	left, right map[invocationKey]InvocationEvidence,
 	compare func(left, right InvocationEvidence) *SectionDelta,
@@ -275,7 +274,7 @@ func diffPacks(left, right *PackEvidence) *SectionDelta {
 // deliberately stage_prompt_hash only: the rendered hash embeds the task id
 // and absolute artifact paths, so two runs of the same task shape never
 // produce equal rendered hashes, and wiring it in here would make every
-// comparison report a difference (ADR 0005 D8).
+// comparison report a difference.
 func diffPrompts(left, right []InvocationEvidence) *SectionDelta {
 	leftMap := indexInvocations(left)
 	rightMap := indexInvocations(right)
@@ -298,10 +297,10 @@ func diffPrompts(left, right []InvocationEvidence) *SectionDelta {
 
 // diffAdapters compares the per-attempt adapter facts plus the run-level
 // declared set. The runtime version is compared as the SET observed across
-// each run's invocations (derived from the records, not a run-level scalar —
-// a run resumed after an upgrade genuinely has two, D6): two runs on the same
-// tier and model but different runtime builds differ on this axis and no
-// other, which is exactly the question the axis exists to answer.
+// each run's invocations (derived from the records, not a run-level scalar — a
+// run resumed after an upgrade genuinely has two): two runs on the same tier
+// and model but different runtime builds differ on this axis and no other,
+// which is exactly the question the axis exists to answer.
 func diffAdapters(left, right *AdapterEvidence, leftRecords, rightRecords []InvocationEvidence) *SectionDelta {
 	if left == nil && right == nil && len(leftRecords) == 0 && len(rightRecords) == 0 {
 		return nil
@@ -362,7 +361,7 @@ func adapterDeclaredCapabilities(section *AdapterEvidence) []string {
 // model id, and the remaining options (task 6's variant lands there). The
 // former run-level scalar comparison is gone with the run-level section — a
 // "primary model" summary maintained by a merge function is what produced the
-// overwritten-evidence defect in the first place (ADR 0005 D6/D10).
+// overwritten-evidence defect in the first place.
 func diffModels(left, right []InvocationEvidence) *SectionDelta {
 	leftMap := indexInvocations(left)
 	rightMap := indexInvocations(right)
@@ -398,7 +397,7 @@ func diffModels(left, right []InvocationEvidence) *SectionDelta {
 // diffCapabilities compares the run-level declared/granted sets and each
 // shared attempt's effective profile. The effective comparison is what makes
 // "the second review of a fix cycle ran under a different profile" visible —
-// schema 1 keyed it by stage and overwrote it (ADR 0005 D6).
+// schema 1 keyed it by stage and overwrote it.
 func diffCapabilities(left, right *CapabilityProfile, leftRecords, rightRecords []InvocationEvidence) *SectionDelta {
 	if left == nil && right == nil {
 		return nil

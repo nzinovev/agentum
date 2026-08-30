@@ -6,10 +6,10 @@ import (
 )
 
 // TestLoad_RetiredOpencodeBinaryRefused: AGENTUM_OPENCODE_BINARY was replaced
-// by the adapter-neutral AGENTUM_RUNTIME_BINARY (ADR 0005 D1). An operator who
-// pinned the runtime under the old name must be told, not quietly dropped back
-// to a PATH lookup — a binary override that stops applying does not look like
-// a configuration change, it looks like the runtime failing.
+// by the adapter-neutral AGENTUM_RUNTIME_BINARY. An operator who pinned the
+// runtime under the old name must be told, not quietly dropped back to a PATH
+// lookup — a binary override that stops applying does not look like a
+// configuration change, it looks like the runtime failing.
 func TestLoad_RetiredOpencodeBinaryRefused(t *testing.T) {
 	t.Setenv("AGENTUM_OPENCODE_BINARY", "/opt/opencode/bin/opencode.exe")
 	_, err := Load()

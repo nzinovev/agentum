@@ -63,7 +63,7 @@ your active agent understands.
 - Operator override (`models.yaml`) wins when present.
 - Otherwise the active execution adapter's built-in defaults are used — the
   tier table travels with the adapter's descriptor, because "these model
-  strings work with this runtime" is runtime knowledge (ADR 0005 D5).
+  strings work with this runtime" is runtime knowledge.
 - An empty tier falls back to the configured default.
 - An unknown tier is an **error** — Agentum never silently picks a model, and
   never substitutes a default for a name it could not resolve. A task whose

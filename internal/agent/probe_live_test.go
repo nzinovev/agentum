@@ -12,9 +12,8 @@ import (
 	"testing"
 )
 
-// TestProbe_LiveRuntimeVersionMatchesCLI (ADR 0005 step 10.1, adapter half):
-// the probed runtime version equals what `opencode --version` prints on this
-// machine.
+// TestProbe_LiveRuntimeVersionMatchesCLI: the probed runtime version equals
+// what `opencode --version` prints on this machine.
 func TestProbe_LiveRuntimeVersionMatchesCLI(t *testing.T) {
 	if _, err := exec.LookPath("opencode"); err != nil {
 		t.Skipf("opencode not on PATH: %v", err)
@@ -34,10 +33,10 @@ func TestProbe_LiveRuntimeVersionMatchesCLI(t *testing.T) {
 	t.Logf("probed runtime version: %s", readiness.RuntimeVersion)
 }
 
-// TestProbe_RuntimeBinaryOverrideSwapsTheVersion (ADR 0005 step 10.3, adapter
-// half): pointing AGENTUM_RUNTIME_BINARY's equivalent (the adapter's binary
-// argument) at a wrapper reporting a different version changes the recorded
-// version — the axis the cross-run diff reads.
+// TestProbe_RuntimeBinaryOverrideSwapsTheVersion: pointing
+// AGENTUM_RUNTIME_BINARY's equivalent (the adapter's binary argument) at a
+// wrapper reporting a different version changes the recorded version — the
+// axis the cross-run diff reads.
 func TestProbe_RuntimeBinaryOverrideSwapsTheVersion(t *testing.T) {
 	if _, err := exec.LookPath("opencode"); err != nil {
 		t.Skipf("opencode not on PATH: %v", err)

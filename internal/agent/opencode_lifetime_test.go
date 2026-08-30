@@ -48,9 +48,8 @@ const (
 // TestMain doubles as the fake agent's entry point. It must intercept before
 // the testing framework parses flags, because the adapter invokes the binary
 // with opencode's argv ("run --format json …", "debug skill", or "--version"),
-// not with test flags. The debug-skill mode serves the ContextProber tests
-// (ADR 0002 D6); the version mode serves the readiness-probe tests (ADR 0005
-// D2).
+// not with test flags. The debug-skill mode serves the ContextProber tests;
+// the version mode serves the readiness-probe tests.
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeAgent(mode))

@@ -190,9 +190,9 @@ func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The write path speaks one schema (ADR 0005 D9): a correction may not
-	// re-introduce the schema-1 sections schema 2 replaced. The refusal is a
-	// 400 naming what to drop, not a silent drop.
+	// The write path speaks one schema: a correction may not re-introduce the
+	// schema-1 sections schema 2 replaced. The refusal is a 400 naming what to
+	// drop, not a silent drop.
 	if patch.CarriesLegacySections() {
 		writeError(w, http.StatusBadRequest, codeBadInput,
 			"patch carries schema-1 sections (prompts, model, capabilities.effective, adapter.name/version) removed in schema 2; correct the invocations section instead")

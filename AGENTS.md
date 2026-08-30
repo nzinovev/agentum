@@ -47,7 +47,7 @@ package they cover.
   final approval. Retrieval is recency-ordered; keyword pull must exist before
   the flywheel test window closes (around task ~20).
 - **The task request reaches an agent only through the routing block's `Task`
-  section** (ADR 0004). `tasks.title` + `tasks.description` are the request and
+  section**. `tasks.title` + `tasks.description` are the request and
   are rendered there by `internal/routing`; `tasks.overrides` configures the
   run and is orchestrator-only — never render it into any prompt, and the
   resolved `## Project checks` section is the only check information an agent

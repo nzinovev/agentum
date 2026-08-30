@@ -103,7 +103,7 @@ func TestDescribe_ReturnedTiersAreACopy(t *testing.T) {
 }
 
 // TestOpencodeDescriptor_DeclaredOptionsMatchArgv is the assertion that keeps
-// D3's declaration honest as MVP task 6 lands: the descriptor's declared model
+// the descriptor's declaration honest as MVP task 6 lands: the declared model
 // options must equal the set of option fields buildOpencodeArgs can actually
 // emit. A descriptor that declares an option the argv builder ignores would
 // silently accept and drop it; an argv builder that emits an undeclared option
@@ -156,10 +156,10 @@ func positionOf(argv []string, flag string) int {
 	return -1
 }
 
-// TestRegistry_ResolveReturnsOneInstancePerID (ADR 0005 D2): the readiness
-// probe memoizes on the adapter value, so "one subprocess per process" holds
-// only while one instance exists per id. Constructing per Resolve made the
-// invariant depend on nobody resolving twice.
+// TestRegistry_ResolveReturnsOneInstancePerID: the readiness probe memoizes on
+// the adapter value, so "one subprocess per process" holds only while one
+// instance exists per id. Constructing per Resolve made the invariant depend
+// on nobody resolving twice.
 func TestRegistry_ResolveReturnsOneInstancePerID(t *testing.T) {
 	t.Parallel()
 	registry := NewRegistry(RegistryOptions{})
@@ -177,11 +177,11 @@ func TestRegistry_ResolveReturnsOneInstancePerID(t *testing.T) {
 }
 
 // TestNoExecutorNameOutsideThisPackage is the acceptance criterion "the
-// adapter's name and version do not appear as literals in calling code"
-// (ADR 0005), made enforceable. It parses each non-test Go file OUTSIDE
-// internal/agent with comments discarded and fails on any string literal
-// naming the executor: prose describing the seam is allowed and expected
-// (ADR 0005 D5), a literal in code is the coupling this ADR removed.
+// adapter's name and version do not appear as literals in calling code" made
+// enforceable. It parses each non-test Go file OUTSIDE internal/agent with
+// comments discarded and fails on any string literal naming the executor:
+// prose describing the seam is allowed and expected, a literal in code is the
+// coupling the adapter seam removed.
 //
 // The adapter VERSION is not scanned: a bare semver is too generic to look for
 // without false positives. It has one declaration by construction —
@@ -238,10 +238,10 @@ func TestNoExecutorNameOutsideThisPackage(t *testing.T) {
 
 // allowedExecutorLiteral lists the string literals outside internal/agent that
 // may name the executor. There is exactly one, and it names a RETIRED setting
-// rather than selecting anything: config.Load recognises the pre-ADR-0005
+// rather than selecting anything: config.Load recognises the retired
 // AGENTUM_OPENCODE_BINARY only to refuse it by name, so the operator learns
 // where the override moved. Removing the literal would remove the refusal and
-// bring back the silent-ignore this ADR is about. Any addition to this list is
+// bring back the silent-ignore the refusal exists to prevent. Any addition is
 // a decision, not a formality.
 func allowedExecutorLiteral(literal string) bool {
 	return literal == `"AGENTUM_OPENCODE_BINARY"`

@@ -143,12 +143,12 @@ func TestRender_ReviewFindings_OmittedWhenNil(t *testing.T) {
 	}
 }
 
-// TestRender_TaskSection covers ADR 0004 D8: the request renders as the
-// block's FIRST section — ahead of the output contract — with the title in
-// bold and the description verbatim; an empty description renders an explicit
-// unknown-request marker instead of a silently empty section; and no
-// overrides-shaped content appears anywhere outside the resolved checks
-// section (D2: overrides never reach the model).
+// TestRender_TaskSection: the request renders as the block's FIRST section —
+// ahead of the output contract — with the title in bold and the description
+// verbatim; an empty description renders an explicit unknown-request marker
+// instead of a silently empty section; and no overrides-shaped content appears
+// anywhere outside the resolved checks section (overrides never reach the
+// model).
 func TestRender_TaskSection(t *testing.T) {
 	t.Parallel()
 	rendered := Render(Block{
@@ -182,11 +182,11 @@ func TestRender_TaskSection_UnknownRequestMarkerWhenDescriptionEmpty(t *testing.
 	}
 }
 
-// TestRender_TaskSection_NeverCarriesOverrides pins D2: the raw overrides
-// (here requesting the `verify` check for this run) must not appear as a
-// block section. The resolved ## Project checks section is the only place
-// check information is allowed — it renders the effective set, not the
-// task-level request.
+// TestRender_TaskSection_NeverCarriesOverrides: the raw overrides (here
+// requesting the `verify` check for this run) must not appear as a block
+// section. The resolved ## Project checks section is the only place check
+// information is allowed — it renders the effective set, not the task-level
+// request.
 func TestRender_TaskSection_NeverCarriesOverrides(t *testing.T) {
 	t.Parallel()
 	rendered := Render(Block{

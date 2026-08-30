@@ -259,11 +259,11 @@ func (runner *Runner) ingest(
 	return revision, true
 }
 
-// openInvocationEvidence writes the OPEN half of one attempt's manifest record
-// (ADR 0005 D7), immediately after the stage_invocation row is created and
-// before adapter.Invoke: invocation id, stage coordinates, adapter id + both
-// versions (probed, memoized), the model selection, both prompt hashes, and
-// the effective capability profile with its role. A crash, timeout, or refused
+// openInvocationEvidence writes the OPEN half of one attempt's manifest
+// record, immediately after the stage_invocation row is created and before
+// adapter.Invoke: invocation id, stage coordinates, adapter id + both versions
+// (probed, memoized), the model selection, both prompt hashes, and the
+// effective capability profile with its role. A crash, timeout, or refused
 // start after this point leaves a record of what the attempt was going to run.
 // No-op when the manifest service is nil (unit tests).
 func (runner *Runner) openInvocationEvidence(
@@ -314,12 +314,12 @@ func (runner *Runner) openInvocationEvidence(
 	}
 }
 
-// closeInvocationEvidence writes the CLOSE half of one attempt's record (ADR
-// 0005 D7): telemetry and the stop reason, filled into the record the open
-// pass created (matched on invocation id; zero fields leave the open values
-// intact). telemetry is nil for a refused start — nothing ran, nothing to
-// bill. Called on EVERY terminal path: success, adapter error, parse error,
-// artifact rejection, refused start.
+// closeInvocationEvidence writes the CLOSE half of one attempt's record:
+// telemetry and the stop reason, filled into the record the open pass created
+// (matched on invocation id; zero fields leave the open values intact).
+// telemetry is nil for a refused start — nothing ran, nothing to bill. Called
+// on EVERY terminal path: success, adapter error, parse error, artifact
+// rejection, refused start.
 func (runner *Runner) closeInvocationEvidence(
 	ctx context.Context,
 	task sqlc.Task,
@@ -371,7 +371,7 @@ func invocationTelemetry(telemetry *agent.Telemetry) *manifest.InvocationTelemet
 // completeStageEvidence writes everything a SUCCESSFUL attempt leaves behind,
 // in ONE manifest transaction: the CLOSE half of the invocation record
 // (telemetry; the stop reason is empty on this path), the artifact revisions
-// the stage captured, and the ADR 0002 project-context section.
+// the stage captured, and the project-context section.
 //
 // One write rather than three because AddEvidence is a full-document
 // read-modify-write under the manifest row's lock — it decodes the whole body,
@@ -382,7 +382,7 @@ func invocationTelemetry(telemetry *agent.Telemetry) *manifest.InvocationTelemet
 //
 // The OPEN half stays its own write, before the adapter starts, because that
 // is what it is for: a crash between open and close must leave the record of
-// what the attempt was going to run (ADR 0005 D7).
+// what the attempt was going to run.
 //
 // No-op when the manifest service is nil (unit tests).
 func (runner *Runner) completeStageEvidence(
@@ -435,10 +435,10 @@ func (runner *Runner) completeStageEvidence(
 }
 
 // adapterEvidence returns the run-level adapter section: the wiring of the
-// process that drove the run (ADR 0005 D6) — id, OUR adapter implementation's
-// version, the capability categories it declares, and the readiness probe
-// outcome. The runtime VERSION is per invocation, not here: a run resumed in
-// a new process after an upgrade genuinely has two.
+// process that drove the run — id, OUR adapter implementation's version, the
+// capability categories it declares, and the readiness probe outcome. The
+// runtime VERSION is per invocation, not here: a run resumed in a new process
+// after an upgrade genuinely has two.
 func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvidence {
 	descriptor := runner.adapter.Describe()
 	readiness := runner.adapter.Probe(ctx)
@@ -481,11 +481,11 @@ func (runner *Runner) recordInitialEvidence(
 			packHash = hash
 		}
 	}
-	// The revision is the canonical hash of the typed request (ADR 0004 D9),
-	// computed from the parsed value so a backfilled or reformatted overrides
-	// column cannot perturb it. A malformed column is an invariant break (the
-	// API guarantees well-formed overrides): fail the provenance root rather
-	// than record a revision nobody can reproduce.
+	// The revision is the canonical hash of the typed request, computed from the
+	// parsed value so a backfilled or reformatted overrides column cannot perturb
+	// it. A malformed column is an invariant break (the API guarantees
+	// well-formed overrides): fail the provenance root rather than record a
+	// revision nobody can reproduce.
 	taskOverrides, overridesErr := taskinput.ParseOverrides(task.Overrides)
 	if overridesErr != nil {
 		return fmt.Errorf("record initial evidence: parse task overrides: %w", overridesErr)
@@ -524,9 +524,9 @@ func (runner *Runner) recordInitialEvidence(
 	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
 		return fmt.Errorf("record initial evidence: %w", err)
 	}
-	// A failed readiness probe is an evidence gap, mirroring the skills probe
-	// (ADR 0005 D2): the run records "runtime not ready, because …" and the
-	// invocation that needs the runtime surfaces the failure itself.
+	// A failed readiness probe is an evidence gap, mirroring the skills probe:
+	// the run records "runtime not ready, because …" and the invocation that
+	// needs the runtime surfaces the failure itself.
 	if readiness := runner.adapter.Probe(ctx); !readiness.Ready {
 		runner.recordEvidenceGap(ctx, task, "adapter.runtime", "",
 			fmt.Errorf("runtime probe failed: %s", readiness.Reason))
@@ -827,11 +827,10 @@ func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Ta
 }
 
 // recordStopEvidence records one controlled stop in the manifest's stops
-// section (D7). Called from applyPauseDecision for EVERY pause — a deliberate
-// widening of D7, so the manifest carries the full stop history (budget,
-// verdict, gate, adapter_error, etc.), not just the budget/verdict ones.
-// (Stage, Reason, Cycle) collapses repeats. Best-effort and a no-op when the
-// manifest service is nil.
+// section. Called from applyPauseDecision for EVERY pause, so the manifest
+// carries the full stop history (budget, verdict, gate, adapter_error, etc.),
+// not just the budget/verdict ones. (Stage, Reason, Cycle) collapses repeats.
+// Best-effort and a no-op when the manifest service is nil.
 func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, record manifest.StopRecord) {
 	if runner.mfst == nil {
 		return

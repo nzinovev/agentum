@@ -49,14 +49,14 @@ type Adapter interface {
 	// Describe returns the adapter's self-description: identity, adapter
 	// implementation version, default binary, understood model options, and
 	// baked-in tier defaults. Everything knowable about the adapter without
-	// running it comes from here — callers never hard-code an executor name
-	// or version (ADR 0005 D1).
+	// running it comes from here — callers never hard-code an executor name or
+	// version.
 	Describe() Descriptor
 
-	// Probe reports the external runtime's readiness and version (ADR 0005
-	// D2). It is memoized per process, returns a value and never an error,
-	// and a failed probe is a recorded fact (Ready=false + Reason), not a
-	// start failure — the invocation that needs the runtime surfaces it.
+	// Probe reports the external runtime's readiness and version. It is memoized
+	// per process, returns a value and never an error, and a failed probe is a
+	// recorded fact (Ready=false + Reason), not a start failure — the invocation
+	// that needs the runtime surfaces it.
 	Probe(ctx context.Context) Readiness
 }
 

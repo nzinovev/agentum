@@ -29,7 +29,7 @@ func TestDiffManifests_InputRevision(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_InputRevisionCanonicalAcrossFormatting is the ADR 0004 D9
+// TestDiffManifests_InputRevisionCanonicalAcrossFormatting is the revision
 // acceptance: two runs whose request bodies differ only in key order and
 // whitespace produce the same canonical revision, so the input diff axis
 // reports NO delta — the fix the axis has always claimed to mean. A different
@@ -267,8 +267,8 @@ func TestDiffManifests_OneSideMissingSection(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_IdenticalRunsEmpty (ADR 0005 D10): two runs with the same
-// attempt set and the same per-attempt inputs diff to empty.
+// TestDiffManifests_IdenticalRunsEmpty: two runs with the same attempt set and
+// the same per-attempt inputs diff to empty.
 func TestDiffManifests_IdenticalRunsEmpty(t *testing.T) {
 	t.Parallel()
 	left := diffBodyOfOneAttempt(testInvocation("inv-left", "spec", 0))
@@ -280,9 +280,9 @@ func TestDiffManifests_IdenticalRunsEmpty(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_RuntimeVersionOnly (ADR 0005 D10): same tier and model,
-// different runtime build - adapter-runtime-version and NOTHING else. This is
-// the axis that answers "identical configuration, different result".
+// TestDiffManifests_RuntimeVersionOnly: same tier and model, different runtime
+// build - adapter-runtime-version and NOTHING else. This is the axis that
+// answers "identical configuration, different result".
 func TestDiffManifests_RuntimeVersionOnly(t *testing.T) {
 	t.Parallel()
 	left := diffBodyOfOneAttempt(testInvocation("inv-left", "spec", 0))
@@ -299,11 +299,11 @@ func TestDiffManifests_RuntimeVersionOnly(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_FixCycleSecondAttemptDifferentModel (ADR 0005 D10): both
-// runs share (review, 0) and (review, 1); the second attempt ran on a
-// different model on the right - the shared key reports model-id, not
-// model-set, because the value difference is the more specific answer and
-// shared keys are compared first.
+// TestDiffManifests_FixCycleSecondAttemptDifferentModel: both runs share
+// (review, 0) and (review, 1); the second attempt ran on a different model on
+// the right - the shared key reports model-id, not model-set, because the
+// value difference is the more specific answer and shared keys are compared
+// first.
 func TestDiffManifests_FixCycleSecondAttemptDifferentModel(t *testing.T) {
 	t.Parallel()
 	left := diffBodyOfOneAttempt(testInvocation("inv-left", "review", 0))
@@ -323,8 +323,8 @@ func TestDiffManifests_FixCycleSecondAttemptDifferentModel(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_ExtraFixCycleReportsModelSet (ADR 0005 D10): a run with an
-// extra attempt where the other has none reports the set difference.
+// TestDiffManifests_ExtraFixCycleReportsModelSet: a run with an extra attempt
+// where the other has none reports the set difference.
 func TestDiffManifests_ExtraFixCycleReportsModelSet(t *testing.T) {
 	t.Parallel()
 	left := diffBodyOfOneAttempt(testInvocation("inv-left", "review", 0))
@@ -340,9 +340,9 @@ func TestDiffManifests_ExtraFixCycleReportsModelSet(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_V1AgainstV2OfSameRunIsEmpty (ADR 0005 D9/D10): a schema-1
-// body and a schema-2 body describing the same run diff to empty - the
-// accessor synthesizes equivalent records, one code path for both versions.
+// TestDiffManifests_V1AgainstV2OfSameRunIsEmpty: a schema-1 body and a
+// schema-2 body describing the same run diff to empty - the accessor
+// synthesizes equivalent records, one code path for both versions.
 func TestDiffManifests_V1AgainstV2OfSameRunIsEmpty(t *testing.T) {
 	t.Parallel()
 	v1 := Body{
@@ -374,9 +374,9 @@ func TestDiffManifests_V1AgainstV2OfSameRunIsEmpty(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_RenderedHashIsNotADiffAxis (ADR 0005 D8): the rendered
-// prompt hash differs on every run by construction (task id, absolute paths),
-// so it must never light any axis.
+// TestDiffManifests_RenderedHashIsNotADiffAxis: the rendered prompt hash
+// differs on every run by construction (task id, absolute paths), so it must
+// never light any axis.
 func TestDiffManifests_RenderedHashIsNotADiffAxis(t *testing.T) {
 	t.Parallel()
 	left := diffBodyOfOneAttempt(testInvocation("inv-left", "spec", 0))
@@ -388,12 +388,12 @@ func TestDiffManifests_RenderedHashIsNotADiffAxis(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_ResumeDoesNotCollapseAnAttempt (ADR 0005 D10): a resume
-// inherits the resumed attempt's cycle (ADR 0001 D4) but gets its own
-// stage_invocations row, so one run can hold two records sharing (stage,
-// cycle). Keying the index on that pair alone dropped the earlier record and
-// made every per-attempt axis blind to it at once. The ordinal — derived from
-// Sequence at index time — is what keeps both comparable.
+// TestDiffManifests_ResumeDoesNotCollapseAnAttempt: a resume inherits the
+// resumed attempt's cycle but gets its own stage_invocations row, so one run
+// can hold two records sharing (stage, cycle). Keying the index on that pair
+// alone dropped the earlier record and made every per-attempt axis blind to it
+// at once. The ordinal — derived from Sequence at index time — is what keeps
+// both comparable.
 func TestDiffManifests_ResumeDoesNotCollapseAnAttempt(t *testing.T) {
 	t.Parallel()
 	leftFirst := testInvocation("inv-left-1", "plan", 0)
@@ -423,10 +423,10 @@ func TestDiffManifests_ResumeDoesNotCollapseAnAttempt(t *testing.T) {
 	}
 }
 
-// TestDiffManifests_ResumeIsAnAttemptInTheSetDiff (ADR 0005 D10): a run whose
-// stage was resumed carries one more attempt at the same coordinate than a run
-// that was not, and the set difference must say so rather than reporting the
-// two runs as equal.
+// TestDiffManifests_ResumeIsAnAttemptInTheSetDiff: a run whose stage was
+// resumed carries one more attempt at the same coordinate than a run that was
+// not, and the set difference must say so rather than reporting the two runs
+// as equal.
 func TestDiffManifests_ResumeIsAnAttemptInTheSetDiff(t *testing.T) {
 	t.Parallel()
 	first := testInvocation("inv-left-1", "plan", 0)

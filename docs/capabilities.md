@@ -74,7 +74,7 @@ effective = (host ∩ pack ∩ stage ∩ (role ∪ invocation-grant)) \ withheld
 | **invocation** | per-run grant (resume, explicit add) | Widens the role; still must survive pack ∩ stage ∩ host. |
 
 `Supported()` is unchanged and stays the capability surface. Its companion on
-the same adapter is `Describe()` (ADR 0005 D1): the adapter's self-description
+the same adapter is `Describe()`: the adapter's self-description
 — id, implementation version, default binary, understood model options, and
 baked-in tier defaults — which everything knowable about the executor without
 running it comes from. Callers never hard-code an executor name or version;

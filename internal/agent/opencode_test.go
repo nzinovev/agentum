@@ -146,10 +146,10 @@ func indexOfArg(argv []string, flag string) int {
 	return -1
 }
 
-// TestInvoke_RefusesUndeclaredModelOption (ADR 0005 D4, the third refusal
-// point): a selection carrying an option the descriptor does not declare is
-// refused before any subprocess starts, and the error names BOTH the adapter
-// id and the option. A narrowed descriptor supplies the negative case, because
+// TestInvoke_RefusesUndeclaredModelOption is the third refusal point: a
+// selection carrying an option the descriptor does not declare is refused
+// before any subprocess starts, and the error names BOTH the adapter id and
+// the option. A narrowed descriptor supplies the negative case, because
 // today's only option (model) is one this adapter declares — this is the
 // mechanism test MVP task 6 inherits for --variant.
 //

@@ -10,7 +10,7 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
-- **Provider-neutral execution target and per-invocation evidence** (ADR 0005).
+- **Provider-neutral execution target and per-invocation evidence**.
   The executor, the model, and the shape of the model's parameters leave the
   domain model: they are a registry entry plus a self-describing adapter.
   - **Execution adapter registry** (`internal/agent`): adapters are selected
@@ -61,7 +61,7 @@ Once tagged releases begin, this project adheres to
     of runtime versions across a run) and `capability-effective`. The ordinal
     distinguishes attempts sharing a cycle — a resume inherits the resumed
     attempt's cycle — so a resumed stage is not erased from the comparison.
-- **The task request as a typed contract, delivered to the agent** (ADR 0004).
+- **The task request as a typed contract, delivered to the agent**.
   The first `backend-development` run stopped at `paused_open_questions`
   because the task's title and description never reached any agent prompt —
   two defects, both fixed: nothing delivered the request, and `tasks.input`
@@ -84,7 +84,7 @@ Once tagged releases begin, this project adheres to
     `input.description` / `input.checks`; the column is dropped, not
     deprecated — while an untyped container exists, the next ill-fitting field
     lands in it).
-  - **Run overrides are orchestrator-only** (D2): nothing in `overrides` is
+  - **Run overrides are orchestrator-only**: nothing in `overrides` is
     ever rendered into a routing block; the resolved `## Project checks`
     section remains the only check information an agent sees. A malformed
     stored `overrides` column now FAILS the run (the old lenient parse

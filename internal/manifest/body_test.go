@@ -35,8 +35,8 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	if decoded.Input == nil || decoded.Input.Revision != "abc" {
 		t.Errorf("Input not preserved: %+v", decoded.Input)
 	}
-	// ADR 0004 D9: the typed request round-trips — a reviewer reads the
-	// description the run existed to satisfy straight off the manifest.
+	// The typed request round-trips — a reviewer reads the description the run
+	// existed to satisfy straight off the manifest.
 	if decoded.Input.Description != "the requested behaviour" {
 		t.Errorf("Input.Description not preserved: %+v", decoded.Input)
 	}
@@ -76,10 +76,10 @@ func TestMergeBodies_ScalarOverwrites(t *testing.T) {
 }
 
 // TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords is the headline
-// regression test of ADR 0005 D6: a fix cycle re-running `review` must leave
-// TWO evidence records - keying by stage (the schema-1 merge rule) replaced
-// the first attempt's model, tier and capability snapshot with the second's.
-// The merge key is the invocation id and nothing else.
+// regression test of the invocation schema: a fix cycle re-running `review`
+// must leave TWO evidence records - keying by stage (the schema-1 merge rule)
+// replaced the first attempt's model, tier and capability snapshot with the
+// second's. The merge key is the invocation id and nothing else.
 func TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords(t *testing.T) {
 	t.Parallel()
 	base := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{
@@ -101,10 +101,10 @@ func TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_SameIDPatchedTwiceMergesIntoOne is the two-pass write of
-// ADR 0005 D7: the open record (identity, model, prompts, profile) is written
-// before Invoke; the close record (telemetry, stop reason) fills the same
-// record afterwards without duplicating it or erasing the open fields.
+// TestMergeBodies_SameIDPatchedTwiceMergesIntoOne is the two-pass write: the
+// open record (identity, model, prompts, profile) is written before Invoke;
+// the close record (telemetry, stop reason) fills the same record afterwards
+// without duplicating it or erasing the open fields.
 func TestMergeBodies_SameIDPatchedTwiceMergesIntoOne(t *testing.T) {
 	t.Parallel()
 	open := testInvocation("inv-1", "spec", 0)
@@ -458,10 +458,10 @@ func equalStringSet(a, b []string) bool {
 	return true
 }
 
-// TestDecodeV1Body_RetainsLegacySectionsVerbatim (ADR 0005 D9): a schema-1
-// body decodes with its prompts / model / effective sections intact and its
-// schema still reading "1" - nothing is dropped on read, so GET on an old
-// sealed manifest returns exactly what was sealed.
+// TestDecodeV1Body_RetainsLegacySectionsVerbatim: a schema-1 body decodes with
+// its prompts / model / effective sections intact and its schema still reading
+// "1" - nothing is dropped on read, so GET on an old sealed manifest returns
+// exactly what was sealed.
 func TestDecodeV1Body_RetainsLegacySectionsVerbatim(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{
@@ -493,8 +493,8 @@ func TestDecodeV1Body_RetainsLegacySectionsVerbatim(t *testing.T) {
 	}
 }
 
-// TestDecodeUnknownSchemaIsATypedError (ADR 0005 D9): a body whose
-// schema_version is neither 1 nor 2 is refused, not silently mis-decoded.
+// TestDecodeUnknownSchemaIsATypedError: a body whose schema_version is neither
+// 1 nor 2 is refused, not silently mis-decoded.
 func TestDecodeUnknownSchemaIsATypedError(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{"schema_version": "9", "input": {"task_id": "T1"}}`)
@@ -511,11 +511,10 @@ func TestDecodeUnknownSchemaIsATypedError(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_V1ExistingUpgradesToV2 (ADR 0005 D9): merging a v2 patch
-// onto a v1 existing body converts the legacy sections into invocation
-// records, clears them, and yields exactly one schema-2 body - losing
-// nothing. The only body this happens to is an unsealed one from a run in
-// flight across the upgrade.
+// TestMergeBodies_V1ExistingUpgradesToV2: merging a v2 patch onto a v1
+// existing body converts the legacy sections into invocation records, clears
+// them, and yields exactly one schema-2 body - losing nothing. The only body
+// this happens to is an unsealed one from a run in flight across the upgrade.
 func TestMergeBodies_V1ExistingUpgradesToV2(t *testing.T) {
 	t.Parallel()
 	existing := Body{
@@ -571,10 +570,10 @@ func TestMergeBodies_V1ExistingUpgradesToV2(t *testing.T) {
 	}
 }
 
-// TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted (ADR 0005 D9): a v1 body
-// whose only legacy content is the run-level adapter section — a run that
-// recorded its provenance root and then stopped before its first stage —
-// still loses those fields on the upgrade. Stamping it schema 2 while leaving
+// TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted: a v1 body whose only
+// legacy content is the run-level adapter section — a run that recorded its
+// provenance root and then stopped before its first stage — still loses those
+// fields on the upgrade. Stamping it schema 2 while leaving
 // adapter.name/version behind would store the mixed-shape body the upgrade
 // exists to prevent, and it would leave a v2 reader looking at an adapter
 // section with no id.
@@ -610,11 +609,11 @@ func TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted(t *testing.T) {
 	}
 }
 
-// TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts (ADR 0005 D9):
-// schema 1 deduplicated prompts on (stage, hash), so two entries for one stage
-// are two genuinely different prompts — two attempts under an edited pack.
-// Collapsing them into one record would delete evidence during the very
-// upgrade that exists to stop evidence being deleted.
+// TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts: schema 1
+// deduplicated prompts on (stage, hash), so two entries for one stage are two
+// genuinely different prompts — two attempts under an edited pack. Collapsing
+// them into one record would delete evidence during the very upgrade that
+// exists to stop evidence being deleted.
 func TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts(t *testing.T) {
 	t.Parallel()
 	v1 := Body{
@@ -659,9 +658,9 @@ func TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts(t *testing.T)
 	}
 }
 
-// TestEncodeBody_NeverWritesLegacyFields (ADR 0005 D9): the write path speaks
-// one schema - even a decoded v1 body re-encodes as schema 2 with its legacy
-// sections converted, never alongside invocations.
+// TestEncodeBody_NeverWritesLegacyFields: the write path speaks one schema -
+// even a decoded v1 body re-encodes as schema 2 with its legacy sections
+// converted, never alongside invocations.
 func TestEncodeBody_NeverWritesLegacyFields(t *testing.T) {
 	t.Parallel()
 	v1 := Body{
@@ -693,9 +692,9 @@ func TestEncodeBody_NeverWritesLegacyFields(t *testing.T) {
 	}
 }
 
-// TestInvocationRecords_V1AndV2Equivalent (ADR 0005 D9): the accessor
-// synthesizes records for a v1 body that are equivalent to a v2 body
-// describing the same run - one code path for every consumer.
+// TestInvocationRecords_V1AndV2Equivalent: the accessor synthesizes records
+// for a v1 body that are equivalent to a v2 body describing the same run - one
+// code path for every consumer.
 func TestInvocationRecords_V1AndV2Equivalent(t *testing.T) {
 	t.Parallel()
 	v1 := Body{
@@ -903,13 +902,13 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef (ADR 0005 D11): two
-// attempts at one stage can produce byte-identical output, and artifacts.Put
-// is a plain INSERT — each capture is a real revision row carrying its own
-// source invocation. De-duplicating on (name, content) dropped the second ref
-// and left the surviving one naming the FIRST attempt as the producer, so
-// grouping by invocation_id answered "nothing" for the repeat attempt and the
-// manifest disagreed with artifact_revisions.
+// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef: two attempts at one
+// stage can produce byte-identical output, and artifacts.Put is a plain INSERT
+// — each capture is a real revision row carrying its own source invocation.
+// De-duplicating on (name, content) dropped the second ref and left the
+// surviving one naming the FIRST attempt as the producer, so grouping by
+// invocation_id answered "nothing" for the repeat attempt and the manifest
+// disagreed with artifact_revisions.
 func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(t *testing.T) {
 	firstAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
 		Outputs: []ArtifactRef{{
@@ -938,9 +937,9 @@ func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_SameRevisionRecordedTwiceStaysOne (ADR 0005 D11): the
-// revision id is what identifies a recorded artifact, so a patch replaying a
-// ref the body already holds does not duplicate it.
+// TestMergeBodies_SameRevisionRecordedTwiceStaysOne: the revision id is what
+// identifies a recorded artifact, so a patch replaying a ref the body already
+// holds does not duplicate it.
 func TestMergeBodies_SameRevisionRecordedTwiceStaysOne(t *testing.T) {
 	ref := ArtifactRef{
 		Name: "plan.md", RevisionID: "rev-1", ContentHash: "hash",
@@ -955,9 +954,9 @@ func TestMergeBodies_SameRevisionRecordedTwiceStaysOne(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_InputRefsDedupeUnchanged (ADR 0005 D11): inputs never carry
-// an invocation (the worktree sync runs before any invocation row exists), so
-// the new key must not start duplicating them.
+// TestMergeBodies_InputRefsDedupeUnchanged: inputs never carry an invocation
+// (the worktree sync runs before any invocation row exists), so the new key
+// must not start duplicating them.
 func TestMergeBodies_InputRefsDedupeUnchanged(t *testing.T) {
 	input := ArtifactRef{Name: "plan.md", ContentHash: "hash", Stage: "plan"}
 	base := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{input}}}

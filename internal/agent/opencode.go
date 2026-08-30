@@ -27,8 +27,8 @@ import (
 type OpencodeAdapter struct {
 	binary string // path to the opencode executable
 
-	// probeOnce / readiness memoize the runtime version probe: one subprocess
-	// per process lifetime, shared by every consumer (ADR 0005 D2).
+	// probeOnce / readiness memoize the runtime version probe: one subprocess per
+	// process lifetime, shared by every consumer.
 	probeOnce sync.Once
 	readiness Readiness
 }
@@ -46,9 +46,9 @@ func NewOpencodeAdapter(binary string) *OpencodeAdapter {
 }
 
 // errPrefix is the "<id> adapter: " lead-in for this adapter's errors. The id
-// comes from the descriptor, never a literal in a message — after ADR 0005 D1
-// the executor is named only in its own declaration, and an error message is
-// calling code like anywhere else.
+// comes from the descriptor, never a literal in a message — the executor is
+// named only in its own declaration, and an error message is calling code like
+// anywhere else.
 func (adapter *OpencodeAdapter) errPrefix() string {
 	return string(adapter.Describe().ID) + " adapter: "
 }
@@ -68,9 +68,9 @@ func (adapter *OpencodeAdapter) errPrefix() string {
 // error here; the invocation does not start.
 func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
 	descriptor := adapter.Describe()
-	// Defence in depth (ADR 0005 D4, point three): re-check what was handed
-	// in, regardless of what the caller believed. An option outside the
-	// descriptor's set is refused and no subprocess starts.
+	// Defence in depth: re-check what was handed in, regardless of what the
+	// caller believed. An option outside the descriptor's set is refused and no
+	// subprocess starts.
 	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}

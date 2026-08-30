@@ -209,10 +209,10 @@ func TestOverridesMarshal_Canonical(t *testing.T) {
 	}
 }
 
-// TestRequest_Revision_StableAcrossSourceFormatting is the D9 acceptance: two
-// bodies that differ only in key order and whitespace — and whose overrides
-// lists differ only in order — produce the same revision, while a changed
-// description produces a different one.
+// TestRequest_Revision_StableAcrossSourceFormatting is the revision
+// acceptance: two bodies that differ only in key order and whitespace — and
+// whose overrides lists differ only in order — produce the same revision,
+// while a changed description produces a different one.
 func TestRequest_Revision_StableAcrossSourceFormatting(t *testing.T) {
 	t.Parallel()
 	build := func(overridesJSON string) Request {

@@ -12,8 +12,8 @@ import (
 
 // The body schema versions this build understands. A body stores its version
 // so an incompatible change can be detected at read time; schema 2 moved the
-// per-attempt evidence into one `invocations` section (ADR 0005 D6). Reads
-// accept both 1 and 2; writes always emit 2 and never emit the legacy fields.
+// per-attempt evidence into one `invocations` section. Reads accept both 1 and
+// 2; writes always emit 2 and never emit the legacy fields.
 const (
 	schemaVersionV1 = "1"
 	schemaVersion   = "2"
@@ -64,19 +64,19 @@ type TokenUsage struct {
 //   - Project       — project + source commit
 //   - Pack          — pack name, version, content hash
 //   - Invocations   — one record per stage ATTEMPT: adapter, model, prompts,
-//     capability profile, telemetry (ADR 0005 D6 — the unit of evidence)
+//     capability profile, telemetry (the unit of evidence)
 //   - Adapter       — the wiring of the process that drove the run
 //   - Capabilities  — the pack-wide declared ceiling
 //   - Memory        — memory slice pulled into the run
 //   - Context       — pinned project instructions + enumerated skills (ADR 0002)
 //   - Artifacts     — input + output artifact revisions (outputs keyed by
-//     invocation, ADR 0005 D11)
+//     invocation)
 //   - Checks        — check set version + their results
 //   - HumanGates    — human gate decisions
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
-//   - Transitions   — conditional transitions the run took (D7)
-//   - Stops         — controlled stops the run hit (D7)
+//   - Transitions   — conditional transitions the run took
+//   - Stops         — controlled stops the run hit
 //   - Missing       — subsystems that did not contribute (derived at seal)
 //   - EvidenceGaps  — evidence the orchestrator tried and failed to write
 //   - EvidenceComplete — set at seal: false when any section is degraded
@@ -104,21 +104,21 @@ type Body struct {
 	// Prompts is the schema-1 per-stage prompt list, retained READ-ONLY so a
 	// sealed v1 manifest round-trips through decode with nothing dropped. A
 	// writer touching it is a bug: schema 2 records prompts per invocation and
-	// encodeBody never emits this field (ADR 0005 D9).
+	// encodeBody never emits this field.
 	Prompts []PromptRevision `json:"prompts,omitempty"`
 	// Model is the schema-1 run-level model summary (including PerStage),
 	// retained READ-ONLY for v1 round-trips. A writer touching it is a bug
-	// (ADR 0005 D6 deleted the run-level section; schema 2 carries the model
-	// per invocation).
+	// (schema 2 deleted the run-level section and carries the model per
+	// invocation).
 	Model *ModelEvidence `json:"model,omitempty"`
 }
 
-// TransitionRecord is one conditional transition the run took (D7). It makes
-// the review ⇄ fix loop auditable from the manifest: each taken branch is
-// recorded with its condition, the verdict that matched, and the prospective
-// cycle of the target invocation. Cycle comes from the runner's Resolution
-// (commit 6), not re-derived. Append-merged by (From, To, Condition, Cycle) so
-// a re-resolution of the same edge under a retry collapses to one record.
+// TransitionRecord is one conditional transition the run took. It makes the
+// review ⇄ fix loop auditable from the manifest: each taken branch is recorded
+// with its condition, the verdict that matched, and the prospective cycle of
+// the target invocation. Cycle comes from the runner's Resolution (commit 6),
+// not re-derived. Append-merged by (From, To, Condition, Cycle) so a
+// re-resolution of the same edge under a retry collapses to one record.
 type TransitionRecord struct {
 	From      string    `json:"from,omitempty"`
 	To        string    `json:"to,omitempty"`
@@ -128,11 +128,11 @@ type TransitionRecord struct {
 	At        time.Time `json:"at"`
 }
 
-// StopRecord is one controlled stop the run hit (D7): fix_budget_exhausted,
+// StopRecord is one controlled stop the run hit: fix_budget_exhausted,
 // verdict_unreadable, gate, adapter_error, etc. recordStopEvidence records
-// every pause (a deliberate widening of D7), so the manifest carries the full
-// stop history; (Stage, Reason, Cycle) collapses repeats. Cycle is the
-// prospective cycle at the stop point.
+// every pause, not only the budget stop, so the manifest carries the full stop
+// history; (Stage, Reason, Cycle) collapses repeats. Cycle is the prospective
+// cycle at the stop point.
 type StopRecord struct {
 	Stage  string    `json:"stage"`
 	Reason string    `json:"reason"`
@@ -158,11 +158,11 @@ func newEmptyBody() Body {
 	return Body{Schema: schemaVersion}
 }
 
-// InputEvidence records the typed task request and its revision (ADR 0004
-// D9): the description the run exists to satisfy, the run overrides, and a
-// canonical hash over {title, description, overrides} — so two runs with the
-// same request hash equal regardless of how either request body was
-// formatted, and the input-revision diff axis means what it always claimed.
+// InputEvidence records the typed task request and its revision: the
+// description the run exists to satisfy, the run overrides, and a canonical
+// hash over {title, description, overrides} — so two runs with the same
+// request hash equal regardless of how either request body was formatted, and
+// the input-revision diff axis means what it always claimed.
 type InputEvidence struct {
 	TaskID      string          `json:"task_id"`
 	Title       string          `json:"title"`
@@ -204,7 +204,7 @@ type PromptRevision struct {
 // InvocationEvidence is everything recorded about ONE attempt at a stage. The
 // key is InvocationID (stage_invocations.id); Stage / Sequence / Cycle are
 // coordinates for a reader, never merge keys — two records with the same stage
-// and different ids are two records, always (ADR 0005 D6).
+// and different ids are two records, always.
 type InvocationEvidence struct {
 	InvocationID string `json:"invocation_id"`
 	Stage        string `json:"stage"`
@@ -220,20 +220,19 @@ type InvocationEvidence struct {
 }
 
 // InvocationAdapter is the execution target one attempt ran under. The three
-// facts are distinct on purpose (ADR 0005 D2): our adapter implementation's
-// version, and the external runtime's own version ("" when the probe failed).
+// facts are distinct on purpose: our adapter implementation's version, and the
+// external runtime's own version ("" when the probe failed).
 type InvocationAdapter struct {
 	ID             AdapterID `json:"id"`
 	AdapterVersion string    `json:"adapter_version,omitempty"`
 	RuntimeVersion string    `json:"runtime_version,omitempty"`
 }
 
-// InvocationPrompt carries the two prompt hashes of one attempt (ADR 0005
-// D8). Bodies are never stored — hashes only, as with instructions and
-// skills. RenderedHash is what makes two attempts at the same stage
-// distinguishable in evidence; it is deliberately NOT a diff axis (the
-// routing block embeds the task id and absolute paths, so it never repeats
-// across runs).
+// InvocationPrompt carries the two prompt hashes of one attempt. Bodies are
+// never stored — hashes only, as with instructions and skills. RenderedHash is
+// what makes two attempts at the same stage distinguishable in evidence; it is
+// deliberately NOT a diff axis (the routing block embeds the task id and
+// absolute paths, so it never repeats across runs).
 type InvocationPrompt struct {
 	StagePromptHash string `json:"stage_prompt_hash"` // sha256 of the pack's stage prompt
 	RenderedHash    string `json:"rendered_hash"`     // sha256 of prompt + "\n\n" + routing block
@@ -248,7 +247,7 @@ type InvocationCaps struct {
 }
 
 // InvocationTelemetry is the cost summary of one attempt, recorded per
-// invocation and only there (ADR 0005 D6).
+// invocation and only there.
 type InvocationTelemetry struct {
 	Tokens TokenUsage `json:"tokens"`
 	Cost   float64    `json:"cost"`
@@ -270,14 +269,14 @@ type AdapterEvidence struct {
 
 	// Name / Version are the schema-1 field names for ID / AdapterVersion,
 	// retained READ-ONLY so a sealed v1 manifest round-trips with nothing
-	// dropped. A writer touching them is a bug (ADR 0005 D9).
+	// dropped. A writer touching them is a bug.
 	Name    string `json:"name,omitempty"`
 	Version string `json:"version,omitempty"`
 }
 
 // ModelEvidence records the model + tier the invocation used — the schema-1
-// shape, retained READ-ONLY for v1 round-trips. A writer touching it is a
-// bug: schema 2 carries the model per invocation (ADR 0005 D6).
+// shape, retained READ-ONLY for v1 round-trips. A writer touching it is a bug:
+// schema 2 carries the model per invocation.
 type ModelEvidence struct {
 	Tier      string       `json:"tier"`
 	Model     string       `json:"model"`
@@ -285,8 +284,7 @@ type ModelEvidence struct {
 	PerStage  []StageModel `json:"per_stage,omitempty"`
 }
 
-// StageModel is the schema-1 per-stage model snapshot. Read-only retention
-// (ADR 0005 D9).
+// StageModel is the schema-1 per-stage model snapshot. Read-only retention.
 type StageModel struct {
 	Stage     string `json:"stage"`
 	Tier      string `json:"tier"`
@@ -302,13 +300,13 @@ type CapabilityProfile struct {
 	Declared []string `json:"declared"`
 	Granted  []string `json:"granted,omitempty"`
 
-	// Effective is the schema-1 per-stage profile list, retained READ-ONLY
-	// for v1 round-trips. A writer touching it is a bug (ADR 0005 D6/D9).
+	// Effective is the schema-1 per-stage profile list, retained READ-ONLY for v1
+	// round-trips. A writer touching it is a bug.
 	Effective []StageCapabilityProfile `json:"effective,omitempty"`
 }
 
 // StageCapabilityProfile is the schema-1 effective-profile snapshot for one
-// stage. Read-only retention (ADR 0005 D9).
+// stage. Read-only retention.
 type StageCapabilityProfile struct {
 	Stage   string          `json:"stage"`
 	Role    string          `json:"role"`
@@ -333,11 +331,11 @@ type ArtifactEvidence struct {
 }
 
 // ArtifactRef is one artifact revision reference inside the manifest. Outputs
-// carry the InvocationID that produced them (ADR 0005 D11): grouping by
-// invocation answers "what did this attempt produce" without a second copy of
-// the ledger. Inputs never do — the worktree sync runs once per job, before
-// any invocation row exists, and attributing it to a "first invocation" would
-// be a guess dressed as a fact.
+// carry the InvocationID that produced them: grouping by invocation answers
+// "what did this attempt produce" without a second copy of the ledger. Inputs
+// never do — the worktree sync runs once per job, before any invocation row
+// exists, and attributing it to a "first invocation" would be a guess dressed
+// as a fact.
 type ArtifactRef struct {
 	Name         string `json:"name"`
 	Kind         string `json:"kind,omitempty"`
@@ -496,7 +494,7 @@ func capabilitiesPresent(body *Body) bool {
 // body's legacy sections (keyed by stage, cycle 0, empty invocation id). Every
 // consumer — the diff, the completeness predicates — goes through it, so a v1
 // manifest and a v2 manifest of the same run remain comparable without a
-// second code path (ADR 0005 D9).
+// second code path.
 func (body Body) InvocationRecords() []InvocationEvidence {
 	if len(body.Invocations) > 0 {
 		return body.Invocations
@@ -615,9 +613,9 @@ func (body Body) legacyInvocationRecords() []InvocationEvidence {
 }
 
 // CarriesLegacySections reports whether the body carries any schema-1-only
-// section or field. The write path speaks one schema: the corrections
-// endpoint rejects a patch that carries them rather than re-introducing
-// shapes schema 2 replaced (ADR 0005 D9).
+// section or field. The write path speaks one schema: the corrections endpoint
+// rejects a patch that carries them rather than re-introducing shapes schema 2
+// replaced.
 func (body Body) CarriesLegacySections() bool {
 	if len(body.Prompts) > 0 || body.Model != nil {
 		return true
@@ -634,12 +632,12 @@ func (body Body) CarriesLegacySections() bool {
 // upgradeLegacySections converts a schema-1 body into the schema-2 shape: the
 // legacy sections become invocation records (via the same synthesis
 // InvocationRecords performs), EVERY legacy field is cleared, and the schema
-// version moves to 2. A body can never hold both shapes (ADR 0005 D9), which
-// is why the guard is CarriesLegacySections rather than "did the synthesis
-// produce records": a run that recorded its adapter section and then stopped
-// before its first stage has legacy fields and no records, and stamping it
-// schema 2 while leaving adapter.name/version behind would store exactly the
-// mixed body this function exists to prevent.
+// version moves to 2. A body can never hold both shapes, which is why the
+// guard is CarriesLegacySections rather than "did the synthesis produce
+// records": a run that recorded its adapter section and then stopped before
+// its first stage has legacy fields and no records, and stamping it schema 2
+// while leaving adapter.name/version behind would store exactly the mixed body
+// this function exists to prevent.
 //
 // A body with no legacy sections is returned unchanged apart from the version
 // stamp, which makes this safe to call from every write path — the upgrade
@@ -763,9 +761,9 @@ func decodeBody(raw []byte) (Body, error) {
 // A schema-1 existing body is upgraded to schema 2 before the patch merges, so
 // a body can never hold both shapes: the legacy sections become invocation
 // records and are cleared in the same merge, under the same row lock
-// AddEvidence already takes (ADR 0005 D9). Legacy fields on the PATCH are
-// ignored — the corrections endpoint rejects a patch that carries them, and
-// the runner writes none.
+// AddEvidence already takes. Legacy fields on the PATCH are ignored — the
+// corrections endpoint rejects a patch that carries them, and the runner
+// writes none.
 //
 // mergeBodies never partially mutates existing — it builds a fresh Body.
 func mergeBodies(existing Body, patch Body) Body {
@@ -1032,8 +1030,8 @@ func appendUniqueArtifactRef(base []ArtifactRef, additions []ArtifactRef) []Arti
 // artifacts.Put is a plain INSERT with no content de-duplication — a repeat
 // attempt that produced a byte-identical output has its OWN revision row with
 // its own source_invocation_id, and dropping the ref would leave the manifest
-// naming the earlier attempt as the producer (ADR 0005 D11) and disagreeing
-// with artifact_revisions.
+// naming the earlier attempt as the producer and disagreeing with
+// artifact_revisions.
 //
 // The (name, content) fallback covers refs carrying no revision id, and it
 // carries the invocation for the same reason. Inputs leave InvocationID empty

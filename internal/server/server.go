@@ -45,11 +45,11 @@ type Server struct {
 // and reconciler are not started here — Run starts them after recovery so no
 // job runs before stale ones are reconciled.
 //
-// New returns an error for configuration the process must not start on
-// (ADR 0005 D4, the first refusal point): a malformed models.yaml (anything
-// other than "no file"), an unknown execution adapter id, or a model option
-// the selected adapter does not declare. Each error names its cause; none of
-// them silently falls back to a default.
+// New returns an error for configuration the process must not start on — the
+// first refusal point: a malformed models.yaml (anything other than "no
+// file"), an unknown execution adapter id, or a model option the selected
+// adapter does not declare. Each error names its cause; none of them silently
+// falls back to a default.
 func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, error) {
 	// Operator model override. ErrNoConfig is the common case (fall back to
 	// the adapter descriptor's tiers); any other load failure is a broken
@@ -131,11 +131,11 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 }
 
 // executionAdapter resolves the configured execution adapter through the
-// registry (ADR 0005 D1) and validates the operator's model configuration
-// against its descriptor (D4): an unknown adapter id — the registry error
-// lists the known ones — and a tier resolving to options the adapter does not
-// declare both stop the process at boot. The executor is named only inside
-// internal/agent; this function works from ids.
+// registry and validates the operator's model configuration against its
+// descriptor: an unknown adapter id — the registry error lists the known ones
+// — and a tier resolving to options the adapter does not declare both stop the
+// process at boot. The executor is named only inside internal/agent; this
+// function works from ids.
 func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapter, error) {
 	registry := agent.NewRegistry(agent.RegistryOptions{
 		DefaultAdapter: agent.AdapterID(cfg.ExecutionAdapter),
@@ -182,10 +182,10 @@ func (server *Server) Handler() http.Handler {
 // before the worker starts, so a crashed worker's stale jobs and any orphaned
 // tasks are repaired before any new job is claimed.
 func (server *Server) Run(ctx context.Context) error {
-	// Warm the runtime probe before the worker starts (ADR 0005 D2): the
-	// first task never pays the subprocess, and the boot log records the
-	// runtime version — or the failure, which is a probe result, not a boot
-	// failure; the run that needs the runtime surfaces it.
+	// Warm the runtime probe before the worker starts: the first task never pays
+	// the subprocess, and the boot log records the runtime version — or the
+	// failure, which is a probe result, not a boot failure; the run that needs
+	// the runtime surfaces it.
 	server.warmRuntimeProbe(ctx)
 
 	reconcilerCtx, cancelReconciler := context.WithCancel(ctx)

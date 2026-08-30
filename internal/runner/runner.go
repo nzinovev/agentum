@@ -139,8 +139,8 @@ func manifestServiceOrNil(service *manifest.Service) manifestService {
 }
 
 // Deps bundles Runner construction. The adapter's identity (id, version,
-// default tiers, model options) is read from adapter.Describe() — never
-// passed separately and never a literal in calling code (ADR 0005 D1).
+// default tiers, model options) is read from adapter.Describe() — never passed
+// separately and never a literal in calling code.
 type Deps struct {
 	Store     Store
 	Packs     pack.Source
@@ -489,11 +489,11 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return runner.failTask(ctx, task, fmt.Errorf("resolve pack %q: %w", task.PipelinePack, err))
 	}
 
-	// Resolve the execution target for EVERY stage up front (ADR 0005 D4,
-	// point two): a tier no configuration defines, or an option the selected
-	// adapter does not declare, must fail the run before the first invocation
-	// — not four stages in, after source has been written. This is also the
-	// seam MVP task 13's RunSpec pins: one value, computed at run start.
+	// Resolve the execution target for EVERY stage up front: a tier no
+	// configuration defines, or an option the selected adapter does not declare,
+	// must fail the run before the first invocation — not four stages in, after
+	// source has been written. This is also the seam MVP task 13's RunSpec pins:
+	// one value, computed at run start.
 	executionPlan, planErr := runner.resolveExecutionPlan(taskPack)
 	if planErr != nil {
 		return runner.failTask(ctx, task, planErr)
@@ -581,11 +581,11 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 }
 
 // resolveExecutionPlan resolves the model selection for every stage the pack
-// declares, before the stage loop runs (ADR 0005 D4, point two). A tier is
-// chosen per stage, so validation must cover every stage — a models.yaml whose
-// reasoning tier declares an option the adapter cannot take must not fail four
-// stages into a run that has already written source. The fallback tiers come
-// from the adapter's descriptor; the runner names no executor itself.
+// declares, before the stage loop runs. A tier is chosen per stage, so
+// validation must cover every stage — a models.yaml whose reasoning tier
+// declares an option the adapter cannot take must not fail four stages into a
+// run that has already written source. The fallback tiers come from the
+// adapter's descriptor; the runner names no executor itself.
 func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]models.Selection, error) {
 	descriptor := runner.adapter.Describe()
 	plan := make(map[string]models.Selection, len(taskPack.Stages))
@@ -774,10 +774,10 @@ type stageRun struct {
 	taskPack *pack.Pack
 	worktree *worktree.Worktree
 
-	// executionPlan is the per-stage resolved model selection, computed once
-	// at run start (ADR 0005 D4). invokeStage looks the stage's selection up
-	// here; it never resolves on the fly, so a pack that names an
-	// unresolvable tier cannot start a run at all.
+	// executionPlan is the per-stage resolved model selection, computed once at
+	// run start. invokeStage looks the stage's selection up here; it never
+	// resolves on the fly, so a pack that names an unresolvable tier cannot start
+	// a run at all.
 	executionPlan map[string]models.Selection
 
 	// instructionFiles is the pinned project-instruction set for the run (ADR
@@ -1420,13 +1420,13 @@ type invocationOutcome struct {
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
 // row with session_id / stop_reason / parsed result.
 //
-// The manifest's invocation record is written in the same two passes (ADR 0005
-// D7): the OPEN half — identity, adapter + runtime versions, the model
-// selection, both prompt hashes, the effective profile — lands before
-// adapter.Invoke, so a crashed, timed-out, or refused attempt still records
-// what it was going to run (a failed attempt is when "which runtime, which
-// model" matters most). The CLOSE half — telemetry and stop reason — lands on
-// every terminal path after the drain.
+// The manifest's invocation record is written in the same two passes: the OPEN
+// half — identity, adapter + runtime versions, the model selection, both
+// prompt hashes, the effective profile — lands before adapter.Invoke, so a
+// crashed, timed-out, or refused attempt still records what it was going to
+// run (a failed attempt is when "which runtime, which model" matters most).
+// The CLOSE half — telemetry and stop reason — lands on every terminal path
+// after the drain.
 func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -1435,12 +1435,12 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 
 	// The run-start execution plan already validated this stage's tier and
-	// options, and it covers every non-terminal stage of the resolved pack —
-	// so this lookup cannot miss today. It is checked anyway, because the
-	// failure mode of a miss is the one this ADR exists to remove: a zero
-	// Selection carries no model, the adapter then omits --model, and the
-	// runtime silently picks its own. An invariant held by an argument that
-	// spans three functions is worth one branch at the point of use.
+	// options, and it covers every non-terminal stage of the resolved pack — so
+	// this lookup cannot miss today. It is checked anyway, because the failure
+	// mode of a miss is the silent one: a zero Selection carries no model, the
+	// adapter then omits --model, and the runtime silently picks its own. An
+	// invariant held by an argument that spans three functions is worth one
+	// branch at the point of use.
 	selection, planned := run.executionPlan[stageID]
 	if !planned {
 		runner.log.Error("stage missing from the execution plan",
@@ -1466,15 +1466,14 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	profileBytes := marshalProfile(profile)
 
 	// VerdictPath is set when this stage sources a verdict condition (detected
-	// via parsed conditions, never substring-scanned). ReviewFindings is set
-	// when the stage was entered through a verdict-conditioned transition, so
-	// the fixer is pointed at the predecessor's findings artifact rather than a
-	// log. Both render nothing when unset. Title/Description carry the task
-	// request into the block's first section (ADR 0004 D8) — the ONLY delivery
-	// path from tasks.title/description to any agent prompt. There is
-	// deliberately no Overrides on this literal (D2): the overrides are
-	// orchestrator-only, and the resolved Checks below already render the
-	// effective set.
+	// via parsed conditions, never substring-scanned). ReviewFindings is set when
+	// the stage was entered through a verdict-conditioned transition, so the
+	// fixer is pointed at the predecessor's findings artifact rather than a log.
+	// Both render nothing when unset. Title/Description carry the task request
+	// into the block's first section — the ONLY delivery path from
+	// tasks.title/description to any agent prompt. There is deliberately no
+	// Overrides on this literal: the overrides are orchestrator-only, and the
+	// resolved Checks below already render the effective set.
 	routingBlock := routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
@@ -1547,13 +1546,13 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		return invocationOutcome{adapterErr: true}
 	}
 
-	// OPEN the invocation record before the adapter starts (D7): identity,
-	// adapter + runtime versions, the model selection, both prompt hashes, and
-	// the effective profile land now, so every terminal path — success, crash,
-	// timeout, refused start — carries what the attempt was going to run.
-	// The rendered hash covers exactly what the adapter is handed below
-	// (prompt + "\n\n" + routing block); it distinguishes two attempts at the
-	// same stage in evidence but is never a diff axis (D8).
+	// OPEN the invocation record before the adapter starts: identity, adapter +
+	// runtime versions, the model selection, both prompt hashes, and the
+	// effective profile land now, so every terminal path — success, crash,
+	// timeout, refused start — carries what the attempt was going to run. The
+	// rendered hash covers exactly what the adapter is handed below (prompt +
+	// "\n\n" + routing block); it distinguishes two attempts at the same stage in
+	// evidence but is never a diff axis.
 	runner.openInvocationEvidence(ctx, run, invocation, stageID, stage, selection, block, profile)
 
 	// Record the effective profile as audit evidence before the run starts. A
@@ -1581,8 +1580,8 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			stopReason = "capability_unenforceable"
 		}
 		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
-		// CLOSE with the stop reason and no telemetry: nothing ran, so there
-		// is nothing to bill (D7 — a refused start still produces a record).
+		// CLOSE with the stop reason and no telemetry: nothing ran, so there is
+		// nothing to bill (a refused start still produces a record).
 		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, stopReason, nil)
 		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
 		return invocationOutcome{adapterErr: true}
@@ -1613,10 +1612,10 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			return invocationOutcome{rejected: true}
 		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
-		// One manifest write closes the whole successful attempt: the CLOSE
-		// half of the invocation record, the artifact revisions the stage
-		// produced, and the ADR 0002 project-context section. Emit the live
-		// pinning signal separately — it is a stream event, not evidence.
+		// One manifest write closes the whole successful attempt: the CLOSE half of
+		// the invocation record, the artifact revisions the stage produced, and the
+		// project-context section. Emit the live pinning signal separately — it is a
+		// stream event, not evidence.
 		runner.completeStageEvidence(ctx, run, stageID, invocation.ID, telemetry, artifactOutputs)
 		runner.emit(ctx, run.task, EvContextPinned, contextPinnedPayload(stageID, run))
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
@@ -1655,8 +1654,8 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 // adapter accumulates the cost in its own stream state and reports both on the
 // terminal EventResult, so carrying them through here would be two parameters
 // that are returned exactly as they arrived — and next to the two-pass
-// evidence write (ADR 0005 D7), a telemetry parameter that is never touched
-// reads as if the drain loop were the thing that measures.
+// evidence write, a telemetry parameter that is never touched reads as if the
+// drain loop were the thing that measures.
 func (runner *Runner) observeEvent(
 	event agent.Event, taskID, stageID string,
 	terminal *agent.Result, terminalEr error,

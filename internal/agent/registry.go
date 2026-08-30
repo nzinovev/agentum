@@ -7,9 +7,9 @@ import (
 )
 
 // AdapterID is the stable identity of an execution adapter. It is declared
-// exactly once, next to the implementation it names, and after ADR 0005 the
-// executor is named ONLY inside this package: callers select an adapter by id
-// through the registry and never construct a concrete type by name.
+// exactly once, next to the implementation it names, and the executor is named
+// ONLY inside this package: callers select an adapter by id through the
+// registry and never construct a concrete type by name.
 type AdapterID string
 
 // AdapterOpencode is the opencode CLI adapter — the single registry entry this
@@ -38,8 +38,8 @@ type Descriptor struct {
 	// never silently dropped (models.Options.SupportedBy).
 	ModelOptions []models.OptionName
 	// DefaultTiers is the adapter's baked-in tier→model map, used when the
-	// operator has no models.yaml. "These model names work with this runtime"
-	// is runtime knowledge, so it lives here (ADR 0005 D5).
+	// operator has no models.yaml. "These model names work with this runtime" is
+	// runtime knowledge, so it lives here.
 	DefaultTiers models.Config
 }
 
@@ -106,11 +106,11 @@ type Registry struct {
 // MVP it holds exactly one entry — that is the point of it being a table.
 //
 // Each entry is constructed ONCE, here, and Resolve hands out that instance.
-// The readiness probe memoizes on the adapter value (ADR 0005 D2), so "one
-// subprocess per process" is only true while there is one instance per id;
-// constructing per Resolve made that invariant depend on nobody calling
-// Resolve twice. Construction is a struct literal — building the table eagerly
-// costs nothing and spawns nothing.
+// The readiness probe memoizes on the adapter value, so "one subprocess per
+// process" is only true while there is one instance per id; constructing per
+// Resolve made that invariant depend on nobody calling Resolve twice.
+// Construction is a struct literal — building the table eagerly costs nothing
+// and spawns nothing.
 //
 // An empty RuntimeBinary is passed through as empty: the adapter substitutes
 // its own descriptor default. Asking a throwaway construction for that default

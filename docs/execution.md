@@ -852,7 +852,7 @@ evidence chains off.
 section) therefore cannot survive to seal time. `memory` stays reported as
 missing because the memory subsystem is genuinely not wired yet.
 
-**Per-invocation evidence (ADR 0005).** The unit of evidence is the
+**Per-invocation evidence.** The unit of evidence is the
 invocation: `body.invocations` carries one record per stage ATTEMPT, keyed by
 `invocation_id` (`stage` / `sequence` / `cycle` are coordinates for a reader,
 never merge keys). Each record opens before the adapter starts — invocation
@@ -861,7 +861,7 @@ selection, both prompt hashes, the effective capability profile — and closes
 after the stream drains with telemetry and the stop reason. A fix cycle's
 second `review` therefore leaves a second record with its own model, profile,
 and rendered prompt hash; nothing is overwritten. Two prompt hashes are
-recorded per attempt (D8): `stage_prompt_hash` (the pack's stage prompt — the
+recorded per attempt: `stage_prompt_hash` (the pack's stage prompt — the
 cross-run diff axis) and `rendered_hash` (prompt + routing block — what makes
 two attempts at the same stage distinguishable; deliberately never a diff
 axis, because the routing block embeds the task id and absolute paths).

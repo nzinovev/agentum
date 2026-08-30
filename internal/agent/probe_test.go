@@ -24,7 +24,7 @@ const (
 )
 
 // runFakeVersion plays the runtime's `--version` side of the readiness-probe
-// contract (ADR 0005 D2).
+// contract.
 func runFakeVersion(mode string) int {
 	if counterPath := os.Getenv(fakeVersionCounterEnv); counterPath != "" {
 		count := 0

@@ -108,10 +108,10 @@ stages:
 }
 
 // TestInvocationEvidence_FixCycleLeavesTwoReviewRecords is the runner half of
-// the headline acceptance criterion (ADR 0005 D6/D7): a fix cycle re-running
-// `review` writes TWO invocation records — each with its own model selection,
-// capability profile, and rendered prompt hash — not one overwritten summary.
-// The runtime version on every record is the probe's memoized value.
+// the headline acceptance criterion: a fix cycle re-running `review` writes
+// TWO invocation records — each with its own model selection, capability
+// profile, and rendered prompt hash — not one overwritten summary. The runtime
+// version on every record is the probe's memoized value.
 func TestInvocationEvidence_FixCycleLeavesTwoReviewRecords(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -187,7 +187,7 @@ func TestInvocationEvidence_FixCycleLeavesTwoReviewRecords(t *testing.T) {
 }
 
 // refusingAdapter is an adapter whose Invoke always refuses to start — the
-// refused-start path of the two-pass evidence write (ADR 0005 D7).
+// refused-start path of the two-pass evidence write.
 type refusingAdapter struct {
 	stubExecution
 }
@@ -198,10 +198,10 @@ func (adapter *refusingAdapter) Invoke(_ context.Context, _ agent.Invocation) (<
 	return nil, errors.New("refused for the test")
 }
 
-// TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry (ADR
-// 0005 D7): an invocation that never started still produces a record — the
-// open half landed before Invoke — with a stop reason and no telemetry
-// (nothing ran, nothing to bill).
+// TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry: an
+// invocation that never started still produces a record — the open half landed
+// before Invoke — with a stop reason and no telemetry (nothing ran, nothing to
+// bill).
 func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -336,10 +336,9 @@ func TestInvocationEvidence_StreamFailureRecordsNoTelemetry(t *testing.T) {
 	}
 }
 
-// TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation (ADR 0005
-// D4, point two): a pack stage naming a tier no configuration defines fails
-// the task at run start — before any stage_invocation row is created, naming
-// the stage and the tier.
+// TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation: a pack
+// stage naming a tier no configuration defines fails the task at run start —
+// before any stage_invocation row is created, naming the stage and the tier.
 func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -376,9 +375,9 @@ func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testin
 	}
 }
 
-// TestResolveExecutionPlan_ValidatesEveryStageOfThePack (ADR 0005 D4): a late
-// stage's bad tier fails the run at start even though the entry stage resolves
-// fine — validation covers the whole pack, not just the first stage.
+// TestResolveExecutionPlan_ValidatesEveryStageOfThePack: a late stage's bad
+// tier fails the run at start even though the entry stage resolves fine —
+// validation covers the whole pack, not just the first stage.
 func TestResolveExecutionPlan_ValidatesEveryStageOfThePack(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -437,10 +436,10 @@ func (adapter *narrowedOptionAdapter) Describe() agent.Descriptor {
 // TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation is the
 // acceptance criterion "a model option the adapter does not support stops the
 // run with a configuration error BEFORE the first invocation, naming adapter
-// and option" (ADR 0005 D4, the second refusal point). The tier cases above
-// cover an unresolvable tier; this one covers the option, which is the half
-// the criterion is actually about — and it asserts the refusal, never "the
-// option was quietly absent from argv".
+// and option" — the second refusal point. The tier cases above cover an
+// unresolvable tier; this one covers the option, which is the half the
+// criterion is actually about — and it asserts the refusal, never "the option
+// was quietly absent from argv".
 func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
