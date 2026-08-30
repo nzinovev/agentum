@@ -472,6 +472,18 @@ Once tagged releases begin, this project adheres to
   yet — that is PR3.
 
 ### Changed
+- **The authz action vocabulary is declared, not spelled at the call site.**
+  Every permission the API checks — the nine `task:*` verbs, the three
+  `project:*` ones, `event:stream`, and the route gate's `access` — is now an
+  `authz.Action*` constant in `internal/authz`. The handlers passed string
+  literals, so the permission surface could not be enumerated and SSO/RBAC would
+  have had no fixed set of rules to attach to; a typo would have invented a
+  permission silently.
+  `authz.Can` is now reached from exactly two places — `authorize` in
+  `internal/api/access.go` and the route gate in `internal/server` — and every
+  handler enters through `requireAccess` or a guard built on it, so an
+  unauthenticated, forbidden, or absent resource answers identically on every
+  route rather than per-handler. No endpoint, status code, or payload changes.
 - **Blob storage sits behind an `artifacts.ObjectStore` interface** instead of
   the concrete `*BlobStore`. The revisions index and the byte store were welded
   together through a struct field, which pinned the durable layer to the local
