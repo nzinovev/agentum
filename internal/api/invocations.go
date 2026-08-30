@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -32,13 +31,8 @@ type invocationResponse struct {
 // Returns a task's stage invocations ordered by sequence, so each attempt is
 // visible in run order. The cycle column distinguishes a retry from a resume.
 func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
-		return
-	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	// Confirm the task exists (and the tenant can see it) before listing its
@@ -71,13 +65,8 @@ func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
 // handleGetInvocation GET /api/v1/tasks/{id}/invocations/{iid}
 // Returns a single stage invocation by id.
 func (api *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
-		return
-	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
 	invocation, err := api.queries.GetStageInvocation(r.Context(), sqlc.GetStageInvocationParams{

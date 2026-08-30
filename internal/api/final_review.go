@@ -3,8 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"database/sql"
-	"errors"
 	"net/http"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -94,21 +92,8 @@ type finalReviewDecision struct {
 // a nicety (ADR 0003 D8). 409 for a task that has not reached the gate.
 // Assembled from durable rows + revisions only; the handler runs no git.
 func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	_, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskRead, "GetTask(final-review)")
 	if !ok {
-		return
-	}
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, r.PathValue("id")); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: r.PathValue("id"), TenantID: principal.TenantID})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
 	state := engine.TaskState(task.State)
