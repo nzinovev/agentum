@@ -167,7 +167,9 @@ func (blobStore *BlobStore) CopyTo(contentHash string, writer io.Writer) (int64,
 	if err != nil {
 		return 0, fmt.Errorf("artifacts: open blob: %w", err)
 	}
-	defer file.Close()
+	// Read-only handle: Close has no buffered write to flush, and io.Copy
+	// below already reports anything that went wrong with the transfer.
+	defer func() { _ = file.Close() }()
 	count, copyErr := io.Copy(writer, file)
 	if copyErr != nil {
 		return count, fmt.Errorf("artifacts: copy blob: %w", copyErr)

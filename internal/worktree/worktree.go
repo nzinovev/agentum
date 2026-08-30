@@ -541,9 +541,16 @@ func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error
 	if err != nil {
 		return fmt.Errorf("open excludes file: %w", err)
 	}
-	defer file.Close()
-	if _, err := file.WriteString(excludeEntry); err != nil {
-		return fmt.Errorf("write excludes file: %w", err)
+	if _, writeErr := file.WriteString(excludeEntry); writeErr != nil {
+		_ = file.Close()
+		return fmt.Errorf("write excludes file: %w", writeErr)
+	}
+	// Close is checked, not deferred: this handle is open for output, where a
+	// write can still be buffered, so a full disk or an I/O fault surfaces
+	// here and nowhere else. Discarding it would report a successful append
+	// that never reached the excludes file.
+	if closeErr := file.Close(); closeErr != nil {
+		return fmt.Errorf("close excludes file: %w", closeErr)
 	}
 	return nil
 }
