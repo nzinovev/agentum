@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
-	"github.com/nzinovev/agentum/internal/authz"
 )
 
 // Repeated artifact-handler messages, as constants so the wording callers and
@@ -65,17 +64,11 @@ func toArtifactRevisionResponse(revision artifacts.Revision) artifactRevisionRes
 // revisions only (the snapshot a resume / comparison reads). Default: all
 // revisions, including superseded.
 func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
+	if !api.requireArtifactStore(w) {
 		return
 	}
 	currentOnly, _ := strconv.ParseBool(r.URL.Query().Get("current"))
@@ -103,33 +96,15 @@ func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 // sibling /content path; splitting keeps this handler cheap and lets a client
 // inspect a revision without buffering the bytes.
 func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+	if !api.requireArtifactStore(w) {
 		return
 	}
-	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
-		return
-	}
-	revision, err := api.art.Get(r.Context(), principal.TenantID, r.PathValue("rid"))
-	if err != nil {
-		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
-			return
-		}
-		logUnexpected(api.log, err, "GetArtifactRevision")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-		return
-	}
-	if revision.TaskID != taskID {
-		// Tenant-can-read but the revision belongs to a different task. Treat
-		// as not-found rather than leaking the cross-task existence.
-		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
+	revision, found := api.revisionForTask(w, r, principal.TenantID, taskID, "GetArtifactRevision")
+	if !found {
 		return
 	}
 	writeJSON(w, http.StatusOK, toArtifactRevisionResponse(revision))
@@ -140,31 +115,15 @@ func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request
 // kind when known, else application/octet-stream. Streams via CopyTo so large
 // blobs do not buffer in memory.
 func (api *API) handleGetArtifactContent(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+	if !api.requireArtifactStore(w) {
 		return
 	}
-	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
-		return
-	}
-	revision, err := api.art.Get(r.Context(), principal.TenantID, r.PathValue("rid"))
-	if err != nil {
-		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
-			return
-		}
-		logUnexpected(api.log, err, "GetArtifactContent")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-		return
-	}
-	if revision.TaskID != taskID {
-		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
+	revision, found := api.revisionForTask(w, r, principal.TenantID, taskID, "GetArtifactContent")
+	if !found {
 		return
 	}
 	w.Header().Set("Content-Type", contentTypeForKind(revision.Kind))
@@ -175,6 +134,39 @@ func (api *API) handleGetArtifactContent(w http.ResponseWriter, r *http.Request)
 		api.log.Warn("stream artifact content", "revision", revision.ID, "error", copyErr)
 		return
 	}
+}
+
+// requireArtifactStore guards the handlers that cannot work without the
+// artifact store, writing the 404 itself when the server was built without one.
+func (api *API) requireArtifactStore(w http.ResponseWriter) bool {
+	if api.art == nil {
+		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactStoreNotConfigured)
+		return false
+	}
+	return true
+}
+
+// revisionForTask loads the {rid} revision and confirms it belongs to taskID.
+// A revision the tenant may read but that hangs off a DIFFERENT task is
+// reported as not-found rather than acknowledged, so the response never leaks
+// its cross-task existence. Writes the error response itself; found=false means
+// the handler must return. where names the caller for the unexpected-error log.
+func (api *API) revisionForTask(w http.ResponseWriter, r *http.Request, tenantID, taskID, where string) (artifacts.Revision, bool) {
+	revision, err := api.art.Get(r.Context(), tenantID, r.PathValue("rid"))
+	if err != nil {
+		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
+			return artifacts.Revision{}, false
+		}
+		logUnexpected(api.log, err, where)
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return artifacts.Revision{}, false
+	}
+	if revision.TaskID != taskID {
+		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
+		return artifacts.Revision{}, false
+	}
+	return revision, true
 }
 
 // contentTypeForKind maps a revision kind to a Content-Type. The map covers

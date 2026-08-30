@@ -56,7 +56,7 @@ func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where str
 		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unresolved principal")
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "event:stream", taskID); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionEventStream, taskID); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}

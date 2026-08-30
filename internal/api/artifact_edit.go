@@ -18,9 +18,8 @@ import (
 // Repeated artifact-edit messages, as constants so the wording callers and
 // logs match on cannot drift.
 const (
-	msgArtifactEditStoreNotConfigured = "artifact store not configured"
-	msgArtifactEditRequiresContent    = "content is required"
-	msgArtifactEditPrecondition       = "expected_revision_id is required when the artifact already has a revision; resend with the current revision id from GET"
+	msgArtifactEditRequiresContent = "content is required"
+	msgArtifactEditPrecondition    = "expected_revision_id is required when the artifact already has a revision; resend with the current revision id from GET"
 )
 
 // artifactEditRequest is the PUT body for a human artifact edit. kind is
@@ -40,17 +39,11 @@ type artifactEditRequest struct {
 // id is surfaced in the X-Revision-Id response header so a client can use it as
 // the expected_revision_id precondition for a subsequent PUT.
 func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactEditStoreNotConfigured)
+	if !api.requireArtifactStore(w) {
 		return
 	}
 	name := r.PathValue("name")
@@ -101,17 +94,11 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // being collapsed into "no current revision" — the latter would silently
 // disable the precondition and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, taskID, ok := requireTaskRead(w, r)
 	if !ok {
 		return
 	}
-	taskID := r.PathValue("id")
-	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
-		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
-		return
-	}
-	if api.art == nil {
-		writeError(w, http.StatusNotFound, codeNotFound, msgArtifactEditStoreNotConfigured)
+	if !api.requireArtifactStore(w) {
 		return
 	}
 	name := r.PathValue("name")

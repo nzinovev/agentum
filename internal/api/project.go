@@ -74,7 +74,7 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "project:create", ""); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionProjectCreate, ""); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -124,7 +124,7 @@ func (api *API) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "project:read", r.PathValue("id")); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionProjectRead, r.PathValue("id")); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -148,7 +148,7 @@ func (api *API) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "project:list", ""); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionProjectList, ""); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}

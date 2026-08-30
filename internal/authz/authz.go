@@ -47,11 +47,50 @@ func Deny(r string) Decision { return Decision{false, r} }
 
 // Action vocabulary. These are the `action` arguments callers pass to Can.
 // Centralized here so the permission surface has one source of truth — a typo
-// in a handler cannot silently invent a new permission.
+// in a handler cannot silently invent a new permission. A caller that needs a
+// permission not listed here adds the constant here FIRST; never pass a string
+// literal to Can, or the vocabulary stops being enumerable and RBAC has nothing
+// to attach rules to.
 const (
+	// ActionAccess is the route-level gate every inbound request passes in the
+	// server middleware, ahead of any handler-specific action. Its resource is
+	// the request path, not a row id.
+	ActionAccess = "access"
+
+	// ActionTaskCreate and ActionTaskList are tenant-scoped: they carry no
+	// resource id, because the task does not exist yet (create) or the resource
+	// is the whole collection (list).
+	ActionTaskCreate = "task:create"
+	ActionTaskList   = "task:list"
+
 	// ActionTaskRead is the right to read a task and its artifacts / manifest.
 	// Every read-side handler (tasks, artifacts, manifest, diff) checks it.
 	ActionTaskRead = "task:read"
+
+	// ActionTaskStart moves a fresh task into the running pipeline.
+	ActionTaskStart = "task:start"
+
+	// The human-gate verbs. Each is its own action rather than one collapsed
+	// "task:write": approving a result, rejecting it, and aborting a run are
+	// different rights, and RBAC will have to grant them separately.
+	ActionTaskAdvance = "task:advance"
+	ActionTaskApprove = "task:approve"
+	ActionTaskReject  = "task:reject"
+	ActionTaskCancel  = "task:cancel"
+
+	// ActionTaskCleanup deletes the delivery artifacts (the task branch) of an
+	// already-terminal task — destructive, so it is not folded into cancel.
+	ActionTaskCleanup = "task:cleanup"
+
+	// Project actions mirror the task ones. A project is the repository a task
+	// runs against.
+	ActionProjectCreate = "project:create"
+	ActionProjectRead   = "project:read"
+	ActionProjectList   = "project:list"
+
+	// ActionEventStream is the right to tail the event stream: tenant-global
+	// when the resource is empty, task-scoped otherwise.
+	ActionEventStream = "event:stream"
 )
 
 // Can is THE permission function. action/resource are coarse today and refine

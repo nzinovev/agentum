@@ -55,6 +55,14 @@ func humanDecisionPatch(stage, gate, decision, actor string, at time.Time) manif
 	}
 }
 
+// gateDecisionPatch is the humanDecisionPatch every lifecycle handler builds:
+// the task's current stage, the gate and decision the handler stands for, the
+// acting principal, and now. Only the gate and the decision vary between
+// handlers, so they are the only things a call site spells out.
+func gateDecisionPatch(task sqlc.Task, principal authz.Principal, gate, decision string) manifest.Body {
+	return humanDecisionPatch(currentStageOr(task.CurrentStage, ""), gate, decision, principal.UserID, time.Now().UTC())
+}
+
 // currentStageOr returns the task's current stage id, or fallback when the task
 // has no current stage set (a task that has not entered a stage yet). Used by
 // the lifecycle handlers to fill the Stage field of a HumanDecision.

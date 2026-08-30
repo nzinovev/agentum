@@ -86,6 +86,33 @@ func requirePrincipal(w http.ResponseWriter, r *http.Request) (authz.Principal, 
 	return principal, true
 }
 
+// requireTaskRead is the preamble every task-scoped read handler opens with:
+// resolve the principal, then authorize task:read on the {id} path value. It
+// writes the 401 / 403 itself, so ok=false means the response is already
+// written and the handler must return.
+func requireTaskRead(w http.ResponseWriter, r *http.Request) (authz.Principal, string, bool) {
+	principal, ok := requirePrincipal(w, r)
+	if !ok {
+		return authz.Principal{}, "", false
+	}
+	taskID := r.PathValue("id")
+	if !authorizeTaskRead(w, r, principal, taskID) {
+		return authz.Principal{}, "", false
+	}
+	return principal, taskID, true
+}
+
+// authorizeTaskRead checks task:read for one task id, writing the 403 itself.
+// Split out of requireTaskRead for the handlers that authorize a SECOND task
+// beyond the path one (the manifest diff's ?other=).
+func authorizeTaskRead(w http.ResponseWriter, r *http.Request, principal authz.Principal, taskID string) bool {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, taskID); !decision.Allowed {
+		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
+		return false
+	}
+	return true
+}
+
 // taskCreateRequest is the POST /tasks body. The request half — title +
 // description — reaches the model; the overrides half configures the run and
 // is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
@@ -195,7 +222,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "task:create", ""); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskCreate, ""); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -274,7 +301,7 @@ func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "task:read", r.PathValue("id")); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskRead, r.PathValue("id")); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -298,7 +325,7 @@ func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "task:list", ""); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskList, ""); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
@@ -338,7 +365,7 @@ func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if decision := authz.Can(r.Context(), principal, "task:start", r.PathValue("id")); !decision.Allowed {
+	if decision := authz.Can(r.Context(), principal, authz.ActionTaskStart, r.PathValue("id")); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
 		return
 	}
