@@ -2,21 +2,24 @@ package manifest
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 func TestEncodeDecode_Roundtrip(t *testing.T) {
 	t.Parallel()
 	body := Body{
-		Schema: "1",
+		Schema: schemaVersion,
 		Input: &InputEvidence{
 			TaskID: "T1", Title: "title", Revision: "abc",
 			Description: "the requested behaviour",
 			Overrides:   []byte(`{"checks":{"required":["verify"],"optional":[]}}`),
 		},
-		Prompts: []PromptRevision{{StageID: "spec", Hash: "h1"}},
-		Missing: []string{"memory"},
+		Invocations: []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		Missing:     []string{"memory"},
 	}
 	encoded, err := encodeBody(body)
 	if err != nil {
@@ -32,16 +35,19 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	if decoded.Input == nil || decoded.Input.Revision != "abc" {
 		t.Errorf("Input not preserved: %+v", decoded.Input)
 	}
-	// ADR 0004 D9: the typed request round-trips — a reviewer reads the
-	// description the run existed to satisfy straight off the manifest.
+	// The typed request round-trips — a reviewer reads the description the run
+	// existed to satisfy straight off the manifest.
 	if decoded.Input.Description != "the requested behaviour" {
 		t.Errorf("Input.Description not preserved: %+v", decoded.Input)
 	}
 	if string(decoded.Input.Overrides) != `{"checks":{"required":["verify"],"optional":[]}}` {
 		t.Errorf("Input.Overrides not preserved: %s", decoded.Input.Overrides)
 	}
-	if len(decoded.Prompts) != 1 || decoded.Prompts[0].StageID != "spec" {
-		t.Errorf("Prompts not preserved: %+v", decoded.Prompts)
+	if len(decoded.Invocations) != 1 || decoded.Invocations[0].Stage != "spec" {
+		t.Errorf("Invocations not preserved: %+v", decoded.Invocations)
+	}
+	if decoded.Invocations[0].Prompt.RenderedHash == "" {
+		t.Errorf("RenderedHash not preserved: %+v", decoded.Invocations[0].Prompt)
 	}
 	if len(decoded.Missing) != 1 || decoded.Missing[0] != "memory" {
 		t.Errorf("Missing not preserved: %+v", decoded.Missing)
@@ -69,16 +75,57 @@ func TestMergeBodies_ScalarOverwrites(t *testing.T) {
 	}
 }
 
-func TestMergeBodies_PromptsAppendUnique(t *testing.T) {
+// TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords is the headline
+// regression test of the invocation schema: a fix cycle re-running `review`
+// must leave TWO evidence records - keying by stage (the schema-1 merge rule)
+// replaced the first attempt's model, tier and capability snapshot with the
+// second's. The merge key is the invocation id and nothing else.
+func TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords(t *testing.T) {
 	t.Parallel()
-	base := Body{Prompts: []PromptRevision{{StageID: "spec", Hash: "h1"}}}
-	patch := Body{Prompts: []PromptRevision{
-		{StageID: "spec", Hash: "h1"}, // dup → ignored
-		{StageID: "impl", Hash: "h2"}, // new
+	base := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{
+		testInvocation("inv-first", "review", 0),
+	}}
+	patch := Body{Invocations: []InvocationEvidence{
+		testInvocation("inv-second", "review", 1),
 	}}
 	merged := mergeBodies(base, patch)
-	if len(merged.Prompts) != 2 {
-		t.Fatalf("merged prompts = %d, want 2: %+v", len(merged.Prompts), merged.Prompts)
+	if len(merged.Invocations) != 2 {
+		t.Fatalf("merged invocations = %d, want 2 (same stage, different ids): %+v",
+			len(merged.Invocations), merged.Invocations)
+	}
+	if merged.Invocations[0].InvocationID != "inv-first" || merged.Invocations[1].InvocationID != "inv-second" {
+		t.Errorf("records reordered or replaced: %+v", merged.Invocations)
+	}
+	if merged.Invocations[0].Prompt.RenderedHash == merged.Invocations[1].Prompt.RenderedHash {
+		t.Errorf("two attempts must carry distinct rendered hashes: %+v", merged.Invocations)
+	}
+}
+
+// TestMergeBodies_SameIDPatchedTwiceMergesIntoOne is the two-pass write: the
+// open record (identity, model, prompts, profile) is written before Invoke;
+// the close record (telemetry, stop reason) fills the same record afterwards
+// without duplicating it or erasing the open fields.
+func TestMergeBodies_SameIDPatchedTwiceMergesIntoOne(t *testing.T) {
+	t.Parallel()
+	open := testInvocation("inv-1", "spec", 0)
+	base := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{open}}
+
+	closed := InvocationEvidence{
+		InvocationID: "inv-1",
+		Telemetry:    &InvocationTelemetry{Tokens: TokenUsage{Total: 42}, Cost: 0.5},
+		StopReason:   "adapter_error",
+	}
+	merged := mergeBodies(base, Body{Invocations: []InvocationEvidence{closed}})
+
+	if len(merged.Invocations) != 1 {
+		t.Fatalf("merged invocations = %d, want 1: %+v", len(merged.Invocations), merged.Invocations)
+	}
+	record := merged.Invocations[0]
+	if record.Model.Tier != open.Model.Tier || record.Prompt.StagePromptHash == "" || record.Capabilities.Role == "" {
+		t.Errorf("close patch erased open fields: %+v", record)
+	}
+	if record.Telemetry == nil || record.Telemetry.Tokens.Total != 42 || record.StopReason != "adapter_error" {
+		t.Errorf("close fields not filled: %+v", record)
 	}
 }
 
@@ -139,7 +186,7 @@ func TestMergeBodies_GitEvidenceOverwritesScalarAppendsCheckpoint(t *testing.T) 
 func TestMergeBodies_NilPatchArtifactsPreservesBase(t *testing.T) {
 	t.Parallel()
 	base := Body{Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{{Name: "x", ContentHash: "h1"}}}}
-	merged := mergeBodies(base, Body{Prompts: []PromptRevision{{StageID: "s", Hash: "h"}}})
+	merged := mergeBodies(base, Body{Invocations: []InvocationEvidence{testInvocation("inv-9", "s", 0)}})
 	if merged.Artifacts == nil || len(merged.Artifacts.Inputs) != 1 {
 		t.Errorf("Artifacts not preserved: %+v", merged.Artifacts)
 	}
@@ -164,31 +211,26 @@ func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) 
 	t.Parallel()
 	base := Body{Schema: "1", Missing: []string{"memory"}}
 	patchA := Body{
-		Prompts:    []PromptRevision{{StageID: "spec", Hash: "spec-hash"}},
-		HumanGates: []HumanDecision{{Stage: "spec", Gate: "final", Decision: "approved", Actor: "alice", Timestamp: parseTestTime(t, "2026-01-01T00:00:00Z")}},
-		Artifacts:  &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "spec.md", RevisionID: "rev-1", ContentHash: "h1", Stage: "spec"}}},
-		Checks:     &CheckEvidence{SetVersion: "v1", Results: []CheckResult{{Name: "build", Status: "pass"}}},
-		Missing:    []string{"capabilities"},
-		Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{
-			Stage: "spec", Role: "implementer", Profile: json.RawMessage("{}"),
-		}}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-spec", "spec", 0)},
+		HumanGates:   []HumanDecision{{Stage: "spec", Gate: "final", Decision: "approved", Actor: "alice", Timestamp: parseTestTime(t, "2026-01-01T00:00:00Z")}},
+		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "spec.md", RevisionID: "rev-1", ContentHash: "h1", Stage: "spec"}}},
+		Checks:       &CheckEvidence{SetVersion: "v1", Results: []CheckResult{{Name: "build", Status: "pass"}}},
+		Missing:      []string{"capabilities"},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 	}
 	patchB := Body{
-		Prompts:    []PromptRevision{{StageID: "impl", Hash: "impl-hash"}},
-		HumanGates: []HumanDecision{{Stage: "impl", Gate: "final", Decision: "approved", Actor: "bob", Timestamp: parseTestTime(t, "2026-01-02T00:00:00Z")}},
-		Artifacts:  &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "impl.md", RevisionID: "rev-2", ContentHash: "h2", Stage: "impl"}}},
-		Checks:     &CheckEvidence{SetVersion: "v2", Results: []CheckResult{{Name: "test", Status: "pass"}}},
-		Missing:    []string{"human_gates"},
-		Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{
-			Stage: "impl", Role: "implementer", Profile: json.RawMessage("{}"),
-		}}},
+		Invocations: []InvocationEvidence{testInvocation("inv-impl", "impl", 0)},
+		HumanGates:  []HumanDecision{{Stage: "impl", Gate: "final", Decision: "approved", Actor: "bob", Timestamp: parseTestTime(t, "2026-01-02T00:00:00Z")}},
+		Artifacts:   &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "impl.md", RevisionID: "rev-2", ContentHash: "h2", Stage: "impl"}}},
+		Checks:      &CheckEvidence{SetVersion: "v2", Results: []CheckResult{{Name: "test", Status: "pass"}}},
+		Missing:     []string{"human_gates"},
 	}
 
 	afterA := mergeBodies(base, patchA)
 	afterB := mergeBodies(afterA, patchB)
 
-	if len(afterB.Prompts) != 2 {
-		t.Errorf("Prompts: A's spec prompt lost; got %+v", afterB.Prompts)
+	if len(afterB.Invocations) != 2 {
+		t.Errorf("Invocations: A's spec record lost; got %+v", afterB.Invocations)
 	}
 	if len(afterB.HumanGates) != 2 {
 		t.Errorf("HumanGates: A's decision lost; got %+v", afterB.HumanGates)
@@ -202,8 +244,20 @@ func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) 
 	if len(afterB.Missing) != 3 {
 		t.Errorf("Missing: union wrong; got %+v", afterB.Missing)
 	}
-	if afterB.Capabilities == nil || len(afterB.Capabilities.Effective) != 2 {
-		t.Errorf("Capabilities.Effective: A's spec profile lost; got %+v", afterB.Capabilities)
+	if afterB.Capabilities == nil || len(afterB.Capabilities.Declared) == 0 {
+		t.Errorf("Capabilities.Declared: A's declared ceiling lost; got %+v", afterB.Capabilities)
+	}
+}
+
+// testInvocation builds one schema-2 invocation record with every section
+// populated, so completeness/merge tests share one shape.
+func testInvocation(invocationID, stage string, cycle int32) InvocationEvidence {
+	return InvocationEvidence{
+		InvocationID: invocationID, Stage: stage, Sequence: cycle + 1, Cycle: cycle,
+		Adapter:      InvocationAdapter{ID: "stub", AdapterVersion: "1.0.0", RuntimeVersion: "1.18.11"},
+		Model:        models.Selection{Tier: "strong", Provider: "stub", Options: models.Options{Model: "stub/model"}},
+		Prompt:       InvocationPrompt{StagePromptHash: "hash-" + stage, RenderedHash: "rendered-" + invocationID},
+		Capabilities: InvocationCaps{Role: "implementer", Profile: json.RawMessage(`{"grants":[]}`)},
 	}
 }
 
@@ -229,8 +283,8 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 	}{
 		{
 			name: "empty body reports every expected section missing",
-			body: Body{Schema: "1"},
-			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "prompts"},
+			body: Body{Schema: schemaVersion},
+			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "invocations"},
 		},
 		{
 			name: "fully populated body reports nothing missing",
@@ -240,7 +294,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
 				Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+				Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 				Context:      &ContextEvidence{SkillsProbe: "ok"},
 			},
 			want: nil,
@@ -248,10 +302,32 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 		{
 			name: "populated capabilities is not reported missing (stale-list regression)",
 			body: Body{
-				Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{Stage: "spec"}}},
-				Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+				Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 			},
 			want: []string{"memory", "context", "human_gates", "artifacts", "checks"},
+		},
+		{
+			name: "a record without a prompt hash leaves invocations missing",
+			body: Body{
+				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+				Invocations: []InvocationEvidence{{
+					InvocationID: "inv-1", Stage: "spec",
+					Capabilities: InvocationCaps{Role: "implementer", Profile: json.RawMessage(`{}`)},
+				}},
+			},
+			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "invocations"},
+		},
+		{
+			name: "a record without a profile leaves capabilities missing",
+			body: Body{
+				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+				Invocations: []InvocationEvidence{{
+					InvocationID: "inv-1", Stage: "spec",
+					Prompt: InvocationPrompt{StagePromptHash: "h"},
+				}},
+			},
+			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities"},
 		},
 	}
 	for _, testCase := range tests {
@@ -324,7 +400,7 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
 		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 		Context:      &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !body.IsEvidenceComplete() {
@@ -346,7 +422,7 @@ func TestEvidenceComplete_GapOrAbsentSectionBlocks(t *testing.T) {
 		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
 		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 		Context:      &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !complete.IsEvidenceComplete() {
@@ -382,60 +458,301 @@ func equalStringSet(a, b []string) bool {
 	return true
 }
 
-// TestMergeBodies_PerStageModelAccumulates is D8: each stage's model must
-// accumulate into Model.PerStage, not overwrite the run-level Model pointer. A
-// pipeline that runs different tiers per stage (cheap for analysis, expensive
-// for implementation) must record which model served each stage; the scalar
-// alone recorded only whichever stage ran last.
-func TestMergeBodies_PerStageModelAccumulates(t *testing.T) {
+// TestDecodeV1Body_RetainsLegacySectionsVerbatim: a schema-1 body decodes with
+// its prompts / model / effective sections intact and its schema still reading
+// "1" - nothing is dropped on read, so GET on an old sealed manifest returns
+// exactly what was sealed.
+func TestDecodeV1Body_RetainsLegacySectionsVerbatim(t *testing.T) {
 	t.Parallel()
-	base := Body{Model: &ModelEvidence{
-		Tier: "fast", Model: "model-fast", AgentName: "opencode",
-		PerStage: []StageModel{{Stage: "spec", Tier: "fast", Model: "model-fast", AgentName: "opencode"}},
-	}}
-	patch := Body{Model: &ModelEvidence{
-		Tier: "strong", Model: "model-strong", AgentName: "opencode",
-		PerStage: []StageModel{{Stage: "impl", Tier: "strong", Model: "model-strong", AgentName: "opencode"}},
-	}}
-	merged := mergeBodies(base, patch)
-
-	// Scalars take the patch's value (the run-level summary is the last stage).
-	if merged.Model.Tier != "strong" || merged.Model.Model != "model-strong" {
-		t.Errorf("scalars = %s/%s, want strong/model-strong", merged.Model.Tier, merged.Model.Model)
+	raw := []byte(`{
+		"schema_version": "1",
+		"prompts": [{"stage_id": "spec", "hash": "spec-hash"}],
+		"model": {"tier": "strong", "model": "stub/model", "agent_name": "stub",
+			"per_stage": [{"stage": "spec", "tier": "strong", "model": "stub/model", "agent_name": "stub"}]},
+		"capabilities": {"declared": ["fs.read"], "effective": [{"stage": "spec", "role": "implementer", "profile": {"grants":[]}}]},
+		"adapter": {"name": "stub", "version": "1.0.0", "declared_capabilities": ["fs.read"]}
+	}`)
+	body, err := decodeBody(raw)
+	if err != nil {
+		t.Fatalf("decode v1: %v", err)
 	}
-	// PerStage accumulates both stages.
-	if len(merged.Model.PerStage) != 2 {
-		t.Fatalf("PerStage = %d entries, want 2: %+v", len(merged.Model.PerStage), merged.Model.PerStage)
+	if body.Schema != schemaVersionV1 {
+		t.Errorf("Schema = %q, want 1 preserved on read", body.Schema)
 	}
-	stages := make(map[string]StageModel, len(merged.Model.PerStage))
-	for _, entry := range merged.Model.PerStage {
-		stages[entry.Stage] = entry
+	if len(body.Prompts) != 1 || body.Prompts[0].Hash != "spec-hash" {
+		t.Errorf("legacy Prompts not retained: %+v", body.Prompts)
 	}
-	if stages["spec"].Model != "model-fast" {
-		t.Errorf("spec stage model lost: %+v", stages["spec"])
+	if body.Model == nil || body.Model.Tier != "strong" || len(body.Model.PerStage) != 1 {
+		t.Errorf("legacy Model not retained: %+v", body.Model)
 	}
-	if stages["impl"].Model != "model-strong" {
-		t.Errorf("impl stage model lost: %+v", stages["impl"])
+	if body.Capabilities == nil || len(body.Capabilities.Effective) != 1 {
+		t.Errorf("legacy Effective not retained: %+v", body.Capabilities)
+	}
+	if body.Adapter == nil || body.Adapter.Name != "stub" || body.Adapter.Version != "1.0.0" {
+		t.Errorf("legacy adapter fields not retained: %+v", body.Adapter)
 	}
 }
 
-// TestMergeBodies_PerStageModelReRunReplaces covers the resume case: a stage
-// re-run after resume supersedes its prior entry rather than appending a
-// duplicate, matching how the capability section handles a re-run.
-func TestMergeBodies_PerStageModelReRunReplaces(t *testing.T) {
+// TestDecodeUnknownSchemaIsATypedError: a body whose schema_version is neither
+// 1 nor 2 is refused, not silently mis-decoded.
+func TestDecodeUnknownSchemaIsATypedError(t *testing.T) {
 	t.Parallel()
-	base := Body{Model: &ModelEvidence{
-		PerStage: []StageModel{{Stage: "spec", Tier: "fast", Model: "model-fast-v1"}},
-	}}
-	patch := Body{Model: &ModelEvidence{
-		PerStage: []StageModel{{Stage: "spec", Tier: "strong", Model: "model-strong-v2"}},
-	}}
-	merged := mergeBodies(base, patch)
-	if len(merged.Model.PerStage) != 1 {
-		t.Fatalf("PerStage = %d entries, want 1 (replaced, not duplicated): %+v", len(merged.Model.PerStage), merged.Model.PerStage)
+	raw := []byte(`{"schema_version": "9", "input": {"task_id": "T1"}}`)
+	_, err := decodeBody(raw)
+	if err == nil {
+		t.Fatal("unknown schema version must be an error")
 	}
-	if merged.Model.PerStage[0].Model != "model-strong-v2" {
-		t.Errorf("spec stage not superseded: %+v", merged.Model.PerStage[0])
+	if !errors.Is(err, ErrUnsupportedSchema) {
+		t.Errorf("error must wrap ErrUnsupportedSchema: %v", err)
+	}
+	var schemaError *UnsupportedSchemaError
+	if !errors.As(err, &schemaError) || schemaError.Version != "9" {
+		t.Errorf("error must name the unsupported version: %v", err)
+	}
+}
+
+// TestMergeBodies_V1ExistingUpgradesToV2: merging a v2 patch onto a v1
+// existing body converts the legacy sections into invocation records, clears
+// them, and yields exactly one schema-2 body - losing nothing. The only body
+// this happens to is an unsealed one from a run in flight across the upgrade.
+func TestMergeBodies_V1ExistingUpgradesToV2(t *testing.T) {
+	t.Parallel()
+	existing := Body{
+		Schema: schemaVersionV1,
+		Prompts: []PromptRevision{
+			{StageID: "spec", Hash: "spec-hash"},
+			{StageID: "impl", Hash: "impl-hash"},
+		},
+		Model: &ModelEvidence{
+			Tier: "strong", Model: "stub/model", AgentName: "stub",
+			PerStage: []StageModel{
+				{Stage: "spec", Tier: "strong", Model: "stub/model", AgentName: "stub"},
+			},
+		},
+		Capabilities: &CapabilityProfile{
+			Declared:  []string{"fs.read"},
+			Effective: []StageCapabilityProfile{{Stage: "spec", Role: "implementer", Profile: json.RawMessage(`{"grants":[]}`)}},
+		},
+		Adapter: &AdapterEvidence{Name: "stub", Version: "1.0.0"},
+	}
+	patch := Body{Invocations: []InvocationEvidence{testInvocation("inv-run-2", "review", 0)}}
+
+	merged := mergeBodies(existing, patch)
+
+	if merged.Schema != schemaVersion {
+		t.Fatalf("Schema = %q, want upgraded to 2", merged.Schema)
+	}
+	if len(merged.Prompts) != 0 || merged.Model != nil || len(merged.Capabilities.Effective) != 0 {
+		t.Errorf("legacy sections must be cleared after the upgrade: %+v", merged)
+	}
+	if merged.Adapter != nil && (merged.Adapter.Name != "" || merged.Adapter.Version != "") {
+		t.Errorf("legacy adapter fields must be cleared: %+v", merged.Adapter)
+	}
+	if len(merged.Invocations) != 3 {
+		t.Fatalf("invocations = %d, want 3 (spec + impl synthesized, review real): %+v",
+			len(merged.Invocations), merged.Invocations)
+	}
+	// Nothing was lost: the synthesized records carry the legacy facts.
+	byStage := make(map[string]InvocationEvidence, len(merged.Invocations))
+	for _, record := range merged.Invocations {
+		byStage[record.Stage] = record
+	}
+	spec := byStage["spec"]
+	if spec.Prompt.StagePromptHash != "spec-hash" || spec.Model.Options.Model != "stub/model" ||
+		spec.Capabilities.Role != "implementer" || spec.Adapter.ID != "stub" {
+		t.Errorf("spec synthesis lost legacy facts: %+v", spec)
+	}
+	if byStage["impl"].Prompt.StagePromptHash != "impl-hash" {
+		t.Errorf("impl synthesis lost its prompt hash: %+v", byStage["impl"])
+	}
+	if byStage["review"].InvocationID != "inv-run-2" {
+		t.Errorf("real v2 record must survive the upgrade: %+v", byStage["review"])
+	}
+}
+
+// TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted: a v1 body whose only
+// legacy content is the run-level adapter section — a run that recorded its
+// provenance root and then stopped before its first stage — still loses those
+// fields on the upgrade. Stamping it schema 2 while leaving
+// adapter.name/version behind would store the mixed-shape body the upgrade
+// exists to prevent, and it would leave a v2 reader looking at an adapter
+// section with no id.
+func TestUpgrade_AdapterOnlyLegacyBodyIsFullyConverted(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema:       schemaVersionV1,
+		Adapter:      &AdapterEvidence{Name: "stub", Version: "opencode-adapter-v1"},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+	}
+
+	encoded, err := encodeBody(v1)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := decodeBody(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Schema != schemaVersion {
+		t.Fatalf("Schema = %q, want 2", decoded.Schema)
+	}
+	if decoded.CarriesLegacySections() {
+		t.Errorf("a body stamped schema 2 still carries schema-1 fields: %+v", decoded.Adapter)
+	}
+	if decoded.Capabilities == nil || len(decoded.Capabilities.Declared) != 1 {
+		t.Errorf("the declared ceiling must survive the upgrade: %+v", decoded.Capabilities)
+	}
+	// The upgrade must not reach back into the caller's body: v1 still holds
+	// the pointers it was built with.
+	if v1.Adapter.Name != "stub" {
+		t.Errorf("upgrade mutated the caller's adapter section: %+v", v1.Adapter)
+	}
+}
+
+// TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts: schema 1
+// deduplicated prompts on (stage, hash), so two entries for one stage are two
+// genuinely different prompts — two attempts under an edited pack. Collapsing
+// them into one record would delete evidence during the very upgrade that
+// exists to stop evidence being deleted.
+func TestLegacyRecords_TwoPromptHashesForOneStageBecomeTwoAttempts(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema: schemaVersionV1,
+		Prompts: []PromptRevision{
+			{StageID: "review", Hash: "first-prompt"},
+			{StageID: "review", Hash: "second-prompt"},
+		},
+		Model: &ModelEvidence{
+			PerStage: []StageModel{{Stage: "review", Tier: "strong", Model: "stub/model"}},
+		},
+		Capabilities: &CapabilityProfile{
+			Declared:  []string{"fs.read"},
+			Effective: []StageCapabilityProfile{{Stage: "review", Role: "reviewer", Profile: json.RawMessage(`{"grants":[]}`)}},
+		},
+	}
+
+	records := v1.InvocationRecords()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want one per distinct prompt hash: %+v", len(records), records)
+	}
+	if records[0].Prompt.StagePromptHash != "first-prompt" || records[1].Prompt.StagePromptHash != "second-prompt" {
+		t.Errorf("prompt hashes lost their append order: %+v", records)
+	}
+	if records[0].Cycle != 0 || records[1].Cycle != 1 {
+		t.Errorf("cycles = %d / %d, want 0 / 1", records[0].Cycle, records[1].Cycle)
+	}
+	// Schema 1 replaced the model and profile by stage on every write, so the
+	// surviving snapshot belongs to the LAST attempt. The earlier attempt
+	// carries its prompt alone — what it ran under is what schema 1 overwrote,
+	// and inventing an attribution would be worse than recording none.
+	if records[1].Model.Options.Model != "stub/model" || records[1].Capabilities.Role != "reviewer" {
+		t.Errorf("the surviving snapshots must attach to the last attempt: %+v", records[1])
+	}
+	if records[0].Model.Options.Model != "" || records[0].Capabilities.Role != "" {
+		t.Errorf("the earlier attempt must not claim the later attempt's snapshot: %+v", records[0])
+	}
+	// And the same records survive the write path.
+	upgraded := upgradeLegacySections(v1)
+	if len(upgraded.Invocations) != 2 || len(upgraded.Prompts) != 0 {
+		t.Errorf("upgrade dropped an attempt: %+v", upgraded.Invocations)
+	}
+}
+
+// TestEncodeBody_NeverWritesLegacyFields: the write path speaks one schema -
+// even a decoded v1 body re-encodes as schema 2 with its legacy sections
+// converted, never alongside invocations.
+func TestEncodeBody_NeverWritesLegacyFields(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema:  schemaVersionV1,
+		Prompts: []PromptRevision{{StageID: "spec", Hash: "spec-hash"}},
+	}
+	encoded, err := encodeBody(v1)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if string(encoded) == "" {
+		t.Fatal("empty encode")
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(encoded, &generic); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	if generic["schema_version"] != schemaVersion {
+		t.Errorf("schema_version = %v, want 2", generic["schema_version"])
+	}
+	if _, present := generic["prompts"]; present {
+		t.Error("encoded body still carries the legacy prompts section")
+	}
+	if _, present := generic["model"]; present {
+		t.Error("encoded body still carries the legacy model section")
+	}
+	if _, present := generic["invocations"]; !present {
+		t.Error("upgraded body must carry the invocations section")
+	}
+}
+
+// TestInvocationRecords_V1AndV2Equivalent: the accessor synthesizes records
+// for a v1 body that are equivalent to a v2 body describing the same run - one
+// code path for every consumer.
+func TestInvocationRecords_V1AndV2Equivalent(t *testing.T) {
+	t.Parallel()
+	v1 := Body{
+		Schema:  schemaVersionV1,
+		Prompts: []PromptRevision{{StageID: "spec", Hash: "spec-hash"}},
+		Model: &ModelEvidence{
+			PerStage: []StageModel{{Stage: "spec", Tier: "strong", Model: "stub/model"}},
+		},
+		Capabilities: &CapabilityProfile{
+			Effective: []StageCapabilityProfile{{Stage: "spec", Role: "implementer", Profile: json.RawMessage(`{"grants":[]}`)}},
+		},
+		Adapter: &AdapterEvidence{Name: "stub", Version: "1.0.0"},
+	}
+	v2 := Body{
+		Schema: schemaVersion,
+		Invocations: []InvocationEvidence{{
+			Stage:        "spec",
+			Adapter:      InvocationAdapter{ID: "stub", AdapterVersion: "1.0.0"},
+			Model:        models.Selection{Tier: "strong", Provider: "stub", Options: models.Options{Model: "stub/model"}},
+			Prompt:       InvocationPrompt{StagePromptHash: "spec-hash"},
+			Capabilities: InvocationCaps{Role: "implementer", Profile: json.RawMessage(`{"grants":[]}`)},
+		}},
+	}
+	left := v1.InvocationRecords()
+	right := v2.InvocationRecords()
+	if len(left) != 1 || len(right) != 1 {
+		t.Fatalf("records = %d / %d, want 1 / 1", len(left), len(right))
+	}
+	if left[0].Stage != right[0].Stage ||
+		left[0].Model.Options.Model != right[0].Model.Options.Model ||
+		left[0].Prompt.StagePromptHash != right[0].Prompt.StagePromptHash ||
+		left[0].Capabilities.Role != right[0].Capabilities.Role ||
+		left[0].Adapter.ID != right[0].Adapter.ID {
+		t.Errorf("synthesized v1 record is not equivalent to the v2 record:\n v1: %+v\n v2: %+v", left[0], right[0])
+	}
+}
+
+// TestCarriesLegacySections backs the corrections-endpoint refusal: each
+// schema-1-only shape is detected, a clean v2 patch is not.
+func TestCarriesLegacySections(t *testing.T) {
+	t.Parallel()
+	if (Body{}).CarriesLegacySections() {
+		t.Error("empty body must not carry legacy sections")
+	}
+	if !(Body{Prompts: []PromptRevision{{StageID: "s"}}}).CarriesLegacySections() {
+		t.Error("prompts must be detected")
+	}
+	if !(Body{Model: &ModelEvidence{Tier: "t"}}).CarriesLegacySections() {
+		t.Error("model must be detected")
+	}
+	if !(Body{Capabilities: &CapabilityProfile{Effective: []StageCapabilityProfile{{Stage: "s"}}}}).CarriesLegacySections() {
+		t.Error("capabilities.effective must be detected")
+	}
+	if !(Body{Adapter: &AdapterEvidence{Name: "stub"}}).CarriesLegacySections() {
+		t.Error("adapter.name must be detected")
+	}
+	if (Body{Invocations: []InvocationEvidence{testInvocation("inv-1", "s", 0)}}).CarriesLegacySections() {
+		t.Error("a v2 patch carrying only invocations must pass")
 	}
 }
 
@@ -503,7 +820,7 @@ func TestEvidenceComplete_ChecksWithoutRanBlocks(t *testing.T) {
 		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
 		Checks:       &CheckEvidence{SetVersion: "v1", Ran: false, MandatoryPassed: true},
 		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 	}
 	if body.IsEvidenceComplete() {
 		t.Error("a checks section with Ran=false must not satisfy completeness even if MandatoryPassed=true")
@@ -579,8 +896,74 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 		}
 	}
 	// The expected sections list now includes context (ADR 0002).
-	wantMissing := []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "prompts"}
+	wantMissing := []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "invocations"}
 	if len(missing) != len(wantMissing) {
 		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
+	}
+}
+
+// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef: two attempts at one
+// stage can produce byte-identical output, and artifacts.Put is a plain INSERT
+// — each capture is a real revision row carrying its own source invocation.
+// De-duplicating on (name, content) dropped the second ref and left the
+// surviving one naming the FIRST attempt as the producer, so grouping by
+// invocation_id answered "nothing" for the repeat attempt and the manifest
+// disagreed with artifact_revisions.
+func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(t *testing.T) {
+	firstAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+		Outputs: []ArtifactRef{{
+			Name: "result.json", Kind: "result_json", RevisionID: "rev-1",
+			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-1",
+		}},
+	}}
+	repeatAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+		Outputs: []ArtifactRef{{
+			Name: "result.json", Kind: "result_json", RevisionID: "rev-2",
+			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-2",
+		}},
+	}}
+
+	merged := mergeBodies(firstAttempt, repeatAttempt)
+	outputs := merged.Artifacts.Outputs
+	if len(outputs) != 2 {
+		t.Fatalf("outputs = %d, want 2 (identical bytes from two attempts are two revisions): %+v", len(outputs), outputs)
+	}
+	producers := map[string]string{}
+	for _, ref := range outputs {
+		producers[ref.InvocationID] = ref.RevisionID
+	}
+	if producers["inv-1"] != "rev-1" || producers["inv-2"] != "rev-2" {
+		t.Errorf("each ref must keep its own producer and revision, got %+v", producers)
+	}
+}
+
+// TestMergeBodies_SameRevisionRecordedTwiceStaysOne: the revision id is what
+// identifies a recorded artifact, so a patch replaying a ref the body already
+// holds does not duplicate it.
+func TestMergeBodies_SameRevisionRecordedTwiceStaysOne(t *testing.T) {
+	ref := ArtifactRef{
+		Name: "plan.md", RevisionID: "rev-1", ContentHash: "hash",
+		Stage: "plan", InvocationID: "inv-1",
+	}
+	base := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Outputs: []ArtifactRef{ref}}}
+	replay := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Outputs: []ArtifactRef{ref}}}
+
+	merged := mergeBodies(base, replay)
+	if got := len(merged.Artifacts.Outputs); got != 1 {
+		t.Errorf("outputs = %d, want 1 (same revision id is the same artifact)", got)
+	}
+}
+
+// TestMergeBodies_InputRefsDedupeUnchanged: inputs never carry an invocation
+// (the worktree sync runs before any invocation row exists), so the new key
+// must not start duplicating them.
+func TestMergeBodies_InputRefsDedupeUnchanged(t *testing.T) {
+	input := ArtifactRef{Name: "plan.md", ContentHash: "hash", Stage: "plan"}
+	base := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{input}}}
+	again := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{Inputs: []ArtifactRef{input}}}
+
+	merged := mergeBodies(base, again)
+	if got := len(merged.Artifacts.Inputs); got != 1 {
+		t.Errorf("inputs = %d, want 1 (unchanged de-duplication for refs with no invocation)", got)
 	}
 }

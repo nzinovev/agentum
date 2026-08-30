@@ -72,10 +72,9 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		return checks.Report{}, false, fmt.Errorf("load registry: %w", err)
 	}
 	// Independent strict parse, for the same reason this function keeps its own
-	// registry load (ADR 0002 D8 / PR #23): the value cached for rendering
-	// never reaches the delivery gate. After the API boundary guarantees
-	// well-formed overrides, a decode failure here is an invariant break and
-	// must be loud (ADR 0004 D7).
+	// registry load (PR #23): the value cached for rendering never reaches the
+	// delivery gate. After the API boundary guarantees well-formed overrides, a
+	// decode failure here is an invariant break and must be loud.
 	taskOverrides, overridesErr := taskinput.ParseOverrides(run.task.Overrides)
 	if overridesErr != nil {
 		return checks.Report{}, false, fmt.Errorf("parse task overrides: %w", overridesErr)
@@ -241,11 +240,11 @@ func packCheckRequests(taskPack *pack.Pack) []checks.Request {
 	return requests
 }
 
-// taskCheckRequests maps the typed task overrides (ADR 0004 D7) onto the
-// checks Request list. The names must exist in the project registry — the
-// resolve step rejects unknown ones. The caller owns the strict decode: this
-// function never sees raw bytes, so the old lenient `return nil` on a
-// malformed column cannot come back through it.
+// taskCheckRequests maps the typed task overrides onto the checks Request
+// list. The names must exist in the project registry — the resolve step
+// rejects unknown ones. The caller owns the strict decode: this function never
+// sees raw bytes, so the old lenient `return nil` on a malformed column cannot
+// come back through it.
 func taskCheckRequests(overrides taskinput.Overrides) []checks.Request {
 	requests := make([]checks.Request, 0, len(overrides.Checks.Required)+len(overrides.Checks.Optional))
 	for _, name := range overrides.Checks.Required {

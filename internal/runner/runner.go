@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -76,16 +77,14 @@ type Sink func(taskID, stageID, chunk string)
 // worker's Handler: the worker claims a job and calls Handle, which runs the
 // stage loop (04 §7.2) until a pause point or terminal state.
 type Runner struct {
-	store     Store
-	packs     pack.Source
-	adapter   agent.Adapter
-	models    *models.Config // nil → built-in default for AgentName
-	wt        *worktree.Manager
-	cancels   *CancelRegistry
-	sink      Sink
-	agentName string
-	adapterV  string // adapter binary version, best-effort; recorded in manifest
-	log       *slog.Logger
+	store   Store
+	packs   pack.Source
+	adapter agent.Adapter
+	models  *models.Config // operator override (models.yaml); nil → the adapter descriptor's DefaultTiers
+	wt      *worktree.Manager
+	cancels *CancelRegistry
+	sink    Sink
+	log     *slog.Logger
 
 	// hardTimeout / idleTimeout are the per-invocation caps the runner layers
 	// onto every effective capability profile (zero = no cap). Sourced from
@@ -139,8 +138,9 @@ func manifestServiceOrNil(service *manifest.Service) manifestService {
 	return service
 }
 
-// Deps bundles Runner construction. AgentName is the adapter's identity for
-// model resolution (e.g. "opencode"); Models may be nil to use built-in defaults.
+// Deps bundles Runner construction. The adapter's identity (id, version,
+// default tiers, model options) is read from adapter.Describe() — never passed
+// separately and never a literal in calling code.
 type Deps struct {
 	Store     Store
 	Packs     pack.Source
@@ -149,11 +149,7 @@ type Deps struct {
 	Worktrees *worktree.Manager
 	Cancels   *CancelRegistry
 	Sink      Sink
-	AgentName string
-	// AdapterVersion is the adapter binary version, surfaced in the manifest
-	// for cross-run comparison. Empty when unknown.
-	AdapterVersion string
-	Log            *slog.Logger
+	Log       *slog.Logger
 
 	// Artifacts is the durable artifact revisions store. May be nil in unit
 	// tests; capture and sync become no-ops then.
@@ -201,8 +197,7 @@ func New(deps Deps) *Runner {
 	}
 	return &Runner{
 		store: deps.Store, packs: deps.Packs, adapter: deps.Adapter, models: deps.Models,
-		wt: worktreeManager, cancels: cancels, sink: deps.Sink,
-		agentName: deps.AgentName, adapterV: deps.AdapterVersion, log: log,
+		wt: worktreeManager, cancels: cancels, sink: deps.Sink, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: manifestServiceOrNil(deps.Manifest),
 		checkExec:   deps.CheckExec,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
@@ -494,6 +489,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return runner.failTask(ctx, task, fmt.Errorf("resolve pack %q: %w", task.PipelinePack, err))
 	}
 
+	// Resolve the execution target for EVERY stage up front: a tier no
+	// configuration defines, or an option the selected adapter does not declare,
+	// must fail the run before the first invocation — not four stages in, after
+	// source has been written. This is also the seam MVP task 13's RunSpec pins:
+	// one value, computed at run start.
+	executionPlan, planErr := runner.resolveExecutionPlan(taskPack)
+	if planErr != nil {
+		return runner.failTask(ctx, task, planErr)
+	}
+
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
 	// from and what checkpoints diff against; recording it immutably before any
 	// work means a later move of base_ref cannot retcon the task's lineage.
@@ -551,7 +556,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	runner.cancels.Register(job.TaskID, cancel)
 	defer runner.cancels.Unregister(job.TaskID)
 
-	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree}
+	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree, executionPlan: executionPlan}
 	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):
 	// whether the pack declares an approval, whether the human has recorded it,
 	// and the revision id the decision is bound to. A durable Postgres read, not
@@ -573,6 +578,45 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// produced. No-op for a fresh run (no revisions yet).
 	runner.syncRevisionsIntoWorktree(ctx, run, startStage)
 	return runner.runLoop(runCtx, run, startStage, resumeSession)
+}
+
+// resolveExecutionPlan resolves the model selection for every stage the pack
+// declares, before the stage loop runs. A tier is chosen per stage, so
+// validation must cover every stage — a models.yaml whose reasoning tier
+// declares an option the adapter cannot take must not fail four stages into a
+// run that has already written source. The fallback tiers come from the
+// adapter's descriptor; the runner names no executor itself.
+func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]models.Selection, error) {
+	descriptor := runner.adapter.Describe()
+	plan := make(map[string]models.Selection, len(taskPack.Stages))
+	// Sorted, not map order: when more than one stage is misconfigured the
+	// run must fail naming the same one every time, or the operator fixes a
+	// different error on each attempt.
+	stageIDs := make([]string, 0, len(taskPack.Stages))
+	for stageID := range taskPack.Stages {
+		stageIDs = append(stageIDs, stageID)
+	}
+	sort.Strings(stageIDs)
+	for _, stageID := range stageIDs {
+		stage := taskPack.Stages[stageID]
+		if stage.Terminal() {
+			// An engine marker, not an invocation: no selection to resolve.
+			continue
+		}
+		tier := stage.Tier
+		if tier == "" {
+			tier = taskPack.Tiers.Default
+		}
+		selection, resolveErr := models.Resolve(runner.models, descriptor.DefaultTiers, tier)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve execution plan, stage %q: %w", stageID, resolveErr)
+		}
+		if optionErr := selection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
+			return nil, fmt.Errorf("resolve execution plan, stage %q: execution adapter %q: %w", stageID, descriptor.ID, optionErr)
+		}
+		plan[stageID] = selection
+	}
+	return plan, nil
 }
 
 // readSourceWriteUnlock reads the durable approval state for the run (ADR 0003
@@ -729,6 +773,12 @@ type stageRun struct {
 	project  sqlc.Project
 	taskPack *pack.Pack
 	worktree *worktree.Worktree
+
+	// executionPlan is the per-stage resolved model selection, computed once at
+	// run start. invokeStage looks the stage's selection up here; it never
+	// resolves on the fly, so a pack that names an unresolvable tier cannot start
+	// a run at all.
+	executionPlan map[string]models.Selection
 
 	// instructionFiles is the pinned project-instruction set for the run (ADR
 	// 0002): bytes read from base_commit, capped/truncated, with source and
@@ -1369,6 +1419,14 @@ type invocationOutcome struct {
 // creates the stage_invocation row at start (so a crash leaves a partial
 // record), drains the stream (forwarding chunks to the sink), and finalizes the
 // row with session_id / stop_reason / parsed result.
+//
+// The manifest's invocation record is written in the same two passes: the OPEN
+// half — identity, adapter + runtime versions, the model selection, both
+// prompt hashes, the effective profile — lands before adapter.Invoke, so a
+// crashed, timed-out, or refused attempt still records what it was going to
+// run (a failed attempt is when "which runtime, which model" matters most).
+// The CLOSE half — telemetry and stop reason — lands on every terminal path
+// after the drain.
 func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -1376,11 +1434,19 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		return invocationOutcome{adapterErr: true}
 	}
 
-	tier := stage.Tier
-	if tier == "" {
-		tier = run.taskPack.Tiers.Default
+	// The run-start execution plan already validated this stage's tier and
+	// options, and it covers every non-terminal stage of the resolved pack — so
+	// this lookup cannot miss today. It is checked anyway, because the failure
+	// mode of a miss is the silent one: a zero Selection carries no model, the
+	// adapter then omits --model, and the runtime silently picks its own. An
+	// invariant held by an argument that spans three functions is worth one
+	// branch at the point of use.
+	selection, planned := run.executionPlan[stageID]
+	if !planned {
+		runner.log.Error("stage missing from the execution plan",
+			"task", run.task.ID, "stage", stageID)
+		return invocationOutcome{adapterErr: true}
 	}
-	model, _ := models.Resolve(runner.models, runner.agentName, tier) // best-effort; empty is acceptable
 
 	// Effective capability profile: host ∩ pack ∩ stage(inherit) ∩ role, with
 	// the configured timeouts layered on. Computed before the invocation row is
@@ -1400,15 +1466,14 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	profileBytes := marshalProfile(profile)
 
 	// VerdictPath is set when this stage sources a verdict condition (detected
-	// via parsed conditions, never substring-scanned). ReviewFindings is set
-	// when the stage was entered through a verdict-conditioned transition, so
-	// the fixer is pointed at the predecessor's findings artifact rather than a
-	// log. Both render nothing when unset. Title/Description carry the task
-	// request into the block's first section (ADR 0004 D8) — the ONLY delivery
-	// path from tasks.title/description to any agent prompt. There is
-	// deliberately no Overrides on this literal (D2): the overrides are
-	// orchestrator-only, and the resolved Checks below already render the
-	// effective set.
+	// via parsed conditions, never substring-scanned). ReviewFindings is set when
+	// the stage was entered through a verdict-conditioned transition, so the
+	// fixer is pointed at the predecessor's findings artifact rather than a log.
+	// Both render nothing when unset. Title/Description carry the task request
+	// into the block's first section — the ONLY delivery path from
+	// tasks.title/description to any agent prompt. There is deliberately no
+	// Overrides on this literal: the overrides are orchestrator-only, and the
+	// resolved Checks below already render the effective set.
 	routingBlock := routing.Block{
 		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
@@ -1481,6 +1546,15 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		return invocationOutcome{adapterErr: true}
 	}
 
+	// OPEN the invocation record before the adapter starts: identity, adapter +
+	// runtime versions, the model selection, both prompt hashes, and the
+	// effective profile land now, so every terminal path — success, crash,
+	// timeout, refused start — carries what the attempt was going to run. The
+	// rendered hash covers exactly what the adapter is handed below (prompt +
+	// "\n\n" + routing block); it distinguishes two attempts at the same stage in
+	// evidence but is never a diff axis.
+	runner.openInvocationEvidence(ctx, run, invocation, stageID, stage, selection, block, profile)
+
 	// Record the effective profile as audit evidence before the run starts. A
 	// denied capability is as much a part of the record as a granted one: this
 	// is what makes "the invocation was deny-by-default" reconstructible later.
@@ -1493,7 +1567,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	eventCh, invokeErr := runner.adapter.Invoke(ctx, agent.Invocation{
 		Workdir: run.worktree.Root, ArtifactDir: artifactDir,
 		Prompt: stage.PromptText(), RoutingBlock: block,
-		ResumeSession: resumeSession, Model: model,
+		ResumeSession: resumeSession, Model: selection,
 		Instructions: agentInstructionFiles(run.instructionFiles),
 		Profile:      profile,
 	})
@@ -1506,22 +1580,23 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			stopReason = "capability_unenforceable"
 		}
 		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
+		// CLOSE with the stop reason and no telemetry: nothing ran, so there is
+		// nothing to bill (a refused start still produces a record).
+		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, stopReason, nil)
 		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
 		return invocationOutcome{adapterErr: true}
 	}
 
 	var (
-		sessionID  string
-		telemetry  agent.Telemetry
 		terminal   *agent.Result
 		terminalEr error
 	)
 	for event := range eventCh {
-		sessionID, telemetry, terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, sessionID, telemetry, terminal, terminalEr)
+		terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, terminal, terminalEr)
 	}
 	if terminal != nil {
-		sessionID = terminal.SessionID
-		telemetry = terminal.Telemetry
+		sessionID := terminal.SessionID
+		telemetry := terminal.Telemetry
 		// Capture produced artifacts (result.json + the agent-declared artifact
 		// paths) into the durable revisions store. This runs before the
 		// invocation is finalized as successful, because a declared path that
@@ -1531,21 +1606,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		artifactOutputs, captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
 		if captureErr != nil {
 			runner.finalize(ctx, invocation, run.task, sessionID, "artifact_rejected", nil)
+			runner.closeInvocationEvidence(ctx, run.task, invocation.ID, "artifact_rejected", &telemetry)
 			runner.log.Error("stage output rejected",
 				"task", run.task.ID, "stage", stageID, "error", captureErr)
 			return invocationOutcome{rejected: true}
 		}
 		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
-		// Record evidence of the prompt + model + effective capability profile
-		// the adapter saw, plus the artifact revisions this stage produced. The
-		// manifest service is nil in unit tests; AddEvidence is a no-op then.
-		runner.recordStageEvidence(ctx, run, stageID, stage, model, profile, artifactOutputs)
-		// ADR 0002: record the project-context channel (pinned instructions +
-		// enumerated skills) and emit the live pinning signal. The section is
-		// written on every successful stage so an empty project still seals
-		// evidence_complete; a failed skill probe additionally records an
-		// evidence gap.
-		runner.recordContextEvidence(ctx, run, stageID)
+		// One manifest write closes the whole successful attempt: the CLOSE half of
+		// the invocation record, the artifact revisions the stage produced, and the
+		// project-context section. Emit the live pinning signal separately — it is a
+		// stream event, not evidence.
+		runner.completeStageEvidence(ctx, run, stageID, invocation.ID, telemetry, artifactOutputs)
 		runner.emit(ctx, run.task, EvContextPinned, contextPinnedPayload(stageID, run))
 		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
@@ -1557,7 +1628,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// (the agent ran but its output was unusable); anything else is an adapter
 	// error (crash, stream failure, cancellation).
 	reason := classifyAdapterFailure(terminalEr)
-	runner.finalize(ctx, invocation, run.task, sessionID, reason, nil)
+	// No session id on this path: the adapter reports it on the terminal
+	// EventResult, which is exactly what did not arrive. It was always empty
+	// here — the drain loop never captured one — and passing "" says so
+	// instead of passing a variable that looks like it might hold something.
+	runner.finalize(ctx, invocation, run.task, "", reason, nil)
+	// CLOSE with the stop reason and NO telemetry. The adapter reports its
+	// accumulated cost only on the terminal EventResult, so on this path there
+	// is no measurement to record — and a zero-valued telemetry object would
+	// not read as "unknown", it would read as "this attempt was free", which is
+	// exactly the wrong thing to tell someone auditing an expensive failure.
+	runner.closeInvocationEvidence(ctx, run.task, invocation.ID, reason, nil)
 	return invocationOutcome{
 		adapterErr: reason == "adapter_error",
 		parseErr:   reason == "parse_error",
@@ -1568,10 +1649,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 // loop carries. Stream chunks are forwarded live to the sink; result and error
 // events are captured for post-loop classification. The accumulator is returned
 // so the loop body stays a single expression with no local branching state.
+//
+// Session id and telemetry are deliberately NOT part of the accumulator: the
+// adapter accumulates the cost in its own stream state and reports both on the
+// terminal EventResult, so carrying them through here would be two parameters
+// that are returned exactly as they arrived — and next to the two-pass
+// evidence write, a telemetry parameter that is never touched reads as if the
+// drain loop were the thing that measures.
 func (runner *Runner) observeEvent(
-	event agent.Event, taskID, stageID, sessionID string,
-	telemetry agent.Telemetry, terminal *agent.Result, terminalEr error,
-) (string, agent.Telemetry, *agent.Result, error) {
+	event agent.Event, taskID, stageID string,
+	terminal *agent.Result, terminalEr error,
+) (*agent.Result, error) {
 	switch event.Kind {
 	case agent.EventStream:
 		if runner.sink != nil && event.Chunk != "" {
@@ -1582,7 +1670,7 @@ func (runner *Runner) observeEvent(
 	case agent.EventError:
 		terminalEr = event.Err
 	}
-	return sessionID, telemetry, terminal, terminalEr
+	return terminal, terminalEr
 }
 
 // classifyAdapterFailure maps an adapter error to a stop reason. A result.json

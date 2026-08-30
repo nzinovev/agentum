@@ -30,12 +30,12 @@ type Block struct {
 	Gate        string // the stage's gate value (one of the six C11 values)
 	ArtifactDir string // absolute path; the agent writes result.json here
 
-	// Title and Description are the task request (ADR 0004): the requested
-	// behaviour, source of truth #1 for every stage. Rendered as the block's
-	// first section so the run's purpose precedes its contract. Deliberately
-	// no Overrides field here — the overrides are orchestrator-only by
-	// construction (D2) and anything in them must never reach the model; the
-	// resolved ## Project checks section already renders the effective set.
+	// Title and Description are the task request: the requested behaviour, source
+	// of truth #1 for every stage. Rendered as the block's first section so the
+	// run's purpose precedes its contract. Deliberately no Overrides field here —
+	// the overrides are orchestrator-only by construction and anything in them
+	// must never reach the model; the resolved ## Project checks section already
+	// renders the effective set.
 	Title       string
 	Description string
 

@@ -43,8 +43,7 @@ func TestRunner_DeliveryChecksCommitBoundToCheckpoint(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}, writeName: "feature.txt", writeBody: "agent work"}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tcb", "tn", "us")); err != nil {
@@ -103,8 +102,7 @@ func TestRunner_DeliveryChecksFailOnDirtyTree(t *testing.T) {
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{},
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 	run := stageRun{task: task, project: proj, worktree: wt}
 
@@ -145,8 +143,7 @@ func TestRunner_DeliveryChecksFailOnMissingBaseCommit(t *testing.T) {
 		"done": {},
 	})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: nobasePack}, Adapter: &scriptAdapter{},
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: nobasePack}, Adapter: &scriptAdapter{}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 	run := stageRun{task: task, project: proj, worktree: wt}
 
@@ -164,6 +161,7 @@ func TestRunner_DeliveryChecksFailOnMissingBaseCommit(t *testing.T) {
 // since no agent role carries git.delivery). Used to force the orchestrator to
 // commit the checkpoint itself.
 type writingAdapter struct {
+	stubExecution
 	scripts   map[string]agent.ResultJSON
 	writeName string
 	writeBody string
@@ -238,7 +236,6 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
-		AgentName: "opencode",
 	})
 	// Inject the fake manifest carrying the verified commit (same-package field
 	// assignment, matching evidence_test.go). Drives the primary path: the
@@ -277,7 +274,6 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
-		AgentName: "opencode",
 	})
 	runner.mfst = &fakeManifestService{checksCommitValue: "sha-same"}
 
@@ -310,7 +306,6 @@ func TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap(t *testin
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
-		AgentName: "opencode",
 	})
 	manifestFake := &fakeManifestService{checksCommitErr: errors.New("connection reset by peer")}
 	runner.mfst = manifestFake
@@ -350,7 +345,6 @@ func TestRunner_VerifyDeliveryCommitBinding_NoRecordedCommitIsQuiet(t *testing.T
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
-		AgentName: "opencode",
 	})
 	manifestFake := &fakeManifestService{} // no checks commit, no error
 	runner.mfst = manifestFake
@@ -399,7 +393,6 @@ func TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite(t *testing.T) {
 	}, writeName: "undeclared.txt", writeBody: "the agent touched this"}
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode",
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tg", "tn", "us")); err != nil {
@@ -431,8 +424,7 @@ func TestRunner_AutoIfCleanGateAdvancesOnCleanTree(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tc", "tn", "us")); err != nil {

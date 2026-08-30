@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
@@ -123,11 +123,12 @@ func (runner *Runner) captureIngest(
 		return outputs
 	}
 	return append(outputs, manifest.ArtifactRef{
-		Name:        revisionName,
-		Kind:        kind,
-		RevisionID:  revision.ID,
-		ContentHash: revision.ContentHash,
-		Stage:       stageID,
+		Name:         revisionName,
+		Kind:         kind,
+		RevisionID:   revision.ID,
+		ContentHash:  revision.ContentHash,
+		Stage:        stageID,
+		InvocationID: invocationID,
 	})
 }
 
@@ -201,11 +202,12 @@ func (runner *Runner) captureFile(
 		return outputs
 	}
 	return append(outputs, manifest.ArtifactRef{
-		Name:        revisionName,
-		Kind:        kind,
-		RevisionID:  revision.ID,
-		ContentHash: revision.ContentHash,
-		Stage:       stageID,
+		Name:         revisionName,
+		Kind:         kind,
+		RevisionID:   revision.ID,
+		ContentHash:  revision.ContentHash,
+		Stage:        stageID,
+		InvocationID: invocationID,
 	})
 }
 
@@ -257,71 +259,199 @@ func (runner *Runner) ingest(
 	return revision, true
 }
 
-// recordStageEvidence adds the prompt + model + adapter + effective-capability
-// + output-artifact evidence for one stage to the manifest. Called after a
-// successful stage invocation. No-op when the manifest service is nil (unit
-// tests). The artifact refs the stage captured are folded into this same patch
-// rather than written in a second AddEvidence round-trip: one manifest write
-// per stage keeps the per-stage evidence atomic (the prompt hash and the
-// artifact revisions that evidence it describe the same invocation) and avoids
-// doubling the write load.
-func (runner *Runner) recordStageEvidence(
+// openInvocationEvidence writes the OPEN half of one attempt's manifest
+// record, immediately after the stage_invocation row is created and before
+// adapter.Invoke: invocation id, stage coordinates, adapter id + both versions
+// (probed, memoized), the model selection, both prompt hashes, and the
+// effective capability profile with its role. A crash, timeout, or refused
+// start after this point leaves a record of what the attempt was going to run.
+// No-op when the manifest service is nil (unit tests).
+func (runner *Runner) openInvocationEvidence(
 	ctx context.Context,
 	run stageRun,
+	invocation sqlc.StageInvocation,
 	stageID string,
 	stage pack.Stage,
-	model string,
+	selection models.Selection,
+	routingBlock string,
 	profile caps.Profile,
+) {
+	if runner.mfst == nil {
+		return
+	}
+	descriptor := runner.adapter.Describe()
+	readiness := runner.adapter.Probe(ctx)
+	record := manifest.InvocationEvidence{
+		InvocationID: invocation.ID,
+		Stage:        stageID,
+		Sequence:     invocation.Sequence,
+		Cycle:        invocation.Cycle,
+		Adapter: manifest.InvocationAdapter{
+			ID:             manifest.AdapterID(descriptor.ID),
+			AdapterVersion: descriptor.AdapterVersion,
+			RuntimeVersion: readiness.RuntimeVersion,
+		},
+		Model: selection,
+		Prompt: manifest.InvocationPrompt{
+			StagePromptHash: hashForEvidence(stage.PromptText()),
+			// Exactly the bytes the adapter hands the runtime (opencode.go
+			// concatenates prompt + "\n\n" + routing block).
+			RenderedHash: hashForEvidence(stage.PromptText() + "\n\n" + routingBlock),
+		},
+		Capabilities: manifest.InvocationCaps{
+			Role:    string(profile.Source.Role),
+			Profile: marshalProfile(profile),
+		},
+	}
+	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{record}}
+	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			runner.log.Warn("open invocation evidence: manifest sealed", "task", run.task.ID)
+			return
+		}
+		runner.log.Warn("open invocation evidence", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.recordEvidenceGap(ctx, run.task, "invocations", stageID, err)
+	}
+}
+
+// closeInvocationEvidence writes the CLOSE half of one attempt's record:
+// telemetry and the stop reason, filled into the record the open pass created
+// (matched on invocation id; zero fields leave the open values intact).
+// telemetry is nil for a refused start — nothing ran, nothing to bill. Called
+// on EVERY terminal path: success, adapter error, parse error, artifact
+// rejection, refused start.
+func (runner *Runner) closeInvocationEvidence(
+	ctx context.Context,
+	task sqlc.Task,
+	invocationID, stopReason string,
+	telemetry *agent.Telemetry,
+) {
+	if runner.mfst == nil {
+		return
+	}
+	record := manifest.InvocationEvidence{
+		InvocationID: invocationID,
+		StopReason:   stopReason,
+		Telemetry:    invocationTelemetry(telemetry),
+	}
+	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{record}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			runner.log.Warn("close invocation evidence: manifest sealed", "task", task.ID)
+			return
+		}
+		runner.log.Warn("close invocation evidence", "task", task.ID, "error", err)
+		runner.recordEvidenceGap(ctx, task, "invocations", "", err)
+	}
+}
+
+// invocationTelemetry maps the adapter's accumulated cost onto the manifest
+// shape, or returns nil when there is nothing measured. nil and a zero value
+// are NOT interchangeable here: the adapter reports its accumulated cost only
+// on the terminal EventResult, so an attempt that was refused or died
+// mid-stream has no measurement — and a zero-valued object would read as
+// "this attempt was free", not as "unknown".
+func invocationTelemetry(telemetry *agent.Telemetry) *manifest.InvocationTelemetry {
+	if telemetry == nil {
+		return nil
+	}
+	return &manifest.InvocationTelemetry{
+		Tokens: manifest.TokenUsage{
+			Total:      telemetry.Tokens.Total,
+			Input:      telemetry.Tokens.Input,
+			Output:     telemetry.Tokens.Output,
+			Reasoning:  telemetry.Tokens.Reasoning,
+			CacheRead:  telemetry.Tokens.CacheRead,
+			CacheWrite: telemetry.Tokens.CacheWrite,
+		},
+		Cost: telemetry.Cost,
+	}
+}
+
+// completeStageEvidence writes everything a SUCCESSFUL attempt leaves behind,
+// in ONE manifest transaction: the CLOSE half of the invocation record
+// (telemetry; the stop reason is empty on this path), the artifact revisions
+// the stage captured, and the project-context section.
+//
+// One write rather than three because AddEvidence is a full-document
+// read-modify-write under the manifest row's lock — it decodes the whole body,
+// merges, and writes the whole body back — so each extra call re-encodes an
+// evidence document that grows for the life of the run. It is also atomic:
+// three separate writes could leave the attempt closed with its artifacts
+// missing, which reads as a stage that produced nothing.
+//
+// The OPEN half stays its own write, before the adapter starts, because that
+// is what it is for: a crash between open and close must leave the record of
+// what the attempt was going to run.
+//
+// No-op when the manifest service is nil (unit tests).
+func (runner *Runner) completeStageEvidence(
+	ctx context.Context,
+	run stageRun,
+	stageID, invocationID string,
+	telemetry agent.Telemetry,
 	artifactOutputs []manifest.ArtifactRef,
 ) {
 	if runner.mfst == nil {
 		return
 	}
-	promptHash := hashForEvidence(stage.PromptText())
-	tier := stage.Tier
-	if tier == "" {
-		tier = run.taskPack.Tiers.Default
-	}
-	stageProfileJSON, _ := json.Marshal(profile)
 	patch := manifest.Body{
-		Prompts: []manifest.PromptRevision{{StageID: stageID, Hash: promptHash}},
-		Model: &manifest.ModelEvidence{
-			Tier: tier, Model: model, AgentName: runner.agentName,
-			PerStage: []manifest.StageModel{{
-				Stage: stageID, Tier: tier, Model: model, AgentName: runner.agentName,
-			}},
-		},
-		Adapter: runner.adapterEvidence(),
-		Capabilities: &manifest.CapabilityProfile{
-			Effective: []manifest.StageCapabilityProfile{{
-				Stage:   stageID,
-				Role:    string(profile.Source.Role),
-				Profile: stageProfileJSON,
-			}},
-		},
+		Invocations: []manifest.InvocationEvidence{{
+			InvocationID: invocationID,
+			Telemetry:    invocationTelemetry(&telemetry),
+		}},
+		Context: contextEvidenceSection(run),
 	}
+	// The sections this one write covers, so a failure records a gap against
+	// each of them: a reviewer asks "is the artifacts section trustworthy",
+	// not "which call failed", and a single compound section name would not
+	// answer that question.
+	sections := []string{"invocations", "context"}
 	if len(artifactOutputs) > 0 {
 		patch.Artifacts = &manifest.ArtifactEvidence{Outputs: artifactOutputs}
+		sections = append(sections, "artifacts")
 	}
 	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
 		// Sealed manifest is unexpected mid-run; logged but not fatal — the
 		// run continues and the gap is recorded in the manifest's evidence
 		// gaps at seal time.
 		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("record evidence: manifest sealed", "task", run.task.ID)
+			runner.log.Warn("complete stage evidence: manifest sealed", "task", run.task.ID)
 			return
 		}
-		runner.log.Warn("record evidence", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "prompts_model_capabilities", stageID, err)
+		runner.log.Warn("complete stage evidence", "task", run.task.ID, "stage", stageID, "error", err)
+		for _, section := range sections {
+			runner.recordEvidenceGap(ctx, run.task, section, stageID, err)
+		}
+		return
+	}
+	// A failed skill probe is an evidence gap (this run's context evidence is
+	// degraded — we do not know what knowledge was in play). An unsupported
+	// probe is not: it is a permanent capability gap recorded in the section.
+	if probeFailed(run.contextReport.SkillsProbe) {
+		runner.recordEvidenceGap(ctx, run.task, "context.skills", stageID,
+			fmt.Errorf("skill probe failed: %s", run.contextReport.SkillsError))
 	}
 }
 
-// adapterEvidence returns the adapter section for the manifest. Capabilities
-// are inert (declared = passed at MVP); Epic 6 grows this section.
-func (runner *Runner) adapterEvidence() *manifest.AdapterEvidence {
+// adapterEvidence returns the run-level adapter section: the wiring of the
+// process that drove the run — id, OUR adapter implementation's version, the
+// capability categories it declares, and the readiness probe outcome. The
+// runtime VERSION is per invocation, not here: a run resumed in a new process
+// after an upgrade genuinely has two.
+func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvidence {
+	descriptor := runner.adapter.Describe()
+	readiness := runner.adapter.Probe(ctx)
+	declared := runner.adapter.Supported()
+	declaredNames := make([]string, 0, len(declared))
+	for _, category := range declared {
+		declaredNames = append(declaredNames, string(category))
+	}
 	return &manifest.AdapterEvidence{
-		Name:    runner.agentName,
-		Version: runner.adapterV,
+		ID:                   manifest.AdapterID(descriptor.ID),
+		AdapterVersion:       descriptor.AdapterVersion,
+		DeclaredCapabilities: declaredNames,
+		RuntimeProbe:         readiness.Label(),
 	}
 }
 
@@ -351,11 +481,11 @@ func (runner *Runner) recordInitialEvidence(
 			packHash = hash
 		}
 	}
-	// The revision is the canonical hash of the typed request (ADR 0004 D9),
-	// computed from the parsed value so a backfilled or reformatted overrides
-	// column cannot perturb it. A malformed column is an invariant break (the
-	// API guarantees well-formed overrides): fail the provenance root rather
-	// than record a revision nobody can reproduce.
+	// The revision is the canonical hash of the typed request, computed from the
+	// parsed value so a backfilled or reformatted overrides column cannot perturb
+	// it. A malformed column is an invariant break (the API guarantees
+	// well-formed overrides): fail the provenance root rather than record a
+	// revision nobody can reproduce.
 	taskOverrides, overridesErr := taskinput.ParseOverrides(task.Overrides)
 	if overridesErr != nil {
 		return fmt.Errorf("record initial evidence: parse task overrides: %w", overridesErr)
@@ -389,10 +519,17 @@ func (runner *Runner) recordInitialEvidence(
 		Capabilities: &manifest.CapabilityProfile{
 			Declared: taskPack.Capabilities,
 		},
-		Adapter: runner.adapterEvidence(),
+		Adapter: runner.adapterEvidence(ctx),
 	}
 	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
 		return fmt.Errorf("record initial evidence: %w", err)
+	}
+	// A failed readiness probe is an evidence gap, mirroring the skills probe:
+	// the run records "runtime not ready, because …" and the invocation that
+	// needs the runtime surfaces the failure itself.
+	if readiness := runner.adapter.Probe(ctx); !readiness.Ready {
+		runner.recordEvidenceGap(ctx, task, "adapter.runtime", "",
+			fmt.Errorf("runtime probe failed: %s", readiness.Reason))
 	}
 	return nil
 }
@@ -690,11 +827,10 @@ func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Ta
 }
 
 // recordStopEvidence records one controlled stop in the manifest's stops
-// section (D7). Called from applyPauseDecision for EVERY pause — a deliberate
-// widening of D7, so the manifest carries the full stop history (budget,
-// verdict, gate, adapter_error, etc.), not just the budget/verdict ones.
-// (Stage, Reason, Cycle) collapses repeats. Best-effort and a no-op when the
-// manifest service is nil.
+// section. Called from applyPauseDecision for EVERY pause, so the manifest
+// carries the full stop history (budget, verdict, gate, adapter_error, etc.),
+// not just the budget/verdict ones. (Stage, Reason, Cycle) collapses repeats.
+// Best-effort and a no-op when the manifest service is nil.
 func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, record manifest.StopRecord) {
 	if runner.mfst == nil {
 		return
@@ -713,8 +849,9 @@ func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, re
 }
 
 // hashForEvidence returns the sha256 hex of the bytes of the prompt text.
-// Centralized so two callers (recordStageEvidence, the manifest diff) agree on
-// the canonical hashing scheme.
+// Centralized so every caller — both prompt hashes on the invocation record,
+// and the instruction/skill hashes in the context section — agrees on the
+// canonical hashing scheme.
 func hashForEvidence(text string) string {
 	return hashForEvidenceBytes([]byte(text))
 }

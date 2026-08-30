@@ -10,7 +10,58 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
-- **The task request as a typed contract, delivered to the agent** (ADR 0004).
+- **Provider-neutral execution target and per-invocation evidence**.
+  The executor, the model, and the shape of the model's parameters leave the
+  domain model: they are a registry entry plus a self-describing adapter.
+  - **Execution adapter registry** (`internal/agent`): adapters are selected
+    by id (`AGENTUM_EXECUTION_ADAPTER`, empty = the registry default) and
+    describe themselves — `Describe()` (id, adapter implementation version,
+    default binary, understood model options, baked-in tier defaults) and
+    `Probe()` (`<binary> --version`, memoized once per process, sticky
+    including failure; unavailability is a probe result, not a boot failure).
+    Adapter id and version are never literals in calling code;
+    `AGENTUM_RUNTIME_BINARY` replaces `AGENTUM_OPENCODE_BINARY`, and the
+    retired name is refused at boot (naming its replacement) rather than
+    silently ignored — a binary override that stops applying surfaces as the
+    runtime failing, not as a configuration change.
+  - **Typed model options** (`internal/models`): `Selection{Tier, Provider,
+    Options}` with `Options.SupportedBy` mirroring `caps.EnforceableBy`. An
+    option the descriptor does not declare is refused at three points — boot
+    (malformed/unknown-key `models.yaml` now also stops the process), run
+    start (every stage's tier validated before the first invocation), and
+    Invoke. Nothing is silently dropped or substituted. A present-but-empty
+    `models.yaml` is refused with its fix ("delete the file"), and an
+    `AGENTUM_MODELS_CONFIG` naming a file that does not exist is an error
+    rather than a fall-through to the other search paths — a named path is a
+    statement of intent, and searching past it would run on tiers nobody
+    picked. When several tiers or stages are misconfigured, the one named in
+    the error is deterministic.
+  - **Per-invocation evidence** (manifest schema `"2"`): `body.invocations`
+    replaces `prompts` / `model.per_stage` / `capabilities.effective` — one
+    record per stage ATTEMPT, keyed by `invocation_id`, opened before
+    `Invoke` and closed with telemetry + stop reason on every terminal path.
+    Telemetry is recorded only where it was measured: a refused start and an
+    attempt that died mid-stream carry none, rather than a zero that would
+    read as "this attempt was free". A successful attempt's close, artifact
+    outputs and context section are one manifest transaction.
+    Two prompt hashes per record (`stage_prompt_hash` is the diff axis;
+    `rendered_hash` distinguishes attempts and is never a diff axis). The
+    runtime version is probed and recorded per invocation; a failed probe
+    records an `adapter.runtime` evidence gap. Output artifact refs carry the
+    producing `invocation_id` and are de-duplicated by revision id, so a
+    repeat attempt that wrote byte-identical output keeps its own
+    attribution instead of inheriting the earlier attempt's. Schema-1
+    manifests stay readable (legacy
+    sections retained verbatim; the diff synthesizes equivalent records), and
+    the v1→v2 upgrade happens once, inside the write transaction.
+  - **Cross-run diff** recomputed from invocation records indexed by
+    `(stage, cycle, ordinal)`: shared keys compare values before set
+    differences (a differing `(review, 1)` model reports `model-id`, an extra
+    attempt reports `model-set`); new axes `adapter-runtime-version` (the SET
+    of runtime versions across a run) and `capability-effective`. The ordinal
+    distinguishes attempts sharing a cycle — a resume inherits the resumed
+    attempt's cycle — so a resumed stage is not erased from the comparison.
+- **The task request as a typed contract, delivered to the agent**.
   The first `backend-development` run stopped at `paused_open_questions`
   because the task's title and description never reached any agent prompt —
   two defects, both fixed: nothing delivered the request, and `tasks.input`
@@ -33,7 +84,7 @@ Once tagged releases begin, this project adheres to
     `input.description` / `input.checks`; the column is dropped, not
     deprecated — while an untyped container exists, the next ill-fitting field
     lands in it).
-  - **Run overrides are orchestrator-only** (D2): nothing in `overrides` is
+  - **Run overrides are orchestrator-only**: nothing in `overrides` is
     ever rendered into a routing block; the resolved `## Project checks`
     section remains the only check information an agent sees. A malformed
     stored `overrides` column now FAILS the run (the old lenient parse

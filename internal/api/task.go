@@ -19,15 +19,15 @@ import (
 	"github.com/nzinovev/agentum/internal/worktree"
 )
 
-// taskResponse is the public task shape. tenant_id and user_id are intentionally
-// absent: identity is implicit in the Principal, not echoed back. description is
-// the request (ADR 0004 D5); overrides is how this run differs from the project
-// defaults — orchestrator-facing, echoed for the author but never delivered to
-// the agent. base_commit / result_commit / branch expose the git egress surface
-// (F.6.1 AC #7): base_ref is the user-supplied input, base_commit the
-// once-resolved immutable lineage anchor, result_commit the recorded tip at
-// terminal teardown, and branch the resolvable delivery ref that survives
-// worktree teardown.
+// taskResponse is the public task shape. tenant_id and user_id are
+// intentionally absent: identity is implicit in the Principal, not echoed
+// back. description is the request; overrides is how this run differs from the
+// project defaults — orchestrator-facing, echoed for the author but never
+// delivered to the agent. base_commit / result_commit / branch expose the git
+// egress surface (F.6.1 AC #7): base_ref is the user-supplied input,
+// base_commit the once-resolved immutable lineage anchor, result_commit the
+// recorded tip at terminal teardown, and branch the resolvable delivery ref
+// that survives worktree teardown.
 type taskResponse struct {
 	ID           string          `json:"id"`
 	ProjectID    string          `json:"project_id"`
@@ -86,11 +86,10 @@ func requirePrincipal(w http.ResponseWriter, r *http.Request) (authz.Principal, 
 	return principal, true
 }
 
-// taskCreateRequest is the POST /tasks body (ADR 0004 D1). The request half —
-// title + description — reaches the model; the overrides half configures the
-// run and is orchestrator-only. Decoded with DisallowUnknownFields (D3): a
-// typo'd or pre-ADR-0004 `input` blob is a loud 400, not a silently dropped
-// key that weakens the run.
+// taskCreateRequest is the POST /tasks body. The request half — title +
+// description — reaches the model; the overrides half configures the run and
+// is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
+// `input` blob is a loud 400, not a silently dropped key that weakens the run.
 type taskCreateRequest struct {
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
@@ -116,7 +115,7 @@ const maxTaskCreateBytes = 6*taskinput.MaxDescriptionBytes + (16 << 10)
 
 // parseTaskCreate turns the raw body into the typed, validated request. Pure
 // (no DB, no HTTP): every validation rule of the boundary is exercisable
-// without a database. The secret scan (D6) runs here so a credential-shaped
+// without a database. The secret scan runs here so a credential-shaped
 // description is refused before any row exists; ErrSecretDetected flows out
 // for the handler to map.
 func parseTaskCreate(body []byte) (taskCreateRequest, taskinput.Request, error) {
@@ -144,12 +143,12 @@ func parseTaskCreate(body []byte) (taskCreateRequest, taskinput.Request, error) 
 	return req, typed, nil
 }
 
-// scanRequestForCredentials is the containment guard for the request fields
-// (ADR 0004 D6). BOTH title and description are scanned: each is delivered
-// verbatim to a model through the routing block's Task section and recorded
-// verbatim in the evidence manifest, which is the whole justification for
-// scanning either. Scanning only the description would leave the same leak
-// one field to the left.
+// scanRequestForCredentials is the containment guard for the request fields.
+// BOTH title and description are scanned: each is delivered verbatim to a
+// model through the routing block's Task section and recorded verbatim in the
+// evidence manifest, which is the whole justification for scanning either.
+// Scanning only the description would leave the same leak one field to the
+// left.
 //
 // NewProseScanner, not NewDefaultScanner: these are sentences a human wrote,
 // so only the credential-shape rules apply. The label-context rules reject
@@ -177,7 +176,7 @@ func scanRequestForCredentials(request taskinput.Request) error {
 // writeTaskCreateError maps parseTaskCreate failures onto the boundary's HTTP
 // contract: everything malformed or over-budget is a 400; a detected
 // credential is a 422 bad_input, the same mapping artifact_edit.go uses for
-// ErrSecretDetected (ADR 0004 D6 — do not invent a new code).
+// ErrSecretDetected (do not invent a new code).
 func writeTaskCreateError(w http.ResponseWriter, err error) {
 	if errors.Is(err, artifacts.ErrSecretDetected) {
 		writeError(w, http.StatusUnprocessableEntity, codeBadInput, err.Error())
@@ -190,7 +189,7 @@ func writeTaskCreateError(w http.ResponseWriter, err error) {
 // Body: {project_id, pipeline_pack, title, description, overrides?, base_ref?}.
 // tenant/user come from the Principal, never the body. The stored overrides
 // are the canonical serialization, so two identically-valued requests produce
-// identical rows and identical revisions (D9).
+// identical rows and identical revisions.
 func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePrincipal(w, r)
 	if !ok {

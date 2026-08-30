@@ -19,9 +19,9 @@ type DefaultScanner struct {
 	Policy ScanPolicy
 
 	// proseOnly restricts the rule set to the credential-shape rules, for
-	// human-authored text rather than machine-written config (ADR 0004 D6).
-	// Unexported so the zero value keeps the full rule set: a bare
-	// DefaultScanner{} scans artifacts exactly as it always did.
+	// human-authored text rather than machine-written config. Unexported so the
+	// zero value keeps the full rule set: a bare DefaultScanner{} scans artifacts
+	// exactly as it always did.
 	proseOnly bool
 }
 
@@ -35,8 +35,8 @@ func NewDefaultScanner(policy ScanPolicy) *DefaultScanner {
 }
 
 // NewProseScanner returns a scanner for human-authored text — a task title or
-// description (ADR 0004 D6), not a config file an agent produced. It runs only
-// the credentialShape rules.
+// description, not a config file an agent produced. It runs only the
+// credentialShape rules.
 //
 // The label-context rules must not run here. They exist to catch `token: <20
 // chars>` in a machine-written config, and in prose they fire on a sentence
@@ -246,9 +246,9 @@ func (scanner *DefaultScanner) Scan(name string, kind string, bytes []byte) (Sca
 		if !textual && !rule.literal {
 			continue
 		}
-		// Prose runs only against rules that match credential material itself.
-		// A label-context rule cannot distinguish a pasted secret from a
-		// sentence about secrets (ADR 0004 D6).
+		// Prose runs only against rules that match credential material itself. A
+		// label-context rule cannot distinguish a pasted secret from a sentence
+		// about secrets.
 		if scanner.proseOnly && !rule.credentialShape {
 			continue
 		}

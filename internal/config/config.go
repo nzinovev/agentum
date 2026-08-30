@@ -21,7 +21,13 @@ type Config struct {
 	PacksDir       string // directory holding <name>/manifest.yaml packs
 	WorkerPoolSize int    // concurrent job workers (1 is fine for single-host MVP)
 	JobMaxAttempts int    // poison bound before a job is failed (04 §7.5)
-	OpencodeBinary string // path to the opencode binary the adapter shells out to
+	// ExecutionAdapter selects the execution adapter by registry id; empty
+	// selects the registry's default entry. Adapter-neutral on purpose: config
+	// names no executor.
+	ExecutionAdapter string
+	// RuntimeBinary overrides the selected adapter descriptor's default
+	// binary; empty keeps Descriptor.Binary.
+	RuntimeBinary string
 
 	// Per-invocation capability timeouts (Epic 6). Zero means no cap; the
 	// values are layered onto every effective capability profile and enforced
@@ -50,6 +56,11 @@ type Config struct {
 	ArtifactScanPolicy string
 }
 
+// retiredBinaryEnv is the retired name for the runtime binary override. It is
+// still recognised — only to refuse it by name, so an operator who set it
+// learns that it moved rather than losing the override silently.
+const retiredBinaryEnv = "AGENTUM_OPENCODE_BINARY"
+
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:          getenv("AGENTUM_HTTP_ADDR", ":8080"),
@@ -58,11 +69,12 @@ func Load() (Config, error) {
 		TenantID:          getenv("AGENTUM_TENANT_ID", "00000000-0000-0000-0000-000000000001"),
 		TenantOwnerUserID: getenv("AGENTUM_OWNER_USER_ID", "00000000-0000-0000-0000-000000000001"),
 
-		PacksDir:       getenv("AGENTUM_PACKS_DIR", "packs"),
-		WorkerPoolSize: getenvInt("AGENTUM_WORKER_POOL_SIZE", 1),
-		JobMaxAttempts: getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
-		OpencodeBinary: getenv("AGENTUM_OPENCODE_BINARY", "opencode"),
-		ArtifactRoot:   getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
+		PacksDir:         getenv("AGENTUM_PACKS_DIR", "packs"),
+		WorkerPoolSize:   getenvInt("AGENTUM_WORKER_POOL_SIZE", 1),
+		JobMaxAttempts:   getenvInt("AGENTUM_JOB_MAX_ATTEMPTS", 3),
+		ExecutionAdapter: getenv("AGENTUM_EXECUTION_ADAPTER", ""),
+		RuntimeBinary:    getenv("AGENTUM_RUNTIME_BINARY", ""),
+		ArtifactRoot:     getenv("AGENTUM_ARTIFACT_ROOT", defaultArtifactRoot()),
 
 		ArtifactScanPolicy: getenv("AGENTUM_ARTIFACT_SCAN_POLICY", "redact"),
 
@@ -74,6 +86,14 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
+	}
+	// AGENTUM_OPENCODE_BINARY named an executor in configuration and was replaced
+	// by the adapter-neutral AGENTUM_RUNTIME_BINARY. Refused rather than ignored,
+	// for the same reason an unsupported model option is refused: a pinned binary
+	// that silently stops applying does not surface as a configuration change, it
+	// surfaces as the runtime failing in ways that look like agent bugs.
+	if retired, set := os.LookupEnv(retiredBinaryEnv); set {
+		return cfg, fmt.Errorf("%s is no longer read; set AGENTUM_RUNTIME_BINARY=%s instead", retiredBinaryEnv, retired)
 	}
 	switch cfg.ArtifactScanPolicy {
 	case "redact", "reject":

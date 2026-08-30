@@ -99,8 +99,8 @@ func TestEvidenceComplete_EmptyContextSectionStillSeals(t *testing.T) {
 		// context.
 		HumanGates:   []HumanDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
 		Artifacts:    &ArtifactEvidence{},
-		Capabilities: &CapabilityProfile{},
-		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 	}
 	// Checks must report Ran:true to count.
 	body.Checks = &CheckEvidence{Ran: true}
@@ -120,8 +120,8 @@ func TestEvidenceComplete_FailedContextProbeSealsFalse(t *testing.T) {
 		HumanGates:   []HumanDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
 		Artifacts:    &ArtifactEvidence{},
 		Checks:       &CheckEvidence{Ran: true},
-		Capabilities: &CapabilityProfile{},
-		Prompts:      []PromptRevision{{StageID: "spec", Hash: "h"}},
+		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 		EvidenceGaps: []EvidenceGap{{Section: "context.skills", Reason: "probe failed", At: time.Now()}},
 	}
 	if body.IsEvidenceComplete() {

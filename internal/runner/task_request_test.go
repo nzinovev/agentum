@@ -17,6 +17,7 @@ import (
 // plays the scripted result, so a test can assert on what the adapter was
 // handed without re-implementing the loop.
 type requestCapturingAdapter struct {
+	stubExecution
 	scripts map[string]agent.ResultJSON
 	blocks  []string
 }
@@ -40,8 +41,8 @@ func (adapter *requestCapturingAdapter) Invoke(ctx context.Context, inv agent.In
 	return eventCh, nil
 }
 
-// TestRunner_RoutingBlockCarriesTaskRequest is the ADR 0004 defect fix itself:
-// the routing block handed to the adapter must carry the task's title and
+// TestRunner_RoutingBlockCarriesTaskRequest is the defect fix itself: the
+// routing block handed to the adapter must carry the task's title and
 // description — the chain that was entirely missing before (Block had no
 // request field, the template no section, the runner no wiring).
 func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
@@ -66,7 +67,7 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	adapter := &requestCapturingAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "planned"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, AgentName: "opencode"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
 
 	if err := runner.Handle(context.Background(), job("run", "Tr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -81,10 +82,10 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	if !strings.Contains(block, "Log /healthz and /readyz at Debug. Compare by exact path.") {
 		t.Errorf("routing block does not carry the task description; got:\n%s", block)
 	}
-	// D2 from the runner side: the raw overrides JSON never appears in the
-	// block. The check it requests may legitimately arrive through the
-	// resolved ## Project checks section (and does not here — this repo
-	// declares no registry), but the request blob itself must not.
+	// The runner side of the same rule: the raw overrides JSON never appears in
+	// the block. The check it requests may legitimately arrive through the
+	// resolved ## Project checks section (and does not here — this repo declares
+	// no registry), but the request blob itself must not.
 	if strings.Contains(block, `"required"`) || strings.Contains(block, `"checks":{`) {
 		t.Errorf("routing block leaks the raw overrides; got:\n%s", block)
 	}

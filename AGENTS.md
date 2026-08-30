@@ -47,7 +47,7 @@ package they cover.
   final approval. Retrieval is recency-ordered; keyword pull must exist before
   the flywheel test window closes (around task ~20).
 - **The task request reaches an agent only through the routing block's `Task`
-  section** (ADR 0004). `tasks.title` + `tasks.description` are the request and
+  section**. `tasks.title` + `tasks.description` are the request and
   are rendered there by `internal/routing`; `tasks.overrides` configures the
   run and is orchestrator-only — never render it into any prompt, and the
   resolved `## Project checks` section is the only check information an agent
@@ -85,6 +85,14 @@ package they cover.
   instruction set (`instructions:` in `.agentum.yaml` ∪ the runtime-injected
   `AGENTS.md`) is pinned from `base_commit` the same way: the agent cannot
   change which instructions or checks gate a run.
+- **The execution target is a registry entry.** Adapters are selected by id
+  through `internal/agent`'s registry and describe themselves (`Describe()`:
+  id, implementation version, binary, understood model options, baked-in tier
+  defaults; `Probe()`: the runtime's own version, memoized per process).
+  Adapter id and version are never literals in calling code, an option the
+  descriptor does not declare is refused (boot, run start, Invoke), and
+  manifest evidence is keyed by invocation — one record per stage attempt,
+  never merged by stage.
 
 ## Conventions
 

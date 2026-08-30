@@ -282,11 +282,11 @@ func bytesEqual(left, right []byte) bool {
 	return true
 }
 
-// TestProseScanner_OnlyCredentialShapes pins the ADR 0004 D6 rule split.
-// NewProseScanner must ignore the label-context rules — they cannot tell a
-// pasted credential from a sentence discussing one, and human-authored task
-// text is full of the latter — while still catching material that identifies
-// itself by its own shape.
+// TestProseScanner_OnlyCredentialShapes pins the rule split. NewProseScanner
+// must ignore the label-context rules — they cannot tell a pasted credential
+// from a sentence discussing one, and human-authored task text is full of the
+// latter — while still catching material that identifies itself by its own
+// shape.
 //
 // fullRejects records what the unchanged artifact scanner does with the same
 // text, so the table doubles as the documented difference between the two.

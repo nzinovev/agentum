@@ -123,13 +123,13 @@ func TestParseTaskCreate(t *testing.T) {
 	}
 }
 
-// TestWriteTaskCreateError_SecretMapsTo422 pins the D6 mapping: a detected
-// credential is a 422 bad_input — the same pairing artifact_edit.go uses —
-// and every other parse failure is a 400 bad_input.
+// TestWriteTaskCreateError_SecretMapsTo422 pins the error mapping: a detected
+// credential is a 422 bad_input — the same pairing artifact_edit.go uses — and
+// every other parse failure is a 400 bad_input.
 func TestWriteTaskCreateError_SecretMapsTo422(t *testing.T) {
 	t.Parallel()
-	// A credential SHAPE, not a labeled value: after the D6 narrowing the
-	// prose scanner only fires on material that identifies itself.
+	// A credential SHAPE, not a labeled value: after the narrowing, the prose
+	// scanner only fires on material that identifies itself.
 	secretErr := parseErrorOf(t, strings.Replace(validCreateBody,
 		`"Log /healthz and /readyz at Debug instead of Info; everything else stays at Info. Compare by exact path."`,
 		`"Paste ghp_0123456789abcdefghijklmnopqrstuvwxyz0123456789 into the config."`, 1))
@@ -167,9 +167,9 @@ func parseErrorOf(t *testing.T, body string) error {
 	return err
 }
 
-// TestToTaskResponse_CarriesRequestNotInput pins the response shape (D5): the
-// task echoes the description and the stored overrides, and the pre-ADR-0004
-// `input` key is gone.
+// TestToTaskResponse_CarriesRequestNotInput pins the response shape: the task
+// echoes the description and the stored overrides, and the legacy `input` key
+// is gone.
 func TestToTaskResponse_CarriesRequestNotInput(t *testing.T) {
 	t.Parallel()
 	task := sqlc.Task{
@@ -192,7 +192,7 @@ func TestToTaskResponse_CarriesRequestNotInput(t *testing.T) {
 		t.Error("overrides missing from the response")
 	}
 	if _, stillPresent := decoded["input"]; stillPresent {
-		t.Error("the pre-ADR-0004 input key must not appear in the response")
+		t.Error("the legacy input key must not appear in the response")
 	}
 }
 
@@ -218,13 +218,13 @@ func TestToTaskResponse_EmptyOverridesRenderAsObject(t *testing.T) {
 	}
 }
 
-// TestParseTaskCreate_ProseAboutCredentialsIsAccepted is the D6 regression
-// test. Before the narrowing, DefaultScanner's label-context rules rejected
-// ordinary backend task descriptions under PolicyReject and the author had no
-// override path: "Add Bearer authentication to /settings" matched
-// bearer-token, and a sentence naming an env var next to the word "secret"
-// matched labeled-secret. An auth task — the product's own documented example
-// — could not be created at all. These must all be accepted.
+// TestParseTaskCreate_ProseAboutCredentialsIsAccepted is the regression test
+// for the scan narrowing. Before it, DefaultScanner's label-context rules
+// rejected ordinary backend task descriptions under PolicyReject and the
+// author had no override path: "Add Bearer authentication to /settings"
+// matched bearer-token, and a sentence naming an env var next to the word
+// "secret" matched labeled-secret. An auth task — the product's own documented
+// example — could not be created at all. These must all be accepted.
 func TestParseTaskCreate_ProseAboutCredentialsIsAccepted(t *testing.T) {
 	t.Parallel()
 	descriptions := []string{
@@ -247,10 +247,10 @@ func TestParseTaskCreate_ProseAboutCredentialsIsAccepted(t *testing.T) {
 	}
 }
 
-// TestParseTaskCreate_CredentialInTitleRefused pins the other half of D6: the
-// title is delivered to the model and recorded in the manifest exactly like
-// the description, so scanning only the description would leave the same leak
-// one field to the left.
+// TestParseTaskCreate_CredentialInTitleRefused pins the other half of the
+// scan: the title is delivered to the model and recorded in the manifest
+// exactly like the description, so scanning only the description would leave
+// the same leak one field to the left.
 func TestParseTaskCreate_CredentialInTitleRefused(t *testing.T) {
 	t.Parallel()
 	body := strings.Replace(validCreateBody,

@@ -80,8 +80,7 @@ func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
@@ -164,8 +163,7 @@ func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 	}}
 	executor := checks.NewExecutor(checks.ExecutorDeps{})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: executor,
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: executor,
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tu", "tn", "us")); err == nil {
@@ -225,12 +223,12 @@ func assertRequest(t *testing.T, req checks.Request, name string, required bool)
 	}
 }
 
-// TestRunner_MalformedStoredOverridesFailRun is the ADR 0004 D7 regression
-// test: a corrupt tasks.overrides column must fail the run loudly, not
-// silently resolve a smaller check set than the operator asked for. The old
-// lenient parse swallowed the unmarshal error and returned nil — the run
-// continued gated on less than the operator believed. The assertion is on the
-// FAILURE (state failed + Handle error), never on an absent request list.
+// TestRunner_MalformedStoredOverridesFailRun is the regression test: a corrupt
+// tasks.overrides column must fail the run loudly, not silently resolve a
+// smaller check set than the operator asked for. The old lenient parse
+// swallowed the unmarshal error and returned nil — the run continued gated on
+// less than the operator believed. The assertion is on the FAILURE (state
+// failed + Handle error), never on an absent request list.
 func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -243,7 +241,7 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		"done": {},
 	})
 	// A column only writable by something that bypassed the API (the boundary
-	// rejects this shape with a 400) — the invariant break D7 exists for.
+	// rejects this shape with a 400) — the invariant break this guards.
 	task := sqlc.Task{
 		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", Overrides: json.RawMessage(`{not json`),
@@ -254,8 +252,7 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tm", "tn", "us"))

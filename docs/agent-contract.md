@@ -30,7 +30,7 @@ stages read earlier stages' outputs that way).
 ## Project context the agent sees
 
 Beyond the role-pure prompt from the pack, a stage receives three pieces of
-context that are **not** pack-owned (ADR 0002, ADR 0004):
+context that are **not** pack-owned:
 
 - **The task request.** The routing block's **Task** section carries the
   task's immutable title and description — the requested behaviour and the

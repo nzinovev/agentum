@@ -95,9 +95,10 @@ type scopeSubst struct {
 // environment that carries both the config and the credential scrub. Returns an
 // error if the profile grants anything the adapter cannot enforce — in that
 // case the invocation MUST NOT start.
-func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
+func (adapter *OpencodeAdapter) prepareEnforcement(inv Invocation) (enforcementPlan, error) {
+	errPrefix := adapter.errPrefix()
 	if err := inv.Profile.EnforceableBy(opencodeSupported); err != nil {
-		return enforcementPlan{}, fmt.Errorf("opencode adapter: %w", err)
+		return enforcementPlan{}, fmt.Errorf("%s%w", errPrefix, err)
 	}
 	subst := scopeSubst{worktree: inv.Workdir, artifact: inv.ArtifactDir}
 	// The audit profile keeps absolute paths: it is the evidence record, and an
@@ -117,10 +118,10 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 
 	config, buildErr := buildOpencodeConfig(substituted, subst, instructionRelPaths)
 	if buildErr != nil {
-		return enforcementPlan{}, fmt.Errorf("opencode adapter: %w", buildErr)
+		return enforcementPlan{}, fmt.Errorf("%s%w", errPrefix, buildErr)
 	}
 
-	configDir, configPath, dirErr := createConfigDir()
+	configDir, configPath, dirErr := createConfigDir(errPrefix)
 	if dirErr != nil {
 		return enforcementPlan{}, dirErr
 	}
@@ -132,7 +133,7 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 	// tamper-proof location and a working delivery path. Delivery only adds —
 	// the runtime's own AGENTS.md injection still happens — but after D4's edit
 	// deny + the runner's pre-stage hash check the two copies are byte-identical.
-	instructionAbsPaths, stageErr := stageInstructionFiles(configDir, inv.Instructions)
+	instructionAbsPaths, stageErr := stageInstructionFiles(configDir, inv.Instructions, errPrefix)
 	if stageErr != nil {
 		_ = os.RemoveAll(configDir)
 		return enforcementPlan{}, stageErr
@@ -144,11 +145,11 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 	compact, indented, renderErr := renderOpencodeConfigBytes(config)
 	if renderErr != nil {
 		_ = os.RemoveAll(configDir)
-		return enforcementPlan{}, fmt.Errorf("opencode adapter: render config: %w", renderErr)
+		return enforcementPlan{}, fmt.Errorf("%srender config: %w", errPrefix, renderErr)
 	}
 	if writeErr := os.WriteFile(configPath, indented, 0o600); writeErr != nil {
 		_ = os.RemoveAll(configDir)
-		return enforcementPlan{}, fmt.Errorf("opencode adapter: write config: %w", writeErr)
+		return enforcementPlan{}, fmt.Errorf("%swrite config: %w", errPrefix, writeErr)
 	}
 
 	return enforcementPlan{
@@ -169,7 +170,7 @@ func prepareEnforcement(inv Invocation) (enforcementPlan, error) {
 // so two declared paths that happen to share a basename do not clobber each
 // other. Mode 0600 matches the config file itself; cleanup removes the whole
 // directory.
-func stageInstructionFiles(configDir string, files []InstructionFile) ([]string, error) {
+func stageInstructionFiles(configDir string, files []InstructionFile, errPrefix string) ([]string, error) {
 	paths := make([]string, 0, len(files))
 	for index, file := range files {
 		if len(file.Content) == 0 {
@@ -182,7 +183,7 @@ func stageInstructionFiles(configDir string, files []InstructionFile) ([]string,
 		name := fmt.Sprintf("pinned-%d-%s", index, basename)
 		absolute := filepath.Join(configDir, name)
 		if err := os.WriteFile(absolute, file.Content, 0o600); err != nil {
-			return nil, fmt.Errorf("opencode adapter: stage instruction %q: %w", file.RepoPath, err)
+			return nil, fmt.Errorf("%sstage instruction %q: %w", errPrefix, file.RepoPath, err)
 		}
 		paths = append(paths, filepath.ToSlash(absolute))
 	}
@@ -199,10 +200,10 @@ func stageInstructionFiles(configDir string, files []InstructionFile) ([]string,
 // feeds the auto_if_clean gate and can leak into the delivery diff. Only
 // `.agentum/` is added to the repo's local excludes; nothing else in the
 // worktree is free.
-func createConfigDir() (dir string, path string, err error) {
+func createConfigDir(errPrefix string) (dir string, path string, err error) {
 	dir, err = os.MkdirTemp("", "agentum-opencode-")
 	if err != nil {
-		return "", "", fmt.Errorf("opencode adapter: create config dir: %w", err)
+		return "", "", fmt.Errorf("%screate config dir: %w", errPrefix, err)
 	}
 	return dir, filepath.Join(dir, "opencode.json"), nil
 }

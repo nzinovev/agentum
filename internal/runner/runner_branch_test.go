@@ -91,8 +91,7 @@ func TestLoop_ChangesRequestedThenApproved(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("first pass"), approvedVerdict("second pass")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	// Derive the syncer the same way production does (from an artifacts.SQLStore
 	// is not available here; the recording store is not an SQLStore, so the
@@ -133,8 +132,7 @@ func TestLoop_ApprovedOnFirstPass(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{approvedVerdict("clean")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -173,8 +171,7 @@ func TestLoop_BudgetExhaustedStopsAndPreserves(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("p1"), changesRequested("p2"), changesRequested("p3")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: artStore,
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: artStore,
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop3", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -255,8 +252,7 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 		"review/verdict.json": mustMarshalVerdict(changesRequested("restart")),
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: artStore,
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: artStore,
 	})
 	// advance from the gate at review: the verdict says changes_requested, so
 	// the resolver wants to enter fix; but the budget (1) is already spent
@@ -278,10 +274,12 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 // call count, so a loop test can say "first review = changes_requested, second
 // = approved" without a per-call key collision.
 type countingVerdictAdapter struct {
+	stubExecution
 	results        map[string]agent.ResultJSON
 	reviewSequence []agent.VerdictJSON
 	reviewCount    int
 	calls          []string
+	invocations    []agent.Invocation
 }
 
 func (adapter *countingVerdictAdapter) Supported() []caps.Category {
@@ -294,6 +292,7 @@ func (adapter *countingVerdictAdapter) Supported() []caps.Category {
 func (adapter *countingVerdictAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<-chan agent.Event, error) {
 	stageID := stageOf(inv)
 	adapter.calls = append(adapter.calls, stageID)
+	adapter.invocations = append(adapter.invocations, inv)
 	eventCh := make(chan agent.Event, 2)
 	go func() {
 		defer close(eventCh)
@@ -309,6 +308,12 @@ func (adapter *countingVerdictAdapter) Invoke(ctx context.Context, inv agent.Inv
 		if !ok {
 			eventCh <- agent.Event{Kind: agent.EventError, Err: fmt.Errorf("no script for stage %q", stageID)}
 			return
+		}
+		// Write result.json like a real agent would, so the capture path
+		// stores revisions and successive attempts' routing blocks differ
+		// (prior-stage refs grow across the run).
+		if resultBytes, marshalErr := json.Marshal(scripted); marshalErr == nil {
+			_ = os.WriteFile(filepath.Join(inv.ArtifactDir, "result.json"), resultBytes, 0o644)
 		}
 		eventCh <- agent.Event{Kind: agent.EventStream, Chunk: "working..."}
 		eventCh <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{SessionID: "sess-" + stageID, ResultJSON: scripted}}
@@ -377,8 +382,7 @@ func TestLoop_ResultSummaryCannotOverrideVerdict(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("actually broken"), approvedVerdict("now ok")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop5", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -414,8 +418,7 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 		reviewSequence: nil, // no verdict written
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop6", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -467,8 +470,7 @@ func TestLoop_TransitionRecordsPerLap(t *testing.T) {
 		},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(), Manifest: nil,
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(), Manifest: nil,
 	})
 	// Inject the fake manifest service after construction (same pattern as
 	// checkpoint_test.go:246).

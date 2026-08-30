@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"context"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 // TestIngest_NDJSONFixture feeds the captured opencode stream through the
@@ -92,4 +96,112 @@ func splitNDJSON(s string) []string {
 		lines = append(lines, cur)
 	}
 	return lines
+}
+
+// TestBuildOpencodeArgs_AggregateShape pins the argv contract: run --format
+// json --auto --dir <workdir> [--session <id>] [--model <model>] <message>.
+// The optional flags appear only when their selection field is populated — an
+// empty model emits no --model, and the runtime's own default applies.
+func TestBuildOpencodeArgs_AggregateShape(t *testing.T) {
+	t.Parallel()
+	base := Invocation{
+		Workdir:      "/wt",
+		Prompt:       "stage prompt",
+		RoutingBlock: "routing block",
+	}
+
+	argv := buildOpencodeArgs("opencode", base)
+	want := []string{"opencode", "run", "--format", "json", "--auto", "--dir", "/wt", "stage prompt\n\nrouting block"}
+	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("bare argv = %v; want %v", argv, want)
+	}
+
+	withModel := base
+	withModel.Model = models.Selection{Tier: "strong", Options: models.Options{Model: "prov/model"}}
+	argv = buildOpencodeArgs("opencode", withModel)
+	if index := indexOfArg(argv, "--model"); index < 0 || argv[index+1] != "prov/model" {
+		t.Errorf("argv = %v; want --model prov/model", argv)
+	}
+
+	withSession := withModel
+	withSession.ResumeSession = "sess-1"
+	argv = buildOpencodeArgs("opencode", withSession)
+	sessionIndex := indexOfArg(argv, "--session")
+	modelIndex := indexOfArg(argv, "--model")
+	if sessionIndex < 0 || modelIndex < 0 || sessionIndex > modelIndex {
+		t.Errorf("argv = %v; want --session before --model", argv)
+	}
+	if got := argv[len(argv)-1]; got != "stage prompt\n\nrouting block" {
+		t.Errorf("last argv element = %q; want the prompt+routing message", got)
+	}
+}
+
+// indexOfArg finds a flag's index in argv, or -1.
+func indexOfArg(argv []string, flag string) int {
+	for index, arg := range argv {
+		if arg == flag {
+			return index
+		}
+	}
+	return -1
+}
+
+// TestInvoke_RefusesUndeclaredModelOption is the third refusal point: a
+// selection carrying an option the descriptor does not declare is refused
+// before any subprocess starts, and the error names BOTH the adapter id and
+// the option. A narrowed descriptor supplies the negative case, because
+// today's only option (model) is one this adapter declares — this is the
+// mechanism test MVP task 6 inherits for --variant.
+//
+// Cannot use t.Parallel: it narrows the package-level descriptor (restored on
+// cleanup), which other Describe() callers read.
+func TestInvoke_RefusesUndeclaredModelOption(t *testing.T) {
+	workdir := t.TempDir()
+	original := opencodeDescriptor.ModelOptions
+	opencodeDescriptor.ModelOptions = nil // the narrowed declaration: nothing is declared
+	t.Cleanup(func() { opencodeDescriptor.ModelOptions = original })
+
+	adapter := NewOpencodeAdapter("definitely-not-a-real-binary")
+	invocation := Invocation{
+		Workdir:     workdir,
+		ArtifactDir: workdir,
+		Prompt:      "stage prompt",
+		Model:       models.Selection{Tier: "strong", Options: models.Options{Model: "prov/model"}},
+	}
+
+	events, err := adapter.Invoke(context.Background(), invocation)
+	if err == nil {
+		t.Fatal("Invoke must refuse a selection whose options the descriptor does not declare")
+	}
+	if events != nil {
+		t.Error("no channel may be returned from a refused start")
+	}
+	if !strings.Contains(err.Error(), string(AdapterOpencode)) {
+		t.Errorf("error must name the adapter id: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unsupported model option") {
+		t.Errorf("error must name the unsupported option: %v", err)
+	}
+}
+
+// TestInvoke_AcceptsDeclaredOptions: the same selection against the real
+// descriptor passes the option check (the start may still fail later on the
+// missing binary — that is a different error, not an option refusal).
+func TestInvoke_AcceptsDeclaredOptions(t *testing.T) {
+	t.Parallel()
+	workdir := t.TempDir()
+	adapter := NewOpencodeAdapter("definitely-not-a-real-runtime-binary")
+	invocation := Invocation{
+		Workdir:     workdir,
+		ArtifactDir: workdir,
+		Prompt:      "stage prompt",
+		Model:       models.Selection{Tier: "strong", Options: models.Options{Model: "prov/model"}},
+	}
+	_, err := adapter.Invoke(context.Background(), invocation)
+	if err == nil {
+		t.Fatal("expected the missing-binary error, not a successful start")
+	}
+	if strings.Contains(err.Error(), "unsupported model option") {
+		t.Errorf("a declared option must not be refused: %v", err)
+	}
 }

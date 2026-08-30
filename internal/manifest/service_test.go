@@ -19,7 +19,7 @@ func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal locked: %v", err)
 	}
-	patch := Body{Prompts: []PromptRevision{{StageID: "spec", Hash: "h1"}}}
+	patch := Body{Invocations: []InvocationEvidence{testInvocation("inv-1", "spec", 0)}}
 
 	merged, err := mergeIntoLocked(lockedBytes, patch)
 	if err != nil {
@@ -32,8 +32,8 @@ func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 	if decoded.Input == nil || decoded.Input.Revision != "v1" {
 		t.Errorf("existing section lost: %+v", decoded.Input)
 	}
-	if len(decoded.Prompts) != 1 || decoded.Prompts[0].StageID != "spec" {
-		t.Errorf("patch not merged: %+v", decoded.Prompts)
+	if len(decoded.Invocations) != 1 || decoded.Invocations[0].Stage != "spec" {
+		t.Errorf("patch not merged: %+v", decoded.Invocations)
 	}
 }
 
@@ -43,7 +43,7 @@ func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 // is not clobbered with a partial patch.
 func TestMergeIntoLocked_UndecodableBodyIsAnError(t *testing.T) {
 	t.Parallel()
-	_, err := mergeIntoLocked([]byte("{not json"), Body{Prompts: []PromptRevision{{StageID: "s", Hash: "h"}}})
+	_, err := mergeIntoLocked([]byte("{not json"), Body{Invocations: []InvocationEvidence{testInvocation("inv-1", "s", 0)}})
 	if err == nil {
 		t.Fatal("mergeIntoLocked on undecodable body returned nil error; an empty merge base would clobber the row")
 	}
@@ -107,13 +107,13 @@ func TestCorrectionChain_PreservesEarlierCorrections(t *testing.T) {
 	t.Parallel()
 	sealed := Body{Missing: []string{"memory"}}
 	first := mergeBodies(sealed, Body{Input: &InputEvidence{TaskID: "T1", Revision: "v1"}})
-	second := mergeBodies(first, Body{Prompts: []PromptRevision{{StageID: "spec", Hash: "h1"}}})
+	second := mergeBodies(first, Body{Invocations: []InvocationEvidence{testInvocation("inv-2", "spec", 1)}})
 
 	if second.Input == nil || second.Input.Revision != "v1" {
 		t.Errorf("first correction's input lost in chain: %+v", second.Input)
 	}
-	if len(second.Prompts) != 1 {
-		t.Errorf("second correction's prompts lost in chain: %+v", second.Prompts)
+	if len(second.Invocations) != 1 || second.Invocations[0].InvocationID != "inv-2" {
+		t.Errorf("second correction's invocations lost in chain: %+v", second.Invocations)
 	}
 	if len(second.Missing) != 1 || second.Missing[0] != "memory" {
 		t.Errorf("sealed body's missing section lost in chain: %+v", second.Missing)

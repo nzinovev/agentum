@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,12 +26,31 @@ import (
 // pass an absolute path to pin it.
 type OpencodeAdapter struct {
 	binary string // path to the opencode executable
+
+	// probeOnce / readiness memoize the runtime version probe: one subprocess per
+	// process lifetime, shared by every consumer.
+	probeOnce sync.Once
+	readiness Readiness
 }
 
-// NewOpencodeAdapter returns an adapter that invokes the named binary. The
-// binary is resolved lazily via exec.LookPath on each Invoke.
+// NewOpencodeAdapter returns an adapter that invokes the named binary. An
+// empty name selects the descriptor's default — "which executable am I" is
+// the adapter's own knowledge, so a caller with no operator override passes
+// nothing rather than looking the default up first. The binary is resolved
+// lazily via exec.LookPath on each Invoke.
 func NewOpencodeAdapter(binary string) *OpencodeAdapter {
+	if binary == "" {
+		binary = opencodeDescriptor.Binary
+	}
 	return &OpencodeAdapter{binary: binary}
+}
+
+// errPrefix is the "<id> adapter: " lead-in for this adapter's errors. The id
+// comes from the descriptor, never a literal in a message — the executor is
+// named only in its own declaration, and an error message is calling code like
+// anywhere else.
+func (adapter *OpencodeAdapter) errPrefix() string {
+	return string(adapter.Describe().ID) + " adapter: "
 }
 
 // Invoke implements Adapter. It starts `opencode run --format json`, forwards
@@ -38,24 +58,33 @@ func NewOpencodeAdapter(binary string) *OpencodeAdapter {
 // ArtifactDir/result.json. On ctx cancellation it kills the process group and
 // emits EventError.
 //
-// Enforcement is applied before the subprocess starts: the effective profile is
-// confirmed enforceable, a per-invocation opencode permission config is
+// Enforcement is applied before the subprocess starts: the model selection is
+// confirmed to carry only options this adapter declared, the effective profile
+// is confirmed enforceable, a per-invocation opencode permission config is
 // rendered outside the worktree and handed to the child through its
 // environment, the environment is credential-scrubbed, and the profile's
 // hard/idle timeouts wrap ctx. A profile that grants a capability the adapter
-// cannot enforce returns an error here — the invocation does not start.
-func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
-	if err := validateInvocation(inv); err != nil {
+// cannot enforce — or a selection carrying an undeclared option — returns an
+// error here; the invocation does not start.
+func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
+	descriptor := adapter.Describe()
+	// Defence in depth: re-check what was handed in, regardless of what the
+	// caller believed. An option outside the descriptor's set is refused and no
+	// subprocess starts.
+	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
+		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
+	}
+	if err := adapter.validateInvocation(inv); err != nil {
 		return nil, err
 	}
-	plan, err := prepareEnforcement(inv)
+	plan, err := adapter.prepareEnforcement(inv)
 	if err != nil {
 		return nil, err
 	}
-	bin, err := exec.LookPath(a.binary)
+	bin, err := exec.LookPath(adapter.binary)
 	if err != nil {
 		plan.cleanup()
-		return nil, fmt.Errorf("opencode adapter: binary %q not found: %w", a.binary, err)
+		return nil, fmt.Errorf("%sbinary %q not found: %w", adapter.errPrefix(), adapter.binary, err)
 	}
 
 	// The run outlives Invoke: the subprocess is still working when we hand the
@@ -80,7 +109,7 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	if err != nil {
 		control.release()
 		plan.cleanup()
-		return nil, fmt.Errorf("opencode adapter: stdout pipe: %w", err)
+		return nil, fmt.Errorf("%sstdout pipe: %w", adapter.errPrefix(), err)
 	}
 	// stderr is discarded for MVP; the print-logs flag is the debug path later.
 	cmd.Stderr = io.Discard
@@ -88,11 +117,11 @@ func (a *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Ev
 	if err := cmd.Start(); err != nil {
 		control.release()
 		plan.cleanup()
-		return nil, fmt.Errorf("opencode adapter: start: %w", err)
+		return nil, fmt.Errorf("%sstart: %w", adapter.errPrefix(), err)
 	}
 
 	ch := make(chan Event, 16)
-	go a.run(control, cmd, stdout, inv, ch, plan)
+	go adapter.run(control, cmd, stdout, inv, ch, plan)
 	return ch, nil
 }
 
@@ -142,11 +171,11 @@ func (control *runControl) stopReason(idleTimeout time.Duration) error {
 // inputs; the adapter re-checks the effective profile at Invoke time as
 // defense-in-depth (a profile built by any other path must still be enforceable
 // before the subprocess may start).
-func (a *OpencodeAdapter) Supported() []caps.Category {
+func (adapter *OpencodeAdapter) Supported() []caps.Category {
 	return append([]caps.Category(nil), opencodeSupported...)
 }
 
-func (a *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
+func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
 	// Ownership of the run context and of the materialized enforcement plan
 	// transfers here from Invoke. Both are released only after the process is
 	// reaped: the rendered config backs the child's permission set for as long
@@ -332,28 +361,30 @@ func assembleResult(inv Invocation, s *invokeState) (*Result, error) {
 }
 
 // buildOpencodeArgs assembles the argv: ["opencode", "run", "--format", "json",
-// "--auto", "--dir", workdir, ...optional, <message>].
+// "--auto", "--dir", workdir, ...optional, <message>]. Model options are read
+// from the typed selection field by field — there is no path where a caller
+// appends a string to argv.
 func buildOpencodeArgs(bin string, inv Invocation) []string {
 	args := []string{bin, "run", "--format", "json", "--auto", "--dir", inv.Workdir}
 	if inv.ResumeSession != "" {
 		args = append(args, "--session", inv.ResumeSession)
 	}
-	if inv.Model != "" {
-		args = append(args, "--model", inv.Model)
+	if inv.Model.Options.Model != "" {
+		args = append(args, "--model", inv.Model.Options.Model)
 	}
 	args = append(args, inv.Prompt+"\n\n"+inv.RoutingBlock)
 	return args
 }
 
-func validateInvocation(inv Invocation) error {
+func (adapter *OpencodeAdapter) validateInvocation(inv Invocation) error {
 	if inv.Workdir == "" {
-		return fmt.Errorf("opencode adapter: Workdir is required")
+		return fmt.Errorf("%sWorkdir is required", adapter.errPrefix())
 	}
 	if inv.ArtifactDir == "" {
-		return fmt.Errorf("opencode adapter: ArtifactDir is required")
+		return fmt.Errorf("%sArtifactDir is required", adapter.errPrefix())
 	}
 	if strings.TrimSpace(inv.Prompt) == "" {
-		return fmt.Errorf("opencode adapter: Prompt is required")
+		return fmt.Errorf("%sPrompt is required", adapter.errPrefix())
 	}
 	return nil
 }

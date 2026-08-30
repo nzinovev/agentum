@@ -9,13 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
-	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -34,6 +34,9 @@ type recordingArtifactStore struct {
 	// Current + GetBytes can serve the verdict artifact the capture path
 	// ingested. Updated on every Put.
 	currentByName map[string][]byte
+	// kindByName remembers each name's kind so ListCurrent can report it
+	// (priorStageRefs filters revisions by kind).
+	kindByName map[string]string
 	// failWith, when set, is returned from every Put.
 	failWith error
 }
@@ -53,6 +56,10 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 	stashed := make([]byte, len(params.Bytes))
 	copy(stashed, params.Bytes)
 	store.currentByName[params.Name] = stashed
+	if store.kindByName == nil {
+		store.kindByName = make(map[string]string)
+	}
+	store.kindByName[params.Name] = params.Kind
 	// A stable, distinct id + content hash per ingest so the manifest-ref
 	// assertions can distinguish revisions by more than name. Hash mirrors the
 	// real store: the bytes determine the hash.
@@ -114,8 +121,23 @@ func (store *recordingArtifactStore) Current(_ context.Context, _ string, _ stri
 func (*recordingArtifactStore) ListForTask(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")
 }
-func (*recordingArtifactStore) ListCurrent(context.Context, string, string) ([]artifacts.Revision, error) {
-	return nil, errors.New("not used")
+func (store *recordingArtifactStore) ListCurrent(context.Context, string, string) ([]artifacts.Revision, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	names := make([]string, 0, len(store.currentByName))
+	for name := range store.currentByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]artifacts.Revision, 0, len(names))
+	for _, name := range names {
+		out = append(out, artifacts.Revision{
+			ID:   "rev-" + name,
+			Name: name,
+			Kind: store.kindByName[name],
+		})
+	}
+	return out, nil
 }
 func (*recordingArtifactStore) ListForInvocation(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")
@@ -165,9 +187,11 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
 	events := newFakeStore(task, sqlc.Project{})
 	store := &recordingArtifactStore{}
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{}}
 	runner := New(Deps{
 		Store:     events,
 		Artifacts: store,
+		Adapter:   adapter,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return &captureFixture{
@@ -519,12 +543,16 @@ func (service *fakeManifestService) gapSections() []string {
 	return out
 }
 
-// TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives is D5: when
+// TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives: when
 // AddEvidence fails mid-run, the runner must record the failure as an
 // EvidenceGap on the manifest rather than swallow it, and the stage must
 // survive. A sealed manifest that swallows the failure (degrading silently) is
 // worse than an absent record because a reviewer cannot tell the two apart.
-func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
+//
+// The successful attempt's evidence is one write covering three sections, so a
+// failure records a gap against EACH of them: a reviewer asks whether the
+// artifacts section is trustworthy, not which call failed.
+func TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
 	fake := &fakeManifestService{addErr: errors.New("db connection lost")}
@@ -535,17 +563,70 @@ func TestRecordStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testing.
 		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 	})
 	run := stageRun{task: task, taskPack: taskPack}
-	stage := taskPack.Stages[fixtureStage]
 
 	// Must not panic or fail the stage; the run continues.
-	fixture.runner.recordStageEvidence(context.Background(), run, fixtureStage, stage, "model-x", caps.Profile{}, nil)
+	outputs := []manifest.ArtifactRef{{
+		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
+		Stage: fixtureStage, InvocationID: "inv-1",
+	}}
+	fixture.runner.completeStageEvidence(context.Background(), run, fixtureStage, "inv-1", agent.Telemetry{}, outputs)
 
 	gaps := fake.gapSections()
-	if len(gaps) != 1 {
-		t.Fatalf("AddEvidence failure recorded %d gaps, want 1: %v", len(gaps), gaps)
+	recorded := make(map[string]bool, len(gaps))
+	for _, section := range gaps {
+		recorded[section] = true
 	}
-	if gaps[0] != "prompts_model_capabilities" {
-		t.Errorf("gap section = %q, want prompts_model_capabilities", gaps[0])
+	for _, want := range []string{"invocations", "context", "artifacts"} {
+		if !recorded[want] {
+			t.Errorf("no gap recorded for the %q section: %v", want, gaps)
+		}
+	}
+	if len(gaps) != 3 {
+		t.Errorf("AddEvidence failure recorded %d gaps, want one per covered section: %v", len(gaps), gaps)
+	}
+}
+
+// TestCompleteStageEvidence_WritesOnce pins the fold: a successful attempt
+// leaves ONE manifest transaction carrying the invocation close, the artifact
+// outputs and the context section. AddEvidence is a full-document
+// read-modify-write under the row lock, so an extra call is an extra decode
+// and re-encode of a body that grows for the life of the run — and three
+// separate writes could leave the attempt closed with its artifacts missing.
+func TestCompleteStageEvidence_WritesOnce(t *testing.T) {
+	t.Parallel()
+	fixture := newCaptureFixture(t)
+	fake := &fakeManifestService{}
+	fixture.runner.mfst = fake
+
+	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+	})
+	run := stageRun{task: task, taskPack: taskPack}
+	outputs := []manifest.ArtifactRef{{
+		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
+		Stage: fixtureStage, InvocationID: "inv-1",
+	}}
+
+	telemetry := agent.Telemetry{Cost: 0.25}
+	telemetry.Tokens.Total = 1234
+	fixture.runner.completeStageEvidence(context.Background(), run, fixtureStage, "inv-1", telemetry, outputs)
+
+	if len(fake.addEvidence) != 1 {
+		t.Fatalf("manifest writes = %d, want 1: %+v", len(fake.addEvidence), fake.addEvidence)
+	}
+	patch := fake.addEvidence[0]
+	if len(patch.Invocations) != 1 || patch.Invocations[0].InvocationID != "inv-1" {
+		t.Errorf("patch carries no invocation close: %+v", patch.Invocations)
+	}
+	if patch.Invocations[0].Telemetry == nil || patch.Invocations[0].Telemetry.Tokens.Total != 1234 {
+		t.Errorf("measured telemetry must reach the record: %+v", patch.Invocations[0].Telemetry)
+	}
+	if patch.Artifacts == nil || len(patch.Artifacts.Outputs) != 1 {
+		t.Errorf("patch carries no artifact outputs: %+v", patch.Artifacts)
+	}
+	if patch.Context == nil {
+		t.Error("patch carries no context section")
 	}
 }
 

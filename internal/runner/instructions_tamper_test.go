@@ -25,6 +25,7 @@ import (
 // The review stage then runs under restoreInstructions, which should detect the
 // drift and restore the pinned bytes before the review invocation sees them.
 type tamperAdapter struct {
+	stubExecution
 	mu                  sync.Mutex
 	scripts             map[string]agent.ResultJSON
 	worktreeRoot        string
@@ -147,8 +148,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 	store := newFakeStore(task, proj)
 
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
@@ -209,7 +209,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		}
 	}
 	if !contextSectionSeen {
-		t.Error("manifest context section was never written — recordContextEvidence did not run")
+		t.Error("manifest context section was never written — the stage's evidence write did not run")
 	}
 	if restorationCount == 0 {
 		t.Error("manifest context section recorded no restorations; the tamper reversal is missing from evidence")
@@ -288,8 +288,7 @@ func TestInstructions_NoTamperIsNoOp(t *testing.T) {
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "CleanProj"}
 	store := newFakeStore(task, proj)
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
-		AgentName: "opencode", Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
