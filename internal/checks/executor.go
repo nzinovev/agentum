@@ -17,13 +17,14 @@ import (
 type Status string
 
 const (
-	// StatusPass: the command exited 0.
+	// StatusPass means the command exited 0.
 	StatusPass Status = "pass"
-	// StatusFail: the command exited non-zero.
+	// StatusFail means the command exited non-zero.
 	StatusFail Status = "fail"
-	// StatusTimeout: the per-check deadline elapsed before the command exited.
+	// StatusTimeout means the per-check deadline elapsed before the command
+	// exited.
 	StatusTimeout Status = "timeout"
-	// StatusError: the command could not be started or failed to produce a
+	// StatusError means the command could not be started or failed to produce a
 	// result for a reason other than exit code or timeout.
 	StatusError Status = "error"
 )

@@ -70,7 +70,8 @@ const (
 	// ActionTaskStart moves a fresh task into the running pipeline.
 	ActionTaskStart = "task:start"
 
-	// The human-gate verbs. Each is its own action rather than one collapsed
+	// ActionTaskAdvance and its approve/reject/cancel siblings are the
+	// human-gate verbs. Each is its own action rather than one collapsed
 	// "task:write": approving a result, rejecting it, and aborting a run are
 	// different rights, and RBAC will have to grant them separately.
 	ActionTaskAdvance = "task:advance"
@@ -82,8 +83,8 @@ const (
 	// already-terminal task — destructive, so it is not folded into cancel.
 	ActionTaskCleanup = "task:cleanup"
 
-	// Project actions mirror the task ones. A project is the repository a task
-	// runs against.
+	// ActionProjectCreate and its read/list siblings mirror the task actions.
+	// A project is the repository a task runs against.
 	ActionProjectCreate = "project:create"
 	ActionProjectRead   = "project:read"
 	ActionProjectList   = "project:list"
