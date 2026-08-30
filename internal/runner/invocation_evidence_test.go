@@ -418,3 +418,68 @@ func TestResolveExecutionPlan_ValidatesEveryStageOfThePack(t *testing.T) {
 func contains(haystack, needle string) bool {
 	return len(needle) == 0 || indexOf(haystack, needle) >= 0
 }
+
+// narrowedOptionAdapter declares NO model options at all, so every resolved
+// selection (a tier always yields a model) carries one this adapter cannot
+// take. It is the runner-side equivalent of the agent package's narrowed
+// descriptor, and the only way to reach the option branch today: the one
+// option that exists is the one the real adapter declares.
+type narrowedOptionAdapter struct {
+	scriptAdapter
+}
+
+func (adapter *narrowedOptionAdapter) Describe() agent.Descriptor {
+	descriptor := adapter.scriptAdapter.Describe()
+	descriptor.ModelOptions = nil
+	return descriptor
+}
+
+// TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation is the
+// acceptance criterion "a model option the adapter does not support stops the
+// run with a configuration error BEFORE the first invocation, naming adapter
+// and option" (ADR 0005 D4, the second refusal point). The tier cases above
+// cover an unresolvable tier; this one covers the option, which is the half
+// the criterion is actually about — and it asserts the refusal, never "the
+// option was quietly absent from argv".
+func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	task := sqlc.Task{ID: "T-bad-option", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+	adapter := &narrowedOptionAdapter{scriptAdapter: scriptAdapter{
+		scripts: map[string]agent.ResultJSON{
+			"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
+		},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+
+	err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us"))
+	if err == nil {
+		t.Fatal("an option the adapter does not declare must fail the run")
+	}
+	// The message must name the adapter and the option: an operator reading it
+	// has to know which executor refused and which parameter to remove.
+	if !contains(err.Error(), "stub") {
+		t.Errorf("failure must name the adapter: %v", err)
+	}
+	if !contains(err.Error(), "unsupported model options") || !contains(err.Error(), string(models.OptionModel)) {
+		t.Errorf("failure must name the unsupported option: %v", err)
+	}
+	if got := store.taskState(); got != "failed" {
+		t.Errorf("task state = %q, want failed", got)
+	}
+	store.mu.Lock()
+	invocationCount := len(store.invocations)
+	store.mu.Unlock()
+	if invocationCount != 0 {
+		t.Errorf("stage invocations created = %d, want 0 (refuse before the first invocation)", invocationCount)
+	}
+}
