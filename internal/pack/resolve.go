@@ -107,10 +107,15 @@ func deepCopy(base *Pack) (*Pack, error) {
 	}
 	out.Dir = base.Dir
 	out.PromptText = make(map[string]string, len(base.PromptText))
-	for id, st := range base.Stages {
-		s := st
-		s.setPromptText(base.PromptText[id])
-		out.Stages[id] = s
+	// The round trip drops Pack.PromptText (yaml:"-") and every stage's
+	// unexported promptText. Restore them onto the stages the round trip
+	// produced. Copying the base stage back over them instead would re-alias
+	// Transitions and Capabilities to the base pack's backing arrays and undo
+	// the copy for exactly the fields an override is most likely to touch.
+	for id := range out.Stages {
+		stage := out.Stages[id]
+		stage.promptText = base.PromptText[id]
+		out.Stages[id] = stage
 		out.PromptText[id] = base.PromptText[id]
 	}
 	return &out, nil
@@ -131,7 +136,7 @@ func applyPromptSwaps(p *Pack, ov *Overrides) error {
 		if rel := ov.Prompts[stage]; rel != "" {
 			st.Prompt = rel
 		}
-		st.setPromptText(text)
+		st.promptText = text
 		p.Stages[stage] = st
 		p.PromptText[stage] = text
 	}

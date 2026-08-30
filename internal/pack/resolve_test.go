@@ -23,6 +23,35 @@ func ptrGate(g Gate) *Gate       { return &g }
 func ptrString(s string) *string { return &s }
 func ptrInt(n int) *int          { return &n }
 
+// TestResolve_DeepCopyDetachesStageSlices guards the copy boundary. Stage
+// carries reference fields (Transitions, Capabilities), so a resolved pack
+// whose stages share their backing arrays with the base is not a copy at all:
+// any in-place edit through the resolved pack reaches back into the base,
+// which callers hold and reuse across resolutions.
+func TestResolve_DeepCopyDetachesStageSlices(t *testing.T) {
+	t.Parallel()
+	base := loadBase(t)
+	copied, err := deepCopy(base)
+	if err != nil {
+		t.Fatalf("deepCopy: %v", err)
+	}
+	for id, baseStage := range base.Stages {
+		if len(baseStage.Transitions) == 0 {
+			continue
+		}
+		want := baseStage.Transitions[0].To
+		copiedStage := copied.Stages[id]
+		copiedStage.Transitions[0].To = "mutated-through-the-copy"
+		if got := base.Stages[id].Transitions[0].To; got != want {
+			t.Errorf("stage %q: writing through the copy reached the base: To = %q, want %q",
+				id, got, want)
+		}
+		if got := copied.Stages[id].PromptText(); got != base.PromptText[id] {
+			t.Errorf("stage %q: copy lost its prompt text: %q, want %q", id, got, base.PromptText[id])
+		}
+	}
+}
+
 // TestResolve_PromptSwapAndParamPatch is the happy path: swap one prompt,
 // patch one stage's gate + tier, patch a budget. The resolved pack validates,
 // carries the swapped text, the patched gate, and the base is untouched.

@@ -61,7 +61,7 @@ func loadPrompts(p *Pack) error {
 		if err != nil {
 			return fmt.Errorf("pack: stage %q read prompt %q: %w", id, s.Prompt, err)
 		}
-		s.setPromptText(string(text))
+		s.promptText = string(text)
 		p.PromptText[id] = string(text)
 		p.Stages[id] = s
 	}
