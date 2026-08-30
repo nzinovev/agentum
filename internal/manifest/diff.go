@@ -220,11 +220,8 @@ func newDelta(reason, summary string) *SectionDelta {
 }
 
 func diffInputs(left, right *InputEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "input-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "input-missing")
 	}
 	if left.Revision != right.Revision {
 		return newDelta("input-revision", "input payload hash differs")
@@ -236,11 +233,8 @@ func diffInputs(left, right *InputEvidence) *SectionDelta {
 }
 
 func diffProjects(left, right *ProjectEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "project-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "project-missing")
 	}
 	if left.ProjectID != right.ProjectID {
 		return newDelta("project-id", "project_id differs")
@@ -252,11 +246,8 @@ func diffProjects(left, right *ProjectEvidence) *SectionDelta {
 }
 
 func diffPacks(left, right *PackEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "pack-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "pack-missing")
 	}
 	if left.ContentHash != "" && right.ContentHash != "" && left.ContentHash != right.ContentHash {
 		return newDelta("pack-hash", "pack content hash differs")
@@ -399,11 +390,8 @@ func diffModels(left, right []InvocationEvidence) *SectionDelta {
 // "the second review of a fix cycle ran under a different profile" visible —
 // schema 1 keyed it by stage and overwrote it.
 func diffCapabilities(left, right *CapabilityProfile, leftRecords, rightRecords []InvocationEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "capabilities-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "capabilities-missing")
 	}
 	if !sameStringSet(left.Declared, right.Declared) {
 		return newDelta("capability-declared", "declared capability set differs")
@@ -424,11 +412,8 @@ func diffCapabilities(left, right *CapabilityProfile, leftRecords, rightRecords 
 }
 
 func diffMemory(left, right *MemorySlice) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "memory-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "memory-missing")
 	}
 	if !sameStringSet(left.Hashes, right.Hashes) {
 		return newDelta("memory-slice", "memory slice hashes differ")
@@ -439,18 +424,15 @@ func diffMemory(left, right *MemorySlice) *SectionDelta {
 	return nil
 }
 
-// diffContext compares the project-context channel (ADR 0002 D9). Both
-// instructions and skills are RUN INPUTS — which is what makes "same task, same
-// commit, same config, different skills ⇒ the runs differ" answerable. The
-// instruction axis compares path → delivered_hash; the skill axis compares the
-// name → hash set. A change in either surfaces a delta; the absence of one side
-// is itself significant.
+// diffContext compares the project-context channel. Both instructions and
+// skills are RUN INPUTS — which is what makes "same task, same commit, same
+// config, different skills ⇒ the runs differ" answerable. The instruction axis
+// compares path → delivered_hash; the skill axis compares the name → hash set.
+// A change in either surfaces a delta; the absence of one side is itself
+// significant.
 func diffContext(left, right *ContextEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "context-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "context-missing")
 	}
 	if !reflect.DeepEqual(indexInstructions(left.Instructions), indexInstructions(right.Instructions)) {
 		return newDelta("context-instructions", "pinned instruction set differs")
@@ -483,11 +465,8 @@ func indexSkills(skills []SkillRef) map[string]string {
 }
 
 func diffInputArtifacts(left, right *ArtifactEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "artifacts-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "artifacts-missing")
 	}
 	leftInputs := indexArtifacts(left.Inputs)
 	rightInputs := indexArtifacts(right.Inputs)
@@ -509,11 +488,8 @@ func indexArtifacts(refs []ArtifactRef) map[string]string {
 }
 
 func diffChecks(left, right *CheckEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "checks-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "checks-missing")
 	}
 	if left.SetVersion != right.SetVersion {
 		return newDelta("check-set-version", "check set version differs")
@@ -522,11 +498,8 @@ func diffChecks(left, right *CheckEvidence) *SectionDelta {
 }
 
 func diffGitBase(left, right *GitEvidence) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "git-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "git-missing")
 	}
 	if left.BaseCommit != right.BaseCommit {
 		return newDelta("git-base-commit", "base_commit differs")
@@ -535,11 +508,8 @@ func diffGitBase(left, right *GitEvidence) *SectionDelta {
 }
 
 func diffExecutionCoordinate(left, right *ExecutionCoordinate) *SectionDelta {
-	if left == nil && right == nil {
-		return nil
-	}
-	if oneNilDelta := eitherNilDelta(left == nil, right == nil, "coordinate-missing"); oneNilDelta != nil {
-		return oneNilDelta
+	if left == nil || right == nil {
+		return eitherNilDelta(left == nil, right == nil, "coordinate-missing")
 	}
 	if left.DeliveryStep != right.DeliveryStep ||
 		left.ExecutionUnit != right.ExecutionUnit ||
@@ -549,8 +519,9 @@ func diffExecutionCoordinate(left, right *ExecutionCoordinate) *SectionDelta {
 	return nil
 }
 
-// eitherNilDelta returns a delta when exactly one side is nil. Returns nil when
-// both are nil (caller handles that earlier) or both are set.
+// eitherNilDelta returns a delta when exactly one side is nil, and nil when
+// both are. Callers hand it the whole `left == nil || right == nil` branch, so
+// past that branch both sides are known to be set.
 func eitherNilDelta(leftNil, rightNil bool, reason string) *SectionDelta {
 	if leftNil != rightNil {
 		return newDelta(reason, "present on one side, missing on the other")
