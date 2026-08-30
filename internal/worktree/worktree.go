@@ -339,20 +339,20 @@ const (
 	// ClassUnknown is the zero value and is never returned by Reconcile; it
 	// exists so an unset Classification reads as "not yet classified".
 	ClassUnknown Classification = iota
-	// ClassClean: no committed work beyond the base and no uncommitted changes.
-	// The stage can start fresh as if it had never run.
+	// ClassClean means no committed work beyond the base and no uncommitted
+	// changes. The stage can start fresh as if it had never run.
 	ClassClean
-	// ClassResumable: committed work exists beyond the base, and the working
-	// tree is clean. The next stage resumes from the recorded HEAD.
+	// ClassResumable means committed work exists beyond the base, and the
+	// working tree is clean. The next stage resumes from the recorded HEAD.
 	ClassResumable
-	// ClassRestorable: the working tree has uncommitted changes. The runner
-	// resets to CheckpointCommit (the last checkpoint, or base_commit if none)
-	// before retrying — a side-effectful stage is never replayed against a
-	// partially-modified tree.
+	// ClassRestorable means the working tree has uncommitted changes. The
+	// runner resets to CheckpointCommit (the last checkpoint, or base_commit if
+	// none) before retrying — a side-effectful stage is never replayed against
+	// a partially-modified tree.
 	ClassRestorable
-	// ClassNeedsAttention: the worktree is missing or in a state the reconciler
-	// cannot safely classify (detached HEAD, HEAD behind base). The runner
-	// surfaces this for a human rather than guessing.
+	// ClassNeedsAttention means the worktree is missing or in a state the
+	// reconciler cannot safely classify (detached HEAD, HEAD behind base). The
+	// runner surfaces this for a human rather than guessing.
 	ClassNeedsAttention
 )
 
@@ -541,9 +541,16 @@ func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error
 	if err != nil {
 		return fmt.Errorf("open excludes file: %w", err)
 	}
-	defer file.Close()
-	if _, err := file.WriteString(excludeEntry); err != nil {
-		return fmt.Errorf("write excludes file: %w", err)
+	if _, writeErr := file.WriteString(excludeEntry); writeErr != nil {
+		_ = file.Close()
+		return fmt.Errorf("write excludes file: %w", writeErr)
+	}
+	// Close is checked, not deferred: this handle is open for output, where a
+	// write can still be buffered, so a full disk or an I/O fault surfaces
+	// here and nowhere else. Discarding it would report a successful append
+	// that never reached the excludes file.
+	if closeErr := file.Close(); closeErr != nil {
+		return fmt.Errorf("close excludes file: %w", closeErr)
 	}
 	return nil
 }

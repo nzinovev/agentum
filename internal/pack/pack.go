@@ -138,20 +138,19 @@ type Stage struct {
 	// entity ("secret.github_token", "mcp.github").
 	Capabilities []string `yaml:"capabilities,omitempty"`
 
-	// promptText is the loaded prompt file contents. Unexported so the override
-	// resolver can only set it via the loader's discipline.
+	// promptText is the loaded prompt file contents. Unexported so only the
+	// loader and the override resolver can attach it, and assigned directly
+	// rather than through a setter: Stage lives in a map[string]Stage, so a
+	// pointer method here would be the type's only one and would invite the
+	// mutate-a-copy mistake that map elements make easy.
 	promptText string
 }
 
 // PromptText returns the loaded prompt contents for this stage.
-func (s Stage) PromptText() string { return s.promptText }
-
-// setPromptText is used by the loader (and, later, the override resolver) to
-// attach file contents after reading.
-func (s *Stage) setPromptText(t string) { s.promptText = t }
+func (stage Stage) PromptText() string { return stage.promptText }
 
 // Terminal reports whether this stage has no outgoing transitions.
-func (s Stage) Terminal() bool { return len(s.Transitions) == 0 }
+func (stage Stage) Terminal() bool { return len(stage.Transitions) == 0 }
 
 // Transition is a named edge to another stage. Condition is a term in the
 // closed D1 grammar (see condition.go); empty means the unconditional fallback

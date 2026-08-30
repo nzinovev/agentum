@@ -7,18 +7,18 @@ import (
 
 // registerRoutes wires the system endpoints only (health, ready). All /api/v1/*
 // surface is owned by internal/api and mounted via api.Register.
-func (s *Server) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /readyz", s.handleReady)
-	s.api.Register(mux)
+func (server *Server) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", server.handleHealth)
+	mux.HandleFunc("GET /readyz", server.handleReady)
+	server.api.Register(mux)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (server *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Ping(r.Context()); err != nil {
+func (server *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if err := server.store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready", "error": err.Error()})
 		return
 	}

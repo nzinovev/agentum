@@ -128,3 +128,15 @@ credentials, so a plain `go test ./...` excludes them; run them locally with
   (`api *API`, `runner *Runner`, `queue QueueStore`) and consistent across all
   methods of a type. When wrapping errors from a sub-call, expand the short
   form (`cerr` → `completeErr`, `ferr` → `failErr`) so the cause is readable.
+- **A suppression is a claim, and it gets reported.** Silence an analyzer
+  (`//noinspection <ID>`, `//nolint:<linter>`) only when the finding is
+  provably wrong — never because the fix is inconvenient. Two things are then
+  mandatory. The suppression carries a comment saying what the analyzer cannot
+  see and why the obvious-looking fix was rejected. And an agent that adds one
+  states it explicitly in its final output — file, inspection id, and the
+  argument — so a developer can re-check the reasoning instead of inheriting
+  it. An unreported suppression is the failure this rule exists to prevent:
+  from the next commit onward it reads as clean code, and the claim behind it
+  is never audited. Worked example: `GoResourceLeak` in `internal/api/task.go`,
+  where the wrapper's `Close` only forwards to `r.Body.Close` and `net/http`
+  closes the request body itself once the handler returns.

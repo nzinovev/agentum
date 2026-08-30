@@ -17,14 +17,14 @@ import (
 type Action int
 
 const (
-	// ActionAdvance: the stage auto-completed; continue to the next stage. The
-	// task stays `running` — no FSM transition, only current_stage moves.
+	// ActionAdvance means the stage auto-completed; continue to the next stage.
+	// The task stays `running` — no FSM transition, only current_stage moves.
 	ActionAdvance Action = iota
-	// ActionPause: stop the loop and surface the FSMEvent; the task moves to a
+	// ActionPause stops the loop and surfaces the FSMEvent; the task moves to a
 	// paused state and awaits a human (continue/advance/cancel).
 	ActionPause
-	// ActionFinal: the terminal stage completed; fire reach_final_gate so the
-	// task moves to awaiting_final_review ahead of final approval.
+	// ActionFinal means the terminal stage completed; fire reach_final_gate so
+	// the task moves to awaiting_final_review ahead of final approval.
 	ActionFinal
 )
 
