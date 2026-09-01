@@ -6,7 +6,9 @@ services:
       POSTGRES_PASSWORD: agentum
       POSTGRES_DB: agentum
     ports:
-      - "5432:5432"
+      # Overridable: 5432 is often already taken by another project's Postgres.
+      # The same variable feeds the Makefile's PG_URL, so both move together.
+      - "${AGENTUM_PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

@@ -1,4 +1,10 @@
-PG_URL ?= postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum
+# The published Postgres port is overridable (5432 is often already taken) and
+# exported, so `AGENTUM_PG_PORT=55432 make test-db` moves compose and the DSN
+# together.
+AGENTUM_PG_PORT ?= 5432
+export AGENTUM_PG_PORT
+
+PG_URL ?= postgres://agentum:agentum@localhost:$(AGENTUM_PG_PORT)/agentum?sslmode=disable&search_path=agentum
 
 # Foreground run vs background run:
 # - `make run` runs in the foreground; stop it with Ctrl+C. Nothing to clean up.

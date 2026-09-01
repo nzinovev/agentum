@@ -15,9 +15,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -31,6 +34,17 @@ import (
 // CI service both do).
 const databaseURLEnvVar = "AGENTUM_TEST_DATABASE_URL"
 
+// databaseNamePrefix marks every database this harness creates, so a later run
+// can recognize what an interrupted one left behind.
+const databaseNamePrefix = "agentum_test_"
+
+// staleAfter is how old a leftover database must be before a later run drops
+// it. It only has to exceed the lifetime of a live test database — seconds —
+// while staying far away from the age of one a sibling `go test` process is
+// using right now: `go test ./...` runs package binaries in parallel, and
+// dropping their databases would fail tests that did nothing wrong.
+const staleAfter = time.Hour
+
 // Handle is one test's database: the open store, sqlc queries over it, and the
 // URL, so a test can tear the schema down and re-open through the production
 // path (the migration-cycle test does exactly that).
@@ -43,15 +57,11 @@ type Handle struct {
 var (
 	stateMutex sync.Mutex
 	// adminConnection talks to the database named in the DSN itself: a database
-	// cannot be created or dropped from inside itself. It is opened when the
-	// template is first needed and closed when the last test database is gone.
+	// cannot be created or dropped from inside itself. It is opened together
+	// with the template and stays open for the life of the process.
 	adminConnection *sql.DB
-	templateName    string
-	templateReady   bool
-	// openTestDatabases counts Store handles not yet cleaned up; the last one
-	// out drops the template and closes the admin connection, so a normal test
-	// run leaves nothing behind.
-	openTestDatabases int
+	// templateName is empty until the one-time setup below has completed.
+	templateName string
 
 	databaseCounter atomic.Int64
 )
@@ -76,10 +86,9 @@ func Store(t *testing.T) *Handle {
 		quoteIdent(databaseName), quoteIdent(template))); err != nil {
 		t.Fatalf("create test database %s: %v", databaseName, err)
 	}
-	retainTemplate()
 
 	// The cleanup is registered the moment the database exists, so a failure
-	// anywhere below still drops it and releases the template.
+	// anywhere below still drops it.
 	var testStore *store.Store
 	t.Cleanup(func() {
 		if testStore != nil {
@@ -90,9 +99,6 @@ func Store(t *testing.T) *Handle {
 		if err := execAdmin(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)",
 			quoteIdent(databaseName))); err != nil {
 			t.Errorf("drop test database %s: %v", databaseName, err)
-		}
-		if err := releaseTemplate(ctx); err != nil {
-			t.Errorf("release database template: %v", err)
 		}
 	})
 
@@ -132,10 +138,16 @@ func requireDatabaseURL(t *testing.T) string {
 // ensureTemplate creates, at most once per process, the database every test is
 // copied from: empty, then migrated through store.Open, then closed — copying
 // with TEMPLATE requires that nothing stay connected to the source.
+//
+// The template then outlives every test in the binary. Dropping it once no test
+// database is left would rebuild it — a full migration run — for the next test
+// and every test after that, which is the cost the template exists to avoid;
+// and a test binary has no exit hook to drop it in. So it is left behind, and
+// swept by a later run instead.
 func ensureTemplate(ctx context.Context, baseURL string) (string, error) {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
-	if templateReady {
+	if templateName != "" {
 		return templateName, nil
 	}
 
@@ -149,21 +161,18 @@ func ensureTemplate(ctx context.Context, baseURL string) (string, error) {
 		return "", fmt.Errorf("connect via %s: %w", databaseURLEnvVar, err)
 	}
 
-	name := fmt.Sprintf("agentum_test_template_%d", os.Getpid())
-	// A crashed earlier run may have left this name behind and PIDs recycle;
-	// claim the name instead of failing on the leftover.
-	dropTemplate := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(name))
-	if _, err := admin.ExecContext(ctx, dropTemplate); err != nil {
-		_ = admin.Close()
-		return "", fmt.Errorf("reclaim template database %s: %w", name, err)
-	}
+	dropStaleDatabases(ctx, admin)
+
+	name := templateDatabaseName()
 	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %s", quoteIdent(name))); err != nil {
 		_ = admin.Close()
 		return "", fmt.Errorf("create template database %s: %w", name, err)
 	}
+	dropTemplate := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(name))
 
 	templateURL, err := withDatabase(baseURL, name)
 	if err != nil {
+		_, _ = admin.ExecContext(ctx, dropTemplate)
 		_ = admin.Close()
 		return "", err
 	}
@@ -181,56 +190,86 @@ func ensureTemplate(ctx context.Context, baseURL string) (string, error) {
 
 	adminConnection = admin
 	templateName = name
-	templateReady = true
 	return name, nil
 }
 
-// retainTemplate accounts for one more live test database.
-func retainTemplate() {
-	stateMutex.Lock()
-	defer stateMutex.Unlock()
-	openTestDatabases++
-}
+// dropStaleDatabases removes what an interrupted run left behind: Ctrl-C during
+// `go test` runs no cleanup, so that run's databases outlive it, and every run
+// leaves its template. Age is the only filter safe against a sibling `go test`
+// process working in the same cluster right now.
+//
+// It is best-effort and deliberately silent: clearing someone else's leftovers
+// must never be the reason a test run fails.
+func dropStaleDatabases(ctx context.Context, admin *sql.DB) {
+	rows, err := admin.QueryContext(ctx,
+		`SELECT datname FROM pg_database WHERE starts_with(datname, $1)`, databaseNamePrefix)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
 
-// releaseTemplate accounts for one fewer live test database and, for the last
-// one, drops the template and closes the admin connection.
-func releaseTemplate(ctx context.Context) error {
-	stateMutex.Lock()
-	defer stateMutex.Unlock()
-	openTestDatabases--
-	if openTestDatabases > 0 || !templateReady {
-		return nil
+	var staleNames []string
+	for rows.Next() {
+		var databaseName string
+		if err := rows.Scan(&databaseName); err != nil {
+			return
+		}
+		created, ok := creationTime(databaseName)
+		if ok && time.Since(created) > staleAfter {
+			staleNames = append(staleNames, databaseName)
+		}
 	}
-	droppedName := templateName
-	_, dropErr := adminConnection.ExecContext(ctx,
-		fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(droppedName)))
-	closeErr := adminConnection.Close()
-	adminConnection = nil
-	templateName = ""
-	templateReady = false
-	if dropErr != nil {
-		return fmt.Errorf("drop template database %s: %w", droppedName, dropErr)
+	if rows.Err() != nil {
+		return
 	}
-	return closeErr
+
+	for _, staleName := range staleNames {
+		_, _ = admin.ExecContext(ctx,
+			fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(staleName)))
+	}
 }
 
 // execAdmin runs a cluster-level statement (CREATE/DROP DATABASE) on the admin
-// connection.
+// connection. The lock is held only long enough to read the pool — the pool
+// itself is safe to share, and holding the lock across the statement would
+// serialize parallel tests on database creation.
 func execAdmin(ctx context.Context, query string) error {
 	stateMutex.Lock()
-	defer stateMutex.Unlock()
-	if adminConnection == nil {
+	admin := adminConnection
+	stateMutex.Unlock()
+	if admin == nil {
 		return errors.New("database admin connection is not open")
 	}
-	_, err := adminConnection.ExecContext(ctx, query)
+	_, err := admin.ExecContext(ctx, query)
 	return err
 }
 
-// nextDatabaseName builds a unique per-test database name: per-process template
-// names collide only if PIDs recycle after a crash, and the counter keeps
-// tests within one process apart.
+// templateDatabaseName and nextDatabaseName build names that are unique across
+// processes and carry the time they were created, in Unix seconds: Postgres
+// does not record when a database was created, and the sweep above needs an age
+// to tell an abandoned database from one that is in use.
+func templateDatabaseName() string {
+	return fmt.Sprintf("%s%d_%d_template", databaseNamePrefix, time.Now().Unix(), os.Getpid())
+}
+
 func nextDatabaseName() string {
-	return fmt.Sprintf("agentum_test_%d_%d", os.Getpid(), databaseCounter.Add(1))
+	return fmt.Sprintf("%s%d_%d_%d", databaseNamePrefix,
+		time.Now().Unix(), os.Getpid(), databaseCounter.Add(1))
+}
+
+// creationTime reads back the timestamp the two names above encode. A name that
+// does not parse is reported as unknown and therefore never dropped: whatever
+// it is, this harness did not make it.
+func creationTime(databaseName string) (time.Time, bool) {
+	fields := strings.Split(strings.TrimPrefix(databaseName, databaseNamePrefix), "_")
+	if len(fields) != 3 {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0), true
 }
 
 // withDatabase rewrites only the database name, preserving the parameters the
@@ -249,9 +288,10 @@ func withDatabase(baseURL string, databaseName string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// quoteIdent quotes a database name for interpolation into DDL. Names here come
-// from a fixed alphabet of letters, digits, and underscores, where Go's %q
-// matches Postgres identifier quoting.
+// quoteIdent quotes a database name for interpolation into DDL, doubling an
+// embedded quote the way Postgres expects. Names here come from a fixed
+// alphabet of letters, digits, and underscores, so this guards the construction
+// rather than escaping anything a caller supplied.
 func quoteIdent(name string) string {
-	return fmt.Sprintf("%q", name)
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
