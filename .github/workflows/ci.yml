@@ -23,6 +23,25 @@ jobs:
   build:
     name: build & vet & test
     runs-on: ubuntu-latest
+    # The Postgres service and the URL below make the DB-backed tests run for
+    # real: with the variable unset they fail in CI instead of skipping, so
+    # they cannot silently stop running one day.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentum
+          POSTGRES_PASSWORD: agentum
+          POSTGRES_DB: agentum
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentum -d agentum"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      AGENTUM_TEST_DATABASE_URL: "postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum"
     steps:
       - uses: actions/checkout@v4
 

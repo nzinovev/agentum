@@ -22,6 +22,7 @@ non-negotiable architecture seams.
 | Build | `go build ./...` |
 | Run (needs Postgres) | `make docker-up && make run` |
 | Tests | `go test ./...` |
+| Tests with Postgres | `make test-db` |
 | Integration tests (needs `opencode` + credentials) | `go test -tags integration ./...` |
 | Vet | `go vet ./...` |
 | Format | `gofmt -s -w .` |
@@ -32,7 +33,10 @@ Before any change is considered done: run `go vet ./...`, `go build ./...`, and
 table-driven by default. The tests that drive a real `opencode` subprocess sit
 behind the `integration` build tag — they need the binary and provider
 credentials, so a plain `go test ./...` excludes them; run them locally with
-`go test -tags integration ./...`.
+`go test -tags integration ./...`. Tests that need Postgres sit behind
+`AGENTUM_TEST_DATABASE_URL`: a plain `go test ./...` skips them, `make test-db`
+runs them against the compose Postgres, and in CI an unset variable fails them
+instead of skipping — a skipped database test there would be a lost check.
 
 ## Architecture seams — do not violate
 

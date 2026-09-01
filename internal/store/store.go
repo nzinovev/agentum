@@ -72,6 +72,20 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
+// MigrateDownTo rolls migrations back down to, but not including, the given
+// version; 0 removes them all. The application only ever migrates up — Open
+// never comes back down, so nothing in the product path calls this. It exists
+// for tests that must exercise the Down side of every migration; keeping it
+// beside Migrate is what lets them reach the embedded migrations at all.
+func (s *Store) MigrateDownTo(ctx context.Context, version int64) error {
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(embed.FS{})
+	if err := goose.DownToContext(ctx, s.DB, "migrations", version); err != nil {
+		return fmt.Errorf("migrate down to %d: %w", version, err)
+	}
+	return nil
+}
+
 func (s *Store) Close() error { return s.DB.Close() }
 
 // Ping verifies connectivity (used by the readiness endpoint).

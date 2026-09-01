@@ -23,6 +23,23 @@ conventions below.
 
 See `AGENTS.md` for the architecture seams that must not be violated.
 
+## Database-backed tests
+
+Tests that need Postgres (migrations up/down, store behavior) sit behind the
+`AGENTUM_TEST_DATABASE_URL` environment variable:
+
+```sh
+make test-db
+```
+
+This starts the compose Postgres, waits for its healthcheck, and runs the full
+test suite with the variable set. A plain `go test ./...` skips those tests
+with a message pointing here — that skip is a developer convenience, not a
+verdict: in CI the same tests fail when the variable is unset, so they cannot
+quietly stop running. Each test gets its own database, copied from a migrated
+template and dropped afterwards, so tests can neither observe each other's
+rows nor depend on cleanup order.
+
 ## Workflow
 
 - Branch from `main`, name it `<type>/<short-slug>` (e.g. `feat/memory-push`,

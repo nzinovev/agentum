@@ -10,7 +10,7 @@ AGENTUM_BIN := bin/agentum
 PID_FILE    := /tmp/agentum.pid
 LOG_FILE    := /tmp/agentum.log
 
-.PHONY: help tidy build run run-bg stop logs test vet fmt sqlc-gen migrate-up migrate-down docker-up docker-down
+.PHONY: help tidy build run run-bg stop logs test test-db vet fmt sqlc-gen migrate-up migrate-down docker-up docker-down
 
 help: ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*##"}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -57,6 +57,13 @@ logs: ## tail the background server log (Ctrl+C to exit)
 
 test: ## run tests
 	go test ./...
+
+# Postgres-backed tests skip under a plain `go test` (unset
+# AGENTUM_TEST_DATABASE_URL); this target is how they actually run. --wait
+# blocks on the compose healthcheck, so tests never race the database boot.
+test-db: ## run all tests incl. Postgres-backed ones (starts compose Postgres, waits for health)
+	docker compose up -d --wait
+	AGENTUM_TEST_DATABASE_URL="$(PG_URL)" go test ./...
 
 vet: ## go vet
 	go vet ./...

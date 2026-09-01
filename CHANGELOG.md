@@ -10,6 +10,12 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Postgres-backed test harness** (`internal/dbtest`, `make test-db`): tests
+  that need a database run against the compose Postgres with one database per
+  test, and migrations are proven up → down-to-zero → up by a test instead of
+  by eye. A plain `go test ./...` skips these tests when
+  `AGENTUM_TEST_DATABASE_URL` is unset; in CI an unset variable fails them, so
+  they cannot silently stop running.
 - **Provider-neutral execution target and per-invocation evidence**.
   The executor, the model, and the shape of the model's parameters leave the
   domain model: they are a registry entry plus a self-describing adapter.
