@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -61,13 +62,38 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
+// gooseMutex serializes the two functions below. goose keeps the migration FS
+// in a package-global that SetBaseFS overwrites, so two migrations running at
+// once would clear it under each other. The server migrates once on boot and
+// never races itself; a test binary opens many stores, and may open them in
+// parallel.
+var gooseMutex sync.Mutex
+
 // Migrate applies the embedded goose migrations. The app auto-migrates on boot,
 // so a separate goose CLI step is optional.
 func (s *Store) Migrate(ctx context.Context) error {
+	gooseMutex.Lock()
+	defer gooseMutex.Unlock()
 	goose.SetBaseFS(migrationsFS)
 	defer goose.SetBaseFS(embed.FS{})
 	if err := goose.UpContext(ctx, s.DB, "migrations"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+// MigrateDownTo rolls migrations back down to, but not including, the given
+// version; 0 removes them all. The application only ever migrates up — Open
+// never comes back down, so nothing in the product path calls this. It exists
+// for tests that must exercise the Down side of every migration; keeping it
+// beside Migrate is what lets them reach the embedded migrations at all.
+func (s *Store) MigrateDownTo(ctx context.Context, version int64) error {
+	gooseMutex.Lock()
+	defer gooseMutex.Unlock()
+	goose.SetBaseFS(migrationsFS)
+	defer goose.SetBaseFS(embed.FS{})
+	if err := goose.DownToContext(ctx, s.DB, "migrations", version); err != nil {
+		return fmt.Errorf("migrate down to %d: %w", version, err)
 	}
 	return nil
 }

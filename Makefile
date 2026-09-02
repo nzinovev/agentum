@@ -1,4 +1,10 @@
-PG_URL ?= postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum
+# The published Postgres port is overridable (5432 is often already taken) and
+# exported, so `AGENTUM_PG_PORT=55432 make test-db` moves compose and the DSN
+# together.
+AGENTUM_PG_PORT ?= 5432
+export AGENTUM_PG_PORT
+
+PG_URL ?= postgres://agentum:agentum@localhost:$(AGENTUM_PG_PORT)/agentum?sslmode=disable&search_path=agentum
 
 # Foreground run vs background run:
 # - `make run` runs in the foreground; stop it with Ctrl+C. Nothing to clean up.
@@ -10,7 +16,7 @@ AGENTUM_BIN := bin/agentum
 PID_FILE    := /tmp/agentum.pid
 LOG_FILE    := /tmp/agentum.log
 
-.PHONY: help tidy build run run-bg stop logs test vet fmt sqlc-gen migrate-up migrate-down docker-up docker-down
+.PHONY: help tidy build run run-bg stop logs test test-db vet fmt sqlc-gen migrate-up migrate-down docker-up docker-down
 
 help: ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*##"}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -57,6 +63,13 @@ logs: ## tail the background server log (Ctrl+C to exit)
 
 test: ## run tests
 	go test ./...
+
+# Postgres-backed tests skip under a plain `go test` (unset
+# AGENTUM_TEST_DATABASE_URL); this target is how they actually run. --wait
+# blocks on the compose healthcheck, so tests never race the database boot.
+test-db: ## run all tests incl. Postgres-backed ones (starts compose Postgres, waits for health)
+	docker compose up -d --wait
+	AGENTUM_TEST_DATABASE_URL="$(PG_URL)" go test ./...
 
 vet: ## go vet
 	go vet ./...

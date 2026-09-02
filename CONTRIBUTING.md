@@ -23,6 +23,49 @@ conventions below.
 
 See `AGENTS.md` for the architecture seams that must not be violated.
 
+## Database-backed tests
+
+Tests that need Postgres (migrations up/down, store behavior) sit behind the
+`AGENTUM_TEST_DATABASE_URL` environment variable:
+
+```sh
+make test-db
+```
+
+This starts the compose Postgres, waits for its healthcheck, and runs the full
+test suite with the variable set. A plain `go test ./...` skips those tests
+with a message pointing here — that skip is a developer convenience, not a
+verdict: in CI the same tests fail when the variable is unset, so they cannot
+quietly stop running. Each test gets its own database, copied from a migrated
+template and dropped afterwards, so tests can neither observe each other's
+rows nor depend on cleanup order.
+
+The template itself is migrated once per test binary and left behind when it
+exits — rebuilding it per test would cost a full migration run every time,
+which is the cost the template exists to avoid. Leftovers (that template, plus
+whatever a Ctrl-C stranded: an interrupted `go test` runs no cleanup) are
+dropped by a later run once they are an hour old, which is long enough that a
+database another `go test` process is using right now is never touched.
+
+If port 5432 is already taken — another project's Postgres, usually — publish a
+different one. The variable reaches both compose and the DSN:
+
+```sh
+AGENTUM_PG_PORT=55432 make test-db
+```
+
+On Windows there is no `make`; start Postgres and run the suite directly. Keep
+the DSN quoted — unquoted, the `&` in it splits the command:
+
+```powershell
+docker compose up -d --wait
+$env:AGENTUM_TEST_DATABASE_URL = "postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum"
+go test ./...
+```
+
+In `cmd.exe` the second line is
+`set "AGENTUM_TEST_DATABASE_URL=postgres://agentum:agentum@localhost:5432/agentum?sslmode=disable&search_path=agentum"`.
+
 ## Workflow
 
 - Branch from `main`, name it `<type>/<short-slug>` (e.g. `feat/memory-push`,
