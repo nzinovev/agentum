@@ -263,6 +263,14 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	// remove a worktree that was never this run's while leaving the real one
 	// behind forever.
 	checkoutPath := checkoutPathOf(task, project)
+	// Relink first when the repository moved: isWorktree's liveness check
+	// would otherwise turn the removal below into a silent no-op and the
+	// worktree would outlive the run. A repair that itself fails must not
+	// wedge the teardown of a terminal run — log it and let RemoveWorktree
+	// decide; its no-op is at least visible in the log then.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		runner.log.Warn("teardown: repair worktree before removal", "task", task.ID, "error", repairErr)
+	}
 	runner.recordResultCommit(ctx, task, checkoutPath)
 	// ADR 0003 D8: result_commit is now pinned at the final gate (the commit the
 	// human reviewed). Detect a divergence between the live branch tip and the
@@ -312,6 +320,12 @@ func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
 	// branch and any lingering worktree live there, wherever the project
 	// points now.
 	checkoutPath := checkoutPathOf(task, project)
+	// Same relink-before-removal as teardown, for the same reason; and a
+	// failed repair is logged, not fatal — branch deletion must not wedge on
+	// a directory state.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		runner.log.Warn("cleanup: repair worktree before removal", "task", task.ID, "error", repairErr)
+	}
 	// Remove any lingering worktree first (idempotent). A branch that is
 	// checked out in a worktree cannot be deleted; clearing the worktree frees it.
 	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, task.ID); err != nil {
@@ -540,16 +554,19 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	baseCommit := task.BaseCommit.String
 
-	// A repository that moved on disk carries its worktrees with it (they live
-	// inside the repo), but git links them with absolute paths, which are now
-	// stale. Repair is idempotent and cheap, so it runs whenever the worktree
-	// directory is present — before Create would mistake the moved worktree
-	// for an absent one and before Reconcile would classify it as needing
-	// human attention.
-	if worktree.DirPresent(worktree.PathFor(checkoutPath, task.ID)) {
-		if repairErr := runner.wt.Repair(ctx, checkoutPath, task.ID); repairErr != nil {
-			return runner.failTask(ctx, task, fmt.Errorf("repair worktree after move: %w", repairErr))
+	// A repository that moved on disk carries its worktrees with it (they
+	// live inside the repo), but git links them with absolute paths, which
+	// are now stale — before Create mistakes the moved worktree for an
+	// absent one and before Reconcile classifies it as needing human
+	// attention. A worktree git cannot relink (its admin metadata was
+	// pruned by gc or by hand) is the same externally-fixable class as a
+	// missing copy: pause, keeping the recovery a failure would destroy.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		if pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, checkoutPath,
+			fmt.Errorf("worktree cannot be relinked: %w", repairErr)); pauseErr != nil {
+			return runner.failTask(ctx, task, pauseErr)
 		}
+		return nil
 	}
 
 	taskWorktree, err := runner.wt.Create(ctx, checkoutPath, task.ID, baseCommit)
@@ -721,7 +738,9 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, rep
 	}
 	if _, err := runner.store.SetBaseCommit(ctx, sqlc.SetBaseCommitParams{
 		ID: task.ID, TenantID: task.TenantID, BaseCommit: nullStr(sha),
-	}); err != nil {
+	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// sql.ErrNoRows is the lost-race answer: another writer pinned
+		// base_commit first, and the re-read below adopts their value.
 		return task, fmt.Errorf("persist base_commit: %w", err)
 	}
 	// Re-read so the returned task carries the canonical base_commit (ours if we
@@ -745,35 +764,58 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, rep
 // outside (restore the directory, re-register the project), and recreating the
 // worktree in some other copy is precisely the silent loss of a commit line
 // this whole sequence exists to prevent.
-func (runner *Runner) resolveRunCheckout(ctx context.Context, task sqlc.Task, project sqlc.Project, taskPack *pack.Pack) (pinnedTask sqlc.Task, checkoutPath string, paused bool, err error) {
-	checkoutPath = task.CheckoutPath
-	if checkoutPath == "" {
-		checkoutPath = project.RepoPath
+func (runner *Runner) resolveRunCheckout(ctx context.Context, task sqlc.Task, project sqlc.Project, taskPack *pack.Pack) (sqlc.Task, string, bool, error) {
+	candidatePath := task.CheckoutPath
+	if candidatePath == "" {
+		candidatePath = project.RepoPath
 	}
-	identity, resolveErr := repoid.Resolve(ctx, checkoutPath)
+	confirmedTopLevel, confirmErr := runner.confirmRunCheckout(ctx, candidatePath, project)
+	if confirmErr != nil {
+		pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, candidatePath, confirmErr)
+		return task, candidatePath, pauseErr == nil, pauseErr
+	}
+	if task.CheckoutPath != "" {
+		// The pinned copy is authoritative: verification proved it still
+		// holds the repository, and everything downstream (worktree, checks,
+		// evidence, teardown) must keep using exactly the recorded path.
+		return task, task.CheckoutPath, false, nil
+	}
+	pinned, pinErr := runner.store.SetCheckoutPath(ctx, sqlc.SetCheckoutPathParams{
+		ID: task.ID, TenantID: task.TenantID, CheckoutPath: confirmedTopLevel,
+	})
+	if errors.Is(pinErr, sql.ErrNoRows) {
+		// Lost the pin race — another worker pinned this run's copy first;
+		// adopt their row rather than fail the run.
+		pinned, pinErr = runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	}
+	if pinErr != nil {
+		return task, confirmedTopLevel, false, fmt.Errorf("persist checkout_path: %w", pinErr)
+	}
+	return pinned, pinned.CheckoutPath, false, nil
+}
+
+// confirmRunCheckout answers whether path still holds the repository this
+// project was registered as, returning the working-tree root it normalizes
+// to. With recorded roots the answer is an object lookup (repoid.Verify); the
+// full-history derivation runs once at registration, not on every job — the
+// walk's cost grows with the repository without a ceiling, and the hot path
+// only ever needs the confirmation.
+func (runner *Runner) confirmRunCheckout(ctx context.Context, path string, project sqlc.Project) (string, error) {
+	if len(project.RepoRootCommits) > 0 {
+		return repoid.Verify(ctx, path, project.RepoRootCommits)
+	}
+	// A project row without recorded roots predates them; there is nothing to
+	// confirm against, and the probe still establishes the path is a usable
+	// work tree. Registration always records roots, so this is the
+	// empty-database window, not a second supported shape.
+	identity, resolveErr := repoid.Resolve(ctx, path)
 	if resolveErr != nil {
-		pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, checkoutPath, resolveErr)
-		return task, checkoutPath, pauseErr == nil, pauseErr
+		return "", resolveErr
 	}
-	// A project row without an identity predates the identity scheme; there is
-	// nothing to compare against, and the probe above already established the
-	// path is a usable work tree. Registration always records one, so this is
-	// the empty-database window, not a second supported shape.
 	if project.RepoIdentity != "" && identity.Value != project.RepoIdentity {
-		pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, checkoutPath,
-			fmt.Errorf("path holds a different repository than the one this project was registered from"))
-		return task, checkoutPath, pauseErr == nil, pauseErr
+		return "", fmt.Errorf("path holds a different repository than the one this project was registered from")
 	}
-	if task.CheckoutPath == "" {
-		pinnedTask, pinErr := runner.store.SetCheckoutPath(ctx, sqlc.SetCheckoutPathParams{
-			ID: task.ID, TenantID: task.TenantID, CheckoutPath: identity.TopLevel,
-		})
-		if pinErr != nil {
-			return task, identity.TopLevel, false, fmt.Errorf("persist checkout_path: %w", pinErr)
-		}
-		task = pinnedTask
-	}
-	return task, identity.TopLevel, false, nil
+	return identity.TopLevel, nil
 }
 
 // pauseForUnavailableCheckout stops the run with stop_reason
@@ -804,6 +846,20 @@ func currentStageOrFallback(stage sql.NullString, fallback string) string {
 		return stage.String
 	}
 	return fallback
+}
+
+// repairIfPresent relinks the per-task worktree when the repository moved on
+// disk: a present directory with a dead link is exactly the state repair
+// exists for, and on a healthy worktree repair is a no-op — cheaper to always
+// call than to detect staleness. Every path that touches an existing
+// worktree (drive before Create/Reconcile, teardown and cleanup before
+// RemoveWorktree) goes through here, so a moved repository cannot leave a
+// worktree that is present but unreachable.
+func (runner *Runner) repairIfPresent(ctx context.Context, checkoutPath, taskID string) error {
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, taskID)) {
+		return nil
+	}
+	return runner.wt.Repair(ctx, checkoutPath, taskID)
 }
 
 // checkoutPathOf returns the working copy a run executes in: the checkout the

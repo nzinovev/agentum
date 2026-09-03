@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
@@ -26,12 +27,16 @@ type projectResponse struct {
 	CreatedAt       string   `json:"created_at"`
 	UpdatedAt       string   `json:"updated_at"`
 
-	// PreviousRepoPath is set when this registration changed the project's
-	// working copy (the same repository, a new path). RunsAwaitingPrevious
-	// Checkout is set when unfinished runs stay in that previous copy — the
-	// user learns about the split at registration, not when a continuation
-	// lands in an unexpected place. Absent when nothing moved.
+	// The three fields below appear only on a registration that changed the
+	// project's working copy. RunsReboundToNewCheckout is how many unfinished
+	// runs moved with the copy (the relocation branch);
+	// RunsAwaitingPreviousCheckout is how many stay in the previous copy —
+	// the two-copies branch, and the could-not-tell branch, which keeps runs
+	// where they are because rebinding on a guess is irreversible while
+	// staying is recoverable (a run whose copy really is gone pauses itself
+	// with checkout_unavailable and resumes when the path returns).
 	PreviousRepoPath             string `json:"previous_repo_path,omitempty"`
+	RunsReboundToNewCheckout     int64  `json:"runs_rebound_to_new_checkout,omitempty"`
 	RunsAwaitingPreviousCheckout int64  `json:"runs_awaiting_previous_checkout,omitempty"`
 }
 
@@ -105,23 +110,37 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The previous row under this identity must be read before the upsert
-	// overwrites its path — it decides what happens to unfinished runs.
+	// overwrites its path — it decides what happens to unfinished runs. A
+	// read failure is not "no previous row": treating it as one would skip
+	// the rebind decision silently, so it fails the request instead.
 	existing, err := api.queries.GetProjectByIdentity(r.Context(), sqlc.GetProjectByIdentityParams{
 		TenantID: principal.TenantID, RepoIdentity: identity.Value,
 	})
-	pathChanged := err == nil && existing.RepoPath != identity.TopLevel
-	// One probe answers the question both branches need: does the previous
-	// path still hold this repository? True means two working copies now;
-	// false means the copy relocated and unfinished runs follow it.
-	previousCopyStillHolds := pathChanged &&
-		previousCopyHoldsRepository(r.Context(), existing.RepoPath, identity.Value)
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		// First registration of this repository: there is no previous path to
+		// resolve.
+	default:
+		logUnexpected(api.log, err, "GetProjectByIdentity")
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+	previousRowFound := err == nil
+	pathChanged := previousRowFound && existing.RepoPath != identity.TopLevel
+	previousState := previousCopyUnknown
+	if pathChanged {
+		previousState = classifyPreviousCopy(r.Context(), existing.RepoPath, existing.RepoRootCommits)
+	}
 
+	var reboundCount int64
 	var proj sqlc.Project
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		created, createErr := qtx.CreateProject(r.Context(), sqlc.CreateProjectParams{
 			TenantID:        principal.TenantID,
 			UserID:          principal.UserID,
 			RepoIdentity:    identity.Value,
+			RepoRootCommits: identity.Roots,
 			RepoPath:        identity.TopLevel,
 			Name:            req.Name,
 			RelatedProjects: req.RelatedProjects,
@@ -130,21 +149,26 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 			return createErr
 		}
 		proj = created
-		if !pathChanged || previousCopyStillHolds {
-			// Either nothing moved, or there are two working copies now:
-			// unfinished runs keep their pinned checkout, and the count is
-			// reported below so the split is visible at registration time.
+		if previousState != previousCopyGone {
+			// Either nothing moved, or the previous copy still holds the
+			// repository, or the probe could not tell: unfinished runs keep
+			// their pinned checkout, and the count is reported below so the
+			// split is visible at registration time.
 			return nil
 		}
 		// The previous copy is gone (moved, or replaced by another
 		// repository): the one working copy relocated, and unfinished runs
-		// move with it. Terminal runs keep their historical checkout_path.
-		if _, rebindErr := qtx.RebindActiveCheckouts(r.Context(), sqlc.RebindActiveCheckoutsParams{
+		// move with it — reported, because a run that silently changes its
+		// working copy is a fact the operator must see. Terminal runs keep
+		// their historical checkout_path.
+		rebound, rebindErr := qtx.RebindActiveCheckouts(r.Context(), sqlc.RebindActiveCheckoutsParams{
 			TenantID: principal.TenantID, ProjectID: proj.ID,
 			CheckoutPath: existing.RepoPath, CheckoutPath_2: identity.TopLevel,
-		}); rebindErr != nil {
+		})
+		if rebindErr != nil {
 			return rebindErr
 		}
+		reboundCount = int64(len(rebound))
 		return nil
 	}); err != nil {
 		logUnexpected(api.log, err, "CreateProject tx")
@@ -153,9 +177,10 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := toProjectResponse(proj)
+	response.RunsReboundToNewCheckout = reboundCount
 	if pathChanged {
 		response.PreviousRepoPath = existing.RepoPath
-		if previousCopyStillHolds {
+		if previousState != previousCopyGone {
 			awaiting, countErr := api.queries.CountActiveTasksOnCheckout(r.Context(), sqlc.CountActiveTasksOnCheckoutParams{
 				TenantID: principal.TenantID, ProjectID: proj.ID, CheckoutPath: existing.RepoPath,
 			})
@@ -169,13 +194,48 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, response)
 }
 
-// previousCopyHoldsRepository reports whether the project's previous path
-// still resolves to the same repository identity. True means a second working
-// copy exists; false means the previous copy is gone or replaced, and whatever
-// ran there must follow the project to the new path.
-func previousCopyHoldsRepository(ctx context.Context, previousPath, repoIdentity string) bool {
-	previousIdentity, err := repoid.Resolve(ctx, previousPath)
-	return err == nil && previousIdentity.Value == repoIdentity
+// previousCopyState classifies what the project's previous working-copy path
+// holds; the classification decides what happens to unfinished runs.
+type previousCopyState int
+
+const (
+	// previousCopyHolds: the previous path still holds the same repository —
+	// there are two working copies now, and runs stay where they started.
+	previousCopyHolds previousCopyState = iota
+	// previousCopyGone: the previous path is absent from disk, or holds a
+	// different repository — the working copy is one and it moved, so
+	// unfinished runs follow it (the only branch that rebinds).
+	previousCopyGone
+	// previousCopyUnknown: the path is present but the probe could not
+	// answer — git failed, the directory is unreadable, a mount is down. An
+	// unreadable directory is not a moved one, and the rebind is
+	// irreversible: after it, the runs' branches and checkpoints live in a
+	// copy nothing points to, and re-registering the old path would only
+	// create a "second copy" and never rebind back. Runs therefore stay on
+	// their pin, which IS recoverable: a run whose copy is really gone
+	// pauses itself with checkout_unavailable and resumes when the path
+	// returns. Unknown behaves like holds everywhere.
+	previousCopyUnknown
+)
+
+// classifyPreviousCopy probes the previous path with the recorded roots.
+// Confirming the roots is an object lookup, not a history walk, so the probe
+// stays cheap at registration time.
+func classifyPreviousCopy(ctx context.Context, previousPath string, roots []string) previousCopyState {
+	if _, statErr := os.Stat(previousPath); statErr != nil && errors.Is(statErr, os.ErrNotExist) {
+		return previousCopyGone
+	}
+	_, verifyErr := repoid.Verify(ctx, previousPath, roots)
+	switch {
+	case verifyErr == nil:
+		return previousCopyHolds
+	case errors.Is(verifyErr, repoid.ErrForeignRepository):
+		// Another repository lives at the previous path now — ours cannot
+		// come back to it, so it moved.
+		return previousCopyGone
+	default:
+		return previousCopyUnknown
+	}
 }
 
 // handleGetProject GET /api/v1/projects/{id}

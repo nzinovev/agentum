@@ -346,9 +346,11 @@ type SetBaseCommitParams struct {
 }
 
 // Resolve-once: capture the immutable SHA the task's base_ref pointed at. The
-// runner calls this before creating the worktree; it must be a no-op after the
-// first capture (WHERE base_commit IS NULL) so the recorded base cannot drift
-// if base_ref is later moved. Returns the row whether or not it changed.
+// runner calls this before creating the worktree; the WHERE keeps it a no-op
+// after the first capture so the recorded base cannot drift if base_ref is
+// later moved. When the value is already pinned the UPDATE matches nothing
+// and returns NO row (sql.ErrNoRows): the caller must read that as "another
+// writer pinned first" and re-read the row, not as a failure.
 func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (Task, error) {
 	row := q.db.QueryRowContext(ctx, setBaseCommit, arg.ID, arg.TenantID, arg.BaseCommit)
 	var i Task
@@ -388,8 +390,10 @@ type SetCheckoutPathParams struct {
 // Resolve-once, like SetBaseCommit: the run pins the working copy it executes
 // in at first start and never re-resolves it, so re-registering the project
 // from another clone cannot pull an in-flight run into a foreign directory.
-// The empty string means "not pinned yet". Returns the row whether or not it
-// changed (a missed WHERE means the copy was already pinned).
+// The empty string means "not pinned yet". When the copy is already pinned
+// the UPDATE matches nothing and returns NO row (sql.ErrNoRows): the caller
+// must read that as "another writer pinned first" and re-read the row, not as
+// a failure.
 func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams) (Task, error) {
 	row := q.db.QueryRowContext(ctx, setCheckoutPath, arg.ID, arg.TenantID, arg.CheckoutPath)
 	var i Task

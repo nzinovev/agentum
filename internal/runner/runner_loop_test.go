@@ -39,13 +39,15 @@ type fakeStore struct {
 }
 
 func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
-	// Fill the project's repo identity from its path when the path resolves,
-	// so a fixture repo behaves like a registered one for the runner's
-	// checkout verification. A path that does not resolve (t.TempDir fixtures
-	// for tests that never enter the prologue) simply carries no identity,
-	// which the runner treats as "nothing to compare against".
+	// Fill the project's recorded registration facts (identity + root
+	// commits) from its path when the path resolves, so a fixture repo
+	// behaves like a registered one for the runner's checkout confirmation.
+	// A path that does not resolve (t.TempDir fixtures for tests that never
+	// enter the prologue) simply carries none, which the runner treats as
+	// "nothing to compare against".
 	if identity, err := repoid.Resolve(context.Background(), project.RepoPath); err == nil {
 		project.RepoIdentity = identity.Value
+		project.RepoRootCommits = identity.Roots
 	}
 	return &fakeStore{task: task, project: project}
 }

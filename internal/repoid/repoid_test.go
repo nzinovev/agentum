@@ -199,3 +199,167 @@ func TestResolve_TypedRefusals(t *testing.T) {
 		}
 	})
 }
+
+// TestResolve_IdentityIgnoresGitWarnings pins reproducibility: git writes
+// warnings to stderr, and an ambiguous ref makes `rev-list HEAD` print one.
+// A reader that glues the streams together folds the warning text into the
+// fingerprint — an identity that silently changes when the stray ref is
+// deleted and the warning disappears, splitting one repository into two
+// projects at the next registration.
+func TestResolve_IdentityIgnoresGitWarnings(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	initCommittedRepo(t, repo, "warnings")
+
+	before, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("resolve before: %v", err)
+	}
+
+	// A branch literally named HEAD makes the "HEAD" argument ambiguous; git
+	// then warns on stderr for rev-list/rev-parse while still answering on
+	// stdout.
+	runGit(t, repo, "update-ref", "refs/heads/HEAD", "HEAD")
+
+	after, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("resolve with warnings: %v", err)
+	}
+	if after.Value != before.Value {
+		t.Fatalf("identity changed when a stderr warning appeared: %q -> %q", before.Value, after.Value)
+	}
+	if after.TopLevel != before.TopLevel {
+		t.Fatalf("working-tree root changed when a stderr warning appeared: %q -> %q", before.TopLevel, after.TopLevel)
+	}
+}
+
+// TestVerify_AcceptsSameRepositoryAndClone: confirming recorded roots answers
+// "does this path hold the recorded repository" on the original copy and on a
+// clone alike — the clone shares the roots, which is what makes a relocation
+// the same project.
+func TestVerify_AcceptsSameRepositoryAndClone(t *testing.T) {
+	t.Parallel()
+	source := t.TempDir()
+	initCommittedRepo(t, source, "verify-clone")
+	identity, err := Resolve(context.Background(), source)
+	if err != nil {
+		t.Fatalf("resolve source: %v", err)
+	}
+
+	cloneParent := t.TempDir()
+	clone := filepath.Join(cloneParent, "clone")
+	runGit(t, cloneParent, "clone", "--quiet", source, clone)
+
+	for name, path := range map[string]string{"original copy": source, "clone": clone} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			topLevel, verifyErr := Verify(context.Background(), path, identity.Roots)
+			if verifyErr != nil {
+				t.Fatalf("Verify: %v", verifyErr)
+			}
+			if topLevel != path {
+				t.Fatalf("topLevel = %q, want %q", topLevel, path)
+			}
+		})
+	}
+}
+
+// TestVerify_RejectsForeignRepository: the roots of one history are absent
+// from an independent repository, so the cheap confirmation is also the
+// distinguishing check — a usable-looking tree with the wrong history must
+// not pass.
+func TestVerify_RejectsForeignRepository(t *testing.T) {
+	t.Parallel()
+	known := t.TempDir()
+	initCommittedRepo(t, known, "verify-known")
+	identity, err := Resolve(context.Background(), known)
+	if err != nil {
+		t.Fatalf("resolve known: %v", err)
+	}
+
+	foreign := t.TempDir()
+	initCommittedRepo(t, foreign, "verify-foreign")
+
+	if _, verifyErr := Verify(context.Background(), foreign, identity.Roots); !errors.Is(verifyErr, ErrForeignRepository) {
+		t.Fatalf("Verify on a foreign repository: err = %v, want ErrForeignRepository", verifyErr)
+	}
+}
+
+// TestVerify_KeepsResolveRefusals: the cheap gates are Resolve's, so both
+// entry points refuse the same unusable copies with the same typed errors.
+func TestVerify_KeepsResolveRefusals(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	plainDir := t.TempDir()
+	if _, err := Verify(ctx, plainDir, []string{"a233383e18550c5974d09c6b36ae62fe1c7e9a1a"}); !errors.Is(err, ErrNotWorkTree) {
+		t.Fatalf("plain dir: err = %v, want ErrNotWorkTree", err)
+	}
+
+	source := t.TempDir()
+	initCommittedRepo(t, source, "verify-gates")
+	if err := os.WriteFile(filepath.Join(source, "second.md"), []byte("2\n"), 0o644); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	runGit(t, source, "add", "second.md")
+	runGit(t, source, "commit", "--quiet", "-m", "second")
+
+	shallowParent := t.TempDir()
+	shallow := filepath.Join(shallowParent, "shallow")
+	runGit(t, shallowParent, "clone", "--quiet", "--depth=1", "file://"+source, shallow)
+	if _, err := Verify(ctx, shallow, []string{"a233383e18550c5974d09c6b36ae62fe1c7e9a1a"}); !errors.Is(err, ErrShallow) {
+		t.Fatalf("shallow clone: err = %v, want ErrShallow", err)
+	}
+
+	main := t.TempDir()
+	initCommittedRepo(t, main, "verify-main")
+	linkedParent := t.TempDir()
+	linked := filepath.Join(linkedParent, "linked")
+	runGit(t, main, "worktree", "add", "--quiet", linked)
+	if _, err := Verify(ctx, linked, []string{"a233383e18550c5974d09c6b36ae62fe1c7e9a1a"}); !errors.Is(err, ErrLinkedWorktree) {
+		t.Fatalf("linked worktree: err = %v, want ErrLinkedWorktree", err)
+	}
+}
+
+// TestVerify_RunsNoHistoryWalk is the guard for the property Verify exists
+// for: no code path it serves may pay a full history traversal. A wrapper
+// script on PATH records every git invocation's arguments; asserting that
+// none of them mentions rev-list checks exactly that, without a timing
+// measurement (which would be flaky on a loaded machine).
+func TestVerify_RunsNoHistoryWalk(t *testing.T) {
+	repo := t.TempDir()
+	initCommittedRepo(t, repo, "verify-no-walk")
+	identity, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("locate git: %v", err)
+	}
+	wrapperDir := t.TempDir()
+	callsLog := filepath.Join(t.TempDir(), "git-calls.log")
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + callsLog + "\"\nexec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatalf("write git wrapper: %v", err)
+	}
+
+	// Not parallel: t.Setenv pins PATH for the process.
+	t.Setenv("PATH", wrapperDir+":"+os.Getenv("PATH"))
+
+	if _, verifyErr := Verify(context.Background(), repo, identity.Roots); verifyErr != nil {
+		t.Fatalf("Verify: %v", verifyErr)
+	}
+
+	calls, err := os.ReadFile(callsLog)
+	if err != nil {
+		t.Fatalf("read git call log: %v", err)
+	}
+	for _, call := range strings.Split(string(calls), "\n") {
+		if strings.Contains(call, "rev-list") {
+			t.Fatalf("Verify walked history: git %s", call)
+		}
+	}
+}

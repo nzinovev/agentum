@@ -16,6 +16,7 @@
 package repoid
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,6 +44,11 @@ type Identity struct {
 	// than whatever the client sent, so a subdirectory or a trailing slash
 	// resolves to the same project row.
 	TopLevel string
+	// Roots are the root commits Value was folded from. Registration stores
+	// them so the hot paths can confirm identity by object existence (Verify)
+	// instead of walking the whole history again: deriving the fingerprint
+	// requires reaching the beginning of history, confirming it does not.
+	Roots []string
 }
 
 // Typed refusals. Each carries (via fmt.Errorf wrapping) a message that names
@@ -64,6 +70,9 @@ var (
 	// linked work tree would nest worktrees and point the project at a
 	// disposable tree.
 	ErrLinkedWorktree = errors.New("path is a linked worktree")
+	// ErrForeignRepository: the path is a usable working copy of a repository
+	// other than the one whose roots were recorded against it.
+	ErrForeignRepository = errors.New("path holds a different repository")
 )
 
 // LinkedWorktreeError names the main work tree the linked work tree belongs
@@ -82,51 +91,15 @@ func (linkedErr *LinkedWorktreeError) Unwrap() error { return ErrLinkedWorktree 
 // Resolve asks git about path and returns the repository identity and the
 // working-tree root, or a typed refusal. Every fact is probed, none inferred
 // from the shape of the path.
+//
+// Resolve walks the entire reachable history to find the root commits — the
+// one full traversal any history-derived fingerprint must pay. It belongs to
+// registration, which runs once; callers that only need to know whether a
+// path still holds the recorded repository use Verify, which never walks.
 func Resolve(ctx context.Context, path string) (Identity, error) {
-	insideWorkTree, err := gitOutput(ctx, path, "rev-parse", "--is-inside-work-tree")
+	topLevel, err := probeWorkTree(ctx, path)
 	if err != nil {
-		return Identity{}, fmt.Errorf("%w: %s", ErrNotWorkTree, err)
-	}
-	if insideWorkTree != "true" {
-		// Bare repos and the .git dir itself report "false"; a project repo
-		// must be a work tree the runner can operate in.
-		return Identity{}, ErrNotWorkTree
-	}
-
-	topLevel, err := gitOutput(ctx, path, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return Identity{}, fmt.Errorf("resolve working tree root: %w: %s", ErrNotWorkTree, err)
-	}
-
-	shallow, err := gitOutput(ctx, path, "rev-parse", "--is-shallow-repository")
-	if err != nil {
-		return Identity{}, fmt.Errorf("probe shallow state: %w", err)
-	}
-	if shallow == "true" {
-		return Identity{}, ErrShallow
-	}
-
-	// A linked work tree keeps its metadata in <main>/.git/worktrees/<id>,
-	// so --git-dir differs from --git-common-dir there. The common dir's
-	// parent is the main work tree — named in the error so the fix is a
-	// copy-paste.
-	//
-	// rev-parse answers may be relative; git prints them relative to the
-	// invocation directory (the -C dir), NOT to the working tree root — from
-	// a subdirectory --git-dir comes back absolute while --git-common-dir
-	// comes back as "../../.git". Anchoring both at the invocation directory
-	// resolves them to comparable absolute paths.
-	invocationDir := path
-	gitDir, err := gitOutput(ctx, invocationDir, "rev-parse", "--git-dir")
-	if err != nil {
-		return Identity{}, fmt.Errorf("resolve git dir: %w", err)
-	}
-	gitCommonDir, err := gitOutput(ctx, invocationDir, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return Identity{}, fmt.Errorf("resolve git common dir: %w", err)
-	}
-	if !sameGitDir(gitDir, gitCommonDir, invocationDir) {
-		return Identity{}, &LinkedWorktreeError{MainWorkTree: mainWorkTreeOf(gitCommonDir, invocationDir)}
+		return Identity{}, err
 	}
 
 	// Root commits reachable from HEAD, hashed in sorted order. A repository
@@ -147,7 +120,94 @@ func Resolve(ctx context.Context, path string) (Identity, error) {
 	return Identity{
 		Value:    schemePrefix + ":" + hex.EncodeToString(digest[:]),
 		TopLevel: topLevel,
+		Roots:    roots,
 	}, nil
+}
+
+// Verify answers the hot-path question — does path still hold the repository
+// these root commits belong to — without re-deriving the identity. The roots'
+// existence is checked by object lookup, which does not depend on the size of
+// the history; the full walk is only needed to PRODUCE an identity, and that
+// happens once, at registration.
+//
+// The cheap gates are Resolve's (work tree, shallow, linked work tree), so
+// both entry points refuse the same unusable copies the same way.
+//
+// A deliberate difference from re-deriving: Verify confirms the recorded
+// roots are present, not that the root SET has not grown. A repository that
+// pulled in an unrelated history (a subtree merge) after registration gains a
+// new root — re-derivation would change its identity and pause every
+// in-flight run, Verify lets them pass. That is the kinder outcome (an added
+// subtree should not orphan a running task), and it is why the recorded roots
+// are the contract, not the current fingerprint.
+func Verify(ctx context.Context, path string, roots []string) (topLevel string, err error) {
+	if len(roots) == 0 {
+		return "", errors.New("repoid: Verify requires at least one recorded root commit")
+	}
+	topLevel, err = probeWorkTree(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	for _, root := range roots {
+		// cat-file -e is an object lookup: exit 0 says the commit exists in
+		// this repository, anything else says this is not its history.
+		if _, lookupErr := gitOutput(ctx, path, "cat-file", "-e", root+"^{commit}"); lookupErr != nil {
+			return "", fmt.Errorf("%w: root commit %s is absent", ErrForeignRepository, root)
+		}
+	}
+	return topLevel, nil
+}
+
+// probeWorkTree runs the cheap gates both Resolve and Verify share: a real
+// work tree, its root, not shallow, not a linked work tree. Each refusal is
+// typed with its fix.
+func probeWorkTree(ctx context.Context, path string) (string, error) {
+	insideWorkTree, err := gitOutput(ctx, path, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", ErrNotWorkTree, err)
+	}
+	if insideWorkTree != "true" {
+		// Bare repos and the .git dir itself report "false"; a project repo
+		// must be a work tree the runner can operate in.
+		return "", ErrNotWorkTree
+	}
+
+	topLevel, err := gitOutput(ctx, path, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("resolve working tree root: %w: %s", ErrNotWorkTree, err)
+	}
+
+	shallow, err := gitOutput(ctx, path, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return "", fmt.Errorf("probe shallow state: %w", err)
+	}
+	if shallow == "true" {
+		return "", ErrShallow
+	}
+
+	// A linked work tree keeps its metadata in <main>/.git/worktrees/<id>,
+	// so --git-dir differs from --git-common-dir there. The common dir's
+	// parent is the main work tree — named in the error so the fix is a
+	// copy-paste.
+	//
+	// rev-parse answers may be relative; git prints them relative to the
+	// invocation directory (the -C dir), NOT to the working tree root — from
+	// a subdirectory --git-dir comes back absolute while --git-common-dir
+	// comes back as "../../.git". Anchoring both at the invocation directory
+	// resolves them to comparable absolute paths.
+	invocationDir := path
+	gitDir, err := gitOutput(ctx, invocationDir, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve git dir: %w", err)
+	}
+	gitCommonDir, err := gitOutput(ctx, invocationDir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	if !sameGitDir(gitDir, gitCommonDir, invocationDir) {
+		return "", &LinkedWorktreeError{MainWorkTree: mainWorkTreeOf(gitCommonDir, invocationDir)}
+	}
+	return topLevel, nil
 }
 
 // sameGitDir compares the two rev-parse answers, accepting relative answers
@@ -178,18 +238,22 @@ func mainWorkTreeOf(gitCommonDir, invocationDir string) string {
 	return absolute
 }
 
-// gitOutput runs one git command in path and returns its trimmed stdout. The
-// error carries git's own combined output, which usually names the real
-// problem (no such path, not a repository).
+// gitOutput runs one git command in path and returns its trimmed stdout. On
+// failure the error carries git's stderr, which usually names the real
+// problem (no such path, not a repository) — stdout alone is kept for the
+// value because it feeds the identity: git writes warnings to stderr, and a
+// stream glued together would put them inside the fingerprint, making it
+// unrepeatable.
 func gitOutput(ctx context.Context, path string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", path}, args...)...)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		trimmed := strings.TrimSpace(string(out))
-		if trimmed == "" {
-			return "", err
+		if diagnostic := strings.TrimSpace(stderr.String()); diagnostic != "" {
+			return "", fmt.Errorf("%s (%s)", err, diagnostic)
 		}
-		return "", fmt.Errorf("%s (%s)", err, trimmed)
+		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }

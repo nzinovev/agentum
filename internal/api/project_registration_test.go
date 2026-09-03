@@ -186,6 +186,9 @@ func TestProjectRegistration_MoveKeepsIdentityAndHistory(t *testing.T) {
 	if second.RunsAwaitingPreviousCheckout != 0 {
 		t.Fatalf("a relocation has no runs awaiting the gone copy; got %d", second.RunsAwaitingPreviousCheckout)
 	}
+	if second.RunsReboundToNewCheckout != 1 {
+		t.Fatalf("the relocation must report the one run that moved with the copy; got %d", second.RunsReboundToNewCheckout)
+	}
 
 	// The unfinished run follows the working copy; the terminal run keeps the
 	// historical fact of where its work happened.
@@ -235,6 +238,9 @@ func TestProjectRegistration_SecondCopyLeavesRunsWhereTheyStarted(t *testing.T) 
 	if secondResponse.RunsAwaitingPreviousCheckout != 1 {
 		t.Fatalf("runs awaiting previous checkout = %d, want 1", secondResponse.RunsAwaitingPreviousCheckout)
 	}
+	if secondResponse.RunsReboundToNewCheckout != 0 {
+		t.Fatalf("a second copy must not capture runs; rebound = %d, want 0", secondResponse.RunsReboundToNewCheckout)
+	}
 
 	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
 	if err != nil {
@@ -242,6 +248,100 @@ func TestProjectRegistration_SecondCopyLeavesRunsWhereTheyStarted(t *testing.T) 
 	}
 	if pinnedRun.CheckoutPath != first {
 		t.Fatalf("a second copy must not capture a started run: checkout_path = %q, want %q", pinnedRun.CheckoutPath, first)
+	}
+}
+
+// TestProjectRegistration_UnreadablePreviousCopyDoesNotRebind: an unreadable
+// previous directory is NOT a relocation. Permission failures, dead mounts,
+// and misbehaving git are indistinguishable from "gone" only if every probe
+// error is read as one — and a wrong rebind is irreversible: the moved runs'
+// branches and checkpoints stay in a copy nothing points to anymore, with no
+// path back. Runs therefore stay on their pin until the copy is verifiably
+// gone, and a run whose copy really disappeared pauses itself.
+func TestProjectRegistration_UnreadablePreviousCopyDoesNotRebind(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod cannot make a directory unreadable for root")
+	}
+	harness := newRegistrationHarness(t)
+
+	original := t.TempDir()
+	initRegistrationRepo(t, original, "unreadable-original")
+	clonesParent := t.TempDir()
+	secondCopy := filepath.Join(clonesParent, "clone")
+	runRegistrationGit(t, clonesParent, "clone", "--quiet", original, secondCopy)
+
+	first := harness.registerProject(original)
+	activeRun := harness.seedRun(first.ID, "running", original)
+
+	// The previous copy exists but cannot be probed: no read permission.
+	if err := os.Chmod(original, 0o000); err != nil {
+		t.Fatalf("chmod previous copy: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(original, 0o755) })
+
+	second := harness.registerProject(secondCopy)
+
+	if second.ID != first.ID {
+		t.Fatal("a clone of the same history must be the same project")
+	}
+	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	if err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if pinnedRun.CheckoutPath != original {
+		t.Fatalf("an unreadable copy must not rebind runs: checkout_path = %q, want the original %q", pinnedRun.CheckoutPath, original)
+	}
+	// The response takes the harmless branch: name the previous copy and the
+	// runs that stay in it, never a rebind count.
+	if second.RunsReboundToNewCheckout != 0 {
+		t.Fatalf("rebound = %d, want 0 — a probe failure is not a relocation", second.RunsReboundToNewCheckout)
+	}
+	if second.RunsAwaitingPreviousCheckout != 1 {
+		t.Fatalf("runs awaiting previous checkout = %d, want 1", second.RunsAwaitingPreviousCheckout)
+	}
+}
+
+// TestProjectRegistration_ReplacedPreviousCopyRebinds: the previous path
+// still exists but holds a DIFFERENT repository now — ours cannot come back
+// to it, so the copy verifiably moved and unfinished runs follow it. This is
+// the other branch (besides an absent path) that earns a rebind, and it must
+// be distinguished from the unreadable case by content, not by existence.
+func TestProjectRegistration_ReplacedPreviousCopyRebinds(t *testing.T) {
+	harness := newRegistrationHarness(t)
+
+	original := t.TempDir()
+	initRegistrationRepo(t, original, "replaced-original")
+	clonesParent := t.TempDir()
+	secondCopy := filepath.Join(clonesParent, "clone")
+	runRegistrationGit(t, clonesParent, "clone", "--quiet", original, secondCopy)
+
+	first := harness.registerProject(original)
+	activeRun := harness.seedRun(first.ID, "running", original)
+
+	// The repository leaves its old path; an unrelated repository takes the
+	// path over.
+	if err := os.Rename(original, filepath.Join(clonesParent, "old-home")); err != nil {
+		t.Fatalf("move original away: %v", err)
+	}
+	if err := os.MkdirAll(original, 0o755); err != nil {
+		t.Fatalf("recreate the old path: %v", err)
+	}
+	initRegistrationRepo(t, original, "took-over-the-path")
+
+	second := harness.registerProject(secondCopy)
+
+	if second.RunsReboundToNewCheckout != 1 {
+		t.Fatalf("a replaced previous copy must rebind the active run; got %d", second.RunsReboundToNewCheckout)
+	}
+	if second.RunsAwaitingPreviousCheckout != 0 {
+		t.Fatalf("nothing waits for the replaced path; got %d", second.RunsAwaitingPreviousCheckout)
+	}
+	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	if err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if pinnedRun.CheckoutPath != secondCopy {
+		t.Fatalf("checkout_path = %q, want the second copy %q", pinnedRun.CheckoutPath, secondCopy)
 	}
 }
 

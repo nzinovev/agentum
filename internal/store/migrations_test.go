@@ -65,12 +65,13 @@ func TestMigrations_UpDownUp(t *testing.T) {
 // counts would drift, so each seeing exactly its one row is the proof.
 func TestDBTest_IsolatesDatabases(t *testing.T) {
 	const insertProbeProject = `
-		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_path, name, related_projects)
+		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_root_commits, repo_path, name, related_projects)
 		VALUES (
 		    '0ac58e85-8a51-4971-9b53-bdfec0a80b01',
 		    '1bd6f9a6-9c62-4a08-b3d4-ce5fd1b91c02',
 		    '2ce7c0b7-ad73-4b19-a4e5-df60e2ca2d03',
 		    'git-roots:v1:probe',
+		    '{a233383e18550c5974d09c6b36ae62fe1c7e9a1a}',
 		    '/same/repo/path',
 		    'isolation probe',
 		    '{}')`
@@ -112,9 +113,10 @@ func TestTenantJoinApprovalsToTasksNeedsNoCast(t *testing.T) {
 	const taskID = "5cf702d3-86e3-4a52-9b20-4d3e1f0c9a32"
 
 	if _, err := handle.Store.DB.ExecContext(ctx, `
-		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_path, name)
+		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_root_commits, repo_path, name)
 		VALUES ('00000000-0000-0000-0000-000000000001', $1, $2,
-		        'git-roots:v1:join-probe', '/join/probe', 'join probe')`,
+		        'git-roots:v1:join-probe', '{a233383e18550c5974d09c6b36ae62fe1c7e9a1a}',
+		        '/join/probe', 'join probe')`,
 		tenantID, userID); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}

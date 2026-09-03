@@ -27,17 +27,29 @@ Once tagged releases begin, this project adheres to
   - **A run executes in the working copy it started in.** `tasks.checkout_path`
     is pinned once at first start, resolve-once like `base_commit`, and every
     step — worktree creation, checks, instruction pinning, evidence, teardown —
-    goes there, not to the project's current path. Re-registration from a
-    second clone reports `previous_repo_path` and the count of runs that stay
-    in it; a relocation (the previous copy no longer holds the repository)
-    rebinds unfinished runs to the new path in the same transaction, while
-    terminal runs keep theirs as history. A pinned copy that is gone or holds
-    a different repository pauses the run
+    goes there, not to the project's current path. Re-registration resolves
+    the previous path to tell a relocation from a second copy: a relocation
+    (the previous path is verifiably gone) rebinds unfinished runs to the new
+    path in the same transaction and reports `runs_rebound_to_new_checkout`;
+    a second copy — or a previous copy that could only be probed to "cannot
+    tell" (unreadable, unreachable) — leaves runs on their pin, named via
+    `previous_repo_path` and `runs_awaiting_previous_checkout`, because a
+    rebind on a guess is irreversible while staying is recoverable. Terminal
+    runs keep their checkout as history in every branch. A pinned copy that is
+    gone or holds a different repository pauses the run
     (`stop_reason = checkout_unavailable`, the event names the path) — it is
     never rebuilt in another copy, which would silently orphan the run's whole
     commit line. A repository that moved is re-linked with `git worktree
-    repair`; `isWorktree` no longer mistakes a directory with a stale `.git`
-    link for a live worktree.
+    repair` (before worktree creation and before teardown/cleanup removal, so
+    the removal cannot degrade into a silent no-op); `isWorktree` no longer
+    mistakes a directory with a stale `.git` link for a live worktree.
+  - **Identity is derived once, confirmed cheaply.** Deriving the fingerprint
+    walks the entire reachable history — a cost that grows with the repository
+    — so it runs only at registration, which also stores the root commits it
+    was folded from (`repo_root_commits`). Every hot question ("does this path
+    still hold the recorded repository" — each run job, each re-registration's
+    previous-path probe) is answered by confirming the recorded roots exist,
+    an object lookup that does not depend on the history's size.
   - `docs/domain-model.md` records the model vocabulary in one place: the
     workspace / project / repository / checkout levels (MVP keeps one of each
     per project line, no new tables), run vs work item vs stage invocation,

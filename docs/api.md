@@ -56,12 +56,16 @@ repository, the root, and the root with a trailing slash all resolve to the
 same project.
 
 When a registration moves the project's working copy, the response says what
-happened to runs that already started: `previous_repo_path` is always set on a
-move; `runs_awaiting_previous_checkout` is set when the previous copy still
-holds the repository (a second working copy exists) and counts the unfinished
-runs that remain in it. When the previous copy no longer holds the repository
-(a relocation), unfinished runs follow the project: their pinned working copy
-is rebound, and terminal runs keep theirs as history.
+happened to runs that already started. `previous_repo_path` is always set on a
+move. `runs_rebound_to_new_checkout` counts the unfinished runs that moved
+with the copy — the relocation branch, taken when the previous path is
+verifiably gone (absent from disk, or holding a different repository).
+`runs_awaiting_previous_checkout` counts the unfinished runs that stay in the previous
+copy: the second-working-copy branch, and the could-not-tell branch — an
+unreadable or unreachable previous copy is not proven gone, and rebinding on
+a guess is irreversible while staying is recoverable (a run whose copy really
+is gone pauses itself with `checkout_unavailable`). Terminal runs keep their
+checkout as history in every branch.
 
 `related_projects` is an **inert seam**: stored now, it will grant
 cross-project read access (a path-scoped `fs.read` capability) in a later
@@ -87,12 +91,14 @@ repository / checkout, run vs work item, actor / creator / owner).
   "created_at": "2026-07-09T...",
   "updated_at": "2026-07-09T...",
   "previous_repo_path": "/home/me/old/path",
+  "runs_rebound_to_new_checkout": 2,
   "runs_awaiting_previous_checkout": 1
 }
 ```
 
-`repo_identity` is read-only. The two trailing fields appear only on a
-registration that moved the working copy and are omitted otherwise.
+`repo_identity` is read-only. The three trailing fields appear only on a
+registration that moved the working copy and are omitted otherwise; at most
+one of the two counters is non-zero on any given registration.
 
 ## Tasks
 
@@ -104,7 +110,7 @@ registration that moved the working copy and are omitted otherwise.
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
 | `POST` | `/tasks/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Task` / `409 illegal_transition` |
 | `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Task` / `409 illegal_transition` |
-| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human | agent | system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the task author approving.
+| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the task author approving. |
 | `POST` | `/tasks/{id}/cleanup` | ✅ | terminal task → branch deleted (idempotent, audited) → `202 Task` / `409 illegal_transition` (if not terminal) |
 
 `base_ref` is the git ref the task builds against (branch / tag / SHA / `HEAD`).

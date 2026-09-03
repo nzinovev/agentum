@@ -58,6 +58,13 @@ never accepts it from a request body — the same rule `tenant_id` and `user_id`
 follow. Uniqueness is `UNIQUE (tenant_id, repo_identity)`; `repo_path` is a
 non-unique attribute of the checkout, updated by every registration.
 
+Deriving the fingerprint walks the entire reachable history, so it happens
+once, at registration, which also stores the root commits the fingerprint was
+folded from (`repo_root_commits`). Every later question — "does this path
+still hold the recorded repository", asked by each run job and by each
+re-registration's previous-path probe — is answered by confirming those roots
+exist, an object lookup that does not depend on the repository's size.
+
 Accepted limitations of `git-roots:v1`: two clones of one history share the
 identity (that is what makes a relocation the same project); a repository
 whose reachable root set changes (merging unrelated histories) gets a new

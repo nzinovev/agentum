@@ -3,11 +3,13 @@
 -- the same working copy (or a clone of the same history) under a new path
 -- updates the path and stays the same project, so a moved directory keeps its
 -- run history, memory and approvals. repo_identity is computed at the
--- boundary (internal/repoid) and never accepted from a request body.
--- Callers must pass a non-nil related_projects slice (the column is NOT
--- NULL; pq.Array(nil) is NULL).
-INSERT INTO projects (tenant_id, user_id, repo_identity, repo_path, name, related_projects)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- boundary (internal/repoid) and never accepted from a request body. The
+-- root commits ride along so later checks confirm identity by object
+-- existence instead of re-walking the history.
+-- Callers must pass non-nil related_projects and repo_root_commits slices
+-- (the columns are NOT NULL; pq.Array(nil) is NULL).
+INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits, repo_path, name, related_projects)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (tenant_id, repo_identity) DO UPDATE SET
     repo_path = EXCLUDED.repo_path,
     name = EXCLUDED.name,

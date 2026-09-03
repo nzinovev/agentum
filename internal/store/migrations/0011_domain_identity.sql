@@ -12,6 +12,13 @@
 -- manifests and approvals stay with the repository.
 ALTER TABLE projects ADD COLUMN repo_identity text NOT NULL;
 
+-- The root commits the identity was folded from. Deriving the fingerprint
+-- requires walking the whole reachable history; confirming it does not — the
+-- roots' existence is an object lookup. Storing them keeps the walk at
+-- registration (once) and off every run job and re-registration, where the
+-- cost would grow with the repository without a ceiling.
+ALTER TABLE projects ADD COLUMN repo_root_commits text[] NOT NULL;
+
 ALTER TABLE projects DROP CONSTRAINT projects_tenant_id_repo_path_key;
 CREATE UNIQUE INDEX idx_projects_identity ON projects(tenant_id, repo_identity);
 -- Not unique: two different repositories that lived at the same path at
@@ -66,6 +73,7 @@ ALTER TABLE tasks DROP COLUMN checkout_path;
 DROP INDEX idx_projects_repo_path;
 DROP INDEX idx_projects_identity;
 ALTER TABLE projects ADD CONSTRAINT projects_tenant_id_repo_path_key UNIQUE (tenant_id, repo_path);
+ALTER TABLE projects DROP COLUMN repo_root_commits;
 ALTER TABLE projects DROP COLUMN repo_identity;
 
 -- +goose StatementEnd

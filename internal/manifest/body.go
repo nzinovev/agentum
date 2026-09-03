@@ -946,10 +946,10 @@ func fillInvocationEvidence(existing InvocationEvidence, patch InvocationEvidenc
 // expressed. A nil refresh simply drops the collision, keeping the first record.
 //
 // The siblings that match against `base` alone (appendUniqueString,
-// appendUniqueHumanDecision, appendUniqueCheckpoint, appendUniqueArtifactRef)
+// appendUniqueGateDecision, appendUniqueCheckpoint, appendUniqueArtifactRef)
 // are deliberately not expressed here: they let a repeat WITHIN one patch
 // through, and collapsing that would change what they record. Two of them could
-// not use a comparable key anyway — appendUniqueHumanDecision compares
+// not use a comparable key anyway — appendUniqueGateDecision compares
 // timestamps with time.Time.Equal, and appendUniqueArtifactRef matches on a
 // conditional predicate rather than a fixed tuple.
 func appendUniqueKeyed[T any, K comparable](base, additions []T, key func(T) K, refresh func(present *T, addition T)) []T {

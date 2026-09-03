@@ -175,7 +175,10 @@ func TestRunner_ForeignCheckoutPauses(t *testing.T) {
 		store.mu.Unlock()
 		t.Fatalf("resolve registered identity: %v", err)
 	}
-	store.project.RepoIdentity = registeredIdentity
+	// The row carries the registration facts of the registered repository —
+	// identity and root commits — while its path points at the foreign one.
+	store.project.RepoIdentity = registeredIdentity.Value
+	store.project.RepoRootCommits = registeredIdentity.Roots
 	store.mu.Unlock()
 
 	taskPack := scriptPack("spec", map[string]pack.Stage{
@@ -299,10 +302,131 @@ func runGitInTest(t *testing.T, dir string, args ...string) {
 }
 
 // repoIdentityOf resolves a repository's identity outside the fake store.
-func repoIdentityOf(repoPath string) (string, error) {
-	identity, err := repoid.Resolve(context.Background(), repoPath)
-	if err != nil {
-		return "", err
+func repoIdentityOf(repoPath string) (repoid.Identity, error) {
+	return repoid.Resolve(context.Background(), repoPath)
+}
+
+// TestRunner_TeardownAfterRepoMoveRemovesWorktree: the repository moved after
+// the run paused, and the terminal teardown must still clean up in the moved
+// copy — relink first, then remove. Without the relink the removal is a
+// silent no-op and the worktree outlives the run, potentially holding the
+// agent's uncommitted work.
+func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
+	t.Parallel()
+
+	original := t.TempDir()
+	if err := initRepoWithCommit(original); err != nil {
+		t.Fatalf("setup repo: %v", err)
 	}
-	return identity.Value, nil
+	taskID := "T-teardown-move"
+	task := sqlc.Task{
+		ID: taskID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+		PipelinePack: "test@0.1.0",
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: original, Name: "P"}
+	store := newFakeStore(task, proj)
+
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+
+	if err := runner.Handle(t.Context(), job("run", taskID, "tn", "us")); err != nil {
+		t.Fatalf("initial run: %v", err)
+	}
+
+	moved := filepath.Join(t.TempDir(), "moved")
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatalf("move repo: %v", err)
+	}
+	store.mu.Lock()
+	store.project.RepoPath = moved
+	store.task.CheckoutPath = moved
+	store.task.State = "done"
+	store.mu.Unlock()
+
+	if err := runner.Handle(t.Context(), job("teardown", taskID, "tn", "us")); err != nil {
+		t.Fatalf("teardown after move: %v", err)
+	}
+	if worktree.DirPresent(worktree.PathFor(moved, taskID)) {
+		t.Fatal("teardown left the worktree behind in the moved copy")
+	}
+}
+
+// TestRunner_UnrepairableWorktreePauses: the worktree directory is present
+// but git cannot relink it (its admin metadata under .git/worktrees was
+// pruned by gc or removed by hand). That is an externally fixable state of
+// the same class as a missing copy, so the run pauses — a failure would
+// destroy the recovery path (restore the metadata, or tear the worktree down
+// deliberately) that a pause keeps. And no worktree is ever rebuilt in some
+// other copy.
+func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	taskID := "T-unrepairable"
+	task := sqlc.Task{
+		ID: taskID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+		PipelinePack: "test@0.1.0",
+	}
+	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(task, proj)
+
+	taskPack := scriptPack("spec", map[string]pack.Stage{
+		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+
+	if err := runner.Handle(t.Context(), job("run", taskID, "tn", "us")); err != nil {
+		t.Fatalf("initial run: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("initial state = %q, want paused_gate", got)
+	}
+
+	// The advance handler transitions paused_gate -> running before enqueuing
+	// the job; mirror that, as the real flow delivers it.
+	store.mu.Lock()
+	store.task.State = "running"
+	store.mu.Unlock()
+
+	// Prune the worktree's admin metadata: the directory and its .git file
+	// remain, but git can neither enter nor relink it.
+	if err := os.RemoveAll(filepath.Join(repo, ".git", "worktrees", taskID)); err != nil {
+		t.Fatalf("prune worktree metadata: %v", err)
+	}
+
+	if err := runner.Handle(t.Context(), job("advance", taskID, "tn", "us")); err != nil {
+		t.Fatalf("advance job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_user_stop" {
+		t.Fatalf("state = %q, want paused_user_stop — an unrepairable worktree pauses instead of failing", got)
+	}
+	store.mu.Lock()
+	pauseEvents := 0
+	for _, event := range store.events {
+		if event.Type == EvCheckoutUnavailable {
+			pauseEvents++
+		}
+	}
+	store.mu.Unlock()
+	if pauseEvents == 0 {
+		t.Fatalf("an unrepairable worktree must surface via %s", EvCheckoutUnavailable)
+	}
+	// No worktree was rebuilt: the original directory is still there (stale)
+	// and git's worktree records were not recreated.
+	if _, statErr := os.Stat(filepath.Join(repo, ".git", "worktrees", taskID)); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree records reappeared: stat err = %v", statErr)
+	}
 }

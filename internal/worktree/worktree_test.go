@@ -155,6 +155,54 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 	}
 }
 
+// TestManager_RemoveWorktreeAfterRepoMove pins the teardown path after a
+// repository moved: the worktree's stale links must be repaired BEFORE
+// removal, or the removal is a silent no-op — the liveness check isWorktree
+// performs says "not a worktree" about a directory that is still on disk,
+// together with its admin metadata. Repair, then remove, and both the
+// working directory and the .git/worktrees record must be gone.
+func TestManager_RemoveWorktreeAfterRepoMove(t *testing.T) {
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	manager := New()
+	const taskID = "task-remove-after-move"
+	if _, err := manager.Create(t.Context(), repo, taskID, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	movedRepo := filepath.Join(t.TempDir(), "moved")
+	if err := os.Rename(repo, movedRepo); err != nil {
+		t.Fatalf("move repo: %v", err)
+	}
+	// The worktree traveled with the repository; its recorded links still
+	// point at the old location.
+	movedWorktreeRoot := PathFor(movedRepo, taskID)
+
+	// Without repair the removal is a no-op: this is the regression guard.
+	if err := manager.RemoveWorktree(t.Context(), movedRepo, taskID); err != nil {
+		t.Fatalf("RemoveWorktree on stale links: %v", err)
+	}
+	if !DirPresent(movedWorktreeRoot) {
+		t.Fatal("control check failed: the stale worktree directory vanished without repair — the no-op premise changed")
+	}
+
+	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if err := manager.RemoveWorktree(t.Context(), movedRepo, taskID); err != nil {
+		t.Fatalf("RemoveWorktree after Repair: %v", err)
+	}
+	if DirPresent(movedWorktreeRoot) {
+		t.Fatal("the worktree directory survived a repaired removal")
+	}
+	worktreeAdminDir := filepath.Join(movedRepo, ".git", "worktrees", taskID)
+	if _, statErr := os.Stat(worktreeAdminDir); !os.IsNotExist(statErr) {
+		t.Fatalf("the .git/worktrees record survived: stat err = %v", statErr)
+	}
+}
+
 // assertBranchCheckedOut confirms the worktree's HEAD points at branch. The
 // git call + parse lives here so the call site is a single assertion (no inline
 // else-if that would inflate the caller's complexity).
