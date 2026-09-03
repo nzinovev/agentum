@@ -16,7 +16,9 @@ LIMIT $4;
 -- name: AppendEvent :one
 -- Insert a row in the durable event log. The runner is the only caller in
 -- production; tests and the SSE handler read. id is monotonic, so Last-Event-ID
--- is a simple "> last_id" tail.
-INSERT INTO events (tenant_id, user_id, task_id, type, payload)
-VALUES ($1, $2, $3, $4, $5)
+-- is a simple "> last_id" tail. The column has no default on purpose: every
+-- writer must name its actor — the runner and the reconciler pass 'system',
+-- request-driven writers pass 'human'.
+INSERT INTO events (tenant_id, user_id, task_id, type, payload, actor)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;

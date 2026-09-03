@@ -125,7 +125,7 @@ func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher h
 		return afterID, err
 	}
 	for _, event := range rows {
-		if err := writeSSEFrame(w, event.ID, event.Type, event.Payload); err != nil {
+		if err := writeSSEFrame(w, event); err != nil {
 			return afterID, err
 		}
 		afterID = event.ID
@@ -136,17 +136,52 @@ func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher h
 
 // writeSSEFrame writes one id:/event:/data: frame. Returns the write error so
 // the caller can detect a gone client.
-func writeSSEFrame(w http.ResponseWriter, id int64, eventType string, payload json.RawMessage) error {
-	if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\n", id, eventType); err != nil {
+//
+// The data object mixes two facts from the event row into the payload the
+// event's source recorded: the run id and the actor. Both live on the row
+// rather than in every producer's payload, which is why the docs can promise
+// them on every frame while individual payloads never repeat them — and why a
+// system-written event cannot read on the stream as the task author acting.
+// The task id is mixed in only when the row carries one (a tenant-global event
+// gets no empty placeholder), a producer's own key always wins over the
+// mixed-in value, and a non-object payload is passed through untouched rather
+// than rewritten into one.
+func writeSSEFrame(w http.ResponseWriter, event sqlc.Event) error {
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\n", event.ID, event.Type); err != nil {
 		return err
 	}
+	payload := event.Payload
 	if len(payload) == 0 {
 		payload = json.RawMessage("{}")
 	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+	merged := payload
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &data); err == nil && data != nil {
+		if event.TaskID.Valid && event.TaskID.String != "" {
+			mixInFrameFact(data, "task_id", event.TaskID.String)
+		}
+		mixInFrameFact(data, "actor", event.Actor)
+		if encoded, encodeErr := json.Marshal(data); encodeErr == nil {
+			merged = encoded
+		}
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", merged); err != nil {
 		return err
 	}
 	return nil
+}
+
+// mixInFrameFact sets key to value unless the producer's payload already
+// carries it: the frame supplements the payload, never rewrites it.
+func mixInFrameFact(data map[string]json.RawMessage, key, value string) {
+	if _, exists := data[key]; exists || value == "" {
+		return
+	}
+	encoded, encodeErr := json.Marshal(value)
+	if encodeErr != nil {
+		return
+	}
+	data[key] = encoded
 }
 
 // parseLastEventID parses the Last-Event-ID header. Empty/invalid → 0, which

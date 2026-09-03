@@ -42,6 +42,29 @@ type Decision struct {
 	Reason  string
 }
 
+// Actor is who performed an action — the shared human | agent | system
+// vocabulary, declared once here because it is identity vocabulary, not a
+// property of any one table that happens to record actions. It answers "who
+// acted"; the user_id recorded beside it answers "on whose behalf". The two
+// name the same person only when actor is human: a system-initiated action
+// (an automatic gate passing, a fix-loop edit, a reconciler pause) carries the
+// tenant's user_id without claiming a human clicked anything.
+//
+// An Actor value is a statement about what happened, never a permission: no
+// code path may branch on it to allow or deny anything — that decision stays
+// in Can.
+type Actor string
+
+const (
+	// ActorHuman is a person acting through the API.
+	ActorHuman Actor = "human"
+	// ActorAgent is the coding agent producing stage output.
+	ActorAgent Actor = "agent"
+	// ActorSystem is the orchestrator acting on its own rules (automatic
+	// gates, fix loops, the reconciler).
+	ActorSystem Actor = "system"
+)
+
 func Allow() Decision        { return Decision{Allowed: true, Reason: "owner"} }
 func Deny(r string) Decision { return Decision{false, r} }
 

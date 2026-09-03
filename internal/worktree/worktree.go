@@ -89,8 +89,12 @@ func (manager *Manager) Create(ctx context.Context, repoPath, taskID, baseCommit
 	// Idempotent: a worktree already at this path is returned as-is. This keeps
 	// resume/retry (which re-enters Create) from failing on the second pass —
 	// and preserves the lineage of an in-flight task (we never rebuild it from
-	// a different base mid-run).
-	if isWorktree(wtPath) {
+	// a different base mid-run). The check requires the worktree to be LIVE
+	// (git can enter it): a directory left over from a repository move holds a
+	// .git file with stale absolute pointers and is not a worktree until
+	// Repair rewires it — returning it as-is would hand the run a directory
+	// every git command refuses to touch.
+	if isWorktree(ctx, wtPath) {
 		return &Worktree{Root: wtPath, Branch: branch, RepoPath: repoAbs}, nil
 	}
 
@@ -398,7 +402,7 @@ func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCom
 		return ReconcileState{}, fmt.Errorf("resolve repo path: %w", err)
 	}
 	wtPath := PathFor(repoAbs, taskID)
-	if !isWorktree(wtPath) {
+	if !isWorktree(ctx, wtPath) {
 		// Worktree gone but task wants to run: a human removed it (or teardown
 		// ran early). Re-creating would silently rebuild from base and replay
 		// side effects — surface instead.
@@ -479,7 +483,7 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, taskID str
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
 	wtPath := PathFor(repoAbs, taskID)
-	if !isWorktree(wtPath) {
+	if !isWorktree(ctx, wtPath) {
 		return nil
 	}
 	// --force: the worktree may contain uncommitted agent work; teardown at
@@ -555,9 +559,27 @@ func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error
 	return nil
 }
 
-// isWorktree reports whether path looks like an existing worktree (a non-empty
-// dir containing a .git file — worktrees use a .git file, not a .git dir).
-func isWorktree(path string) bool {
+// isWorktree reports whether path is a worktree git can actually enter: the
+// directory with its .git entry exists AND git resolves it. The second half is
+// what separates a live worktree from a moved one — git stores absolute paths
+// in both .git/worktrees/<id>/gitdir and the worktree's .git file, so after
+// the repository moves on disk the directory and its .git file are all still
+// there while every git command inside them fails on the stale pointer.
+// Presence alone used to pass this check, and a broken worktree sailed
+// through as healthy.
+func isWorktree(ctx context.Context, path string) bool {
+	if !DirPresent(path) {
+		return false
+	}
+	out, err := git(ctx, path, revParseCmd, "--git-dir")
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// DirPresent reports whether a worktree directory with its .git entry exists
+// at path, whether or not the link is live. The runner uses it to decide
+// whether a repair is worth running before reconciling: after a repository
+// move, presence plus a dead link is exactly the state repair exists to fix.
+func DirPresent(path string) bool {
 	fileInfo, err := os.Stat(path)
 	if err != nil || !fileInfo.IsDir() {
 		return false
@@ -569,6 +591,29 @@ func isWorktree(path string) bool {
 		return false
 	}
 	return true
+}
+
+// Repair rewires a per-task worktree whose absolute pointers went stale after
+// the repository moved on disk. `git worktree repair <path>` rewrites both
+// sides of the linkage (.git/worktrees/<id>/gitdir and the worktree's .git
+// file); the bare form without a path does not recover a moved repository, so
+// the worktree's own path is always passed. Idempotent and cheap — repairing
+// a healthy worktree is a no-op — which is why the runner calls it whenever
+// the worktree directory is present before creating and reconciling, instead
+// of trying to detect staleness itself.
+func (manager *Manager) Repair(ctx context.Context, repoPath, taskID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	out, err := git(ctx, repoAbs, "worktree", "repair", PathFor(repoAbs, taskID))
+	if err != nil {
+		return fmt.Errorf("git worktree repair: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // git runs a git command in dir and returns combined output. Combined (not just

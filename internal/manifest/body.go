@@ -72,7 +72,7 @@ type TokenUsage struct {
 //   - Artifacts     — input + output artifact revisions (outputs keyed by
 //     invocation)
 //   - Checks        — check set version + their results
-//   - HumanGates    — human gate decisions
+//   - GateDecisions — gate decisions: human and system alike
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
 //   - Transitions   — conditional transitions the run took
@@ -92,7 +92,7 @@ type Body struct {
 	Context             *ContextEvidence     `json:"context,omitempty"`
 	Artifacts           *ArtifactEvidence    `json:"artifacts,omitempty"`
 	Checks              *CheckEvidence       `json:"checks,omitempty"`
-	HumanGates          []HumanDecision      `json:"human_gates,omitempty"`
+	GateDecisions       []GateDecision       `json:"gate_decisions,omitempty"`
 	Git                 *GitEvidence         `json:"git,omitempty"`
 	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
 	Transitions         []TransitionRecord   `json:"transitions,omitempty"`
@@ -383,15 +383,23 @@ type CheckResult struct {
 	Source             string `json:"source,omitempty"`
 }
 
-// HumanDecision is one human gate decision. Decision is one of: approved (a
-// gate was passed), rejected (the run was cancelled), edited (a human edit at a
-// human_edit gate — the edit is the approval), continued (a paused run was
-// resumed past an open_questions or user_stop pause).
-type HumanDecision struct {
+// GateDecision is one gate decision, whoever made it. Decision is one of:
+// approved (a gate was passed), rejected (the run was cancelled), edited (a
+// human edit at a human_edit gate — the edit is the approval), continued (a
+// paused run was resumed past an open_questions or user_stop pause).
+//
+// Actor is the shared human | agent | system vocabulary: a gate that could
+// have stopped the work and did not is a decision, and when the orchestrator
+// made it (auto_if_clean passing on a clean tree, auto_on_approval applying a
+// recorded human approval) the record says system rather than borrowing a
+// human's name. UserID is whose name the action was taken under — identical to
+// a person only when Actor is human.
+type GateDecision struct {
 	Stage     string    `json:"stage"`
 	Gate      string    `json:"gate"`
 	Decision  string    `json:"decision"` // approved | rejected | edited | continued
-	Actor     string    `json:"actor"`
+	Actor     string    `json:"actor"`    // human | agent | system
+	UserID    string    `json:"user_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -448,7 +456,7 @@ type expectedSection struct {
 var expectedSections = []expectedSection{
 	{name: "memory", present: func(body *Body) bool { return body.Memory != nil }, countsTowardCompleteness: false},
 	{name: "context", present: func(body *Body) bool { return body.Context != nil }, countsTowardCompleteness: true},
-	{name: "human_gates", present: func(body *Body) bool { return len(body.HumanGates) > 0 }, countsTowardCompleteness: true},
+	{name: "gate_decisions", present: func(body *Body) bool { return len(body.GateDecisions) > 0 }, countsTowardCompleteness: true},
 	{name: "artifacts", present: func(body *Body) bool { return body.Artifacts != nil }, countsTowardCompleteness: true},
 	{name: "checks", present: func(body *Body) bool { return body.Checks != nil && body.Checks.Ran }, countsTowardCompleteness: true},
 	{name: "capabilities", present: capabilitiesPresent, countsTowardCompleteness: true},
@@ -801,8 +809,8 @@ func mergeBodies(existing Body, patch Body) Body {
 	if patch.Checks != nil {
 		merged.Checks = mergeCheckEvidence(merged.Checks, patch.Checks)
 	}
-	if len(patch.HumanGates) > 0 {
-		merged.HumanGates = appendUniqueHumanDecision(merged.HumanGates, patch.HumanGates)
+	if len(patch.GateDecisions) > 0 {
+		merged.GateDecisions = appendUniqueGateDecision(merged.GateDecisions, patch.GateDecisions)
 	}
 	if patch.Git != nil {
 		merged.Git = mergeGitEvidence(merged.Git, patch.Git)
@@ -989,15 +997,27 @@ type evidenceGapKey struct {
 	reason  string
 }
 
-// appendUniqueHumanDecision appends decisions not already in base (matched by
-// Stage + Decision + Timestamp).
-func appendUniqueHumanDecision(base []HumanDecision, additions []HumanDecision) []HumanDecision {
-	out := make([]HumanDecision, 0, len(base)+len(additions))
+// appendUniqueGateDecision appends decisions not already in base (matched by
+// Stage + Gate + Decision + Actor + UserID + Timestamp). The key grew with the
+// record: once a human decision and a system decision can exist on the same
+// stage with the same outcome, a key without Actor and UserID collapses them
+// into one — exactly the ambiguity the record exists to remove. Gate joined
+// for the same reason: the system's own pass (gate = auto_*) and the human's
+// advance on it are two records. The timestamp stays in the key so a genuine
+// re-delivery of one record (a resume re-recording the decision it inherited)
+// collapses while a later, separate decision stays its own record.
+func appendUniqueGateDecision(base []GateDecision, additions []GateDecision) []GateDecision {
+	out := make([]GateDecision, 0, len(base)+len(additions))
 	out = append(out, base...)
 	for _, addition := range additions {
 		found := false
 		for _, present := range base {
-			if present.Stage == addition.Stage && present.Decision == addition.Decision && present.Timestamp.Equal(addition.Timestamp) {
+			if present.Stage == addition.Stage &&
+				present.Gate == addition.Gate &&
+				present.Decision == addition.Decision &&
+				present.Actor == addition.Actor &&
+				present.UserID == addition.UserID &&
+				present.Timestamp.Equal(addition.Timestamp) {
 				found = true
 				break
 			}

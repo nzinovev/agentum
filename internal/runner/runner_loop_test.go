@@ -15,6 +15,7 @@ import (
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/repoid"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -38,6 +39,14 @@ type fakeStore struct {
 }
 
 func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
+	// Fill the project's repo identity from its path when the path resolves,
+	// so a fixture repo behaves like a registered one for the runner's
+	// checkout verification. A path that does not resolve (t.TempDir fixtures
+	// for tests that never enter the prologue) simply carries no identity,
+	// which the runner treats as "nothing to compare against".
+	if identity, err := repoid.Resolve(context.Background(), project.RepoPath); err == nil {
+		project.RepoIdentity = identity.Value
+	}
 	return &fakeStore{task: task, project: project}
 }
 
@@ -68,6 +77,14 @@ func (store *fakeStore) SetBaseCommit(_ context.Context, arg sqlc.SetBaseCommitP
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.task.BaseCommit = arg.BaseCommit
+	return store.task, nil
+}
+func (store *fakeStore) SetCheckoutPath(_ context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Task, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.task.CheckoutPath == "" {
+		store.task.CheckoutPath = arg.CheckoutPath
+	}
 	return store.task, nil
 }
 func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error) {
@@ -168,7 +185,7 @@ func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheck
 func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.events = append(store.events, sqlc.Event{Type: arg.Type, Payload: arg.Payload})
+	store.events = append(store.events, sqlc.Event{Type: arg.Type, Payload: arg.Payload, Actor: arg.Actor})
 	return sqlc.Event{}, nil
 }
 

@@ -97,10 +97,10 @@ func TestEvidenceComplete_EmptyContextSectionStillSeals(t *testing.T) {
 		Context: &ContextEvidence{SkillsProbe: "ok"},
 		// Fill the other required sections so completeness is gated only by
 		// context.
-		HumanGates:   []HumanDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
-		Artifacts:    &ArtifactEvidence{},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		GateDecisions: []GateDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
+		Artifacts:     &ArtifactEvidence{},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 	}
 	// Checks must report Ran:true to count.
 	body.Checks = &CheckEvidence{Ran: true}
@@ -116,13 +116,13 @@ func TestEvidenceComplete_EmptyContextSectionStillSeals(t *testing.T) {
 func TestEvidenceComplete_FailedContextProbeSealsFalse(t *testing.T) {
 	t.Parallel()
 	body := Body{
-		Context:      &ContextEvidence{SkillsProbe: "failed: timeout"},
-		HumanGates:   []HumanDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
-		Artifacts:    &ArtifactEvidence{},
-		Checks:       &CheckEvidence{Ran: true},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
-		EvidenceGaps: []EvidenceGap{{Section: "context.skills", Reason: "probe failed", At: time.Now()}},
+		Context:       &ContextEvidence{SkillsProbe: "failed: timeout"},
+		GateDecisions: []GateDecision{{Stage: "review", Decision: "approved", Timestamp: time.Now()}},
+		Artifacts:     &ArtifactEvidence{},
+		Checks:        &CheckEvidence{Ran: true},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		EvidenceGaps:  []EvidenceGap{{Section: "context.skills", Reason: "probe failed", At: time.Now()}},
 	}
 	if body.IsEvidenceComplete() {
 		t.Error("a body with a context.skills EvidenceGap must not be complete")

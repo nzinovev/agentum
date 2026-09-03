@@ -29,34 +29,70 @@ and land with the epic named in the table.
 
 ## Projects
 
-A project binds a local git repository to an Agentum project id (one repo = one
-project per tenant). Tasks reference a project; the runner creates a per-task
-worktree off the project's repo. Registration is idempotent: re-`POST`ing the
-same `repo_path` updates `name` / `related_projects` rather than failing.
+A project binds a repository to an Agentum project id (one repository = one
+project per tenant). The project's key is the repository's **identity** — a
+fingerprint of its own history (`repo_identity`, computed at registration from
+the repository itself and never accepted from a request body) — not its local
+path. Tasks reference a project; the runner creates a per-task worktree off
+the project's working copy. Registration is idempotent: registering the same
+repository — the same copy, a moved directory, or a clone of the same history —
+returns the same project, updating `repo_path` / `name` / `related_projects`
+rather than failing, so a relocated repository keeps its run history.
+
+`repo_path` must point inside a usable git working copy. Registration probes
+git and refuses, each with a `400 bad_input` naming the fix:
+
+- the path is not inside a git work tree;
+- the repository has no commits (make at least one commit first — a run needs
+  a base to branch from);
+- the repository is a shallow clone (run `git fetch --unshallow` first: a
+  shallow history would fingerprint at the cut boundary and silently change
+  identity on unshallow);
+- the path is a linked work tree (the message names the main work tree —
+  register that instead).
+
+The stored `repo_path` is the working-tree root, so a subdirectory of the
+repository, the root, and the root with a trailing slash all resolve to the
+same project.
+
+When a registration moves the project's working copy, the response says what
+happened to runs that already started: `previous_repo_path` is always set on a
+move; `runs_awaiting_previous_checkout` is set when the previous copy still
+holds the repository (a second working copy exists) and counts the unfinished
+runs that remain in it. When the previous copy no longer holds the repository
+(a relocation), unfinished runs follow the project: their pinned working copy
+is rebound, and terminal runs keep theirs as history.
+
+`related_projects` is an **inert seam**: stored now, it will grant
+cross-project read access (a path-scoped `fs.read` capability) in a later
+epic — never auto-discovered, the configured set is the security boundary. See
+`docs/domain-model.md` for the full model vocabulary (workspace / project /
+repository / checkout, run vs work item, actor / creator / owner).
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/projects` | ✅ | `{repo_path, name, related_projects?}` → `201 Project` / `400 bad_input` (if `repo_path` is not a git work tree) |
+| `POST` | `/projects` | ✅ | `{repo_path, name, related_projects?}` → `201 Project` / `400 bad_input` (not a usable working copy — see the refusals above) |
 | `GET` | `/projects` | ✅ | `?limit=&offset=` → `200 Project[]` |
 | `GET` | `/projects/{id}` | ✅ | → `200 Project` / `404 not_found` |
-
-`repo_path` must point inside a real git work tree (validated at registration).
-`related_projects` is an **inert seam**: stored now, it will grant cross-project
-read access (a path-scoped `fs.read` capability) in a later epic — never
-auto-discovered, the configured set is the security boundary.
 
 ### Project
 
 ```json
 {
   "id": "uuid",
+  "repo_identity": "git-roots:v1:9f86d0...",
   "repo_path": "/home/me/repos/my-app",
   "name": "My App",
   "related_projects": [],
   "created_at": "2026-07-09T...",
-  "updated_at": "2026-07-09T..."
+  "updated_at": "2026-07-09T...",
+  "previous_repo_path": "/home/me/old/path",
+  "runs_awaiting_previous_checkout": 1
 }
 ```
+
+`repo_identity` is read-only. The two trailing fields appear only on a
+registration that moved the working copy and are omitted otherwise.
 
 ## Tasks
 
@@ -68,13 +104,22 @@ auto-discovered, the configured set is the security boundary.
 | `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
 | `POST` | `/tasks/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Task` / `409 illegal_transition` |
 | `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Task` / `409 illegal_transition` |
-| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. |
+| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human | agent | system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the task author approving.
 | `POST` | `/tasks/{id}/cleanup` | ✅ | terminal task → branch deleted (idempotent, audited) → `202 Task` / `409 illegal_transition` (if not terminal) |
 
 `base_ref` is the git ref the task builds against (branch / tag / SHA / `HEAD`).
 It is resolved once to an immutable `base_commit` before the worktree is
 created; omitted defaults to `HEAD`. See `docs/execution.md` § "Safe lifecycle,
 checkpoints, and code egress" for the full lineage / abort / cleanup model.
+
+A run executes in the working copy it pinned at first start (the project's
+`repo_path` at that moment), and keeps that copy even if the project is later
+re-registered from another clone — its branch, checkpoints, and worktree stay
+together. If the pinned copy becomes unavailable or holds a different
+repository, the run pauses with stop reason `checkout_unavailable` (the
+`task.checkout_unavailable` event names the path) and stays resumable: restore
+the directory or re-register the project, then continue. The run never rebuilds
+its worktree in a different copy.
 
 `cancel` is a **terminal abort**: the in-flight run is aborted and the worktree
 is torn down, but the `agentum/<task-id>` branch and any committed recovery work
@@ -234,8 +279,8 @@ revision, project + base commit, pack + version + hash, one invocation record
 per stage attempt — adapter + runtime versions, model selection, both prompt
 hashes, effective capability profile, telemetry — the adapter wiring and its
 runtime probe, memory slice, input/output artifact revisions, check set
-version + results, human gate decisions, branch + checkpoints + result
-commits).
+version + results, gate decisions (human and system alike, each with its
+actor and user_id), branch + checkpoints + result commits).
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
@@ -281,10 +326,10 @@ invocation records for the diff.
   "memory":           { "scope": "project", "hashes": [], "entries": 0 },
   "artifacts":        { "inputs": [], "outputs": [{ "name": "review/result.json", "revision_id": "…", "content_hash": "…", "stage": "review", "invocation_id": "6f1c…" }] },
   "checks":           { "set_version": "", "results": [] },
-  "human_gates":      [{ "stage": "…", "gate": "…", "decision": "approved | rejected | edited | continued", "actor": "…", "timestamp": "…" }],
+  "gate_decisions":   [{ "stage": "…", "gate": "…", "decision": "approved | rejected | edited | continued", "actor": "human | agent | system", "user_id": "…", "timestamp": "…" }],
   "git":              { "branch": "agentum/…", "base_commit": "…", "result_commit": "…", "checkpoints": [] },
   "execution_coordinate": { "delivery_step": "", "execution_unit": "", "phase": "" },
-  "missing":          ["memory", "checks", "human_gates"]
+  "missing":          ["memory", "checks", "gate_decisions"]
 }
 ```
 
@@ -375,6 +420,10 @@ data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
 - `id` is the monotonic `events.id` (bigint). **`Last-Event-ID`** replays every
   row with `id > lastID`, scoped to the tenant (and task for per-task). A
   missing/invalid `Last-Event-ID` replays from the start.
+- The `data` object carries two facts from the event row on every frame:
+  `task_id` (present only when the event belongs to a run) and `actor`
+  (`human | agent | system` — who produced the event). A payload's own key
+  always wins over the mixed-in value.
 - After replay completes, the connection live-tails new rows and emits a
   comment-frame keepalive (`: ping <unix>`) every 15s.
 - The same durable log backs the audit trail, so reconnect semantics and audit
@@ -384,7 +433,8 @@ data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
 
 | `event` | Carries | Emitted by |
 |---|---|---|
-| `task.state_changed` | `{task_id, from, to}` | engine on every transition |
+| `task.state_changed` | `{task_id, from, to, stop_reason?, stage?}` | engine on every transition |
+| `task.checkout_unavailable` | `{task_id, checkout_path, reason}` | runner when a run's pinned working copy is gone or holds a different repository; the run pauses (`stop_reason: checkout_unavailable`) and stays resumable |
 | `stage.invocation_started` | `{task_id, invocation_id, stage, sequence}` | runner |
 | `stage.stream` | `{task_id, invocation_id, chunk}` | adapter (agent text → SSE) |
 | `stage.tool` | `{task_id, invocation_id, tool, target, status}` | adapter (tool activity) |

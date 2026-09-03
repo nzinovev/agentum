@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -45,7 +46,7 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	if worktree.Branch != "agentum/task-001" {
 		t.Errorf("Branch = %q", worktree.Branch)
 	}
-	if !isWorktree(worktree.Root) {
+	if !isWorktree(context.Background(), worktree.Root) {
 		t.Fatalf("worktree not created at %s", worktree.Root)
 	}
 	// The branch is checked out in the worktree.
@@ -65,7 +66,7 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
-	if isWorktree(worktree.Root) {
+	if isWorktree(context.Background(), worktree.Root) {
 		t.Error("worktree still present after RemoveWorktree")
 	}
 	assertBranchListHas(t, repo, "agentum/task-001", true)
@@ -82,6 +83,75 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
 		t.Errorf("second DeleteBranch should be a no-op, got: %v", err)
+	}
+}
+
+// TestWorktree_MoveBreaksLinkAndRepairRestores pins the recovery path for a
+// repository that moved on disk: git writes absolute paths into both halves of
+// the worktree linkage, so after the move the worktree directory is fully
+// present while git refuses to enter it — presence alone must not read as
+// "healthy worktree" (that was the old isWorktree), and Repair is what turns
+// the stale links live again, after which Create returns the SAME worktree
+// rather than trying to rebuild the lineage.
+func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	manager := New()
+	const taskID = "task-moved"
+	worktree, err := manager.Create(t.Context(), repo, taskID, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	headBeforeMove, err := manager.HeadCommit(t.Context(), worktree.Root)
+	if err != nil {
+		t.Fatalf("read head before move: %v", err)
+	}
+
+	movedRepo := filepath.Join(t.TempDir(), "moved")
+	if err := os.Rename(repo, movedRepo); err != nil {
+		t.Fatalf("move repo: %v", err)
+	}
+	movedWorktreeRoot := PathFor(movedRepo, taskID)
+
+	// The directory (and its .git file) traveled with the repository, but the
+	// link is dead: presence is true, liveness is not.
+	if !DirPresent(movedWorktreeRoot) {
+		t.Fatal("the worktree directory must exist after the repository moved")
+	}
+	if isWorktree(context.Background(), movedWorktreeRoot) {
+		t.Fatal("a moved worktree's stale link must not read as a live worktree")
+	}
+
+	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if !isWorktree(context.Background(), movedWorktreeRoot) {
+		t.Fatal("Repair must make the moved worktree live again")
+	}
+	headAfterRepair, err := manager.HeadCommit(t.Context(), movedWorktreeRoot)
+	if err != nil {
+		t.Fatalf("read head after repair: %v", err)
+	}
+	if headAfterRepair != headBeforeMove {
+		t.Fatalf("head moved across repair: %q -> %q", headBeforeMove, headAfterRepair)
+	}
+
+	// Create after repair returns the SAME worktree (idempotent), not a
+	// rebuild: the lineage a run left behind is the whole point of repairing
+	// instead of recreating.
+	restored, err := manager.Create(t.Context(), movedRepo, taskID, headBeforeMove)
+	if err != nil {
+		t.Fatalf("Create after repair: %v", err)
+	}
+	if restored.Root != movedWorktreeRoot {
+		t.Fatalf("Create rebuilt the worktree at %s, want the repaired %s", restored.Root, movedWorktreeRoot)
+	}
+
+	// Repair is idempotent: a second run on a healthy worktree is a no-op.
+	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+		t.Fatalf("idempotent Repair: %v", err)
 	}
 }
 

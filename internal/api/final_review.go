@@ -82,8 +82,12 @@ type finalReviewManifest struct {
 type finalReviewDecision struct {
 	Gate     string `json:"gate"`
 	Decision string `json:"decision"`
-	Actor    string `json:"actor"`
-	At       string `json:"at"`
+	// Actor is the shared human | agent | system vocabulary; UserID is whose
+	// name the decision was taken under — the reviewer reads both, because
+	// "who let this through" is the question the section exists to answer.
+	Actor  string `json:"actor"`
+	UserID string `json:"user_id,omitempty"`
+	At     string `json:"at"`
 }
 
 // handleFinalReview GET /api/v1/tasks/{id}/final-review
@@ -146,7 +150,7 @@ func (api *API) finalReviewPlan(ctx context.Context, task sqlc.Task, approval pa
 	if row, err := api.queries.GetApproval(ctx, sqlc.GetApprovalParams{
 		TenantID: task.TenantID, TaskID: task.ID, Name: approval.Name,
 	}); err == nil {
-		out.ApprovedBy = row.Actor
+		out.ApprovedBy = row.UserID
 		out.ApprovedAt = row.CreatedAt.UTC().Format("2006-01-02T15:04:05.000000000Z")
 	}
 	return out
@@ -163,12 +167,8 @@ func (api *API) finalReviewDecisions(ctx context.Context, task sqlc.Task) []fina
 	}
 	out := make([]finalReviewDecision, 0, len(rows))
 	for _, row := range rows {
-		gate := row.Name
-		if gate == "final_review" {
-			gate = "final_review"
-		}
 		out = append(out, finalReviewDecision{
-			Gate: gate, Decision: row.Decision, Actor: row.Actor,
+			Gate: row.Name, Decision: row.Decision, Actor: row.Actor, UserID: row.UserID,
 			At: row.CreatedAt.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		})
 	}

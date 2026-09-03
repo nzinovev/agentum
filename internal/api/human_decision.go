@@ -11,8 +11,8 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// Human gate decision values. Centralized so the spelling callers, the
-// manifest, and the docs agree on. HumanDecision.Decision carries these.
+// Gate decision values. Centralized so the spelling callers, the
+// manifest, and the docs agree on. GateDecision.Decision carries these.
 const (
 	decisionApproved  = "approved"
 	decisionRejected  = "rejected"
@@ -20,7 +20,7 @@ const (
 	decisionContinued = "continued"
 )
 
-// Gate identifiers recorded on a HumanDecision. These name the kind of gate the
+// Gate identifiers recorded on a GateDecision. These name the kind of gate the
 // decision applied to; the diff/audit surface reads them, so they are stable
 // across releases. They are GATE LABELS (the audit vocabulary), distinct from
 // the task_approvals.name key (the durable approval namespace) — the two must
@@ -38,18 +38,22 @@ const (
 )
 
 // humanDecisionPatch builds the manifest.Body patch that records one human
-// gate decision. It is a pure function over its inputs so the gate/decision
-// mapping for each lifecycle action is unit-testable without a database or an
-// HTTP harness. The caller is responsible for committing it atomically with
-// the state change it describes (via manifest.Service.AddEvidenceTx inside the
-// handler's runInTx closure).
-func humanDecisionPatch(stage, gate, decision, actor string, at time.Time) manifest.Body {
+// gate decision: actor is the shared vocabulary value (a human acted here —
+// the system's own gate passes are recorded by the runner with
+// authz.ActorSystem), userID is the person whose name the decision was taken
+// under. A pure function over its inputs so the gate/decision mapping for each
+// lifecycle action is unit-testable without a database or an HTTP harness. The
+// caller is responsible for committing it atomically with the state change it
+// describes (via manifest.Service.AddEvidenceTx inside the handler's runInTx
+// closure).
+func humanDecisionPatch(stage, gate, decision, userID string, at time.Time) manifest.Body {
 	return manifest.Body{
-		HumanGates: []manifest.HumanDecision{{
+		GateDecisions: []manifest.GateDecision{{
 			Stage:     stage,
 			Gate:      gate,
 			Decision:  decision,
-			Actor:     actor,
+			Actor:     string(authz.ActorHuman),
+			UserID:    userID,
 			Timestamp: at,
 		}},
 	}
@@ -65,7 +69,7 @@ func gateDecisionPatch(task sqlc.Task, principal authz.Principal, gate, decision
 
 // currentStageOr returns the task's current stage id, or fallback when the task
 // has no current stage set (a task that has not entered a stage yet). Used by
-// the lifecycle handlers to fill the Stage field of a HumanDecision.
+// the lifecycle handlers to fill the Stage field of a GateDecision.
 func currentStageOr(stage sql.NullString, fallback string) string {
 	if stage.Valid && stage.String != "" {
 		return stage.String

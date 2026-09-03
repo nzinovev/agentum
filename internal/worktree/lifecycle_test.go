@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,7 +50,7 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
-	if isWorktree(wt.Root) {
+	if isWorktree(context.Background(), wt.Root) {
 		t.Fatal("worktree dir still present after teardown")
 	}
 

@@ -150,7 +150,7 @@ func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun
 	if !run.task.BaseCommit.Valid || baseCommit == "" {
 		return nil, errors.New("delivery boundary reached without a resolved base_commit; lineage anchor is required to gate delivery")
 	}
-	raw, err := runner.wt.FileAtCommit(ctx, run.project.RepoPath, baseCommit, checks.ConfigFile)
+	raw, err := runner.wt.FileAtCommit(ctx, checkoutPathOf(run.task, run.project), baseCommit, checks.ConfigFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

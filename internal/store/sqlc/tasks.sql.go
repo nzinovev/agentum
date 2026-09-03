@@ -11,11 +11,33 @@ import (
 	"encoding/json"
 )
 
+const countActiveTasksOnCheckout = `-- name: CountActiveTasksOnCheckout :one
+SELECT count(*) FROM tasks
+WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
+  AND state NOT IN ('done', 'failed', 'cancelled')
+`
+
+type CountActiveTasksOnCheckoutParams struct {
+	TenantID     string `json:"tenant_id"`
+	ProjectID    string `json:"project_id"`
+	CheckoutPath string `json:"checkout_path"`
+}
+
+// The second working copy: how many unfinished runs stay in the previous one.
+// The registration response names this count so the split is visible at
+// registration time, not when someone tries to continue a run.
+func (q *Queries) CountActiveTasksOnCheckout(ctx context.Context, arg CountActiveTasksOnCheckoutParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActiveTasksOnCheckout, arg.TenantID, arg.ProjectID, arg.CheckoutPath)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (tenant_id, user_id, project_id, pipeline_pack,
                    title, description, overrides, base_ref, state)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
 `
 
 type CreateTaskParams struct {
@@ -57,12 +79,13 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
 
 const findOrphanedRunningTasks = `-- name: FindOrphanedRunningTasks :many
-SELECT t.id, t.tenant_id, t.user_id, t.project_id, t.pipeline_pack, t.title, t.state, t.created_at, t.updated_at, t.current_stage, t.base_ref, t.base_commit, t.result_commit, t.description, t.overrides FROM tasks t
+SELECT t.id, t.tenant_id, t.user_id, t.project_id, t.pipeline_pack, t.title, t.state, t.created_at, t.updated_at, t.current_stage, t.base_ref, t.base_commit, t.result_commit, t.description, t.overrides, t.checkout_path FROM tasks t
 WHERE t.tenant_id = $1
   AND t.state = 'running'
   AND NOT EXISTS (
@@ -104,6 +127,7 @@ func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string)
 			&i.ResultCommit,
 			&i.Description,
 			&i.Overrides,
+			&i.CheckoutPath,
 		); err != nil {
 			return nil, err
 		}
@@ -119,7 +143,7 @@ func (q *Queries) FindOrphanedRunningTasks(ctx context.Context, tenantID string)
 }
 
 const getTask = `-- name: GetTask :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path FROM tasks WHERE id = $1 AND tenant_id = $2
 `
 
 type GetTaskParams struct {
@@ -146,12 +170,13 @@ func (q *Queries) GetTask(ctx context.Context, arg GetTaskParams) (Task, error) 
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
 
 const getTaskForUpdate = `-- name: GetTaskForUpdate :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path FROM tasks WHERE id = $1 AND tenant_id = $2 FOR UPDATE
 `
 
 type GetTaskForUpdateParams struct {
@@ -181,12 +206,13 @@ func (q *Queries) GetTaskForUpdate(ctx context.Context, arg GetTaskForUpdatePara
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
 
 const listTasksByProject = `-- name: ListTasksByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides FROM tasks
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path FROM tasks
 WHERE tenant_id = $1 AND project_id = $2
 ORDER BY created_at DESC
 LIMIT $3 OFFSET $4
@@ -229,6 +255,70 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 			&i.ResultCommit,
 			&i.Description,
 			&i.Overrides,
+			&i.CheckoutPath,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const rebindActiveCheckouts = `-- name: RebindActiveCheckouts :many
+UPDATE tasks SET checkout_path = $4, updated_at = now()
+WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
+  AND state NOT IN ('done', 'failed', 'cancelled')
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
+`
+
+type RebindActiveCheckoutsParams struct {
+	TenantID       string `json:"tenant_id"`
+	ProjectID      string `json:"project_id"`
+	CheckoutPath   string `json:"checkout_path"`
+	CheckoutPath_2 string `json:"checkout_path_2"`
+}
+
+// The repository moved: the previous path no longer holds this repository, so
+// the working copy is one and it relocated. Only non-terminal runs — a
+// terminal run's checkout_path is a historical statement about where the work
+// happened, and rewriting it would falsify the record.
+func (q *Queries) RebindActiveCheckouts(ctx context.Context, arg RebindActiveCheckoutsParams) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, rebindActiveCheckouts,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.CheckoutPath,
+		arg.CheckoutPath_2,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.UserID,
+			&i.ProjectID,
+			&i.PipelinePack,
+			&i.Title,
+			&i.State,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CurrentStage,
+			&i.BaseRef,
+			&i.BaseCommit,
+			&i.ResultCommit,
+			&i.Description,
+			&i.Overrides,
+			&i.CheckoutPath,
 		); err != nil {
 			return nil, err
 		}
@@ -246,7 +336,7 @@ func (q *Queries) ListTasksByProject(ctx context.Context, arg ListTasksByProject
 const setBaseCommit = `-- name: SetBaseCommit :one
 UPDATE tasks SET base_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
 `
 
 type SetBaseCommitParams struct {
@@ -278,6 +368,48 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (T
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
+	)
+	return i, err
+}
+
+const setCheckoutPath = `-- name: SetCheckoutPath :one
+UPDATE tasks SET checkout_path = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND checkout_path = ''
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
+`
+
+type SetCheckoutPathParams struct {
+	ID           string `json:"id"`
+	TenantID     string `json:"tenant_id"`
+	CheckoutPath string `json:"checkout_path"`
+}
+
+// Resolve-once, like SetBaseCommit: the run pins the working copy it executes
+// in at first start and never re-resolves it, so re-registering the project
+// from another clone cannot pull an in-flight run into a foreign directory.
+// The empty string means "not pinned yet". Returns the row whether or not it
+// changed (a missed WHERE means the copy was already pinned).
+func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, setCheckoutPath, arg.ID, arg.TenantID, arg.CheckoutPath)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
@@ -285,7 +417,7 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (T
 const setResultCommit = `-- name: SetResultCommit :one
 UPDATE tasks SET result_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
 `
 
 type SetResultCommitParams struct {
@@ -315,6 +447,7 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
@@ -322,7 +455,7 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 const updateTaskStage = `-- name: UpdateTaskStage :one
 UPDATE tasks SET current_stage = $3, state = $4, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
 `
 
 type UpdateTaskStageParams struct {
@@ -359,6 +492,7 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }
@@ -366,7 +500,7 @@ func (q *Queries) UpdateTaskStage(ctx context.Context, arg UpdateTaskStageParams
 const updateTaskState = `-- name: UpdateTaskState :one
 UPDATE tasks SET state = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path
 `
 
 type UpdateTaskStateParams struct {
@@ -394,6 +528,7 @@ func (q *Queries) UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams
 		&i.ResultCommit,
 		&i.Description,
 		&i.Overrides,
+		&i.CheckoutPath,
 	)
 	return i, err
 }

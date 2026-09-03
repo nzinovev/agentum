@@ -35,6 +35,34 @@ UPDATE tasks SET base_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
 RETURNING *;
 
+-- name: SetCheckoutPath :one
+-- Resolve-once, like SetBaseCommit: the run pins the working copy it executes
+-- in at first start and never re-resolves it, so re-registering the project
+-- from another clone cannot pull an in-flight run into a foreign directory.
+-- The empty string means "not pinned yet". Returns the row whether or not it
+-- changed (a missed WHERE means the copy was already pinned).
+UPDATE tasks SET checkout_path = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND checkout_path = ''
+RETURNING *;
+
+-- name: RebindActiveCheckouts :many
+-- The repository moved: the previous path no longer holds this repository, so
+-- the working copy is one and it relocated. Only non-terminal runs — a
+-- terminal run's checkout_path is a historical statement about where the work
+-- happened, and rewriting it would falsify the record.
+UPDATE tasks SET checkout_path = $4, updated_at = now()
+WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
+  AND state NOT IN ('done', 'failed', 'cancelled')
+RETURNING *;
+
+-- name: CountActiveTasksOnCheckout :one
+-- The second working copy: how many unfinished runs stay in the previous one.
+-- The registration response names this count so the split is visible at
+-- registration time, not when someone tries to continue a run.
+SELECT count(*) FROM tasks
+WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
+  AND state NOT IN ('done', 'failed', 'cancelled');
+
 -- name: GetTaskForUpdate :one
 -- Locking read used by SetBaseCommit callers that need the post-resolution row
 -- even when the UPDATE matched zero rows (base_commit already set). FOR UPDATE

@@ -65,11 +65,12 @@ func TestMigrations_UpDownUp(t *testing.T) {
 // counts would drift, so each seeing exactly its one row is the proof.
 func TestDBTest_IsolatesDatabases(t *testing.T) {
 	const insertProbeProject = `
-		INSERT INTO projects (id, tenant_id, user_id, repo_path, name, related_projects)
+		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_path, name, related_projects)
 		VALUES (
 		    '0ac58e85-8a51-4971-9b53-bdfec0a80b01',
 		    '1bd6f9a6-9c62-4a08-b3d4-ce5fd1b91c02',
 		    '2ce7c0b7-ad73-4b19-a4e5-df60e2ca2d03',
+		    'git-roots:v1:probe',
 		    '/same/repo/path',
 		    'isolation probe',
 		    '{}')`
@@ -94,6 +95,52 @@ func TestDBTest_IsolatesDatabases(t *testing.T) {
 				t.Fatalf("projects visible in this test's database: got %d, want 1", projectCount)
 			}
 		})
+	}
+}
+
+// TestTenantJoinApprovalsToTasksNeedsNoCast pins the tenant seam's type
+// uniformity the way a real consumer hits it: the query decisions-inbox style
+// screens run joins approvals to tasks on the tenant with no cast. On a schema
+// where one side is text and the other uuid, Postgres rejects the bare
+// comparison outright — so the query succeeding IS the check.
+func TestTenantJoinApprovalsToTasksNeedsNoCast(t *testing.T) {
+	handle := dbtest.Store(t)
+	ctx := context.Background()
+
+	const tenantID = "3ad5e0b1-64c1-4e30-9f0e-2b1c9d8a7e10"
+	const userID = "4be6f1c2-75d2-4f41-8a1f-3c2d0e9b8f21"
+	const taskID = "5cf702d3-86e3-4a52-9b20-4d3e1f0c9a32"
+
+	if _, err := handle.Store.DB.ExecContext(ctx, `
+		INSERT INTO projects (id, tenant_id, user_id, repo_identity, repo_path, name)
+		VALUES ('00000000-0000-0000-0000-000000000001', $1, $2,
+		        'git-roots:v1:join-probe', '/join/probe', 'join probe')`,
+		tenantID, userID); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `
+		INSERT INTO tasks (id, tenant_id, user_id, project_id, pipeline_pack,
+		                   title, description, overrides, base_ref, state)
+		VALUES ($1, $2, $3, '00000000-0000-0000-0000-000000000001', 'test@1',
+		        'join probe', 'probe', '{}', 'HEAD', 'created')`,
+		taskID, tenantID, userID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `
+		INSERT INTO task_approvals (tenant_id, user_id, task_id, name, decision, actor)
+		VALUES ($1, $2, $3, 'final_review', 'approved', 'human')`,
+		tenantID, userID, taskID); err != nil {
+		t.Fatalf("insert approval: %v", err)
+	}
+
+	var joinedCount int
+	if err := handle.Store.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM task_approvals a JOIN tasks t ON t.tenant_id = a.tenant_id`,
+	).Scan(&joinedCount); err != nil {
+		t.Fatalf("join approvals to tasks on the tenant: %v", err)
+	}
+	if joinedCount != 1 {
+		t.Fatalf("joined rows = %d, want 1", joinedCount)
 	}
 }
 

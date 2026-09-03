@@ -6,8 +6,10 @@
 -- gate is surfaced by GetApproval and stays a 409 at the handler. Returns no
 -- rows on conflict — the caller falls back to GetApproval to read the existing
 -- decision.
-INSERT INTO task_approvals (tenant_id, task_id, name, decision, artifact_revision_id, actor)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- user_id is whose name the decision was recorded under; actor is who acted
+-- ('human' for every writer today — the shared human|agent|system vocabulary).
+INSERT INTO task_approvals (tenant_id, user_id, task_id, name, decision, artifact_revision_id, actor)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (tenant_id, task_id, name) DO NOTHING
 RETURNING *;
 
@@ -20,7 +22,7 @@ WHERE tenant_id = $1 AND task_id = $2 AND name = $3;
 
 -- name: ListApprovalsForTask :many
 -- Every decision recorded for a task, oldest first. Feeds the final-review
--- payload and the manifest's human_gates audit section.
+-- payload and the manifest's gate_decisions audit section.
 SELECT * FROM task_approvals
 WHERE tenant_id = $1 AND task_id = $2
 ORDER BY created_at ASC, id ASC;
