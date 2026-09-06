@@ -87,7 +87,7 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 	// probe's baseline), bytes read from base_commit via the worktree manager
 	// (which satisfies instructions.Reader through FileAtCommit).
 	declared := registry.InstructionPaths()
-	pinned, pinErr := instructions.Pin(ctx, runner.wt, run.project.RepoPath, baseCommit, declared, report.AutoInstructions)
+	pinned, pinErr := instructions.Pin(ctx, runner.wt, checkoutPathOf(run.task, run.project), baseCommit, declared, report.AutoInstructions)
 	if pinErr != nil {
 		// A read failure (not a missing file) is recorded as an evidence gap;
 		// the run proceeds with whatever was pinnable. A missing file is already

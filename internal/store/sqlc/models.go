@@ -40,6 +40,7 @@ type Event struct {
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+	Actor     string          `json:"actor"`
 }
 
 type Job struct {
@@ -83,6 +84,8 @@ type Project struct {
 	RelatedProjects []string  `json:"related_projects"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+	RepoIdentity    string    `json:"repo_identity"`
+	RepoRootCommits []string  `json:"repo_root_commits"`
 }
 
 type StageInvocation struct {
@@ -119,6 +122,7 @@ type Task struct {
 	ResultCommit sql.NullString  `json:"result_commit"`
 	Description  string          `json:"description"`
 	Overrides    json.RawMessage `json:"overrides"`
+	CheckoutPath string          `json:"checkout_path"`
 }
 
 type TaskApproval struct {
@@ -130,6 +134,7 @@ type TaskApproval struct {
 	ArtifactRevisionID sql.NullString `json:"artifact_revision_id"`
 	Actor              string         `json:"actor"`
 	CreatedAt          time.Time      `json:"created_at"`
+	UserID             string         `json:"user_id"`
 }
 
 type TaskCheckpoint struct {

@@ -12,31 +12,41 @@ import (
 )
 
 const createProject = `-- name: CreateProject :one
-INSERT INTO projects (tenant_id, user_id, repo_path, name, related_projects)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (tenant_id, repo_path) DO UPDATE SET
+INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits, repo_path, name, related_projects)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (tenant_id, repo_identity) DO UPDATE SET
+    repo_path = EXCLUDED.repo_path,
     name = EXCLUDED.name,
     related_projects = EXCLUDED.related_projects,
     updated_at = now()
-RETURNING id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at
+RETURNING id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at, repo_identity, repo_root_commits
 `
 
 type CreateProjectParams struct {
 	TenantID        string   `json:"tenant_id"`
 	UserID          string   `json:"user_id"`
+	RepoIdentity    string   `json:"repo_identity"`
+	RepoRootCommits []string `json:"repo_root_commits"`
 	RepoPath        string   `json:"repo_path"`
 	Name            string   `json:"name"`
 	RelatedProjects []string `json:"related_projects"`
 }
 
-// Idempotent registration: one repo_path = one project per tenant. Re-registering
-// the same repo touches updated_at and applies the new fields (name, related set)
-// rather than failing, so onboarding scripts are restart-safe. Callers must pass
-// a non-nil related_projects slice (the column is NOT NULL; pq.Array(nil) is NULL).
+// Idempotent registration keyed on the repository's identity, not its path:
+// the same working copy (or a clone of the same history) under a new path
+// updates the path and stays the same project, so a moved directory keeps its
+// run history, memory and approvals. repo_identity is computed at the
+// boundary (internal/repoid) and never accepted from a request body. The
+// root commits ride along so later checks confirm identity by object
+// existence instead of re-walking the history.
+// Callers must pass non-nil related_projects and repo_root_commits slices
+// (the columns are NOT NULL; pq.Array(nil) is NULL).
 func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (Project, error) {
 	row := q.db.QueryRowContext(ctx, createProject,
 		arg.TenantID,
 		arg.UserID,
+		arg.RepoIdentity,
+		pq.Array(arg.RepoRootCommits),
 		arg.RepoPath,
 		arg.Name,
 		pq.Array(arg.RelatedProjects),
@@ -51,12 +61,14 @@ func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (P
 		pq.Array(&i.RelatedProjects),
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RepoIdentity,
+		pq.Array(&i.RepoRootCommits),
 	)
 	return i, err
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at FROM projects WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at, repo_identity, repo_root_commits FROM projects WHERE id = $1 AND tenant_id = $2
 `
 
 type GetProjectParams struct {
@@ -76,23 +88,26 @@ func (q *Queries) GetProject(ctx context.Context, arg GetProjectParams) (Project
 		pq.Array(&i.RelatedProjects),
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RepoIdentity,
+		pq.Array(&i.RepoRootCommits),
 	)
 	return i, err
 }
 
-const getProjectByRepoPath = `-- name: GetProjectByRepoPath :one
-SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at FROM projects WHERE tenant_id = $1 AND repo_path = $2
+const getProjectByIdentity = `-- name: GetProjectByIdentity :one
+SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at, repo_identity, repo_root_commits FROM projects WHERE tenant_id = $1 AND repo_identity = $2
 `
 
-type GetProjectByRepoPathParams struct {
-	TenantID string `json:"tenant_id"`
-	RepoPath string `json:"repo_path"`
+type GetProjectByIdentityParams struct {
+	TenantID     string `json:"tenant_id"`
+	RepoIdentity string `json:"repo_identity"`
 }
 
-// Lookup by repo_path within a tenant (used to resolve a project from a path
-// without a round-trip of list-then-match).
-func (q *Queries) GetProjectByRepoPath(ctx context.Context, arg GetProjectByRepoPathParams) (Project, error) {
-	row := q.db.QueryRowContext(ctx, getProjectByRepoPath, arg.TenantID, arg.RepoPath)
+// The pre-upsert read of the registration flow: the handler must know the
+// project's previous repo_path (which the upsert overwrites) to resolve it
+// and decide whether unfinished runs stay in the old copy or move with it.
+func (q *Queries) GetProjectByIdentity(ctx context.Context, arg GetProjectByIdentityParams) (Project, error) {
+	row := q.db.QueryRowContext(ctx, getProjectByIdentity, arg.TenantID, arg.RepoIdentity)
 	var i Project
 	err := row.Scan(
 		&i.ID,
@@ -103,12 +118,14 @@ func (q *Queries) GetProjectByRepoPath(ctx context.Context, arg GetProjectByRepo
 		pq.Array(&i.RelatedProjects),
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RepoIdentity,
+		pq.Array(&i.RepoRootCommits),
 	)
 	return i, err
 }
 
 const listProjects = `-- name: ListProjects :many
-SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at FROM projects
+SELECT id, tenant_id, user_id, repo_path, name, related_projects, created_at, updated_at, repo_identity, repo_root_commits FROM projects
 WHERE tenant_id = $1
 ORDER BY created_at DESC
 LIMIT $2 OFFSET $3
@@ -138,6 +155,8 @@ func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]P
 			pq.Array(&i.RelatedProjects),
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RepoIdentity,
+			pq.Array(&i.RepoRootCommits),
 		); err != nil {
 			return nil, err
 		}

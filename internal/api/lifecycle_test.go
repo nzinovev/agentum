@@ -13,7 +13,7 @@ import (
 
 // TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision pins the
 // humanDecisionPatch mapping the four lifecycle actions rely on. The patch is
-// a pure function over (stage, gate, decision, actor, timestamp), so the
+// a pure function over (stage, gate, decision, user, timestamp), so the
 // gate/decision contract each action records is unit-testable without a
 // database or HTTP harness — the transactional wiring around it (runInTx,
 // AddEvidenceTx) is review-only, not covered here, because the important
@@ -27,7 +27,7 @@ func TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision(t *testing.T) {
 		stage    string
 		gate     string
 		decision string
-		actor    string
+		user     string
 	}{
 		{"advance passes a gate as approved", "impl", gateAdvance, decisionApproved, "alice"},
 		{"approve passes final as approved", "impl", gateFinal, decisionApproved, "alice"},
@@ -40,11 +40,11 @@ func TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision(t *testing.T) {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			patch := humanDecisionPatch(testCase.stage, testCase.gate, testCase.decision, testCase.actor, at)
-			if len(patch.HumanGates) != 1 {
-				t.Fatalf("patch has %d decisions, want 1", len(patch.HumanGates))
+			patch := humanDecisionPatch(testCase.stage, testCase.gate, testCase.decision, testCase.user, at)
+			if len(patch.GateDecisions) != 1 {
+				t.Fatalf("patch has %d decisions, want 1", len(patch.GateDecisions))
 			}
-			decision := patch.HumanGates[0]
+			decision := patch.GateDecisions[0]
 			if decision.Stage != testCase.stage {
 				t.Errorf("Stage = %q, want %q", decision.Stage, testCase.stage)
 			}
@@ -54,8 +54,15 @@ func TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision(t *testing.T) {
 			if decision.Decision != testCase.decision {
 				t.Errorf("Decision = %q, want %q", decision.Decision, testCase.decision)
 			}
-			if decision.Actor != testCase.actor {
-				t.Errorf("Actor = %q, want %q", decision.Actor, testCase.actor)
+			// Every lifecycle handler writes a HUMAN decision: actor is the
+			// vocabulary value, and the user id lands in its own field — a
+			// human's name must never masquerade as the actor kind, nor an
+			// orchestrator action as the human's.
+			if decision.Actor != "human" {
+				t.Errorf("Actor = %q, want the vocabulary value \"human\"", decision.Actor)
+			}
+			if decision.UserID != testCase.user {
+				t.Errorf("UserID = %q, want %q", decision.UserID, testCase.user)
 			}
 			if !decision.Timestamp.Equal(at) {
 				t.Errorf("Timestamp = %v, want %v", decision.Timestamp, at)
@@ -64,17 +71,18 @@ func TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision(t *testing.T) {
 	}
 }
 
-// TestHumanDecisionPatch_OnlyCarriesHumanGates guards that the patch does not
-// accidentally set other manifest sections — the caller merges it into a body
-// that already holds stage evidence, and a stray section would be clobbering.
-func TestHumanDecisionPatch_OnlyCarriesHumanGates(t *testing.T) {
+// TestHumanDecisionPatch_OnlyCarriesGateDecisions guards that the patch does
+// not accidentally set other manifest sections — the caller merges it into a
+// body that already holds stage evidence, and a stray section would be
+// clobbering.
+func TestHumanDecisionPatch_OnlyCarriesGateDecisions(t *testing.T) {
 	t.Parallel()
 	patch := humanDecisionPatch("impl", gateFinal, decisionApproved, "alice", time.Now().UTC())
 	if patch.Input != nil || patch.Prompts != nil || patch.Artifacts != nil || patch.Model != nil {
-		t.Errorf("patch carries sections beyond HumanGates: %+v", patch)
+		t.Errorf("patch carries sections beyond GateDecisions: %+v", patch)
 	}
-	if patch.HumanGates == nil {
-		t.Error("HumanGates is nil")
+	if patch.GateDecisions == nil {
+		t.Error("GateDecisions is nil")
 	}
 }
 

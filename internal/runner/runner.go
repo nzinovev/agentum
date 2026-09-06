@@ -17,6 +17,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/engine"
@@ -24,6 +25,7 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/repoid"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -37,6 +39,10 @@ type Store interface {
 	UpdateTaskState(ctx context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error)
 	UpdateTaskStage(ctx context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error)
 	SetBaseCommit(ctx context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Task, error)
+	// SetCheckoutPath pins the working copy the run executes in, resolve-once
+	// like SetBaseCommit: after the first pin the run stays in its copy even
+	// if the project is later re-registered from another clone.
+	SetCheckoutPath(ctx context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Task, error)
 	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
@@ -251,13 +257,27 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	if err != nil {
 		return fmt.Errorf("teardown: load project: %w", err)
 	}
-	runner.recordResultCommit(ctx, task, project.RepoPath)
+	// Teardown goes to the copy the run worked in (the pinned checkout), not
+	// to wherever the project points now: after a re-registration, the
+	// project's path names a different copy, and cleaning THAT one would
+	// remove a worktree that was never this run's while leaving the real one
+	// behind forever.
+	checkoutPath := checkoutPathOf(task, project)
+	// Relink first when the repository moved: isWorktree's liveness check
+	// would otherwise turn the removal below into a silent no-op and the
+	// worktree would outlive the run. A repair that itself fails must not
+	// wedge the teardown of a terminal run — log it and let RemoveWorktree
+	// decide; its no-op is at least visible in the log then.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		runner.log.Warn("teardown: repair worktree before removal", "task", task.ID, "error", repairErr)
+	}
+	runner.recordResultCommit(ctx, task, checkoutPath)
 	// ADR 0003 D8: result_commit is now pinned at the final gate (the commit the
 	// human reviewed). Detect a divergence between the live branch tip and the
 	// recorded result_commit: something moved the branch between review and
 	// teardown. Same non-fatal treatment as the checks-commit divergence (gap +
 	// event); the human already approved.
-	runner.verifyResultCommitMatchesLiveTip(ctx, task, project.RepoPath)
+	runner.verifyResultCommitMatchesLiveTip(ctx, task, checkoutPath)
 	// Refresh task state (recordResultCommit may have set result_commit) and
 	// detect any divergence between what was delivered and what the checks
 	// verified, before sealing. The seal captures the final git lineage; a sealed
@@ -271,7 +291,7 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 		runner.verifyDeliveryCommitBinding(ctx, task)
 		runner.sealManifestAtTerminal(ctx, task)
 	}
-	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
+	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, task.ID); err != nil {
 		runner.log.Error("teardown worktree", "task", task.ID, "error", err)
 		return err
 	}
@@ -296,13 +316,23 @@ func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
 	if err != nil {
 		return fmt.Errorf("cleanup: load project: %w", err)
 	}
+	// Cleanup goes to the copy the run worked in (the pinned checkout): the
+	// branch and any lingering worktree live there, wherever the project
+	// points now.
+	checkoutPath := checkoutPathOf(task, project)
+	// Same relink-before-removal as teardown, for the same reason; and a
+	// failed repair is logged, not fatal — branch deletion must not wedge on
+	// a directory state.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		runner.log.Warn("cleanup: repair worktree before removal", "task", task.ID, "error", repairErr)
+	}
 	// Remove any lingering worktree first (idempotent). A branch that is
 	// checked out in a worktree cannot be deleted; clearing the worktree frees it.
-	if err := runner.wt.RemoveWorktree(ctx, project.RepoPath, task.ID); err != nil {
+	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, task.ID); err != nil {
 		runner.log.Error("cleanup: remove worktree", "task", task.ID, "error", err)
 		return err
 	}
-	if err := runner.wt.DeleteBranch(ctx, project.RepoPath, task.ID); err != nil {
+	if err := runner.wt.DeleteBranch(ctx, checkoutPath, task.ID); err != nil {
 		runner.log.Error("cleanup: delete branch", "task", task.ID, "error", err)
 		return err
 	}
@@ -499,16 +529,47 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return runner.failTask(ctx, task, planErr)
 	}
 
+	// Pin the working copy this run executes in, once, exactly as base_commit
+	// is pinned below. The project's repo_path stopped being a key and became
+	// an attribute, so it can change under a run that already started (a
+	// re-registration from another clone); without the pin, the continuation
+	// would create a fresh worktree in the foreign copy off the same pinned
+	// base — silently, with the whole commit line left behind in the original.
+	task, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, task, project, taskPack)
+	if checkoutErr != nil {
+		return runner.failTask(ctx, task, checkoutErr)
+	}
+	if paused {
+		// The pause is already applied and its evidence recorded; the job ends
+		// here successfully, exactly as a loop pause does.
+		return nil
+	}
+
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
 	// from and what checkpoints diff against; recording it immutably before any
 	// work means a later move of base_ref cannot retcon the task's lineage.
-	task, err = runner.resolveBaseCommit(ctx, task, project.RepoPath)
+	task, err = runner.resolveBaseCommit(ctx, task, checkoutPath)
 	if err != nil {
 		return runner.failTask(ctx, task, err)
 	}
 	baseCommit := task.BaseCommit.String
 
-	taskWorktree, err := runner.wt.Create(ctx, project.RepoPath, task.ID, baseCommit)
+	// A repository that moved on disk carries its worktrees with it (they
+	// live inside the repo), but git links them with absolute paths, which
+	// are now stale — before Create mistakes the moved worktree for an
+	// absent one and before Reconcile classifies it as needing human
+	// attention. A worktree git cannot relink (its admin metadata was
+	// pruned by gc or by hand) is the same externally-fixable class as a
+	// missing copy: pause, keeping the recovery a failure would destroy.
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
+		if pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, checkoutPath,
+			fmt.Errorf("worktree cannot be relinked: %w", repairErr)); pauseErr != nil {
+			return runner.failTask(ctx, task, pauseErr)
+		}
+		return nil
+	}
+
+	taskWorktree, err := runner.wt.Create(ctx, checkoutPath, task.ID, baseCommit)
 	if err != nil {
 		return runner.failTask(ctx, task, fmt.Errorf("create worktree: %w", err))
 	}
@@ -520,7 +581,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// Reconcile before driving a side-effectful stage. A crashed worktree may be
 	// clean, safely resumable, restorable to the last checkpoint, or in a state
 	// that needs a human — never blindly replayed.
-	if err := runner.reconcileWorktree(ctx, task, project.RepoPath, baseCommit, taskWorktree.Root); err != nil {
+	if err := runner.reconcileWorktree(ctx, task, checkoutPath, baseCommit, taskWorktree.Root); err != nil {
 		return err
 	}
 	runner.emit(ctx, task, EvWorktreeCreated, map[string]any{
@@ -677,12 +738,141 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, rep
 	}
 	if _, err := runner.store.SetBaseCommit(ctx, sqlc.SetBaseCommitParams{
 		ID: task.ID, TenantID: task.TenantID, BaseCommit: nullStr(sha),
-	}); err != nil {
+	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// sql.ErrNoRows is the lost-race answer: another writer pinned
+		// base_commit first, and the re-read below adopts their value.
 		return task, fmt.Errorf("persist base_commit: %w", err)
 	}
 	// Re-read so the returned task carries the canonical base_commit (ours if we
 	// won the race, the other resolver's if we lost).
 	return runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+}
+
+// resolveRunCheckout pins and verifies the working copy the run executes in.
+//
+// The pin is resolve-once (SetCheckoutPath writes only while the column is
+// still the empty string, mirroring SetBaseCommit): the first start records
+// the project's current path —
+// normalized to the working-tree root by the same probe that reads the
+// identity — and every continuation, resume, and teardown uses the pinned
+// copy, never the project's current one.
+//
+// The verification asks the same question registration asks (repoid.Resolve):
+// the path must still hold a usable working copy of the SAME repository this
+// project was registered as. An unavailable path or a different repository is
+// a pause, not a failure and never a rebuild: the condition is lifted from
+// outside (restore the directory, re-register the project), and recreating the
+// worktree in some other copy is precisely the silent loss of a commit line
+// this whole sequence exists to prevent.
+func (runner *Runner) resolveRunCheckout(ctx context.Context, task sqlc.Task, project sqlc.Project, taskPack *pack.Pack) (sqlc.Task, string, bool, error) {
+	candidatePath := task.CheckoutPath
+	if candidatePath == "" {
+		candidatePath = project.RepoPath
+	}
+	confirmedTopLevel, confirmErr := runner.confirmRunCheckout(ctx, candidatePath, project)
+	if confirmErr != nil {
+		pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, candidatePath, confirmErr)
+		return task, candidatePath, pauseErr == nil, pauseErr
+	}
+	if task.CheckoutPath != "" {
+		// The pinned copy is authoritative: verification proved it still
+		// holds the repository, and everything downstream (worktree, checks,
+		// evidence, teardown) must keep using exactly the recorded path.
+		return task, task.CheckoutPath, false, nil
+	}
+	pinned, pinErr := runner.store.SetCheckoutPath(ctx, sqlc.SetCheckoutPathParams{
+		ID: task.ID, TenantID: task.TenantID, CheckoutPath: confirmedTopLevel,
+	})
+	if errors.Is(pinErr, sql.ErrNoRows) {
+		// Lost the pin race — another worker pinned this run's copy first;
+		// adopt their row rather than fail the run.
+		pinned, pinErr = runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	}
+	if pinErr != nil {
+		return task, confirmedTopLevel, false, fmt.Errorf("persist checkout_path: %w", pinErr)
+	}
+	return pinned, pinned.CheckoutPath, false, nil
+}
+
+// confirmRunCheckout answers whether path still holds the repository this
+// project was registered as, returning the working-tree root it normalizes
+// to. With recorded roots the answer is an object lookup (repoid.Verify); the
+// full-history derivation runs once at registration, not on every job — the
+// walk's cost grows with the repository without a ceiling, and the hot path
+// only ever needs the confirmation.
+func (runner *Runner) confirmRunCheckout(ctx context.Context, path string, project sqlc.Project) (string, error) {
+	if len(project.RepoRootCommits) > 0 {
+		return repoid.Verify(ctx, path, project.RepoRootCommits)
+	}
+	// A project row without recorded roots predates them; there is nothing to
+	// confirm against, and the probe still establishes the path is a usable
+	// work tree. Registration always records roots, so this is the
+	// empty-database window, not a second supported shape.
+	identity, resolveErr := repoid.Resolve(ctx, path)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	if project.RepoIdentity != "" && identity.Value != project.RepoIdentity {
+		return "", fmt.Errorf("path holds a different repository than the one this project was registered from")
+	}
+	return identity.TopLevel, nil
+}
+
+// pauseForUnavailableCheckout stops the run with stop_reason
+// checkout_unavailable, naming the path. EventStopUser (paused_user_stop) is
+// the retryable shape: the human lifts the condition and presses continue.
+// FailTask would be wrong twice over — the run has done nothing wrong, and a
+// failed run loses the recovery path that a pause keeps.
+func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, task sqlc.Task, taskPack *pack.Pack, checkoutPath string, cause error) error {
+	runner.log.Warn("run working copy unavailable",
+		"task", task.ID, "checkout_path", checkoutPath, "error", cause)
+	runner.emit(ctx, task, EvCheckoutUnavailable, map[string]any{
+		"checkout_path": checkoutPath,
+		"reason":        cause.Error(),
+	})
+	return runner.applyPauseDecision(ctx, task, Decision{
+		Action:     ActionPause,
+		FSMEvent:   engine.EventStopUser,
+		StopReason: "checkout_unavailable",
+	}, currentStageOrFallback(task.CurrentStage, taskPack.Entry))
+}
+
+// currentStageOrFallback is currentStageOr for the runner: the task's current
+// stage, or the pack entry for a run that never entered one. applyPauseDecision
+// pins current_stage to its stageID, so the fallback keeps the pause from
+// clearing the position a resumed run would restart from.
+func currentStageOrFallback(stage sql.NullString, fallback string) string {
+	if stage.Valid && stage.String != "" {
+		return stage.String
+	}
+	return fallback
+}
+
+// repairIfPresent relinks the per-task worktree when the repository moved on
+// disk: a present directory with a dead link is exactly the state repair
+// exists for, and on a healthy worktree repair is a no-op — cheaper to always
+// call than to detect staleness. Every path that touches an existing
+// worktree (drive before Create/Reconcile, teardown and cleanup before
+// RemoveWorktree) goes through here, so a moved repository cannot leave a
+// worktree that is present but unreachable.
+func (runner *Runner) repairIfPresent(ctx context.Context, checkoutPath, taskID string) error {
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, taskID)) {
+		return nil
+	}
+	return runner.wt.Repair(ctx, checkoutPath, taskID)
+}
+
+// checkoutPathOf returns the working copy a run executes in: the checkout the
+// run pinned at start, falling back to the project's current path for a run
+// that never started (no pin exists, and there is nothing to protect). Every
+// path the runner acts on — worktree creation, checks, instruction pinning,
+// evidence, teardown — flows through here so the run's copy and the project's
+// current copy can never be confused for one another.
+func checkoutPathOf(task sqlc.Task, project sqlc.Project) string {
+	if task.CheckoutPath != "" {
+		return task.CheckoutPath
+	}
+	return project.RepoPath
 }
 
 // reconcileWorktree enforces the F.6.1 "never blindly replay a side-effectful
@@ -913,6 +1103,14 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 			Condition: resolution.Condition, Cycle: resolution.Cycle,
 			Verdict: resolution.Verdict, At: time.Now().UTC(),
 		})
+		// An auto_on_approval stage passed by applying an approval the human
+		// recorded earlier: the pass itself is the orchestrator's decision,
+		// recorded under the system actor beside the human's own decision the
+		// advance handler wrote. human gates do not record one here — there the
+		// human's decision is the whole record.
+		if currentStage.Gate == pack.GateAutoOnApproval {
+			runner.recordSystemGateDecision(ctx, task, currentStageID, string(currentStage.Gate))
+		}
 		return resolution.To, "", nil, nil
 	}
 	return "", "", nil, fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
@@ -1168,7 +1366,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		if err := runner.reachTerminalStage(ctx, run.task, run.project.RepoPath, stageID); err != nil {
+		if err := runner.reachTerminalStage(ctx, run.task, checkoutPathOf(run.task, run.project), stageID); err != nil {
 			return stageOutcome{}, err
 		}
 		return stageOutcome{done: true}, nil
@@ -1245,7 +1443,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// permanently false); git add -A would also sweep those undeclared files into
 	// the delivery commit. Sampling before preserves the signal the gate exists
 	// to send.
-	cleanBeforeCommit := runner.isClean(run.project.RepoPath, run.task.ID)
+	cleanBeforeCommit := runner.isClean(checkoutPathOf(run.task, run.project), run.task.ID)
 	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
 		runner.recordStageCheckpoint(ctx, run, stageID)
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
@@ -1304,6 +1502,14 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 			Condition: decision.Transition.Condition, Cycle: decision.Transition.Cycle,
 			Verdict: decision.Transition.Verdict, At: time.Now().UTC(),
 		})
+		// auto_if_clean passing is the orchestrator's own decision — it
+		// verified the tree was clean and let the work through — so it is
+		// recorded as one, under the system actor. A gate that could have
+		// stopped the work and did not is a decision; leaving it unrecorded is
+		// what made all-automatic runs read as incomplete evidence.
+		if stage.Gate == pack.GateAutoIfClean {
+			runner.recordSystemGateDecision(ctx, run.task, stageID, string(stage.Gate))
+		}
 		// Carry the resolved edge to the next iteration so invokeStage can hand
 		// the fixer the predecessor's findings (commit 7) and commit 8 can
 		// record the TransitionRecord without re-resolving.
@@ -1329,7 +1535,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, run.project.RepoPath, stageID)
+		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, checkoutPathOf(run.task, run.project), stageID)
 	}
 	return stageOutcome{}, fmt.Errorf("runner: unknown decision action %d", decision.Action)
 }
@@ -1762,7 +1968,41 @@ func (runner *Runner) failTask(ctx context.Context, task sqlc.Task, cause error)
 	return cause
 }
 
-// emit appends a meaningful event to the durable log (04 §7.1.5).
+// recordSystemGateDecision writes the orchestrator's own gate decision into
+// the manifest's decisions section: a gate that could have stopped the work
+// and did not IS a decision, and the record must say the orchestrator made it
+// rather than borrowing a human's name. user_id carries the run's user —
+// whose behalf the orchestrator acted on — and never claims a person clicked
+// anything. Only auto_if_clean (verified a clean tree, passed) and
+// auto_on_approval (applied a recorded human approval) write one: a plain
+// auto stage has no gate and nothing to decide, and a gate that DID stop the
+// work is decided by the human, whose handlers record that decision
+// themselves. task_approvals is deliberately not written: it is the namespace
+// of named pack approvals, and mixing the two kinds of records in one table
+// is what this separation exists to undo.
+func (runner *Runner) recordSystemGateDecision(ctx context.Context, task sqlc.Task, stageID, gate string) {
+	if runner.mfst == nil {
+		return
+	}
+	patch := manifest.Body{GateDecisions: []manifest.GateDecision{{
+		Stage:     stageID,
+		Gate:      gate,
+		Decision:  "approved",
+		Actor:     string(authz.ActorSystem),
+		UserID:    task.UserID,
+		Timestamp: time.Now().UTC(),
+	}}}
+	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+		if errors.Is(err, manifest.ErrSealed) {
+			return
+		}
+		runner.log.Warn("record system gate decision", "task", task.ID, "stage", stageID, "gate", gate, "error", err)
+	}
+}
+
+// emit appends a meaningful event to the durable log (04 §7.1.5). Every event
+// the runner writes is the orchestrator speaking, and the actor column says
+// so: a system row must never read as the task author acting.
 func (runner *Runner) emit(ctx context.Context, task sqlc.Task, eventType string, payload any) {
 	var raw json.RawMessage = json.RawMessage("{}")
 	if payload != nil {
@@ -1771,7 +2011,8 @@ func (runner *Runner) emit(ctx context.Context, task sqlc.Task, eventType string
 		}
 	}
 	if _, err := runner.store.AppendEvent(ctx, sqlc.AppendEventParams{
-		TenantID: task.TenantID, UserID: task.UserID, TaskID: nullStr(task.ID), Type: eventType, Payload: raw,
+		TenantID: task.TenantID, UserID: task.UserID, TaskID: nullStr(task.ID),
+		Type: eventType, Payload: raw, Actor: string(authz.ActorSystem),
 	}); err != nil {
 		runner.log.Warn("emit event", "type", eventType, "task", task.ID, "error", err)
 	}
@@ -1841,6 +2082,12 @@ const (
 	// body carries the full refs (hashes and sizes only); this event is the live
 	// signal that the channel is active.
 	EvContextPinned = "stage.context_pinned"
+	// EvCheckoutUnavailable records that a run refused to start or continue in
+	// its pinned working copy: the path is gone or holds a different
+	// repository. The follow-up pause (stop_reason = checkout_unavailable)
+	// keeps the run resumable; this event carries the path and the probe's
+	// reason, which the stop vocabulary alone cannot name.
+	EvCheckoutUnavailable = "task.checkout_unavailable"
 	// EvInstructionsRestored records one tamper reversal: a pre-stage hash check
 	// found a worktree instruction copy had drifted from the pinned bytes and the
 	// runner rewrote or removed it (ADR 0002 D4 layer 2). Carries the stage, the

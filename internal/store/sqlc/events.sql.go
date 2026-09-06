@@ -12,9 +12,9 @@ import (
 )
 
 const appendEvent = `-- name: AppendEvent :one
-INSERT INTO events (tenant_id, user_id, task_id, type, payload)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, tenant_id, user_id, task_id, type, payload, created_at
+INSERT INTO events (tenant_id, user_id, task_id, type, payload, actor)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, tenant_id, user_id, task_id, type, payload, created_at, actor
 `
 
 type AppendEventParams struct {
@@ -23,11 +23,14 @@ type AppendEventParams struct {
 	TaskID   sql.NullString  `json:"task_id"`
 	Type     string          `json:"type"`
 	Payload  json.RawMessage `json:"payload"`
+	Actor    string          `json:"actor"`
 }
 
 // Insert a row in the durable event log. The runner is the only caller in
 // production; tests and the SSE handler read. id is monotonic, so Last-Event-ID
-// is a simple "> last_id" tail.
+// is a simple "> last_id" tail. The column has no default on purpose: every
+// writer must name its actor — the runner and the reconciler pass 'system',
+// request-driven writers pass 'human'.
 func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event, error) {
 	row := q.db.QueryRowContext(ctx, appendEvent,
 		arg.TenantID,
@@ -35,6 +38,7 @@ func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event
 		arg.TaskID,
 		arg.Type,
 		arg.Payload,
+		arg.Actor,
 	)
 	var i Event
 	err := row.Scan(
@@ -45,12 +49,13 @@ func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event
 		&i.Type,
 		&i.Payload,
 		&i.CreatedAt,
+		&i.Actor,
 	)
 	return i, err
 }
 
 const listEventsAfter = `-- name: ListEventsAfter :many
-SELECT id, tenant_id, user_id, task_id, type, payload, created_at FROM events
+SELECT id, tenant_id, user_id, task_id, type, payload, created_at, actor FROM events
 WHERE tenant_id = $1 AND id > $2
 ORDER BY id ASC
 LIMIT $3
@@ -81,6 +86,7 @@ func (q *Queries) ListEventsAfter(ctx context.Context, arg ListEventsAfterParams
 			&i.Type,
 			&i.Payload,
 			&i.CreatedAt,
+			&i.Actor,
 		); err != nil {
 			return nil, err
 		}
@@ -96,7 +102,7 @@ func (q *Queries) ListEventsAfter(ctx context.Context, arg ListEventsAfterParams
 }
 
 const listEventsAfterTask = `-- name: ListEventsAfterTask :many
-SELECT id, tenant_id, user_id, task_id, type, payload, created_at FROM events
+SELECT id, tenant_id, user_id, task_id, type, payload, created_at, actor FROM events
 WHERE tenant_id = $1 AND task_id = $2 AND id > $3
 ORDER BY id ASC
 LIMIT $4
@@ -132,6 +138,7 @@ func (q *Queries) ListEventsAfterTask(ctx context.Context, arg ListEventsAfterTa
 			&i.Type,
 			&i.Payload,
 			&i.CreatedAt,
+			&i.Actor,
 		); err != nil {
 			return nil, err
 		}

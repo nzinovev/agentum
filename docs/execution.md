@@ -30,11 +30,19 @@ execute task work inline.
 
 ## Projects
 
-A project binds a local git repository to an Agentum project id. One repo =
-one project per tenant; registration is idempotent on `(tenant_id, repo_path)`.
+A project binds a repository to an Agentum project id. One repository = one
+project per tenant; registration is idempotent on `(tenant_id, repo_identity)`
+— the repository's identity fingerprint, not its path.
 
-- `POST /api/v1/projects` validates `repo_path` is a real git work tree
-  (`git -C <path> rev-parse --is-inside-work-tree`) at registration time.
+- `POST /api/v1/projects` probes git once (`internal/repoid`): it computes the
+  identity (sha256 over the sorted root commits reachable from `HEAD`,
+  prefixed `git-roots:v1:`), normalizes `repo_path` to the working-tree root,
+  and refuses what cannot serve as a working copy (no commits, a shallow
+  clone, a linked work tree) with a message naming the fix.
+- Because identity is not the path, moving the directory and re-registering
+  keeps the same project (and its run history); the stored `repo_path` just
+  points at the new location. See `docs/domain-model.md` for the level
+  vocabulary (workspace / project / repository / checkout).
 - `tasks.project_id` is a real FK; a task cannot exist without a project.
 - `related_projects` is an **inert seam**: stored now, grants nothing.
   Cross-project / sibling-folder access lands in Epic 6 as a path-scoped
@@ -45,9 +53,16 @@ See `docs/api.md#projects` for the endpoint surface.
 
 ## Worktrees
 
-Each task runs in its own git worktree off the project's repo (C5 — isolated
-workspace per task). Created by `internal/worktree` on the first stage of a
-run; reused across stages and resumes; torn down at terminal state.
+Each task runs in its own git worktree off the run's pinned working copy
+(C5 — isolated workspace per task). A run pins its copy once at first start
+(`tasks.checkout_path`, resolve-once like `base_commit`) and executes there
+for its whole life — worktree creation, checks, evidence, teardown — even if
+the project is later re-registered from another clone. A pinned copy that is
+gone or holds a different repository pauses the run
+(`stop_reason = checkout_unavailable`) instead of rebuilding the worktree
+somewhere else; a repository that moved is re-linked with `git worktree
+repair` before the run continues. Created by `internal/worktree` on the first
+stage of a run; reused across stages and resumes; torn down at terminal state.
 
 - **Location:** `<repo>/.agentum/worktrees/<task-id>/`
 - **Branch:** `agentum/<task-id>` (off the repo's current HEAD)

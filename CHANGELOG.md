@@ -10,6 +10,73 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Repository identity replaces the local path as the project's key, and a
+  run pins its working copy.** Moving a directory on disk no longer forges a
+  second project: identity is a fingerprint of the repository's own history,
+  computed by probing git at the registration boundary
+  (`internal/repoid`, value `git-roots:v1:<sha256>` over the sorted root
+  commits reachable from `HEAD`), never accepted from a request body, and
+  unique per tenant as `UNIQUE (tenant_id, repo_identity)`. The local path is
+  an attribute of the checkout, stored normalized to the working-tree root.
+  - **Registration refuses what cannot serve as a working copy**, each refusal
+    naming its fix: a repository without commits, a shallow clone (its
+    fingerprint would sit at the cut boundary and move on
+    `git fetch --unshallow`), and a linked work tree (the message names the
+    main work tree — Agentum parks its own worktrees under the repository, so
+    a linked tree is one typo away).
+  - **A run executes in the working copy it started in.** `tasks.checkout_path`
+    is pinned once at first start, resolve-once like `base_commit`, and every
+    step — worktree creation, checks, instruction pinning, evidence, teardown —
+    goes there, not to the project's current path. Re-registration resolves
+    the previous path to tell a relocation from a second copy: a relocation
+    (the previous path is verifiably gone) rebinds unfinished runs to the new
+    path in the same transaction and reports `runs_rebound_to_new_checkout`;
+    a second copy — or a previous copy that could only be probed to "cannot
+    tell" (unreadable, unreachable) — leaves runs on their pin, named via
+    `previous_repo_path` and `runs_awaiting_previous_checkout`, because a
+    rebind on a guess is irreversible while staying is recoverable. Terminal
+    runs keep their checkout as history in every branch. A pinned copy that is
+    gone or holds a different repository pauses the run
+    (`stop_reason = checkout_unavailable`, the event names the path) — it is
+    never rebuilt in another copy, which would silently orphan the run's whole
+    commit line. A repository that moved is re-linked with `git worktree
+    repair` (before worktree creation and before teardown/cleanup removal, so
+    the removal cannot degrade into a silent no-op); `isWorktree` no longer
+    mistakes a directory with a stale `.git` link for a live worktree.
+  - **Identity is derived once, confirmed cheaply.** Deriving the fingerprint
+    walks the entire reachable history — a cost that grows with the repository
+    — so it runs only at registration, which also stores the root commits it
+    was folded from (`repo_root_commits`). Every hot question ("does this path
+    still hold the recorded repository" — each run job, each re-registration's
+    previous-path probe) is answered by confirming the recorded roots exist,
+    an object lookup that does not depend on the history's size.
+  - `docs/domain-model.md` records the model vocabulary in one place: the
+    workspace / project / repository / checkout levels (MVP keeps one of each
+    per project line, no new tables), run vs work item vs stage invocation,
+    actor / creator / owner, and the `related_projects` inert-seam status.
+- **Decisions and events name their actor.** `actor` is one shared
+  `human | agent | system` vocabulary (`authz.Actor`; `artifacts.Actor` is now
+  an alias of it), and `user_id` beside it answers "on whose behalf" — the two
+  coincide only when a human acted. `task_approvals` gains `user_id` and the
+  actor CHECK; `events` gains `actor` (no default — every writer names
+  itself: the runner and the reconciler say `system`).
+  - **A gate that could have stopped the work and did not is recorded as a
+    decision.** `auto_if_clean` passing on a clean tree and `auto_on_approval`
+    applying a recorded approval each write one decision with
+    `actor = system` into the manifest's `gate_decisions` section (renamed
+    from `human_gates`); a plain `auto` stage has no gate and writes nothing,
+    and a gate that did stop the work stays the human's decision. The
+    deduplication key grew to `Stage + Gate + Decision + Actor + UserID +
+    Timestamp` so a human's and the system's decision on one stage never
+    collapse. All-automatic runs no longer read as incomplete evidence.
+  - The final-review payload and the SSE frames carry the actor: every SSE
+    `data` object mixes in `actor` and (when the row has one) `task_id`, and
+    a system-written event can no longer read on the stream as the task
+    author acting.
+- **`tenant_id` is `uuid` in every table.** `task_approvals` carried it as
+  `text`, so any join to tasks needed a cast that kills the index. A static
+  test now reads the migrations and fails on any seam column that ends up
+  non-uuid, and a database test joins approvals to tasks with no cast.
 - **Provider-neutral execution target and per-invocation evidence**.
   The executor, the model, and the shape of the model's parameters leave the
   domain model: they are a registry entry plus a self-describing adapter.

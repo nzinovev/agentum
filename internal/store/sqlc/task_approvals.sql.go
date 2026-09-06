@@ -11,14 +11,15 @@ import (
 )
 
 const createApproval = `-- name: CreateApproval :one
-INSERT INTO task_approvals (tenant_id, task_id, name, decision, artifact_revision_id, actor)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO task_approvals (tenant_id, user_id, task_id, name, decision, artifact_revision_id, actor)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (tenant_id, task_id, name) DO NOTHING
-RETURNING id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at
+RETURNING id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at, user_id
 `
 
 type CreateApprovalParams struct {
 	TenantID           string         `json:"tenant_id"`
+	UserID             string         `json:"user_id"`
 	TaskID             string         `json:"task_id"`
 	Name               string         `json:"name"`
 	Decision           string         `json:"decision"`
@@ -33,9 +34,12 @@ type CreateApprovalParams struct {
 // gate is surfaced by GetApproval and stays a 409 at the handler. Returns no
 // rows on conflict — the caller falls back to GetApproval to read the existing
 // decision.
+// user_id is whose name the decision was recorded under; actor is who acted
+// ('human' for every writer today — the shared human|agent|system vocabulary).
 func (q *Queries) CreateApproval(ctx context.Context, arg CreateApprovalParams) (TaskApproval, error) {
 	row := q.db.QueryRowContext(ctx, createApproval,
 		arg.TenantID,
+		arg.UserID,
 		arg.TaskID,
 		arg.Name,
 		arg.Decision,
@@ -52,12 +56,13 @@ func (q *Queries) CreateApproval(ctx context.Context, arg CreateApprovalParams) 
 		&i.ArtifactRevisionID,
 		&i.Actor,
 		&i.CreatedAt,
+		&i.UserID,
 	)
 	return i, err
 }
 
 const getApproval = `-- name: GetApproval :one
-SELECT id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at FROM task_approvals
+SELECT id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at, user_id FROM task_approvals
 WHERE tenant_id = $1 AND task_id = $2 AND name = $3
 `
 
@@ -82,12 +87,13 @@ func (q *Queries) GetApproval(ctx context.Context, arg GetApprovalParams) (TaskA
 		&i.ArtifactRevisionID,
 		&i.Actor,
 		&i.CreatedAt,
+		&i.UserID,
 	)
 	return i, err
 }
 
 const listApprovalsForTask = `-- name: ListApprovalsForTask :many
-SELECT id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at FROM task_approvals
+SELECT id, tenant_id, task_id, name, decision, artifact_revision_id, actor, created_at, user_id FROM task_approvals
 WHERE tenant_id = $1 AND task_id = $2
 ORDER BY created_at ASC, id ASC
 `
@@ -98,7 +104,7 @@ type ListApprovalsForTaskParams struct {
 }
 
 // Every decision recorded for a task, oldest first. Feeds the final-review
-// payload and the manifest's human_gates audit section.
+// payload and the manifest's gate_decisions audit section.
 func (q *Queries) ListApprovalsForTask(ctx context.Context, arg ListApprovalsForTaskParams) ([]TaskApproval, error) {
 	rows, err := q.db.QueryContext(ctx, listApprovalsForTask, arg.TenantID, arg.TaskID)
 	if err != nil {
@@ -117,6 +123,7 @@ func (q *Queries) ListApprovalsForTask(ctx context.Context, arg ListApprovalsFor
 			&i.ArtifactRevisionID,
 			&i.Actor,
 			&i.CreatedAt,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}

@@ -207,23 +207,63 @@ func TestMergeBodies_NilPatchArtifactsPreservesBase(t *testing.T) {
 // full replacement) and is review-only, not test-covered. This test stays
 // because it pins the merge contract the write path depends on; it is not a D1
 // regression test and was mislabeled as one in the original plan.
+// TestMergeBodies_HumanAndSystemDecisionsDoNotCollapse pins the widened
+// deduplication key of the decisions section. A human advancing a gate and the
+// orchestrator passing an automatic gate on the same stage produce two records
+// with the same stage and the same outcome that differ only in actor and
+// user_id; a key without those axes would fold them into one and delete the
+// very distinction the section exists to carry. The identical re-delivery
+// (same record, same timestamp — what a resume inherits and re-records) must
+// still collapse.
+func TestMergeBodies_HumanAndSystemDecisionsDoNotCollapse(t *testing.T) {
+	t.Parallel()
+	at := parseTestTime(t, "2026-03-01T09:00:00Z")
+	base := Body{Schema: "2", GateDecisions: []GateDecision{{
+		Stage: "review", Gate: "advance", Decision: "approved",
+		Actor: "human", UserID: "user-1", Timestamp: at,
+	}}}
+
+	withSystemPass := mergeBodies(base, Body{Schema: "2", GateDecisions: []GateDecision{{
+		Stage: "review", Gate: "auto_if_clean", Decision: "approved",
+		Actor: "system", UserID: "user-1", Timestamp: at,
+	}}})
+	if len(withSystemPass.GateDecisions) != 2 {
+		t.Fatalf("human and system decisions on one stage collapsed: %+v", withSystemPass.GateDecisions)
+	}
+
+	redelivered := mergeBodies(withSystemPass, Body{Schema: "2", GateDecisions: append([]GateDecision(nil), withSystemPass.GateDecisions...)})
+	if len(redelivered.GateDecisions) != 2 {
+		t.Fatalf("identical re-delivery must collapse; got %+v", redelivered.GateDecisions)
+	}
+
+	// The same human, the same gate, a later timestamp: a separate decision,
+	// not a duplicate — the timestamp keeps genuine repeats distinct.
+	repeatedLater := mergeBodies(base, Body{Schema: "2", GateDecisions: []GateDecision{{
+		Stage: "review", Gate: "advance", Decision: "approved",
+		Actor: "human", UserID: "user-1", Timestamp: parseTestTime(t, "2026-03-02T09:00:00Z"),
+	}}})
+	if len(repeatedLater.GateDecisions) != 2 {
+		t.Fatalf("a later, separate decision must stay its own record; got %+v", repeatedLater.GateDecisions)
+	}
+}
+
 func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) {
 	t.Parallel()
 	base := Body{Schema: "1", Missing: []string{"memory"}}
 	patchA := Body{
-		Invocations:  []InvocationEvidence{testInvocation("inv-spec", "spec", 0)},
-		HumanGates:   []HumanDecision{{Stage: "spec", Gate: "final", Decision: "approved", Actor: "alice", Timestamp: parseTestTime(t, "2026-01-01T00:00:00Z")}},
-		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "spec.md", RevisionID: "rev-1", ContentHash: "h1", Stage: "spec"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1", Results: []CheckResult{{Name: "build", Status: "pass"}}},
-		Missing:      []string{"capabilities"},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-spec", "spec", 0)},
+		GateDecisions: []GateDecision{{Stage: "spec", Gate: "final", Decision: "approved", Actor: "alice", Timestamp: parseTestTime(t, "2026-01-01T00:00:00Z")}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "spec.md", RevisionID: "rev-1", ContentHash: "h1", Stage: "spec"}}},
+		Checks:        &CheckEvidence{SetVersion: "v1", Results: []CheckResult{{Name: "build", Status: "pass"}}},
+		Missing:       []string{"capabilities"},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
 	}
 	patchB := Body{
-		Invocations: []InvocationEvidence{testInvocation("inv-impl", "impl", 0)},
-		HumanGates:  []HumanDecision{{Stage: "impl", Gate: "final", Decision: "approved", Actor: "bob", Timestamp: parseTestTime(t, "2026-01-02T00:00:00Z")}},
-		Artifacts:   &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "impl.md", RevisionID: "rev-2", ContentHash: "h2", Stage: "impl"}}},
-		Checks:      &CheckEvidence{SetVersion: "v2", Results: []CheckResult{{Name: "test", Status: "pass"}}},
-		Missing:     []string{"human_gates"},
+		Invocations:   []InvocationEvidence{testInvocation("inv-impl", "impl", 0)},
+		GateDecisions: []GateDecision{{Stage: "impl", Gate: "final", Decision: "approved", Actor: "bob", Timestamp: parseTestTime(t, "2026-01-02T00:00:00Z")}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "impl.md", RevisionID: "rev-2", ContentHash: "h2", Stage: "impl"}}},
+		Checks:        &CheckEvidence{SetVersion: "v2", Results: []CheckResult{{Name: "test", Status: "pass"}}},
+		Missing:       []string{"gate_decisions"},
 	}
 
 	afterA := mergeBodies(base, patchA)
@@ -232,8 +272,8 @@ func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) 
 	if len(afterB.Invocations) != 2 {
 		t.Errorf("Invocations: A's spec record lost; got %+v", afterB.Invocations)
 	}
-	if len(afterB.HumanGates) != 2 {
-		t.Errorf("HumanGates: A's decision lost; got %+v", afterB.HumanGates)
+	if len(afterB.GateDecisions) != 2 {
+		t.Errorf("GateDecisions: A's decision lost; got %+v", afterB.GateDecisions)
 	}
 	if afterB.Artifacts == nil || len(afterB.Artifacts.Outputs) != 2 {
 		t.Errorf("Artifacts.Outputs: A's revision lost; got %+v", afterB.Artifacts)
@@ -284,18 +324,18 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 		{
 			name: "empty body reports every expected section missing",
 			body: Body{Schema: schemaVersion},
-			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "invocations"},
+			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"},
 		},
 		{
 			name: "fully populated body reports nothing missing",
 			body: Body{
-				Memory:       &MemorySlice{Entries: 1},
-				HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
-				Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-				Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
-				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-				Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
-				Context:      &ContextEvidence{SkillsProbe: "ok"},
+				Memory:        &MemorySlice{Entries: 1},
+				GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+				Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+				Checks:        &CheckEvidence{SetVersion: "v1", Ran: true},
+				Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+				Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+				Context:       &ContextEvidence{SkillsProbe: "ok"},
 			},
 			want: nil,
 		},
@@ -305,7 +345,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 				Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 			},
-			want: []string{"memory", "context", "human_gates", "artifacts", "checks"},
+			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks"},
 		},
 		{
 			name: "a record without a prompt hash leaves invocations missing",
@@ -316,7 +356,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 					Capabilities: InvocationCaps{Role: "implementer", Profile: json.RawMessage(`{}`)},
 				}},
 			},
-			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "invocations"},
+			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "invocations"},
 		},
 		{
 			name: "a record without a profile leaves capabilities missing",
@@ -327,7 +367,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 					Prompt: InvocationPrompt{StagePromptHash: "h"},
 				}},
 			},
-			want: []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities"},
+			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities"},
 		},
 	}
 	for _, testCase := range tests {
@@ -396,12 +436,12 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 	t.Parallel()
 	body := Body{
 		// Memory intentionally nil — the subsystem is not wired.
-		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
-		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
-		Context:      &ContextEvidence{SkillsProbe: "ok"},
+		GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:        &CheckEvidence{SetVersion: "v1", Ran: true},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		Context:       &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !body.IsEvidenceComplete() {
 		t.Error("a run with every wired section present should be complete despite memory being absent")
@@ -418,12 +458,12 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 func TestEvidenceComplete_GapOrAbsentSectionBlocks(t *testing.T) {
 	t.Parallel()
 	complete := Body{
-		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
-		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1", Ran: true},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
-		Context:      &ContextEvidence{SkillsProbe: "ok"},
+		GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:        &CheckEvidence{SetVersion: "v1", Ran: true},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		Context:       &ContextEvidence{SkillsProbe: "ok"},
 	}
 	if !complete.IsEvidenceComplete() {
 		t.Fatal("baseline body should be complete")
@@ -816,11 +856,11 @@ func TestMergeBodies_CheckEvidenceRanIsMonotonic(t *testing.T) {
 func TestEvidenceComplete_ChecksWithoutRanBlocks(t *testing.T) {
 	t.Parallel()
 	body := Body{
-		HumanGates:   []HumanDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
-		Artifacts:    &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
-		Checks:       &CheckEvidence{SetVersion: "v1", Ran: false, MandatoryPassed: true},
-		Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
-		Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:        &CheckEvidence{SetVersion: "v1", Ran: false, MandatoryPassed: true},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 	}
 	if body.IsEvidenceComplete() {
 		t.Error("a checks section with Ran=false must not satisfy completeness even if MandatoryPassed=true")
@@ -896,7 +936,7 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 		}
 	}
 	// The expected sections list now includes context (ADR 0002).
-	wantMissing := []string{"memory", "context", "human_gates", "artifacts", "checks", "capabilities", "invocations"}
+	wantMissing := []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"}
 	if len(missing) != len(wantMissing) {
 		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
 	}

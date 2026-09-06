@@ -37,6 +37,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -51,16 +52,19 @@ const (
 	ActionEdit Action = "edit"
 )
 
-// Actor is who produced the revision. Stored on the row as actor.
-type Actor string
+// Actor is who produced the revision, stored on the row as actor. It is an
+// alias of the identity package's vocabulary — one declaration serves every
+// table that records actions (artifact revisions, gate decisions, events) —
+// and the constants below re-export it so no existing call site changes.
+type Actor = authz.Actor
 
 const (
 	// ActorHuman is a user-initiated edit via the API.
-	ActorHuman Actor = "human"
+	ActorHuman = authz.ActorHuman
 	// ActorAgent is the coding agent producing stage output.
-	ActorAgent Actor = "agent"
+	ActorAgent = authz.ActorAgent
 	// ActorSystem is an orchestrator-internal change (e.g. a fix-loop).
-	ActorSystem Actor = "system"
+	ActorSystem = authz.ActorSystem
 )
 
 // DiffTruncationMarker is the byte sequence the runner appends to a diff.patch

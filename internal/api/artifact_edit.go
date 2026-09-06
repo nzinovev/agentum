@@ -67,7 +67,7 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // Creates a new revision from the request body. A human edit has no source
 // invocation (actor = human), unlike a stage capture. When the task is paused at
 // a human gate, the edit IS the approval, so a successful PUT also records a
-// HumanDecision{decision: "edited"} on the manifest — a plain AddEvidence, since
+// GateDecision{decision: "edited"} on the manifest — a plain AddEvidence, since
 // this handler performs no FSM transition and needs no shared transaction. The
 // decision is recorded only at a gate: a PUT issued while the task is running or
 // terminal is a legitimate artifact edit but not a gate decision, and recording
@@ -191,15 +191,15 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 // store's limit governs the rejection message rather than a transport error.
 const maxArtifactEditBytes = 16 << 20 // 16 MiB
 
-// recordHumanEditDecision records a HumanDecision{decision: edited} for a
+// recordHumanEditDecision records a GateDecision{decision: edited} for a
 // successful human artifact edit — but only when the task is actually paused at
 // a human gate. The edit endpoint is available regardless of task state (a
 // reviewer may inspect or tweak an artifact at many points), but a
-// HumanDecision claims a human passed a gate. Recording one on a PUT issued
+// GateDecision claims a human passed a gate. Recording one on a PUT issued
 // while the task is `running`, far from any gate, would be a false claim in a
 // record whose entire purpose is to be trustworthy: a reader would conclude a
 // gate was passed when none was active. The artifact revision row is always the
-// durable record of the edit itself; the HumanDecision is gated to the gate.
+// durable record of the edit itself; the GateDecision is gated to the gate.
 //
 // Best-effort: a nil manifest service (tests, a server that did not wire one)
 // is a no-op, and a sealed / missing manifest is dropped.

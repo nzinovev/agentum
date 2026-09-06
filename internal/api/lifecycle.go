@@ -269,8 +269,8 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 			return conflictingGateDecision{name: rejectName, existing: existing.Decision}
 		}
 		if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
-			TenantID: task.TenantID, TaskID: task.ID, Name: rejectName,
-			Decision: "rejected", ArtifactRevisionID: sql.NullString{}, Actor: principal.UserID,
+			TenantID: task.TenantID, UserID: principal.UserID, TaskID: task.ID, Name: rejectName,
+			Decision: "rejected", ArtifactRevisionID: sql.NullString{}, Actor: string(authz.ActorHuman),
 		}); createErr != nil && !errors.Is(createErr, sql.ErrNoRows) {
 			return createErr
 		}
@@ -349,8 +349,8 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 		// ADR 0003 D4: record the durable final_review approval row in the same
 		// tx. No bound artifact — final_review approves the run, not a document.
 		if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
-			TenantID: task.TenantID, TaskID: task.ID, Name: "final_review",
-			Decision: "approved", ArtifactRevisionID: sql.NullString{}, Actor: principal.UserID,
+			TenantID: task.TenantID, UserID: principal.UserID, TaskID: task.ID, Name: "final_review",
+			Decision: "approved", ArtifactRevisionID: sql.NullString{}, Actor: string(authz.ActorHuman),
 		}); createErr != nil && !errors.Is(createErr, sql.ErrNoRows) {
 			return createErr
 		}
@@ -517,8 +517,8 @@ func (api *API) applyResume(r *http.Request, task sqlc.Task, event engine.TaskEv
 				return revErr
 			}
 			if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
-				TenantID: task.TenantID, TaskID: task.ID, Name: approval.name,
-				Decision: "approved", ArtifactRevisionID: revisionID, Actor: principal.UserID,
+				TenantID: task.TenantID, UserID: principal.UserID, TaskID: task.ID, Name: approval.name,
+				Decision: "approved", ArtifactRevisionID: revisionID, Actor: string(authz.ActorHuman),
 			}); createErr != nil && !errors.Is(createErr, sql.ErrNoRows) {
 				return createErr
 			}

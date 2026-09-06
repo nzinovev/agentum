@@ -503,8 +503,12 @@ func (runner *Runner) recordInitialEvidence(
 			PipelineRef: task.PipelinePack,
 		},
 		Project: &manifest.ProjectEvidence{
-			ProjectID:  project.ID,
-			RepoPath:   project.RepoPath,
+			ProjectID: project.ID,
+			// The manifest names the copy the run executes in — the pinned
+			// checkout — not the project's current path: after a
+			// re-registration the two differ, and evidence describes what
+			// happened, not what is configured now.
+			RepoPath:   checkoutPathOf(task, project),
 			Name:       project.Name,
 			BaseRef:    task.BaseRef,
 			BaseCommit: nullStringOr(task.BaseCommit),

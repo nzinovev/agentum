@@ -8,6 +8,7 @@ import (
 
 	"log/slog"
 
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -142,6 +143,7 @@ func (rec *Reconciler) repairOrphanedTasks(ctx context.Context) error {
 			TenantID: task.TenantID, UserID: task.UserID,
 			TaskID: nullStrEvent(task.ID), Type: "task.reconciled",
 			Payload: []byte(`{"from":"running","to":"paused_user_stop","reason":"interrupted"}`),
+			Actor:   string(authz.ActorSystem),
 		}); emitErr != nil {
 			rec.log.Warn("reconcile: emit event", "task", task.ID, "error", emitErr)
 		}
