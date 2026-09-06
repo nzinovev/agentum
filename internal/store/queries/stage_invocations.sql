@@ -14,7 +14,7 @@ LIMIT 1;
 
 -- name: ListStageInvocationsForTask :many
 -- Ordered by sequence so each attempt is visible in run order; the cycle column
--- distinguishes retries from resumes. Backs GET /tasks/{id}/invocations.
+-- distinguishes retries from resumes. Backs GET /runs/{id}/invocations.
 SELECT * FROM stage_invocations
 WHERE task_id = $1 AND tenant_id = $2
 ORDER BY sequence ASC;

@@ -186,15 +186,15 @@ func TestLoop_BudgetExhaustedStopsAndPreserves(t *testing.T) {
 		t.Errorf("stage call order = %v, want %v", adapter.calls, wantCalls)
 	}
 	// The stop reason is recorded on the last invocation's stop_reason and on
-	// the task.state_changed event. Find the budget stop in the events.
+	// the run.state_changed event. Find the budget stop in the events.
 	foundStopReason := false
 	for _, event := range store.events {
-		if event.Type == EvTaskStateChanged && containsEventField(event, "fix_budget_exhausted") {
+		if event.Type == EvRunStateChanged && containsEventField(event, "fix_budget_exhausted") {
 			foundStopReason = true
 		}
 	}
 	if !foundStopReason {
-		t.Error("no task.state_changed event carrying fix_budget_exhausted")
+		t.Error("no run.state_changed event carrying fix_budget_exhausted")
 	}
 	// Artifact revisions were captured (verdict.json at minimum) and survived.
 	if len(artStore.puts) == 0 {
@@ -429,12 +429,12 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 	// The stop reason names verdict_unreadable.
 	foundUnreadable := false
 	for _, event := range store.events {
-		if event.Type == EvTaskStateChanged && containsEventField(event, "verdict_unreadable") {
+		if event.Type == EvRunStateChanged && containsEventField(event, "verdict_unreadable") {
 			foundUnreadable = true
 		}
 	}
 	if !foundUnreadable {
-		t.Error("no task.state_changed event carrying verdict_unreadable")
+		t.Error("no run.state_changed event carrying verdict_unreadable")
 	}
 }
 

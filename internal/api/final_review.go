@@ -19,7 +19,7 @@ import (
 // revision-content endpoints — the payload carries ids, not blobs, so a large
 // diff does not have to be inlined.
 type finalReviewResponse struct {
-	Task      taskResponse          `json:"task"`
+	Run       taskResponse          `json:"run"`
 	Plan      *finalReviewPlan      `json:"plan,omitempty"`
 	Git       *finalReviewGit       `json:"git,omitempty"`
 	Diff      *finalReviewDiff      `json:"diff,omitempty"`
@@ -90,7 +90,7 @@ type finalReviewDecision struct {
 	At     string `json:"at"`
 }
 
-// handleFinalReview GET /api/v1/tasks/{id}/final-review
+// handleFinalReview GET /api/v1/runs/{id}/final-review
 // Returns 200 in awaiting_final_review AND in done/cancelled/failed — "the
 // result stays reviewable after the worktree is removed" is a requirement, not
 // a nicety (ADR 0003 D8). 409 for a task that has not reached the gate.
@@ -103,10 +103,10 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	state := engine.TaskState(task.State)
 	if state != engine.StateAwaitingFinalReview && !engine.IsTerminal(state) {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"final-review requires awaiting_final_review or a terminal state; task is "+task.State)
+			"final-review requires awaiting_final_review or a terminal state; run is "+task.State)
 		return
 	}
-	response := finalReviewResponse{Task: toTaskResponse(task)}
+	response := finalReviewResponse{Run: toTaskResponse(task)}
 	response.Git = &finalReviewGit{
 		Branch:       branchForTask(task.ID),
 		BaseCommit:   nullStringOr(task.BaseCommit),

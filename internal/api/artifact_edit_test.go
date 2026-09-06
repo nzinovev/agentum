@@ -97,7 +97,7 @@ func TestArtifactPut_SuccessfulEditCreatesHumanRevisionNoInvocation(t *testing.T
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"new spec","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -129,7 +129,7 @@ func TestArtifactPut_RevisionConflictMapsTo409(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"new spec","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -155,7 +155,7 @@ func TestArtifactPut_SecretDetectedMapsTo422(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"token: ghp_x","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -174,7 +174,7 @@ func TestArtifactGet_NoCurrentRevisionMapsTo404(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodGet,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/never.md", "")
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/never.md", "")
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactGet(recorder, request)
 
@@ -197,7 +197,7 @@ func TestArtifactPut_MissingPreconditionWhenCurrentExistsMapsTo428(t *testing.T)
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"blind overwrite"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -219,7 +219,7 @@ func TestArtifactPut_FirstCreateNeedsNoPrecondition(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/new.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/new.md",
 		`{"content":"fresh artifact","kind":"spec"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -244,7 +244,7 @@ func TestArtifactPut_TransientCurrentErrorFailsHard(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"blind overwrite, no precondition"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -265,7 +265,7 @@ func TestArtifactPut_PreconditionOnCreateMapsTo409(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodPut,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/new.md",
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/new.md",
 		`{"content":"fresh","expected_revision_id":"rev-x"}`)
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactPut(recorder, request)
@@ -287,7 +287,7 @@ func TestArtifactGet_ReturnsRevisionIdHeader(t *testing.T) {
 	apiInst := newEditAPI(store)
 
 	request := editRequest(http.MethodGet,
-		"/api/v1/tasks/task-1/invocations/inv-1/artifacts/spec.md", "")
+		"/api/v1/runs/task-1/invocations/inv-1/artifacts/spec.md", "")
 	recorder := httptest.NewRecorder()
 	apiInst.handleArtifactGet(recorder, request)
 

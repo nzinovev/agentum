@@ -141,7 +141,7 @@ func (rec *Reconciler) repairOrphanedTasks(ctx context.Context) error {
 		}
 		if _, emitErr := rec.tasks.AppendEvent(ctx, sqlc.AppendEventParams{
 			TenantID: task.TenantID, UserID: task.UserID,
-			TaskID: nullStrEvent(task.ID), Type: "task.reconciled",
+			TaskID: nullStrEvent(task.ID), Type: "run.reconciled",
 			Payload: []byte(`{"from":"running","to":"paused_user_stop","reason":"interrupted"}`),
 			Actor:   string(authz.ActorSystem),
 		}); emitErr != nil {

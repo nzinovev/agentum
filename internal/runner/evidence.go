@@ -495,7 +495,7 @@ func (runner *Runner) recordInitialEvidence(
 	}
 	patch := manifest.Body{
 		Input: &manifest.InputEvidence{
-			TaskID:      task.ID,
+			RunID:       task.ID,
 			Title:       task.Title,
 			Description: task.Description,
 			Overrides:   task.Overrides,

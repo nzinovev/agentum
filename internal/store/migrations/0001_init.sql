@@ -71,7 +71,7 @@ CREATE TABLE events (
     tenant_id  uuid NOT NULL,
     user_id    uuid NOT NULL,
     task_id    uuid REFERENCES tasks(id) ON DELETE CASCADE,
-    type       text NOT NULL,                          -- e.g. task.state_changed | stage.stopped | memory.committed
+    type       text NOT NULL,                          -- e.g. run.state_changed | stage.stopped | memory.committed
     payload    jsonb NOT NULL DEFAULT '{}',
     created_at timestamptz NOT NULL DEFAULT now()
 );

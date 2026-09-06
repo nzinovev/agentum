@@ -153,7 +153,7 @@ events (`events.actor`) alike. There is no second vocabulary for the same
 thing. `user_id` answers "on whose behalf"; the two name the same person only
 when `actor = human`. When the orchestrator passes an automatic gate or pauses
 a run, the record says `system` with the tenant's `user_id` — it never
-presents a system action as the task author clicking something.
+presents a system action as the run author clicking something.
 
 An actor value is a statement about what happened, not a permission: nothing
 branches on it to allow or deny — that decision lives in `authz.Can`.

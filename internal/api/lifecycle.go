@@ -13,7 +13,7 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// handleInvocationContinue POST /api/v1/tasks/{id}/invocations/{iid}/continue
+// handleInvocationContinue POST /api/v1/runs/{id}/invocations/{iid}/continue
 // Resume after open_questions / user_stop (session-id resume). The body carries
 // optional answers/context appended to the resumed session.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,7 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		gate = gateUserStop
 	default:
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"continue requires paused_open_questions or paused_user_stop; task is "+task.State)
+			"continue requires paused_open_questions or paused_user_stop; run is "+task.State)
 		return
 	}
 	var body map[string]any
@@ -55,7 +55,7 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		if isHumanDecisionRecordFailure(err) {
 			writeError(w, http.StatusInternalServerError, codeInternal,
-				"could not record the continue decision; the task was not resumed")
+				"could not record the continue decision; the run was not resumed")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
@@ -145,7 +145,7 @@ func (api *API) decisionIsIdempotent(w http.ResponseWriter, r *http.Request, tas
 	return true
 }
 
-// handleInvocationAdvance POST /api/v1/tasks/{id}/invocations/{iid}/advance
+// handleInvocationAdvance POST /api/v1/runs/{id}/invocations/{iid}/advance
 // Pass a gate → the next stage runs (a fresh invocation). When the task's
 // current stage is the pack's approval stage (ADR 0003 D3/D4), advancing IS the
 // approval: the task_approvals row is written in the same tx as the transition,
@@ -167,7 +167,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"advance requires paused_gate; task is "+task.State)
+			"advance requires paused_gate; run is "+task.State)
 		return
 	}
 	decision := gateDecisionPatch(task, principal, gateAdvance, decisionApproved)
@@ -177,7 +177,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		if isHumanDecisionRecordFailure(err) {
 			writeError(w, http.StatusInternalServerError, codeInternal,
-				"could not record the advance decision; the task was not advanced")
+				"could not record the advance decision; the run was not advanced")
 			return
 		}
 		statusForTransition(w, err)
@@ -186,7 +186,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// handleRejectTask POST /api/v1/tasks/{id}/reject
+// handleRejectTask POST /api/v1/runs/{id}/reject
 // Terminal reject at either human gate (ADR 0003 D4). Reuse of EventCancel
 // means the task lands in `cancelled`; a distinct task_approvals row
 // (final_review, decision=rejected) and seal reason SealRejected keep the
@@ -232,14 +232,14 @@ func (api *API) handleRejectTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"reject requires awaiting_final_review or paused_gate; task is "+task.State)
+			"reject requires awaiting_final_review or paused_gate; run is "+task.State)
 		return
 	}
 	if engine.IsTerminal(engine.TaskState(task.State)) {
 		if api.decisionIsIdempotent(w, r, task, rejectName, "rejected") {
 			return
 		}
-		writeError(w, http.StatusConflict, codeIllegalTransition, "task is already terminal: "+task.State)
+		writeError(w, http.StatusConflict, codeIllegalTransition, "run is already terminal: "+task.State)
 		return
 	}
 	next, ok := api.beginTerminalAbort(w, task)
@@ -303,7 +303,7 @@ func (conflict conflictingGateDecision) Error() string {
 	return "gate " + conflict.name + " already decided " + conflict.existing
 }
 
-// handleInvocationApprove POST /api/v1/tasks/{id}/invocations/{iid}/approve
+// handleInvocationApprove POST /api/v1/runs/{id}/invocations/{iid}/approve
 // Final approval → task done. Memory commit (Epic 1) is deferred. The teardown
 // job records result_commit (the agentum/<task-id> tip) and removes the worktree
 // only — the branch + result_commit remain resolvable for review (F.6.1 AC #3).
@@ -321,7 +321,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"approve requires awaiting_final_review; task is "+task.State)
+			"approve requires awaiting_final_review; run is "+task.State)
 		return
 	}
 	next, err := engine.Next(engine.TaskState(task.State), engine.EventApprove)
@@ -359,7 +359,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	}); err != nil {
 		if isHumanDecisionRecordFailure(err) {
 			writeError(w, http.StatusInternalServerError, codeInternal,
-				"could not record the approval decision; the task was not advanced")
+				"could not record the approval decision; the run was not advanced")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
@@ -368,7 +368,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// handleCancelTask POST /api/v1/tasks/{id}/cancel
+// handleCancelTask POST /api/v1/runs/{id}/cancel
 // Terminal abort: any non-terminal task → cancelled. The in-flight run (if any)
 // is aborted via the cancel registry, then the FSM transition + teardown-job
 // enqueue commit atomically. F.6.1: cancel is a terminal ABORT, distinct from
@@ -381,7 +381,7 @@ func (api *API) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if engine.IsTerminal(engine.TaskState(task.State)) {
-		writeError(w, http.StatusConflict, codeIllegalTransition, "task is already terminal: "+task.State)
+		writeError(w, http.StatusConflict, codeIllegalTransition, "run is already terminal: "+task.State)
 		return
 	}
 
@@ -553,7 +553,7 @@ func (api *API) resolveApprovalRevisionID(ctx context.Context, qtx *sqlc.Queries
 	return sql.NullString{String: revision.ID, Valid: true}, nil
 }
 
-// handleCleanupTask POST /api/v1/tasks/{id}/cleanup
+// handleCleanupTask POST /api/v1/runs/{id}/cleanup
 // Explicit, idempotent branch deletion (F.6.1 AC #4). Distinct verb from
 // cancel (terminal abort) and pause: cleanup operates on an ALREADY-terminal
 // task and removes its delivery artifacts. A generic cancel cannot ambiguously
@@ -569,7 +569,7 @@ func (api *API) handleCleanupTask(w http.ResponseWriter, r *http.Request) {
 	// delivery state — deleting it would destroy in-flight work.
 	if !engine.IsTerminal(engine.TaskState(task.State)) {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"cleanup requires a terminal task; task is "+task.State)
+			"cleanup requires a terminal run; run is "+task.State)
 		return
 	}
 	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{

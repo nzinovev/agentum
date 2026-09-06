@@ -97,54 +97,62 @@ func (api *API) runInTx(ctx context.Context, fn func(qtx *sqlc.Queries) error) e
 // here; unimplemented contract endpoints are declared in stubs.go. The server
 // has already applied the boundary middleware, so every call below carries a
 // Principal.
-func (api *API) Register(mux *http.ServeMux) {
+//
+// The mux parameter is an interface *http.ServeMux satisfies (its HandleFunc
+// takes the plain func type — an interface naming http.HandlerFunc here would
+// not match ServeMux's method set): ServeMux offers no way to enumerate
+// registered patterns, so the route-vocabulary test passes a recording stub to
+// read the surface back. Behavior for real callers is unchanged.
+func (api *API) Register(mux interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}) {
 	// Projects (registration: one repo = one project).
 	mux.HandleFunc("GET /api/v1/projects", api.handleListProjects)
 	mux.HandleFunc("POST /api/v1/projects", api.handleCreateProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}", api.handleGetProject)
 
-	// Tasks (lifecycle).
-	mux.HandleFunc("GET /api/v1/tasks", api.handleListTasks)
-	mux.HandleFunc("POST /api/v1/tasks", api.handleCreateTask)
-	mux.HandleFunc("GET /api/v1/tasks/{id}", api.handleGetTask)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/start", api.handleStartTask)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", api.handleCancelTask)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/reject", api.handleRejectTask)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/cleanup", api.handleCleanupTask)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/final-review", api.handleFinalReview)
+	// Runs (lifecycle).
+	mux.HandleFunc("GET /api/v1/runs", api.handleListTasks)
+	mux.HandleFunc("POST /api/v1/runs", api.handleCreateTask)
+	mux.HandleFunc("GET /api/v1/runs/{id}", api.handleGetTask)
+	mux.HandleFunc("POST /api/v1/runs/{id}/start", api.handleStartTask)
+	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", api.handleCancelTask)
+	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectTask)
+	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupTask)
+	mux.HandleFunc("GET /api/v1/runs/{id}/final-review", api.handleFinalReview)
 
 	// Stage invocations (read-only for now).
-	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations", api.handleListInvocations)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations/{iid}", api.handleGetInvocation)
+	mux.HandleFunc("GET /api/v1/runs/{id}/invocations", api.handleListInvocations)
+	mux.HandleFunc("GET /api/v1/runs/{id}/invocations/{iid}", api.handleGetInvocation)
 
 	// Artifacts (revisions store): list revisions + stream content. These are
 	// the read surface over the immutable, worktree-independent revisions store
 	// (F.7). A missing revision is a 404; the handler never falls back to the
 	// disposable worktree path.
-	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts", api.handleListArtifacts)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/revisions/{rid}", api.handleGetArtifactRevision)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/revisions/{rid}/content", api.handleGetArtifactContent)
+	mux.HandleFunc("GET /api/v1/runs/{id}/artifacts", api.handleListArtifacts)
+	mux.HandleFunc("GET /api/v1/runs/{id}/artifacts/revisions/{rid}", api.handleGetArtifactRevision)
+	mux.HandleFunc("GET /api/v1/runs/{id}/artifacts/revisions/{rid}/content", api.handleGetArtifactContent)
 
 	// Evidence manifest (read-only). GET returns the manifest body + seal
 	// metadata + corrections; GET .../diff compares two sealed manifests.
-	mux.HandleFunc("GET /api/v1/tasks/{id}/manifest", api.handleGetManifest)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/manifest/diff", api.handleDiffManifest)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/manifest/corrections", api.handleCorrectManifest)
+	mux.HandleFunc("GET /api/v1/runs/{id}/manifest", api.handleGetManifest)
+	mux.HandleFunc("GET /api/v1/runs/{id}/manifest/diff", api.handleDiffManifest)
+	mux.HandleFunc("POST /api/v1/runs/{id}/manifest/corrections", api.handleCorrectManifest)
 
 	// Gate actions (§3.2 stop conditions → continue semantics).
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/continue", api.handleInvocationContinue)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/advance", api.handleInvocationAdvance)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/approve", api.handleInvocationApprove)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/edit", api.handleInvocationEdit)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/ask-to-edit", api.handleInvocationAskToEdit)
-	mux.HandleFunc("POST /api/v1/tasks/{id}/invocations/{iid}/add-context", api.handleInvocationAddContext)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/continue", api.handleInvocationContinue)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/advance", api.handleInvocationAdvance)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/approve", api.handleInvocationApprove)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/edit", api.handleInvocationEdit)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/ask-to-edit", api.handleInvocationAskToEdit)
+	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/add-context", api.handleInvocationAddContext)
 
 	// Artifacts. {name...} matches a multi-segment path so orchestrator-built
 	// names like "plan/plan.md", "review/verdict.json", and
 	// "<stage>/result.json" are addressable (ADR 0003 D2). Purely additive:
 	// single-segment names keep resolving identically.
-	mux.HandleFunc("GET /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactGet)
-	mux.HandleFunc("PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactPut)
+	mux.HandleFunc("GET /api/v1/runs/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactGet)
+	mux.HandleFunc("PUT /api/v1/runs/{id}/invocations/{iid}/artifacts/{name...}", api.handleArtifactPut)
 
 	// Memory keyword-pull handle.
 	mux.HandleFunc("GET /api/v1/projects/{id}/memory", api.handleMemorySearch)
@@ -155,5 +163,5 @@ func (api *API) Register(mux *http.ServeMux) {
 
 	// SSE event streams.
 	mux.HandleFunc("GET /api/v1/events", api.handleEventStream)
-	mux.HandleFunc("GET /api/v1/tasks/{id}/events", api.handleTaskEventStream)
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", api.handleTaskEventStream)
 }

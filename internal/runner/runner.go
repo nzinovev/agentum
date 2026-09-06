@@ -51,7 +51,7 @@ type Store interface {
 	// of the given stages has reached for the task. Returns -1 when none has run
 	// (the query's COALESCE sentinel); the runner maps -1 -> 0 entries.
 	MaxCycleForStages(ctx context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error)
-	// ListStageInvocationsForTask backs GET /tasks/{id}/invocations and makes
+	// ListStageInvocationsForTask backs GET /runs/{id}/invocations and makes
 	// "each attempt visible separately" checkable.
 	ListStageInvocationsForTask(ctx context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error)
 	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
@@ -300,7 +300,7 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 }
 
 // cleanup is the explicit, idempotent, audited deletion of a terminal task's
-// delivery artifacts (F.6.1 AC #4). Triggered by POST /tasks/{id}/cleanup, it
+// delivery artifacts (F.6.1 AC #4). Triggered by POST /runs/{id}/cleanup, it
 // removes the agentum/<task-id> branch AND any lingering worktree (the latter
 // idempotent — a task whose teardown already ran has only the branch left).
 // Distinct from teardown (worktree-only at terminal state) and from cancel
@@ -336,7 +336,7 @@ func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
 		runner.log.Error("cleanup: delete branch", "task", task.ID, "error", err)
 		return err
 	}
-	runner.emit(ctx, task, EvTaskCleanedUp, map[string]any{"branch": worktree.BranchFor(task.ID)})
+	runner.emit(ctx, task, EvRunCleanedUp, map[string]any{"branch": worktree.BranchFor(task.ID)})
 	return nil
 }
 
@@ -1566,7 +1566,7 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 	}); err != nil {
 		return fmt.Errorf("persist pause: %w", err)
 	}
-	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{
+	runner.emit(ctx, task, EvRunStateChanged, map[string]any{
 		"from": task.State, "to": string(newState), "stop_reason": decision.StopReason, "stage": stageID,
 	})
 	// Record EVERY pause in the manifest's stops section (D7, deliberately
@@ -1603,7 +1603,7 @@ func (runner *Runner) transitionToFinalState(ctx context.Context, task sqlc.Task
 	}); err != nil {
 		return fmt.Errorf("persist final: %w", err)
 	}
-	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{"from": task.State, "to": string(newState), "stage": stageID})
+	runner.emit(ctx, task, EvRunStateChanged, map[string]any{"from": task.State, "to": string(newState), "stage": stageID})
 	return nil
 }
 
@@ -1949,7 +1949,7 @@ func (runner *Runner) failTask(ctx context.Context, task sqlc.Task, cause error)
 	}); err != nil {
 		return fmt.Errorf("%w (and failed to mark task failed: %v)", cause, err)
 	}
-	runner.emit(ctx, task, EvTaskStateChanged, map[string]any{"from": task.State, "to": string(engine.StateFailed), "error": cause.Error()})
+	runner.emit(ctx, task, EvRunStateChanged, map[string]any{"from": task.State, "to": string(engine.StateFailed), "error": cause.Error()})
 	// Seal the manifest with reason=failed so the partial evidence is still
 	// the immutable record of what was attempted. The teardown job will run
 	// the git-evidence + seal again; the seal is idempotent.
@@ -2035,19 +2035,19 @@ func (runner *Runner) isClean(repoPath, taskID string) bool {
 // Event types the runner emits. The runner owns its taxonomy; the SSE layer
 // frames whatever string the events table carries.
 const (
-	EvTaskStateChanged   = "task.state_changed"
+	EvRunStateChanged    = "run.state_changed"
 	EvStageStarted       = "stage.started"
 	EvStageStopped       = "stage.stopped"
-	EvWorktreeCreated    = "task.worktree_created"
-	EvWorktreeRemoved    = "task.worktree_removed"
-	EvWorktreeReconciled = "task.worktree_reconciled"
-	EvCheckpointRecorded = "task.checkpoint_recorded"
-	EvTaskCleanedUp      = "task.cleaned_up"
+	EvWorktreeCreated    = "run.worktree_created"
+	EvWorktreeRemoved    = "run.worktree_removed"
+	EvWorktreeReconciled = "run.worktree_reconciled"
+	EvCheckpointRecorded = "run.checkpoint_recorded"
+	EvRunCleanedUp       = "run.cleaned_up"
 	// EvStageTransition records a conditional transition resolution ({from, to,
 	// condition, cycle, verdict}), emitted at the resolution point so the
 	// branch is auditable even when the next stage never starts (e.g. budget
 	// exhaustion stops the run before the target stage runs). Exhaustion itself
-	// needs no new event type: task.state_changed already carries stop_reason.
+	// needs no new event type: run.state_changed already carries stop_reason.
 	EvStageTransition = "stage.transition"
 	// EvCapabilityEnforced records the effective capability profile granted to
 	// a stage invocation, emitted before the adapter is invoked. The profile
@@ -2055,7 +2055,7 @@ const (
 	// invocation was deny-by-default; a later review reconstructs "what could
 	// this run do" from it.
 	EvCapabilityEnforced = "stage.capability_enforced"
-	EvRevisionsSynced    = "task.revisions_synced"
+	EvRevisionsSynced    = "run.revisions_synced"
 	// EvArtifactRejected records that the orchestrator refused to ingest an
 	// artifact the agent declared — because the path resolved outside the
 	// worktree, or because the artifact scanner found credential-shaped content
@@ -2067,7 +2067,7 @@ const (
 	// the delivery boundary. The manifest body carries the full per-check
 	// results; this event is the durable signal that Agentum ran its own checks
 	// (not the agent's claim) against the checkpoint commit.
-	EvProjectChecksRun = "task.project_checks_run"
+	EvProjectChecksRun = "run.project_checks_run"
 	// EvDeliveryCommitDiverged records that the commit recorded as delivered
 	// (result_commit) differs from the one the delivery checks verified. Emitted
 	// at teardown when the two diverge — a human approval, a continue job, or a
@@ -2075,7 +2075,7 @@ const (
 	// The task is not failed (the human already approved); the divergence is
 	// recorded as an evidence gap and the sealed manifest reads incomplete, which
 	// is the signal a reviewer acts on.
-	EvDeliveryCommitDiverged = "task.delivery_commit_diverged"
+	EvDeliveryCommitDiverged = "run.delivery_commit_diverged"
 	// EvContextPinned records that the project-context channel was pinned for a
 	// stage: how many instruction files and skills were in play, and how many
 	// instruction files were truncated against the cap (ADR 0002). The manifest
@@ -2087,13 +2087,13 @@ const (
 	// repository. The follow-up pause (stop_reason = checkout_unavailable)
 	// keeps the run resumable; this event carries the path and the probe's
 	// reason, which the stop vocabulary alone cannot name.
-	EvCheckoutUnavailable = "task.checkout_unavailable"
+	EvCheckoutUnavailable = "run.checkout_unavailable"
 	// EvInstructionsRestored records one tamper reversal: a pre-stage hash check
 	// found a worktree instruction copy had drifted from the pinned bytes and the
 	// runner rewrote or removed it (ADR 0002 D4 layer 2). Carries the stage, the
 	// path, the action, and the tampered hash — the tamper and its reversal both
 	// land in the git lineage via the next checkpoint commit.
-	EvInstructionsRestored = "task.instructions_restored"
+	EvInstructionsRestored = "run.instructions_restored"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.

@@ -283,7 +283,7 @@ func isFixerStage(target string, fixerStages []string) bool {
 
 // verdictPayload is the stage.transition event body (D7). Emitted at the
 // resolution point so the branch is auditable even when the next stage never
-// starts. Exhaustion needs no new event type: task.state_changed already
+// starts. Exhaustion needs no new event type: run.state_changed already
 // carries stop_reason.
 type verdictPayload struct {
 	From      string `json:"from,omitempty"`

@@ -23,7 +23,7 @@ const (
 // chains edits so the audit trail reads in order.
 type artifactRevisionResponse struct {
 	ID               string `json:"id"`
-	TaskID           string `json:"task_id"`
+	RunID            string `json:"run_id"`
 	Name             string `json:"name"`
 	Kind             string `json:"kind"`
 	ContentHash      string `json:"content_hash"`
@@ -42,7 +42,7 @@ type artifactRevisionResponse struct {
 func toArtifactRevisionResponse(revision artifacts.Revision) artifactRevisionResponse {
 	return artifactRevisionResponse{
 		ID:               revision.ID,
-		TaskID:           revision.TaskID,
+		RunID:            revision.TaskID,
 		Name:             revision.Name,
 		Kind:             revision.Kind,
 		ContentHash:      revision.ContentHash,
@@ -59,7 +59,7 @@ func toArtifactRevisionResponse(revision artifacts.Revision) artifactRevisionRes
 	}
 }
 
-// handleListArtifacts GET /api/v1/tasks/{id}/artifacts?current=true
+// handleListArtifacts GET /api/v1/runs/{id}/artifacts?current=true
 // Returns artifact revisions for a task. ?current=true narrows to current
 // revisions only (the snapshot a resume / comparison reads). Default: all
 // revisions, including superseded.
@@ -91,7 +91,7 @@ func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGetArtifactRevision GET /api/v1/tasks/{id}/artifacts/revisions/{rid}
+// handleGetArtifactRevision GET /api/v1/runs/{id}/artifacts/revisions/{rid}
 // Returns the revision metadata (no bytes). The content lives at the
 // sibling /content path; splitting keeps this handler cheap and lets a client
 // inspect a revision without buffering the bytes.
@@ -110,7 +110,7 @@ func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, toArtifactRevisionResponse(revision))
 }
 
-// handleGetArtifactContent GET /api/v1/tasks/{id}/artifacts/revisions/{rid}/content
+// handleGetArtifactContent GET /api/v1/runs/{id}/artifacts/revisions/{rid}/content
 // Streams the blob bytes for a revision. Sets Content-Type from the revision
 // kind when known, else application/octet-stream. Streams via CopyTo so large
 // blobs do not buffer in memory.

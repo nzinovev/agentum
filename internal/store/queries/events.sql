@@ -7,7 +7,7 @@ ORDER BY id ASC
 LIMIT $3;
 
 -- name: ListEventsAfterTask :many
--- Per-task tail: same shape, scoped to one task. Used by GET /tasks/{id}/events.
+-- Per-task tail: same shape, scoped to one task. Used by GET /runs/{id}/events.
 SELECT * FROM events
 WHERE tenant_id = $1 AND task_id = $2 AND id > $3
 ORDER BY id ASC

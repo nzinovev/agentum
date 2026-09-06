@@ -57,7 +57,7 @@ func TestWriteSSEFrame(t *testing.T) {
 	if frameFact(t, data, "stop_reason") != "gate" {
 		t.Errorf("producer payload lost: %v", data)
 	}
-	if frameFact(t, data, "task_id") != "t1" {
+	if frameFact(t, data, "run_id") != "t1" {
 		t.Errorf("run id not mixed in: %v", data)
 	}
 	if frameFact(t, data, "actor") != "system" {
@@ -72,16 +72,16 @@ func TestWriteSSEFrame_MixInNeverRewrites(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
 	if err := writeSSEFrame(rec, sqlc.Event{
-		ID: 7, Type: "task.state_changed",
+		ID: 7, Type: "run.state_changed",
 		TaskID:  sql.NullString{String: "row-id", Valid: true},
-		Payload: json.RawMessage(`{"task_id":"producer-id"}`),
+		Payload: json.RawMessage(`{"run_id":"producer-id"}`),
 		Actor:   "human",
 	}); err != nil {
 		t.Fatalf("writeSSEFrame: %v", err)
 	}
 	data := frameData(t, lineAfter(t, rec.Body.String(), "data: "))
-	if frameFact(t, data, "task_id") != "producer-id" {
-		t.Errorf("producer task_id rewritten: %v", data)
+	if frameFact(t, data, "run_id") != "producer-id" {
+		t.Errorf("producer run_id rewritten: %v", data)
 	}
 	if frameFact(t, data, "actor") != "human" {
 		t.Errorf("actor missing: %v", data)
@@ -89,7 +89,7 @@ func TestWriteSSEFrame_MixInNeverRewrites(t *testing.T) {
 }
 
 // TestWriteSSEFrame_TenantGlobalEventOmitsRunID: an event with no run carries
-// no empty task_id placeholder — the frame says nothing rather than saying
+// no empty run_id placeholder — the frame says nothing rather than saying
 // "".
 func TestWriteSSEFrame_TenantGlobalEventOmitsRunID(t *testing.T) {
 	t.Parallel()
@@ -98,8 +98,8 @@ func TestWriteSSEFrame_TenantGlobalEventOmitsRunID(t *testing.T) {
 		t.Fatalf("writeSSEFrame: %v", err)
 	}
 	data := frameData(t, lineAfter(t, rec.Body.String(), "data: "))
-	if _, exists := data["task_id"]; exists {
-		t.Errorf("tenant-global event carries a task_id: %v", data)
+	if _, exists := data["run_id"]; exists {
+		t.Errorf("tenant-global event carries a run_id: %v", data)
 	}
 	if frameFact(t, data, "actor") != "system" {
 		t.Errorf("actor missing: %v", data)
@@ -109,7 +109,7 @@ func TestWriteSSEFrame_TenantGlobalEventOmitsRunID(t *testing.T) {
 func TestWriteSSEFrame_EmptyPayload(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	if err := writeSSEFrame(rec, sqlc.Event{ID: 1, Type: "task.state_changed", Payload: nil, Actor: "human"}); err != nil {
+	if err := writeSSEFrame(rec, sqlc.Event{ID: 1, Type: "run.state_changed", Payload: nil, Actor: "human"}); err != nil {
 		t.Fatalf("writeSSEFrame: %v", err)
 	}
 	if !strings.Contains(rec.Body.String(), `data: {`) {
@@ -180,7 +180,7 @@ func TestStructuredErrorShape(t *testing.T) {
 func TestNotImplementedShape(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	notImplemented(rec, "Epic 2", "POST /tasks/{id}/invocations/{iid}/continue")
+	notImplemented(rec, "Epic 2", "POST /runs/{id}/invocations/{iid}/continue")
 	if rec.Code != 501 {
 		t.Fatalf("status = %d, want 501", rec.Code)
 	}

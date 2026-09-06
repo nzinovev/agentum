@@ -34,7 +34,7 @@ type artifactEditRequest struct {
 	ExpectedRevisionID string `json:"expected_revision_id,omitempty"`
 }
 
-// handleArtifactGet GET /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}
+// handleArtifactGet GET /api/v1/runs/{id}/invocations/{iid}/artifacts/{name}
 // Returns the current revision of (task, name) plus its content. The revision
 // id is surfaced in the X-Revision-Id response header so a client can use it as
 // the expected_revision_id precondition for a subsequent PUT.
@@ -63,7 +63,7 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleArtifactPut PUT /api/v1/tasks/{id}/invocations/{iid}/artifacts/{name}
+// handleArtifactPut PUT /api/v1/runs/{id}/invocations/{iid}/artifacts/{name}
 // Creates a new revision from the request body. A human edit has no source
 // invocation (actor = human), unlike a stage capture. When the task is paused at
 // a human gate, the edit IS the approval, so a successful PUT also records a

@@ -173,7 +173,7 @@ type ListStageInvocationsForTaskParams struct {
 }
 
 // Ordered by sequence so each attempt is visible in run order; the cycle column
-// distinguishes retries from resumes. Backs GET /tasks/{id}/invocations.
+// distinguishes retries from resumes. Backs GET /runs/{id}/invocations.
 func (q *Queries) ListStageInvocationsForTask(ctx context.Context, arg ListStageInvocationsForTaskParams) ([]StageInvocation, error) {
 	rows, err := q.db.QueryContext(ctx, listStageInvocationsForTask, arg.TaskID, arg.TenantID)
 	if err != nil {
