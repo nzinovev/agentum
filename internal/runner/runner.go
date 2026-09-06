@@ -34,42 +34,42 @@ import (
 // Store is the subset of sqlc.Queries the runner uses. Declaring it here decouples
 // the loop from the generated layer and makes it unit-testable with a fake.
 type Store interface {
-	GetTask(ctx context.Context, arg sqlc.GetTaskParams) (sqlc.Task, error)
+	GetRun(ctx context.Context, arg sqlc.GetRunParams) (sqlc.Run, error)
 	GetProject(ctx context.Context, arg sqlc.GetProjectParams) (sqlc.Project, error)
-	UpdateTaskState(ctx context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error)
-	UpdateTaskStage(ctx context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error)
-	SetBaseCommit(ctx context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Task, error)
+	UpdateRunState(ctx context.Context, arg sqlc.UpdateRunStateParams) (sqlc.Run, error)
+	UpdateRunStage(ctx context.Context, arg sqlc.UpdateRunStageParams) (sqlc.Run, error)
+	SetBaseCommit(ctx context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Run, error)
 	// SetCheckoutPath pins the working copy the run executes in, resolve-once
 	// like SetBaseCommit: after the first pin the run stays in its copy even
 	// if the project is later re-registered from another clone.
-	SetCheckoutPath(ctx context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Task, error)
-	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error)
+	SetCheckoutPath(ctx context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Run, error)
+	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
-	LatestStageForTask(ctx context.Context, arg sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error)
+	LatestStageForRun(ctx context.Context, arg sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error)
 	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
-	// of the given stages has reached for the task. Returns -1 when none has run
+	// of the given stages has reached for the record. Returns -1 when none has run
 	// (the query's COALESCE sentinel); the runner maps -1 -> 0 entries.
 	MaxCycleForStages(ctx context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error)
-	// ListStageInvocationsForTask backs GET /runs/{id}/invocations and makes
+	// ListStageInvocationsForRun backs GET /runs/{id}/invocations and makes
 	// "each attempt visible separately" checkable.
-	ListStageInvocationsForTask(ctx context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error)
-	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
-	ListCheckpointsForTask(ctx context.Context, arg sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error)
-	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error)
+	ListStageInvocationsForRun(ctx context.Context, arg sqlc.ListStageInvocationsForRunParams) ([]sqlc.StageInvocation, error)
+	LatestCheckpointForRun(ctx context.Context, arg sqlc.LatestCheckpointForRunParams) (sqlc.RunCheckpoint, error)
+	ListCheckpointsForRun(ctx context.Context, arg sqlc.ListCheckpointsForRunParams) ([]sqlc.RunCheckpoint, error)
+	CreateCheckpoint(ctx context.Context, arg sqlc.CreateCheckpointParams) (sqlc.RunCheckpoint, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
-	// GetApproval reads one human-approval decision row by (tenant, task, name),
+	// GetApproval reads one human-approval decision row by (tenant, run, name),
 	// or returns sql.ErrNoRows when undecided (ADR 0003 D3). The runner uses it
 	// to decide whether the source_write withholding applies.
-	GetApproval(ctx context.Context, arg sqlc.GetApprovalParams) (sqlc.TaskApproval, error)
-	// ListApprovalsForTask reads every approval decision for a task, oldest
+	GetApproval(ctx context.Context, arg sqlc.GetApprovalParams) (sqlc.RunApproval, error)
+	// ListApprovalsForRun reads every approval decision for a run, oldest
 	// first (ADR 0003). Used by sealManifestAtTerminal to distinguish a reject
 	// (cancel fired from a human reject at a gate) from a plain cancel, and by
 	// the final-review payload.
-	ListApprovalsForTask(ctx context.Context, arg sqlc.ListApprovalsForTaskParams) ([]sqlc.TaskApproval, error)
+	ListApprovalsForRun(ctx context.Context, arg sqlc.ListApprovalsForRunParams) ([]sqlc.RunApproval, error)
 	// CurrentArtifactRevisionForName is the durable read of the current revision
-	// for a (task, name), used by the plan_revision_drift check. Shared with the
+	// for a (run, name), used by the plan_revision_drift check. Shared with the
 	// artifacts sync path.
 	CurrentArtifactRevisionForName(ctx context.Context, arg sqlc.CurrentArtifactRevisionForNameParams) (sqlc.ArtifactRevision, error)
 }
@@ -77,9 +77,9 @@ type Store interface {
 // Sink forwards a live stream chunk to subscribers (e.g. an in-memory SSE broker).
 // nil chunks are drained and discarded; the runner accumulates telemetry either
 // way. The durable event log carries only meaningful events (04 §7.1.5).
-type Sink func(taskID, stageID, chunk string)
+type Sink func(runID, stageID, chunk string)
 
-// Runner drives a task through its pack's stages. It implements the job
+// Runner drives a run through its pack's stages. It implements the job
 // worker's Handler: the worker claims a job and calls Handle, which runs the
 // stage loop (04 §7.2) until a pause point or terminal state.
 type Runner struct {
@@ -120,15 +120,15 @@ type Runner struct {
 // records calls or fails on demand; the production *manifest.Service satisfies
 // it without changes.
 type manifestService interface {
-	AddEvidence(ctx context.Context, tenantID, taskID string, patch manifest.Body) error
-	Seal(ctx context.Context, tenantID, userID, taskID string, reason manifest.SealReason) error
-	RecordGap(ctx context.Context, tenantID, taskID string, gap manifest.EvidenceGap) error
+	AddEvidence(ctx context.Context, tenantID, runID string, patch manifest.Body) error
+	Seal(ctx context.Context, tenantID, userID, runID string, reason manifest.SealReason) error
+	RecordGap(ctx context.Context, tenantID, runID string, gap manifest.EvidenceGap) error
 	// ChecksCommit returns the commit the delivery checks verified
 	// (body.checks.commit). Empty when no checks section was recorded. Used by
 	// teardown to compare result_commit against the verified commit directly,
 	// rather than a checkpoint proxy whose correctness depends on an FSM
 	// property a future feature could break silently.
-	ChecksCommit(ctx context.Context, tenantID, taskID string) (string, error)
+	ChecksCommit(ctx context.Context, tenantID, runID string) (string, error)
 }
 
 // manifestServiceOrNil returns service as a manifestService, or nil when
@@ -169,9 +169,9 @@ type Deps struct {
 
 	// CheckExec runs the orchestrator-owned project checks at the delivery
 	// boundary. May be nil in unit tests; project checks are skipped then. When
-	// set, the runner enforces the project baseline (plus pack/task requests)
-	// after the final-stage checkpoint and before the task reaches the review
-	// gate; a mandatory failure blocks delivery by failing the task.
+	// set, the runner enforces the project baseline (plus pack/run requests)
+	// after the final-stage checkpoint and before the run reaches the review
+	// gate; a mandatory failure blocks delivery by failing the record.
 	CheckExec *checks.Executor
 
 	// HardTimeout / IdleTimeout are the per-invocation caps applied to every
@@ -236,24 +236,24 @@ func (runner *Runner) Handle(ctx context.Context, job sqlc.Job) error {
 	}
 }
 
-// teardown removes the task's worktree once it has reached a terminal state
+// teardown removes the run's worktree once it has reached a terminal state
 // (done/cancelled/failed). F.6.1: the worktree is disposable, the branch is not
-// — RemoveWorktree deletes the working tree only; agentum/<task-id> and any
+// — RemoveWorktree deletes the working tree only; agentum/<run-id> and any
 // committed recovery/delivery work remain resolvable. Idempotent: a missing
-// worktree is a no-op. Enqueued by the cancel/approve handlers and by failTask;
+// worktree is a no-op. Enqueued by the cancel/approve handlers and by failRun;
 // the worker claims it after the driving run job is done, so it never races the
 // runner (04 §7.1.3). Branch deletion is a separate explicit cleanup action.
 //
-// Before removing the worktree, teardown captures the agentum/<task-id> tip as
+// Before removing the worktree, teardown captures the agentum/<run-id> tip as
 // result_commit — the immutable record of what was delivered (done) or recovered
 // (cancelled/failed). The branch survives teardown, so result_commit is always
 // resolvable after the fact; recording it here keeps the API free of git.
 func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
-	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
+	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
-		return fmt.Errorf("teardown: load task: %w", err)
+		return fmt.Errorf("teardown: load run: %w", err)
 	}
-	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: task.ProjectID, TenantID: task.TenantID})
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
 	if err != nil {
 		return fmt.Errorf("teardown: load project: %w", err)
 	}
@@ -262,115 +262,115 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	// project's path names a different copy, and cleaning THAT one would
 	// remove a worktree that was never this run's while leaving the real one
 	// behind forever.
-	checkoutPath := checkoutPathOf(task, project)
+	checkoutPath := checkoutPathOf(record, project)
 	// Relink first when the repository moved: isWorktree's liveness check
 	// would otherwise turn the removal below into a silent no-op and the
 	// worktree would outlive the run. A repair that itself fails must not
 	// wedge the teardown of a terminal run — log it and let RemoveWorktree
 	// decide; its no-op is at least visible in the log then.
-	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
-		runner.log.Warn("teardown: repair worktree before removal", "task", task.ID, "error", repairErr)
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
+		runner.log.Warn("teardown: repair worktree before removal", "run", record.ID, "error", repairErr)
 	}
-	runner.recordResultCommit(ctx, task, checkoutPath)
+	runner.recordResultCommit(ctx, record, checkoutPath)
 	// ADR 0003 D8: result_commit is now pinned at the final gate (the commit the
 	// human reviewed). Detect a divergence between the live branch tip and the
 	// recorded result_commit: something moved the branch between review and
 	// teardown. Same non-fatal treatment as the checks-commit divergence (gap +
 	// event); the human already approved.
-	runner.verifyResultCommitMatchesLiveTip(ctx, task, checkoutPath)
-	// Refresh task state (recordResultCommit may have set result_commit) and
+	runner.verifyResultCommitMatchesLiveTip(ctx, record, checkoutPath)
+	// Refresh run state (recordResultCommit may have set result_commit) and
 	// detect any divergence between what was delivered and what the checks
 	// verified, before sealing. The seal captures the final git lineage; a sealed
 	// manifest is the immutable record a comparison / reproduction reads.
-	updatedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	updatedRecord, refreshErr := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
 	if refreshErr == nil {
-		runner.verifyDeliveryCommitBinding(ctx, updatedTask)
-		runner.sealManifestAtTerminal(ctx, updatedTask)
+		runner.verifyDeliveryCommitBinding(ctx, updatedRecord)
+		runner.sealManifestAtTerminal(ctx, updatedRecord)
 	} else {
-		runner.log.Warn("teardown: reload task for seal", "task", task.ID, "error", refreshErr)
-		runner.verifyDeliveryCommitBinding(ctx, task)
-		runner.sealManifestAtTerminal(ctx, task)
+		runner.log.Warn("teardown: reload run for seal", "run", record.ID, "error", refreshErr)
+		runner.verifyDeliveryCommitBinding(ctx, record)
+		runner.sealManifestAtTerminal(ctx, record)
 	}
-	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, task.ID); err != nil {
-		runner.log.Error("teardown worktree", "task", task.ID, "error", err)
+	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
+		runner.log.Error("teardown worktree", "run", record.ID, "error", err)
 		return err
 	}
-	runner.emit(ctx, task, EvWorktreeRemoved, map[string]any{"stage": task.CurrentStage.String})
+	runner.emit(ctx, record, EvWorktreeRemoved, map[string]any{"stage": record.CurrentStage.String})
 	return nil
 }
 
-// cleanup is the explicit, idempotent, audited deletion of a terminal task's
+// cleanup is the explicit, idempotent, audited deletion of a terminal run's
 // delivery artifacts (F.6.1 AC #4). Triggered by POST /runs/{id}/cleanup, it
-// removes the agentum/<task-id> branch AND any lingering worktree (the latter
-// idempotent — a task whose teardown already ran has only the branch left).
+// removes the agentum/<run-id> branch AND any lingering worktree (the latter
+// idempotent — a run whose teardown already ran has only the branch left).
 // Distinct from teardown (worktree-only at terminal state) and from cancel
 // (terminal abort): cleanup is the operator saying "I am done with this
-// delivery." Branch deletion is forced: a delivered task's commits are reviewed
+// delivery." Branch deletion is forced: a delivered run's commits are reviewed
 // via result_commit / the branch before cleanup; -D is the intent.
 func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
-	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
+	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
-		return fmt.Errorf("cleanup: load task: %w", err)
+		return fmt.Errorf("cleanup: load run: %w", err)
 	}
-	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: task.ProjectID, TenantID: task.TenantID})
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
 	if err != nil {
 		return fmt.Errorf("cleanup: load project: %w", err)
 	}
 	// Cleanup goes to the copy the run worked in (the pinned checkout): the
 	// branch and any lingering worktree live there, wherever the project
 	// points now.
-	checkoutPath := checkoutPathOf(task, project)
+	checkoutPath := checkoutPathOf(record, project)
 	// Same relink-before-removal as teardown, for the same reason; and a
 	// failed repair is logged, not fatal — branch deletion must not wedge on
 	// a directory state.
-	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
-		runner.log.Warn("cleanup: repair worktree before removal", "task", task.ID, "error", repairErr)
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
+		runner.log.Warn("cleanup: repair worktree before removal", "run", record.ID, "error", repairErr)
 	}
 	// Remove any lingering worktree first (idempotent). A branch that is
 	// checked out in a worktree cannot be deleted; clearing the worktree frees it.
-	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, task.ID); err != nil {
-		runner.log.Error("cleanup: remove worktree", "task", task.ID, "error", err)
+	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
+		runner.log.Error("cleanup: remove worktree", "run", record.ID, "error", err)
 		return err
 	}
-	if err := runner.wt.DeleteBranch(ctx, checkoutPath, task.ID); err != nil {
-		runner.log.Error("cleanup: delete branch", "task", task.ID, "error", err)
+	if err := runner.wt.DeleteBranch(ctx, checkoutPath, record.ID); err != nil {
+		runner.log.Error("cleanup: delete branch", "run", record.ID, "error", err)
 		return err
 	}
-	runner.emit(ctx, task, EvRunCleanedUp, map[string]any{"branch": worktree.BranchFor(task.ID)})
+	runner.emit(ctx, record, EvRunCleanedUp, map[string]any{"branch": worktree.BranchFor(record.ID)})
 	return nil
 }
 
-// recordResultCommit captures the agentum/<task-id> tip as result_commit if it
+// recordResultCommit captures the agentum/<run-id> tip as result_commit if it
 // is not already recorded and the branch is resolvable. Best-effort: a branch
 // that is already gone (cleanup ran, or never created) is a no-op. result_commit
 // remains queryable as the diff target against base_commit after teardown.
-func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, repoPath string) {
-	if task.ResultCommit.Valid && task.ResultCommit.String != "" {
+func (runner *Runner) recordResultCommit(ctx context.Context, record sqlc.Run, repoPath string) {
+	if record.ResultCommit.Valid && record.ResultCommit.String != "" {
 		return
 	}
-	tip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(task.ID))
+	tip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(record.ID))
 	if err != nil {
 		// Branch not resolvable (never created, or already cleaned up). Nothing
 		// to record — leave result_commit NULL rather than guessing.
 		return
 	}
 	if _, err := runner.store.SetResultCommit(ctx, sqlc.SetResultCommitParams{
-		ID: task.ID, TenantID: task.TenantID, ResultCommit: nullStr(tip),
+		ID: record.ID, TenantID: record.TenantID, ResultCommit: nullStr(tip),
 	}); err != nil {
-		runner.log.Warn("record result_commit", "task", task.ID, "error", err)
+		runner.log.Warn("record result_commit", "run", record.ID, "error", err)
 	}
 }
 
 // verifyDeliveryCommitBinding detects a divergence between the commit the
 // delivery checks verified and the commit recorded as delivered (result_commit).
-// The two are separated by a human approval: the checks run before the task
+// The two are separated by a human approval: the checks run before the run
 // reaches awaiting_final_review, teardown runs after approval, and in between a
 // continue job, a human artifact edit, or a filesystem change can move the
 // branch tip. Nothing previously compared the two, so the sealed manifest could
 // assert "mandatory checks passed at X" alongside "delivered Y" with no signal
 // they differ.
 //
-// On a mismatch this does NOT fail the task — the human already approved, and
+// On a mismatch this does NOT fail the run — the human already approved, and
 // failing at teardown after approval would be a confusing terminal state.
 // Instead the divergence is recorded as an EvidenceGap (so the sealed manifest
 // carries it and evidence_complete reads false) and emitted as a distinct event
@@ -397,32 +397,32 @@ func (runner *Runner) recordResultCommit(ctx context.Context, task sqlc.Task, re
 // commit falls back to the latest checkpoint SHA. This is the degraded path:
 // correct only while the FSM property above holds, and used solely so the
 // teardown flow does not skip the check entirely in tests. The persisted
-// result_commit is used (the refreshed task), not the value this teardown would
+// result_commit is used (the refreshed run), not the value this teardown would
 // have written — recordResultCommit is a no-op when result_commit is already
 // set, so comparing against a not-yet-persisted tip would miss a divergence that
 // a prior teardown already recorded.
-func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc.Task) {
-	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
+func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, record sqlc.Run) {
+	if !record.ResultCommit.Valid || record.ResultCommit.String == "" {
 		return
 	}
-	verifiedCommit, err := runner.checksVerifiedCommit(ctx, task)
+	verifiedCommit, err := runner.checksVerifiedCommit(ctx, record)
 	if err != nil {
 		// The comparison could not run. Record that as a gap rather than
 		// returning quietly: "the check found no divergence" and "the check
 		// never happened" are different claims, and a manifest silent about
 		// both is the fail-open shape this whole comparison exists to remove.
-		runner.log.Warn("verify delivery binding: read verified commit", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "checks", "",
+		runner.log.Warn("verify delivery binding: read verified commit", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "checks", "",
 			fmt.Errorf("could not compare result_commit against the checks-verified commit: %w", err))
 		return
 	}
 	if verifiedCommit == "" {
-		// No recorded checks commit (e.g. a task that never reached delivery, or
+		// No recorded checks commit (e.g. a run that never reached delivery, or
 		// the manifest service is nil and no checkpoint exists). Nothing to
 		// compare against — an absence, not a failure.
 		return
 	}
-	if task.ResultCommit.String == verifiedCommit {
+	if record.ResultCommit.String == verifiedCommit {
 		return
 	}
 	// Divergence: the delivered commit is not the one the checks verified. Record
@@ -431,43 +431,43 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, task sqlc
 	// than buried in the manifest body.
 	cause := fmt.Errorf(
 		"result_commit %s != checks-verified commit %s; the delivered commit was not the one the delivery checks verified",
-		task.ResultCommit.String, verifiedCommit,
+		record.ResultCommit.String, verifiedCommit,
 	)
-	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
-	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
-		"result_commit": task.ResultCommit.String,
+	runner.recordEvidenceGap(ctx, record, "checks", "", cause)
+	runner.emit(ctx, record, EvDeliveryCommitDiverged, map[string]any{
+		"result_commit": record.ResultCommit.String,
 		"checks_commit": verifiedCommit,
 	})
 }
 
 // verifyResultCommitMatchesLiveTip detects a divergence between the recorded
-// result_commit and the live agentum/<task-id> branch tip at teardown (ADR 0003
+// result_commit and the live agentum/<run-id> branch tip at teardown (ADR 0003
 // D8). result_commit is pinned at the final gate (the commit the human
 // reviewed); if the branch moved between review and teardown, the recorded
 // commit no longer names what is actually delivered. Same non-fatal treatment
 // as verifyDeliveryCommitBinding: a gap + event, never a post-approval failure.
 // No-op when result_commit is unset or the branch is unresolvable (already
 // cleaned up).
-func (runner *Runner) verifyResultCommitMatchesLiveTip(ctx context.Context, task sqlc.Task, repoPath string) {
-	if !task.ResultCommit.Valid || task.ResultCommit.String == "" {
+func (runner *Runner) verifyResultCommitMatchesLiveTip(ctx context.Context, record sqlc.Run, repoPath string) {
+	if !record.ResultCommit.Valid || record.ResultCommit.String == "" {
 		return
 	}
-	liveTip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(task.ID))
+	liveTip, err := runner.wt.ResolveRef(ctx, repoPath, worktree.BranchFor(record.ID))
 	if err != nil {
 		// Branch not resolvable — already cleaned up, or never created. Nothing
 		// to compare; an absence, not a divergence.
 		return
 	}
-	if liveTip == task.ResultCommit.String {
+	if liveTip == record.ResultCommit.String {
 		return
 	}
 	cause := fmt.Errorf(
 		"result_commit %s != live branch tip %s; the branch moved between review and teardown",
-		task.ResultCommit.String, liveTip,
+		record.ResultCommit.String, liveTip,
 	)
-	runner.recordEvidenceGap(ctx, task, "checks", "", cause)
-	runner.emit(ctx, task, EvDeliveryCommitDiverged, map[string]any{
-		"result_commit": task.ResultCommit.String,
+	runner.recordEvidenceGap(ctx, record, "checks", "", cause)
+	runner.emit(ctx, record, EvDeliveryCommitDiverged, map[string]any{
+		"result_commit": record.ResultCommit.String,
 		"live_tip":      liveTip,
 	})
 }
@@ -482,16 +482,16 @@ func (runner *Runner) verifyResultCommitMatchesLiveTip(ctx context.Context, task
 // against"; a non-nil error means "the recorded value could not be read." The
 // caller must distinguish them, because only the second one is a gap in the
 // evidence.
-func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) (string, error) {
+func (runner *Runner) checksVerifiedCommit(ctx context.Context, record sqlc.Run) (string, error) {
 	if runner.mfst != nil {
-		return runner.mfst.ChecksCommit(ctx, task.TenantID, task.ID)
+		return runner.mfst.ChecksCommit(ctx, record.TenantID, record.ID)
 	}
-	checkpoint, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+	checkpoint, err := runner.store.LatestCheckpointForRun(ctx, sqlc.LatestCheckpointForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// A task that never recorded a checkpoint has nothing to compare
+			// A run that never recorded a checkpoint has nothing to compare
 			// against; that is an absence, not a read failure.
 			return "", nil
 		}
@@ -500,33 +500,33 @@ func (runner *Runner) checksVerifiedCommit(ctx context.Context, task sqlc.Task) 
 	return checkpoint.CommitSha, nil
 }
 
-// drive performs the shared setup (load task + project + pack, resolve the
+// drive performs the shared setup (load run + project + pack, resolve the
 // lineage anchor, reconcile any partially-modified worktree, create the
 // worktree off base_commit, record the base checkpoint) and enters the stage
-// loop. It registers a cancel for the task so the cancel handler can abort the
+// loop. It registers a cancel for the run so the cancel handler can abort the
 // run mid-stage; a child context carries that cancellation down to the adapter.
 func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
-	task, err := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: job.TaskID, TenantID: job.TenantID})
+	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
-		return fmt.Errorf("load task: %w", err)
+		return fmt.Errorf("load run: %w", err)
 	}
-	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: task.ProjectID, TenantID: task.TenantID})
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
 	if err != nil {
 		return fmt.Errorf("load project: %w", err)
 	}
-	taskPack, err := runner.packs.Resolve(ctx, task.PipelinePack)
+	runPack, err := runner.packs.Resolve(ctx, record.PipelinePack)
 	if err != nil {
-		return runner.failTask(ctx, task, fmt.Errorf("resolve pack %q: %w", task.PipelinePack, err))
+		return runner.failRun(ctx, record, fmt.Errorf("resolve pack %q: %w", record.PipelinePack, err))
 	}
 
 	// Resolve the execution target for EVERY stage up front: a tier no
 	// configuration defines, or an option the selected adapter does not declare,
 	// must fail the run before the first invocation — not four stages in, after
-	// source has been written. This is also the seam MVP task 13's RunSpec pins:
+	// source has been written. This is also the seam MVP run 13's RunSpec pins:
 	// one value, computed at run start.
-	executionPlan, planErr := runner.resolveExecutionPlan(taskPack)
+	executionPlan, planErr := runner.resolveExecutionPlan(runPack)
 	if planErr != nil {
-		return runner.failTask(ctx, task, planErr)
+		return runner.failRun(ctx, record, planErr)
 	}
 
 	// Pin the working copy this run executes in, once, exactly as base_commit
@@ -535,9 +535,9 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// re-registration from another clone); without the pin, the continuation
 	// would create a fresh worktree in the foreign copy off the same pinned
 	// base — silently, with the whole commit line left behind in the original.
-	task, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, task, project, taskPack)
+	record, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, record, project, runPack)
 	if checkoutErr != nil {
-		return runner.failTask(ctx, task, checkoutErr)
+		return runner.failRun(ctx, record, checkoutErr)
 	}
 	if paused {
 		// The pause is already applied and its evidence recorded; the job ends
@@ -547,12 +547,12 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
 	// from and what checkpoints diff against; recording it immutably before any
-	// work means a later move of base_ref cannot retcon the task's lineage.
-	task, err = runner.resolveBaseCommit(ctx, task, checkoutPath)
+	// work means a later move of base_ref cannot retcon the run's lineage.
+	record, err = runner.resolveBaseCommit(ctx, record, checkoutPath)
 	if err != nil {
-		return runner.failTask(ctx, task, err)
+		return runner.failRun(ctx, record, err)
 	}
-	baseCommit := task.BaseCommit.String
+	baseCommit := record.BaseCommit.String
 
 	// A repository that moved on disk carries its worktrees with it (they
 	// live inside the repo), but git links them with absolute paths, which
@@ -561,31 +561,31 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// attention. A worktree git cannot relink (its admin metadata was
 	// pruned by gc or by hand) is the same externally-fixable class as a
 	// missing copy: pause, keeping the recovery a failure would destroy.
-	if repairErr := runner.repairIfPresent(ctx, checkoutPath, task.ID); repairErr != nil {
-		if pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, checkoutPath,
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
+		if pauseErr := runner.pauseForUnavailableCheckout(ctx, record, runPack, checkoutPath,
 			fmt.Errorf("worktree cannot be relinked: %w", repairErr)); pauseErr != nil {
-			return runner.failTask(ctx, task, pauseErr)
+			return runner.failRun(ctx, record, pauseErr)
 		}
 		return nil
 	}
 
-	taskWorktree, err := runner.wt.Create(ctx, checkoutPath, task.ID, baseCommit)
+	runWorktree, err := runner.wt.Create(ctx, checkoutPath, record.ID, baseCommit)
 	if err != nil {
-		return runner.failTask(ctx, task, fmt.Errorf("create worktree: %w", err))
+		return runner.failRun(ctx, record, fmt.Errorf("create worktree: %w", err))
 	}
 
 	// Record the base as a checkpoint so a crash before the first stage completes
 	// still has a restore target. Idempotent: ON CONFLICT replaces the SHA.
-	runner.recordCheckpoint(ctx, task, "base", baseCommit)
+	runner.recordCheckpoint(ctx, record, "base", baseCommit)
 
 	// Reconcile before driving a side-effectful stage. A crashed worktree may be
 	// clean, safely resumable, restorable to the last checkpoint, or in a state
 	// that needs a human — never blindly replayed.
-	if err := runner.reconcileWorktree(ctx, task, checkoutPath, baseCommit, taskWorktree.Root); err != nil {
+	if err := runner.reconcileWorktree(ctx, record, checkoutPath, baseCommit, runWorktree.Root); err != nil {
 		return err
 	}
-	runner.emit(ctx, task, EvWorktreeCreated, map[string]any{
-		"base_commit": baseCommit, "branch": worktree.BranchFor(task.ID),
+	runner.emit(ctx, record, EvWorktreeCreated, map[string]any{
+		"base_commit": baseCommit, "branch": worktree.BranchFor(record.ID),
 	})
 
 	// Record the initial manifest evidence (input, project, pack, declared
@@ -593,46 +593,46 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// provenance root — a failure here fails the run, because every later
 	// piece of evidence chains off it and a silent gap at the root would
 	// orphan everything that follows.
-	if evidenceErr := runner.recordInitialEvidence(ctx, task, project, taskPack); evidenceErr != nil {
-		return runner.failTask(ctx, task, evidenceErr)
+	if evidenceErr := runner.recordInitialEvidence(ctx, record, project, runPack); evidenceErr != nil {
+		return runner.failRun(ctx, record, evidenceErr)
 	}
-	runner.recordGitEvidence(ctx, task)
+	runner.recordGitEvidence(ctx, record)
 
-	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, task, taskPack)
+	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, record, runPack)
 	if err != nil {
-		return runner.failTask(ctx, task, err)
+		return runner.failRun(ctx, record, err)
 	}
 	// A halt (budget exhausted / verdict unreadable on the advance path) is a
 	// controlled pause, not a failure: apply it and stop without entering the
-	// loop. This must not flow through err, which drive turns into failTask.
+	// loop. This must not flow through err, which drive turns into failRun.
 	if halt != nil {
-		return runner.applyPauseDecision(ctx, task, halt.decision, halt.stageID)
+		return runner.applyPauseDecision(ctx, record, halt.decision, halt.stageID)
 	}
 
-	// Register a cancel for this task so the cancel handler can abort the
+	// Register a cancel for this run so the cancel handler can abort the
 	// in-flight run. The child context propagates that cancellation to the
 	// adapter (the §5.1 seam).
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	runner.cancels.Register(job.TaskID, cancel)
-	defer runner.cancels.Unregister(job.TaskID)
+	runner.cancels.Register(job.RunID, cancel)
+	defer runner.cancels.Unregister(job.RunID)
 
-	run := stageRun{task: task, project: project, taskPack: taskPack, worktree: taskWorktree, executionPlan: executionPlan}
+	run := stageRun{record: record, project: project, runPack: runPack, worktree: runWorktree, executionPlan: executionPlan}
 	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):
 	// whether the pack declares an approval, whether the human has recorded it,
 	// and the revision id the decision is bound to. A durable Postgres read, not
 	// process state — a worker restart, a worktree restore, and a Restore to a
 	// checkpoint all leave it intact.
-	run.sourceWriteUnlock = runner.readSourceWriteUnlock(ctx, task, taskPack)
+	run.sourceWriteUnlock = runner.readSourceWriteUnlock(ctx, record, runPack)
 	// Prepare the project-context channel (ADR 0002): read .agentum.yaml from
 	// base_commit once, pin the declared + auto-injected instruction files,
 	// probe the runtime's skills, and resolve the check set for rendering. This
 	// runs after the worktree exists (project-local skills come from it) and
 	// before the first stage. A malformed config or an unresolvable check set
-	// fails the task; a pin or probe failure degrades evidence and the run
+	// fails the run; a pin or probe failure degrades evidence and the run
 	// proceeds with whatever context was pinnable.
 	if contextErr := runner.prepareProjectContext(ctx, &run, baseCommit); contextErr != nil {
-		return runner.failTask(ctx, run.task, contextErr)
+		return runner.failRun(ctx, run.record, contextErr)
 	}
 	// On resume / advance, sync the current artifact revisions back into the
 	// worktree so the agent starts from the same content the prior invocation
@@ -647,26 +647,26 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 // declares an option the adapter cannot take must not fail four stages into a
 // run that has already written source. The fallback tiers come from the
 // adapter's descriptor; the runner names no executor itself.
-func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]models.Selection, error) {
+func (runner *Runner) resolveExecutionPlan(runPack *pack.Pack) (map[string]models.Selection, error) {
 	descriptor := runner.adapter.Describe()
-	plan := make(map[string]models.Selection, len(taskPack.Stages))
+	plan := make(map[string]models.Selection, len(runPack.Stages))
 	// Sorted, not map order: when more than one stage is misconfigured the
 	// run must fail naming the same one every time, or the operator fixes a
 	// different error on each attempt.
-	stageIDs := make([]string, 0, len(taskPack.Stages))
-	for stageID := range taskPack.Stages {
+	stageIDs := make([]string, 0, len(runPack.Stages))
+	for stageID := range runPack.Stages {
 		stageIDs = append(stageIDs, stageID)
 	}
 	sort.Strings(stageIDs)
 	for _, stageID := range stageIDs {
-		stage := taskPack.Stages[stageID]
+		stage := runPack.Stages[stageID]
 		if stage.Terminal() {
 			// An engine marker, not an invocation: no selection to resolve.
 			continue
 		}
 		tier := stage.Tier
 		if tier == "" {
-			tier = taskPack.Tiers.Default
+			tier = runPack.Tiers.Default
 		}
 		selection, resolveErr := models.Resolve(runner.models, descriptor.DefaultTiers, tier)
 		if resolveErr != nil {
@@ -682,7 +682,7 @@ func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]mode
 
 // readSourceWriteUnlock reads the durable approval state for the run (ADR 0003
 // D3). Required is true when the pack declares a source_write approval; Granted
-// is true when the matching task_approvals row exists; ApprovedRevisionID
+// is true when the matching run_approvals row exists; ApprovedRevisionID
 // carries the revision id the decision is bound to (used to detect
 // plan_revision_drift before entering a source-writing stage). A pack with no
 // approvals block yields the zero value — the withholding never applies and
@@ -691,14 +691,14 @@ func (runner *Runner) resolveExecutionPlan(taskPack *pack.Pack) (map[string]mode
 // This is a Postgres read, not a manifest read: a security precondition must
 // not read from a store whose write path is allowed to fail quietly (manifest
 // AddEvidence failures are logged and turned into evidence gaps).
-func (runner *Runner) readSourceWriteUnlock(ctx context.Context, task sqlc.Task, taskPack *pack.Pack) approvalState {
-	approval, hasApproval := taskPack.SourceWriteApproval()
+func (runner *Runner) readSourceWriteUnlock(ctx context.Context, record sqlc.Run, runPack *pack.Pack) approvalState {
+	approval, hasApproval := runPack.SourceWriteApproval()
 	if !hasApproval {
 		return approvalState{}
 	}
 	state := approvalState{Required: true}
 	row, err := runner.store.GetApproval(ctx, sqlc.GetApprovalParams{
-		TenantID: task.TenantID, TaskID: task.ID, Name: approval.Name,
+		TenantID: record.TenantID, RunID: record.ID, Name: approval.Name,
 	})
 	if err != nil {
 		// sql.ErrNoRows means "not yet decided" — the row is absent, which is
@@ -706,7 +706,7 @@ func (runner *Runner) readSourceWriteUnlock(ctx context.Context, task sqlc.Task,
 		// is logged but fails closed (Granted stays false): the lock is the
 		// default, the approval is the exception.
 		if !errors.Is(err, sql.ErrNoRows) {
-			runner.log.Warn("read source_write approval", "task", task.ID, "name", approval.Name, "error", err)
+			runner.log.Warn("read source_write approval", "run", record.ID, "name", approval.Name, "error", err)
 		}
 		return state
 	}
@@ -719,33 +719,33 @@ func (runner *Runner) readSourceWriteUnlock(ctx context.Context, task sqlc.Task,
 	return state
 }
 
-// resolveBaseCommit resolves task.BaseRef to a full SHA exactly once and pins it
+// resolveBaseCommit resolves record.BaseRef to a full SHA exactly once and pins it
 // on the row. SetBaseCommit's `WHERE base_commit IS NULL` makes a concurrent
 // resolver a no-op; we re-read to pick up the canonical value either way. The
-// worktree branches from this SHA, so a missing/unknown ref fails the task
+// worktree branches from this SHA, so a missing/unknown ref fails the run
 // before any side effect rather than mid-stage.
-func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, repoPath string) (sqlc.Task, error) {
-	if task.BaseCommit.Valid && task.BaseCommit.String != "" {
-		return task, nil
+func (runner *Runner) resolveBaseCommit(ctx context.Context, record sqlc.Run, repoPath string) (sqlc.Run, error) {
+	if record.BaseCommit.Valid && record.BaseCommit.String != "" {
+		return record, nil
 	}
-	baseRef := task.BaseRef
+	baseRef := record.BaseRef
 	if baseRef == "" {
 		baseRef = "HEAD"
 	}
 	sha, err := runner.wt.ResolveRef(ctx, repoPath, baseRef)
 	if err != nil {
-		return task, fmt.Errorf("resolve base_ref %q: %w", baseRef, err)
+		return record, fmt.Errorf("resolve base_ref %q: %w", baseRef, err)
 	}
 	if _, err := runner.store.SetBaseCommit(ctx, sqlc.SetBaseCommitParams{
-		ID: task.ID, TenantID: task.TenantID, BaseCommit: nullStr(sha),
+		ID: record.ID, TenantID: record.TenantID, BaseCommit: nullStr(sha),
 	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		// sql.ErrNoRows is the lost-race answer: another writer pinned
 		// base_commit first, and the re-read below adopts their value.
-		return task, fmt.Errorf("persist base_commit: %w", err)
+		return record, fmt.Errorf("persist base_commit: %w", err)
 	}
-	// Re-read so the returned task carries the canonical base_commit (ours if we
+	// Re-read so the returned run carries the canonical base_commit (ours if we
 	// won the race, the other resolver's if we lost).
-	return runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	return runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
 }
 
 // resolveRunCheckout pins and verifies the working copy the run executes in.
@@ -764,32 +764,32 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, task sqlc.Task, rep
 // outside (restore the directory, re-register the project), and recreating the
 // worktree in some other copy is precisely the silent loss of a commit line
 // this whole sequence exists to prevent.
-func (runner *Runner) resolveRunCheckout(ctx context.Context, task sqlc.Task, project sqlc.Project, taskPack *pack.Pack) (sqlc.Task, string, bool, error) {
-	candidatePath := task.CheckoutPath
+func (runner *Runner) resolveRunCheckout(ctx context.Context, record sqlc.Run, project sqlc.Project, runPack *pack.Pack) (sqlc.Run, string, bool, error) {
+	candidatePath := record.CheckoutPath
 	if candidatePath == "" {
 		candidatePath = project.RepoPath
 	}
 	confirmedTopLevel, confirmErr := runner.confirmRunCheckout(ctx, candidatePath, project)
 	if confirmErr != nil {
-		pauseErr := runner.pauseForUnavailableCheckout(ctx, task, taskPack, candidatePath, confirmErr)
-		return task, candidatePath, pauseErr == nil, pauseErr
+		pauseErr := runner.pauseForUnavailableCheckout(ctx, record, runPack, candidatePath, confirmErr)
+		return record, candidatePath, pauseErr == nil, pauseErr
 	}
-	if task.CheckoutPath != "" {
+	if record.CheckoutPath != "" {
 		// The pinned copy is authoritative: verification proved it still
 		// holds the repository, and everything downstream (worktree, checks,
 		// evidence, teardown) must keep using exactly the recorded path.
-		return task, task.CheckoutPath, false, nil
+		return record, record.CheckoutPath, false, nil
 	}
 	pinned, pinErr := runner.store.SetCheckoutPath(ctx, sqlc.SetCheckoutPathParams{
-		ID: task.ID, TenantID: task.TenantID, CheckoutPath: confirmedTopLevel,
+		ID: record.ID, TenantID: record.TenantID, CheckoutPath: confirmedTopLevel,
 	})
 	if errors.Is(pinErr, sql.ErrNoRows) {
 		// Lost the pin race — another worker pinned this run's copy first;
 		// adopt their row rather than fail the run.
-		pinned, pinErr = runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+		pinned, pinErr = runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
 	}
 	if pinErr != nil {
-		return task, confirmedTopLevel, false, fmt.Errorf("persist checkout_path: %w", pinErr)
+		return record, confirmedTopLevel, false, fmt.Errorf("persist checkout_path: %w", pinErr)
 	}
 	return pinned, pinned.CheckoutPath, false, nil
 }
@@ -821,23 +821,23 @@ func (runner *Runner) confirmRunCheckout(ctx context.Context, path string, proje
 // pauseForUnavailableCheckout stops the run with stop_reason
 // checkout_unavailable, naming the path. EventStopUser (paused_user_stop) is
 // the retryable shape: the human lifts the condition and presses continue.
-// FailTask would be wrong twice over — the run has done nothing wrong, and a
+// FailRun would be wrong twice over — the run has done nothing wrong, and a
 // failed run loses the recovery path that a pause keeps.
-func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, task sqlc.Task, taskPack *pack.Pack, checkoutPath string, cause error) error {
+func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, record sqlc.Run, runPack *pack.Pack, checkoutPath string, cause error) error {
 	runner.log.Warn("run working copy unavailable",
-		"task", task.ID, "checkout_path", checkoutPath, "error", cause)
-	runner.emit(ctx, task, EvCheckoutUnavailable, map[string]any{
+		"run", record.ID, "checkout_path", checkoutPath, "error", cause)
+	runner.emit(ctx, record, EvCheckoutUnavailable, map[string]any{
 		"checkout_path": checkoutPath,
 		"reason":        cause.Error(),
 	})
-	return runner.applyPauseDecision(ctx, task, Decision{
+	return runner.applyPauseDecision(ctx, record, Decision{
 		Action:     ActionPause,
 		FSMEvent:   engine.EventStopUser,
 		StopReason: "checkout_unavailable",
-	}, currentStageOrFallback(task.CurrentStage, taskPack.Entry))
+	}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
 }
 
-// currentStageOrFallback is currentStageOr for the runner: the task's current
+// currentStageOrFallback is currentStageOr for the runner: the run's current
 // stage, or the pack entry for a run that never entered one. applyPauseDecision
 // pins current_stage to its stageID, so the fallback keeps the pause from
 // clearing the position a resumed run would restart from.
@@ -848,18 +848,18 @@ func currentStageOrFallback(stage sql.NullString, fallback string) string {
 	return fallback
 }
 
-// repairIfPresent relinks the per-task worktree when the repository moved on
+// repairIfPresent relinks the per-run worktree when the repository moved on
 // disk: a present directory with a dead link is exactly the state repair
 // exists for, and on a healthy worktree repair is a no-op — cheaper to always
 // call than to detect staleness. Every path that touches an existing
 // worktree (drive before Create/Reconcile, teardown and cleanup before
 // RemoveWorktree) goes through here, so a moved repository cannot leave a
 // worktree that is present but unreachable.
-func (runner *Runner) repairIfPresent(ctx context.Context, checkoutPath, taskID string) error {
-	if !worktree.DirPresent(worktree.PathFor(checkoutPath, taskID)) {
+func (runner *Runner) repairIfPresent(ctx context.Context, checkoutPath, runID string) error {
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, runID)) {
 		return nil
 	}
-	return runner.wt.Repair(ctx, checkoutPath, taskID)
+	return runner.wt.Repair(ctx, checkoutPath, runID)
 }
 
 // checkoutPathOf returns the working copy a run executes in: the checkout the
@@ -868,9 +868,9 @@ func (runner *Runner) repairIfPresent(ctx context.Context, checkoutPath, taskID 
 // path the runner acts on — worktree creation, checks, instruction pinning,
 // evidence, teardown — flows through here so the run's copy and the project's
 // current copy can never be confused for one another.
-func checkoutPathOf(task sqlc.Task, project sqlc.Project) string {
-	if task.CheckoutPath != "" {
-		return task.CheckoutPath
+func checkoutPathOf(record sqlc.Run, project sqlc.Project) string {
+	if record.CheckoutPath != "" {
+		return record.CheckoutPath
 	}
 	return project.RepoPath
 }
@@ -878,25 +878,25 @@ func checkoutPathOf(task sqlc.Task, project sqlc.Project) string {
 // reconcileWorktree enforces the F.6.1 "never blindly replay a side-effectful
 // stage" invariant. The worktree is classified; restorable trees are restored
 // to the last checkpoint (so the next stage starts from a known-good commit),
-// needs-attention trees fail the task rather than guessing, and clean/resumable
+// needs-attention trees fail the run rather than guessing, and clean/resumable
 // trees proceed as-is.
-func (runner *Runner) reconcileWorktree(ctx context.Context, task sqlc.Task, repoPath, baseCommit, wtRoot string) error {
+func (runner *Runner) reconcileWorktree(ctx context.Context, record sqlc.Run, repoPath, baseCommit, wtRoot string) error {
 	lastCheckpoint := ""
-	if cp, err := runner.store.LatestCheckpointForTask(ctx, sqlc.LatestCheckpointForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+	if cp, err := runner.store.LatestCheckpointForRun(ctx, sqlc.LatestCheckpointForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
 	}); err == nil {
 		lastCheckpoint = cp.CommitSha
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		runner.log.Warn("load last checkpoint for reconcile", "task", task.ID, "error", err)
+		runner.log.Warn("load last checkpoint for reconcile", "run", record.ID, "error", err)
 	}
 
-	state, err := runner.wt.Reconcile(ctx, repoPath, task.ID, baseCommit, lastCheckpoint)
+	state, err := runner.wt.Reconcile(ctx, repoPath, record.ID, baseCommit, lastCheckpoint)
 	if err != nil {
-		return runner.failTask(ctx, task, fmt.Errorf("reconcile worktree: %w", err))
+		return runner.failRun(ctx, record, fmt.Errorf("reconcile worktree: %w", err))
 	}
 	switch state.Class {
 	case worktree.ClassClean, worktree.ClassResumable:
-		runner.emit(ctx, task, EvWorktreeReconciled, map[string]any{
+		runner.emit(ctx, record, EvWorktreeReconciled, map[string]any{
 			"class": state.Class.String(), "head": state.HeadCommit,
 		})
 		return nil
@@ -904,14 +904,14 @@ func (runner *Runner) reconcileWorktree(ctx context.Context, task sqlc.Task, rep
 		// Restore to the checkpoint before the stage runs — uncommitted work from
 		// a crashed run must not bleed into the retry.
 		if err := runner.wt.Restore(ctx, wtRoot, state.CheckpointCommit); err != nil {
-			return runner.failTask(ctx, task, fmt.Errorf("restore worktree to checkpoint: %w", err))
+			return runner.failRun(ctx, record, fmt.Errorf("restore worktree to checkpoint: %w", err))
 		}
-		runner.emit(ctx, task, EvWorktreeReconciled, map[string]any{
+		runner.emit(ctx, record, EvWorktreeReconciled, map[string]any{
 			"class": state.Class.String(), "restored_to": state.CheckpointCommit,
 		})
 		return nil
 	default:
-		return runner.failTask(ctx, task, fmt.Errorf("worktree needs human attention (class=%s)", state.Class))
+		return runner.failRun(ctx, record, fmt.Errorf("worktree needs human attention (class=%s)", state.Class))
 	}
 }
 
@@ -919,21 +919,21 @@ func (runner *Runner) reconcileWorktree(ctx context.Context, task sqlc.Task, rep
 // label — a retry after a crash that re-crosses the same boundary upserts
 // rather than duplicates. Best-effort: a checkpoint write failure is logged,
 // not fatal (the lineage and result_commit are independent of checkpoints).
-func (runner *Runner) recordCheckpoint(ctx context.Context, task sqlc.Task, label, commit string) {
+func (runner *Runner) recordCheckpoint(ctx context.Context, record sqlc.Run, label, commit string) {
 	if commit == "" {
 		return
 	}
 	if _, err := runner.store.CreateCheckpoint(ctx, sqlc.CreateCheckpointParams{
-		TenantID: task.TenantID, UserID: task.UserID, TaskID: task.ID,
+		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
 		Label: label, CommitSha: commit,
 	}); err != nil {
-		runner.log.Warn("record checkpoint", "task", task.ID, "label", label, "error", err)
+		runner.log.Warn("record checkpoint", "run", record.ID, "label", label, "error", err)
 		return
 	}
-	runner.emit(ctx, task, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
+	runner.emit(ctx, record, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
 }
 
-// recordStageCheckpoint commits the worktree's working state on the task branch
+// recordStageCheckpoint commits the worktree's working state on the run branch
 // and records the resulting SHA as a post-stage boundary checkpoint. The label
 // is `post-<stage>`. The orchestrator authors the commit itself (the
 // git.delivery privilege no agent role carries): without this, a checkpoint
@@ -949,19 +949,19 @@ func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, s
 	message := fmt.Sprintf("agentum: checkpoint after stage %s", stageID)
 	head, _, err := runner.wt.Commit(ctx, run.worktree.Root, message)
 	if err != nil {
-		runner.log.Warn("commit stage checkpoint", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("commit stage checkpoint", "run", run.record.ID, "stage", stageID, "error", err)
 		return
 	}
-	runner.recordCheckpoint(ctx, run.task, "post-"+stageID, head)
+	runner.recordCheckpoint(ctx, run.record, "post-"+stageID, head)
 }
 
-// stageRun bundles the per-task state the loop and adapter invocation share.
+// stageRun bundles the per-run state the loop and adapter invocation share.
 // Loading it once in drive() keeps runLoop/invokeStage signatures under the
 // parameter-count lint bound and makes the per-stage data flow explicit.
 type stageRun struct {
-	task     sqlc.Task
+	record   sqlc.Run
 	project  sqlc.Project
-	taskPack *pack.Pack
+	runPack  *pack.Pack
 	worktree *worktree.Worktree
 
 	// executionPlan is the per-stage resolved model selection, computed once at
@@ -986,7 +986,7 @@ type stageRun struct {
 	resolvedChecks []routing.CheckRef
 	// sourceWriteUnlock records whether the run's source_write approval is in
 	// place (ADR 0003 D3). Read ONCE in drive() from the pack's approval
-	// declaration plus the durable task_approvals row, so a worker restart, a
+	// declaration plus the durable run_approvals row, so a worker restart, a
 	// worktree restore, and a Restore to a checkpoint all leave the decision
 	// intact. While Required && !Granted, computeProfile withholds
 	// caps.SourceWriteCategories for every stage and processStage refuses entry
@@ -1001,7 +1001,7 @@ type stageRun struct {
 
 // approvalState is the durable read of whether a pack-declared approval has
 // been recorded for this run (ADR 0003 D3). Required is true when the pack
-// declares a source_write approval; Granted is true when the task_approvals
+// declares a source_write approval; Granted is true when the run_approvals
 // row exists; ApprovedRevisionID is the artifact revision id the human bound
 // their decision to, used to detect plan_revision_drift.
 type approvalState struct {
@@ -1011,7 +1011,7 @@ type approvalState struct {
 }
 
 // haltDecision carries a pause Decision out of entryPoint without surfacing it
-// as an error. drive turns any entryPoint error into failTask; a budget halt or
+// as an error. drive turns any entryPoint error into failRun; a budget halt or
 // a verdict_unreadable halt is a controlled pause, not a failure, so it must
 // travel a separate channel. When entryPoint returns a non-nil halt, drive
 // applies it via applyPauseDecision and returns without entering the loop.
@@ -1024,33 +1024,33 @@ type haltDecision struct {
 // The returned halt is non-nil only for the advance job when the resolved
 // transition halts (fix_budget_exhausted / verdict_unreadable) — those are
 // controlled pauses, not errors, so they must not flow through err (which drive
-// turns into failTask).
-func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Task, taskPack *pack.Pack) (stage, resume string, halt *haltDecision, err error) {
+// turns into failRun).
+func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.Run, runPack *pack.Pack) (stage, resume string, halt *haltDecision, err error) {
 	switch job.Kind {
 	case "run":
 		// A fresh run starts at the pack entry, unless a previous attempt set
 		// current_stage before a crash — resume there.
-		if task.CurrentStage.Valid {
-			return task.CurrentStage.String, "", nil, nil
+		if record.CurrentStage.Valid {
+			return record.CurrentStage.String, "", nil, nil
 		}
-		return taskPack.Entry, "", nil, nil
+		return runPack.Entry, "", nil, nil
 	case "continue":
 		// Resume the current stage from its captured session id (non-destructive).
-		latest, latestErr := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
-			TaskID: task.ID, TenantID: task.TenantID,
+		latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
+			RunID: record.ID, TenantID: record.TenantID,
 		})
 		if latestErr != nil {
 			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
 		}
-		return task.CurrentStage.String, latest.SessionID.String, nil, nil
+		return record.CurrentStage.String, latest.SessionID.String, nil, nil
 	case "advance":
 		// Past the gate: resolve the current stage's transition through the SAME
 		// resolver the loop path uses (D3: one resolver, not two). A halt
 		// (budget exhausted / verdict unreadable) returns a pause Decision via
 		// halt rather than err, so drive applies a controlled pause instead of
-		// failing the task.
-		currentStageID := task.CurrentStage.String
-		currentStage, ok := taskPack.Stages[currentStageID]
+		// failing the record.
+		currentStageID := record.CurrentStage.String
+		currentStage, ok := runPack.Stages[currentStageID]
 		if !ok {
 			return "", "", nil, fmt.Errorf("advance: current stage %q not in pack", currentStageID)
 		}
@@ -1060,8 +1060,8 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 		// On the advance path the prior stage already produced its result; read
 		// the status from the latest invocation's stored result so the condition
 		// matches on what the stage actually reported.
-		latestResult := runner.latestStoredResult(ctx, task)
-		transitionContext, transitionErr := runner.buildTransitionContext(ctx, task, taskPack, currentStageID, latestResult)
+		latestResult := runner.latestStoredResult(ctx, record)
+		transitionContext, transitionErr := runner.buildTransitionContext(ctx, record, runPack, currentStageID, latestResult)
 		if transitionErr != nil {
 			return "", "", nil, fmt.Errorf("advance: build transition context: %w", transitionErr)
 		}
@@ -1076,7 +1076,7 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 			}
 			// Emit the transition resolution (even though no stage starts) so
 			// the would-be branch is auditable.
-			runner.emitStageTransition(ctx, task, verdictPayload{
+			runner.emitStageTransition(ctx, record, verdictPayload{
 				From: currentStageID, Condition: resolution.Condition,
 				Cycle: resolution.Cycle, Verdict: resolution.Verdict,
 			})
@@ -1086,19 +1086,19 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 		// (the pure resolver leaves it zero; see processStage's ActionAdvance
 		// branch for why). Using nextCycleForStage keeps the record and the
 		// invocation row in agreement.
-		targetCycle, cycleErr := runner.nextCycleForStage(ctx, task, resolution.To, nil)
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, record, resolution.To, nil)
 		if cycleErr != nil {
 			return "", "", nil, fmt.Errorf("advance: resolve target cycle for stage %q: %w", resolution.To, cycleErr)
 		}
 		resolution.Cycle = int(targetCycle)
-		runner.emitStageTransition(ctx, task, verdictPayload{
+		runner.emitStageTransition(ctx, record, verdictPayload{
 			From: currentStageID, To: resolution.To,
 			Condition: resolution.Condition, Cycle: resolution.Cycle, Verdict: resolution.Verdict,
 		})
 		// Record the taken branch (the same record processStage writes on the
 		// loop path), so an advance-job resolution is auditable from the sealed
 		// manifest too (D7).
-		runner.recordTransitionEvidence(ctx, task, manifest.TransitionRecord{
+		runner.recordTransitionEvidence(ctx, record, manifest.TransitionRecord{
 			From: currentStageID, To: resolution.To,
 			Condition: resolution.Condition, Cycle: resolution.Cycle,
 			Verdict: resolution.Verdict, At: time.Now().UTC(),
@@ -1109,21 +1109,21 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, task sqlc.Ta
 		// advance handler wrote. human gates do not record one here — there the
 		// human's decision is the whole record.
 		if currentStage.Gate == pack.GateAutoOnApproval {
-			runner.recordSystemGateDecision(ctx, task, currentStageID, string(currentStage.Gate))
+			runner.recordSystemGateDecision(ctx, record, currentStageID, string(currentStage.Gate))
 		}
 		return resolution.To, "", nil, nil
 	}
 	return "", "", nil, fmt.Errorf("entryPoint: unsupported kind %q", job.Kind)
 }
 
-// latestStoredResult reads the parsed result.json off the task's most recent
+// latestStoredResult reads the parsed result.json off the run's most recent
 // stage invocation, so the advance path can match transition conditions on the
 // status the prior stage actually reported. Returns nil when there is no stored
 // result (the condition will treat status as empty, which is correct for a
 // verdict-only stage).
-func (runner *Runner) latestStoredResult(ctx context.Context, task sqlc.Task) *agent.ResultJSON {
-	latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+func (runner *Runner) latestStoredResult(ctx context.Context, record sqlc.Run) *agent.ResultJSON {
+	latest, err := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
 	})
 	if err != nil {
 		return nil
@@ -1217,7 +1217,7 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 	if role != "implementer" && role != "fixer" {
 		return nil
 	}
-	approval, hasApproval := run.taskPack.SourceWriteApproval()
+	approval, hasApproval := run.runPack.SourceWriteApproval()
 	if !hasApproval {
 		// Unreachable in practice: sourceWriteUnlock.Required is derived from
 		// this same pack's declaration. If it ever diverges, do not halt —
@@ -1273,13 +1273,13 @@ func (runner *Runner) detectPlanRevisionDrift(ctx context.Context, run stageRun)
 	if approved == "" {
 		return false
 	}
-	approval, hasApproval := run.taskPack.SourceWriteApproval()
+	approval, hasApproval := run.runPack.SourceWriteApproval()
 	if !hasApproval {
 		return false
 	}
 	revisionName := approval.Stage + "/" + approval.Artifact
 	current, err := runner.store.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: run.task.ID, TenantID: run.task.TenantID, Name: revisionName,
+		RunID: run.record.ID, TenantID: run.record.TenantID, Name: revisionName,
 	})
 	if err != nil {
 		// No current revision (sql.ErrNoRows) or a read failure — both mean we
@@ -1301,14 +1301,14 @@ func (runner *Runner) approvedPlanRef(ctx context.Context, run stageRun, approva
 	}
 	revisionName := approval.Stage + "/" + approval.Artifact
 	current, err := runner.store.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: run.task.ID, TenantID: run.task.TenantID, Name: revisionName,
+		RunID: run.record.ID, TenantID: run.record.TenantID, Name: revisionName,
 	})
 	if err != nil {
 		return nil
 	}
 	return &routing.PlanRef{
 		Stage:       approval.Stage,
-		Path:        filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, approval.Stage), approval.Artifact),
+		Path:        filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, approval.Stage), approval.Artifact),
 		RevisionID:  current.ID,
 		ContentHash: current.ContentHash,
 	}
@@ -1321,7 +1321,7 @@ func (runner *Runner) approvedPlanRef(ctx context.Context, run stageRun, approva
 // walk) so it survives a worktree Restore and a worker restart. The current
 // stage is excluded — it has no "prior" self.
 func (runner *Runner) priorStageRefs(ctx context.Context, run stageRun, currentStage string) []routing.PriorStage {
-	revisions, err := runner.currentRevisionList(ctx, run.task.TenantID, run.task.ID)
+	revisions, err := runner.currentRevisionList(ctx, run.record.TenantID, run.record.ID)
 	if err != nil || len(revisions) == 0 {
 		return nil
 	}
@@ -1338,7 +1338,7 @@ func (runner *Runner) priorStageRefs(ctx context.Context, run stageRun, currentS
 		seen[stage] = true
 		refs = append(refs, routing.PriorStage{
 			Stage: stage,
-			Path:  filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stage), "result.json"),
+			Path:  filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, stage), "result.json"),
 		})
 	}
 	return refs
@@ -1351,37 +1351,37 @@ func (runner *Runner) priorStageRefs(ctx context.Context, run stageRun, currentS
 // hand-off without re-reading the artifact. The caller owns loop control
 // (continue / stop) via stageOutcome.
 func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string, transitionIn stageTransition) (stageOutcome, error) {
-	stage, ok := run.taskPack.Stages[stageID]
+	stage, ok := run.runPack.Stages[stageID]
 	if !ok {
-		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("pack stage %q not found", stageID))
+		return stageOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("pack stage %q not found", stageID))
 	}
 
 	// A terminal stage (no transitions) is an engine marker, not an agent
 	// invocation: reaching it means the pipeline is complete. Enforce the
 	// orchestrator-owned project checks first (against the last post-stage
 	// checkpoint, i.e. the worktree HEAD), then fire the final gate. A mandatory
-	// check failure blocks delivery: the task fails rather than reaching the
+	// check failure blocks delivery: the run fails rather than reaching the
 	// review gate, and the check evidence in the manifest is the record.
 	if stage.Terminal() {
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		if err := runner.reachTerminalStage(ctx, run.task, checkoutPathOf(run.task, run.project), stageID); err != nil {
+		if err := runner.reachTerminalStage(ctx, run.record, checkoutPathOf(run.record, run.project), stageID); err != nil {
 			return stageOutcome{}, err
 		}
 		return stageOutcome{done: true}, nil
 	}
 
-	// Record current position; the task stays running through auto-advances.
-	updatedTask, err := runner.store.UpdateTaskStage(ctx, sqlc.UpdateTaskStageParams{
-		ID: run.task.ID, TenantID: run.task.TenantID,
+	// Record current position; the run stays running through auto-advances.
+	updatedRecord, err := runner.store.UpdateRunStage(ctx, sqlc.UpdateRunStageParams{
+		ID: run.record.ID, TenantID: run.record.TenantID,
 		CurrentStage: nullStr(stageID), State: string(engine.StateRunning),
 	})
 	if err != nil {
 		return stageOutcome{}, fmt.Errorf("update current_stage: %w", err)
 	}
-	run.task = updatedTask
-	runner.emit(ctx, run.task, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
+	run.record = updatedRecord
+	runner.emit(ctx, run.record, EvStageStarted, map[string]any{"stage": stageID, "gate": string(stage.Gate)})
 
 	// ADR 0003 D3 layer 2 — entry refusal. The capability withholding (layer 1)
 	// makes a pre-approval implementer refuse every write at the runtime layer,
@@ -1396,7 +1396,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// halt.stageID is the APPROVAL stage (the rewind target), not the
 		// refused stage — see refuseSourceWriteBeforeApproval for why the pause
 		// must sit there for advance to resolve the right transition.
-		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, halt.decision, halt.stageID)
+		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, halt.decision, halt.stageID)
 	}
 
 	// ADR 0002 D4 layer 2: restore any instruction files the worktree drifted
@@ -1404,10 +1404,10 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// bash; this hash check is what catches a bash-side rewrite. Runs strictly
 	// before invokeStage, never between the isClean sample and the checkpoint
 	// commit (the load-bearing ordering preserved below). A restore IO error
-	// fails the task — we cannot stand behind a run whose reviewer might be
+	// fails the run — we cannot stand behind a run whose reviewer might be
 	// reading rewritten rules.
 	if restoreErr := runner.restoreInstructions(ctx, run, stageID); restoreErr != nil {
-		return stageOutcome{}, runner.failTask(ctx, run.task, restoreErr)
+		return stageOutcome{}, runner.failRun(ctx, run.record, restoreErr)
 	}
 
 	// ADR 0003 D5: produce the orchestrator-owned diff for reviewer-role
@@ -1443,20 +1443,20 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// permanently false); git add -A would also sweep those undeclared files into
 	// the delivery commit. Sampling before preserves the signal the gate exists
 	// to send.
-	cleanBeforeCommit := runner.isClean(checkoutPathOf(run.task, run.project), run.task.ID)
+	cleanBeforeCommit := runner.isClean(checkoutPathOf(run.record, run.project), run.record.ID)
 	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
 		runner.recordStageCheckpoint(ctx, run, stageID)
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
 		// the manifest service is nil in unit tests.
-		runner.recordGitEvidence(ctx, run.task)
+		runner.recordGitEvidence(ctx, run.record)
 	}
 
 	// Build the transition context (verdict, status, fix-cycle counter, budget)
 	// before Evaluate so the gate logic and the branch logic share one pure
 	// function. A build failure halts the run rather than guessing a route.
-	transitionContext, transitionErr := runner.buildTransitionContext(ctx, run.task, run.taskPack, stageID, outcome.result)
+	transitionContext, transitionErr := runner.buildTransitionContext(ctx, run.record, run.runPack, stageID, outcome.result)
 	if transitionErr != nil {
-		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("build transition context for stage %q: %w", stageID, transitionErr))
+		return stageOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("build transition context for stage %q: %w", stageID, transitionErr))
 	}
 
 	decision, err := Evaluate(StageInput{
@@ -1470,7 +1470,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		ArtifactRejected: outcome.rejected,
 	})
 	if err != nil {
-		return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("evaluate stage %q: %w", stageID, err))
+		return stageOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("evaluate stage %q: %w", stageID, err))
 	}
 
 	switch decision.Action {
@@ -1481,23 +1481,23 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// wrong for a non-fixer back-edge and for multi-fixer packs). Compute it
 		// here via nextCycleForStage — the SAME function that assigns the
 		// invocation row's cycle — so the record and the row can never disagree.
-		targetCycle, cycleErr := runner.nextCycleForStage(ctx, run.task, decision.Transition.To, nil)
+		targetCycle, cycleErr := runner.nextCycleForStage(ctx, run.record, decision.Transition.To, nil)
 		if cycleErr != nil {
-			return stageOutcome{}, runner.failTask(ctx, run.task, fmt.Errorf("resolve target cycle for stage %q: %w", decision.Transition.To, cycleErr))
+			return stageOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("resolve target cycle for stage %q: %w", decision.Transition.To, cycleErr))
 		}
 		decision.Transition.Cycle = int(targetCycle)
 		// Emit the transition resolution so the branch is auditable even when
 		// the next stage never starts. The cycle carried on the Resolution is
 		// the prospective cycle for the next invocation; from is the stage that
 		// just ran.
-		runner.emitStageTransition(ctx, run.task, verdictPayload{
+		runner.emitStageTransition(ctx, run.record, verdictPayload{
 			From: stageID, To: decision.Transition.To,
 			Condition: decision.Transition.Condition,
 			Cycle:     decision.Transition.Cycle, Verdict: decision.Transition.Verdict,
 		})
 		// Record the taken branch in the manifest's transitions section so the
 		// review ⇄ fix loop is auditable from the sealed manifest (D7).
-		runner.recordTransitionEvidence(ctx, run.task, manifest.TransitionRecord{
+		runner.recordTransitionEvidence(ctx, run.record, manifest.TransitionRecord{
 			From: stageID, To: decision.Transition.To,
 			Condition: decision.Transition.Condition, Cycle: decision.Transition.Cycle,
 			Verdict: decision.Transition.Verdict, At: time.Now().UTC(),
@@ -1508,7 +1508,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// stopped the work and did not is a decision; leaving it unrecorded is
 		// what made all-automatic runs read as incomplete evidence.
 		if stage.Gate == pack.GateAutoIfClean {
-			runner.recordSystemGateDecision(ctx, run.task, stageID, string(stage.Gate))
+			runner.recordSystemGateDecision(ctx, run.record, stageID, string(stage.Gate))
 		}
 		// Carry the resolved edge to the next iteration so invokeStage can hand
 		// the fixer the predecessor's findings (commit 7) and commit 8 can
@@ -1521,12 +1521,12 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// path and finding count come from the transition context we built
 		// above; carry them so the fixer's routing block points at the findings.
 		if decision.Transition.Verdict != "" {
-			next.verdictPath = filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID), agent.VerdictFileName)
+			next.verdictPath = filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, stageID), agent.VerdictFileName)
 			next.findingsCount = transitionContext.FindingsCount
 		}
 		return stageOutcome{nextStage: decision.NextStage, transition: next}, nil
 	case ActionPause:
-		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.task, decision, stageID)
+		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, decision, stageID)
 	case ActionFinal:
 		// Defensive double-enforcement: eval only returns ActionFinal for a
 		// terminal stage, and terminal stages short-circuit to the branch above
@@ -1535,39 +1535,39 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
-		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.task, checkoutPathOf(run.task, run.project), stageID)
+		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.record, checkoutPathOf(run.record, run.project), stageID)
 	}
 	return stageOutcome{}, fmt.Errorf("runner: unknown decision action %d", decision.Action)
 }
 
 // reachTerminalStage pins current_stage on a terminal (no-transitions) stage,
 // then fires the final gate.
-func (runner *Runner) reachTerminalStage(ctx context.Context, task sqlc.Task, repoPath, stageID string) error {
-	updatedTask, err := runner.store.UpdateTaskStage(ctx, sqlc.UpdateTaskStageParams{
-		ID: task.ID, TenantID: task.TenantID,
+func (runner *Runner) reachTerminalStage(ctx context.Context, record sqlc.Run, repoPath, stageID string) error {
+	updatedRecord, err := runner.store.UpdateRunStage(ctx, sqlc.UpdateRunStageParams{
+		ID: record.ID, TenantID: record.TenantID,
 		CurrentStage: nullStr(stageID), State: string(engine.StateRunning),
 	})
 	if err != nil {
 		return fmt.Errorf("update current_stage (terminal): %w", err)
 	}
-	return runner.transitionToFinalState(ctx, updatedTask, repoPath, stageID)
+	return runner.transitionToFinalState(ctx, updatedRecord, repoPath, stageID)
 }
 
 // applyPauseDecision records the pause: pin current_stage, advance the FSM to
 // the paused state named by the decision's event, emit, and stop the loop.
-func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, decision Decision, stageID string) error {
-	newState, fsmErr := engine.Next(engine.TaskState(task.State), decision.FSMEvent)
+func (runner *Runner) applyPauseDecision(ctx context.Context, record sqlc.Run, decision Decision, stageID string) error {
+	newState, fsmErr := engine.Next(engine.RunState(record.State), decision.FSMEvent)
 	if fsmErr != nil {
-		return runner.failTask(ctx, task, fmt.Errorf("fsm %s --%s-->: %w", task.State, decision.FSMEvent, fsmErr))
+		return runner.failRun(ctx, record, fmt.Errorf("fsm %s --%s-->: %w", record.State, decision.FSMEvent, fsmErr))
 	}
-	if _, err := runner.store.UpdateTaskStage(ctx, sqlc.UpdateTaskStageParams{
-		ID: task.ID, TenantID: task.TenantID,
+	if _, err := runner.store.UpdateRunStage(ctx, sqlc.UpdateRunStageParams{
+		ID: record.ID, TenantID: record.TenantID,
 		CurrentStage: nullStr(stageID), State: string(newState),
 	}); err != nil {
 		return fmt.Errorf("persist pause: %w", err)
 	}
-	runner.emit(ctx, task, EvRunStateChanged, map[string]any{
-		"from": task.State, "to": string(newState), "stop_reason": decision.StopReason, "stage": stageID,
+	runner.emit(ctx, record, EvRunStateChanged, map[string]any{
+		"from": record.State, "to": string(newState), "stop_reason": decision.StopReason, "stage": stageID,
 	})
 	// Record EVERY pause in the manifest's stops section (D7, deliberately
 	// widened beyond budget/verdict): budget exhaustion, verdict_unreadable,
@@ -1575,7 +1575,7 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 	// collapses repeats. The cycle is the prospective fix-cycle count at the
 	// stop point when the resolver populated it (budget/verdict halts); 0 for
 	// the non-branching pauses.
-	runner.recordStopEvidence(ctx, task, manifest.StopRecord{
+	runner.recordStopEvidence(ctx, record, manifest.StopRecord{
 		Stage: stageID, Reason: decision.StopReason,
 		Cycle: decision.Transition.Cycle, At: time.Now().UTC(),
 	})
@@ -1592,18 +1592,18 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, task sqlc.Task, de
 // commit recorded is the branch tip at the gate — which is the checkpoint the
 // delivery checks verified. recordResultCommit is a no-op when result_commit
 // is already set, so a re-entry does not overwrite.
-func (runner *Runner) transitionToFinalState(ctx context.Context, task sqlc.Task, repoPath, stageID string) error {
-	runner.recordResultCommit(ctx, task, repoPath)
-	newState, fsmErr := engine.Next(engine.TaskState(task.State), engine.EventReachFinalGate)
+func (runner *Runner) transitionToFinalState(ctx context.Context, record sqlc.Run, repoPath, stageID string) error {
+	runner.recordResultCommit(ctx, record, repoPath)
+	newState, fsmErr := engine.Next(engine.RunState(record.State), engine.EventReachFinalGate)
 	if fsmErr != nil {
-		return runner.failTask(ctx, task, fmt.Errorf("fsm reach_final_gate: %w", fsmErr))
+		return runner.failRun(ctx, record, fmt.Errorf("fsm reach_final_gate: %w", fsmErr))
 	}
-	if _, err := runner.store.UpdateTaskState(ctx, sqlc.UpdateTaskStateParams{
-		ID: task.ID, TenantID: task.TenantID, State: string(newState),
+	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
+		ID: record.ID, TenantID: record.TenantID, State: string(newState),
 	}); err != nil {
 		return fmt.Errorf("persist final: %w", err)
 	}
-	runner.emit(ctx, task, EvRunStateChanged, map[string]any{"from": task.State, "to": string(newState), "stage": stageID})
+	runner.emit(ctx, record, EvRunStateChanged, map[string]any{"from": record.State, "to": string(newState), "stage": stageID})
 	return nil
 }
 
@@ -1634,7 +1634,7 @@ type invocationOutcome struct {
 // The CLOSE half — telemetry and stop reason — lands on every terminal path
 // after the drain.
 func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
-	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
+	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.record.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		runner.log.Error("create artifact dir", "dir", artifactDir, "error", err)
 		return invocationOutcome{adapterErr: true}
@@ -1650,7 +1650,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	selection, planned := run.executionPlan[stageID]
 	if !planned {
 		runner.log.Error("stage missing from the execution plan",
-			"task", run.task.ID, "stage", stageID)
+			"run", run.record.ID, "stage", stageID)
 		return invocationOutcome{adapterErr: true}
 	}
 
@@ -1667,7 +1667,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		withheld = caps.SourceWriteCategories
 		withheldReason = "plan approval not recorded"
 	}
-	profile := runner.computeProfile(run.taskPack, stageID, stage, runner.adapter.Supported(),
+	profile := runner.computeProfile(run.runPack, stageID, stage, runner.adapter.Supported(),
 		runner.hardTimeout, runner.idleTimeout, withheld, withheldReason)
 	profileBytes := marshalProfile(profile)
 
@@ -1675,16 +1675,16 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// via parsed conditions, never substring-scanned). ReviewFindings is set when
 	// the stage was entered through a verdict-conditioned transition, so the
 	// fixer is pointed at the predecessor's findings artifact rather than a log.
-	// Both render nothing when unset. Title/Description carry the task request
+	// Both render nothing when unset. Title/Description carry the run request
 	// into the block's first section — the ONLY delivery path from
 	// tasks.title/description to any agent prompt. There is deliberately no
 	// Overrides on this literal: the overrides are orchestrator-only, and the
 	// resolved Checks below already render the effective set.
 	routingBlock := routing.Block{
-		TaskID: run.task.ID, ProjectName: run.project.Name, Stage: stageID,
+		RunID: run.record.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
-		Title:        run.task.Title,
-		Description:  run.task.Description,
+		Title:        run.record.Title,
+		Description:  run.record.Description,
 		Capabilities: profileTokens(profile),
 		Checks:       run.resolvedChecks,
 	}
@@ -1697,7 +1697,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// the approval, pointing at the approved revision. PriorStages lists every
 	// prior stage that produced a result.json, read from the durable revision
 	// list so it survives a worktree Restore and a worker restart.
-	if approval, hasApproval := run.taskPack.SourceWriteApproval(); hasApproval {
+	if approval, hasApproval := run.runPack.SourceWriteApproval(); hasApproval {
 		if approval.Stage == stageID {
 			routingBlock.PlanPath = filepath.Join(artifactDir, approval.Artifact)
 		}
@@ -1718,7 +1718,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 	block := routing.Render(routingBlock)
 
-	// Next sequence number + resume_of for this task. resume_of is set ONLY when
+	// Next sequence number + resume_of for this record. resume_of is set ONLY when
 	// this invocation resumes a captured session (resumeSession != ""); setting
 	// it for every invocation made the resume chain a lie — it pointed at the
 	// previous invocation even for a fresh entry, blocking "was this a retry or
@@ -1727,7 +1727,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	var seq int32 = 1
 	var resumeOf sql.NullString
 	var resumed *sqlc.StageInvocation
-	if latest, err := runner.store.LatestStageForTask(ctx, sqlc.LatestStageForTaskParams{TaskID: run.task.ID, TenantID: run.task.TenantID}); err == nil {
+	if latest, err := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{RunID: run.record.ID, TenantID: run.record.TenantID}); err == nil {
 		seq = latest.Sequence + 1
 		if resumeSession != "" {
 			resumeOf = nullStr(latest.ID)
@@ -1735,20 +1735,20 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		}
 	}
 
-	cycle, err := runner.nextCycleForStage(ctx, run.task, stageID, resumed)
+	cycle, err := runner.nextCycleForStage(ctx, run.record, stageID, resumed)
 	if err != nil {
-		runner.log.Error("compute cycle for stage", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Error("compute cycle for stage", "run", run.record.ID, "stage", stageID, "error", err)
 		return invocationOutcome{adapterErr: true}
 	}
 
 	invocation, err := runner.store.CreateStageInvocation(ctx, sqlc.CreateStageInvocationParams{
-		TenantID: run.task.TenantID, UserID: run.task.UserID, TaskID: run.task.ID,
+		TenantID: run.record.TenantID, UserID: run.record.UserID, RunID: run.record.ID,
 		Stage: stageID, Sequence: seq, ResumeOf: resumeOf,
 		CapabilityProfile: toNullRaw(profileBytes),
 		Cycle:             cycle,
 	})
 	if err != nil {
-		runner.log.Error("create stage invocation", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Error("create stage invocation", "run", run.record.ID, "stage", stageID, "error", err)
 		return invocationOutcome{adapterErr: true}
 	}
 
@@ -1764,7 +1764,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// Record the effective profile as audit evidence before the run starts. A
 	// denied capability is as much a part of the record as a granted one: this
 	// is what makes "the invocation was deny-by-default" reconstructible later.
-	runner.emit(ctx, run.task, EvCapabilityEnforced, map[string]any{
+	runner.emit(ctx, run.record, EvCapabilityEnforced, map[string]any{
 		"stage": stageID, "invocation": invocation.ID,
 		"role": string(profile.Source.Role), "profile": profile,
 		"cycle": invocation.Cycle,
@@ -1785,11 +1785,11 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		if errors.Is(invokeErr, caps.ErrUnenforceable) {
 			stopReason = "capability_unenforceable"
 		}
-		runner.finalize(ctx, invocation, run.task, "", stopReason, nil)
+		runner.finalize(ctx, invocation, run.record, "", stopReason, nil)
 		// CLOSE with the stop reason and no telemetry: nothing ran, so there is
 		// nothing to bill (a refused start still produces a record).
-		runner.closeInvocationEvidence(ctx, run.task, invocation.ID, stopReason, nil)
-		runner.log.Error("invoke refused", "task", run.task.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
+		runner.closeInvocationEvidence(ctx, run.record, invocation.ID, stopReason, nil)
+		runner.log.Error("invoke refused", "run", run.record.ID, "stage", stageID, "reason", stopReason, "error", invokeErr)
 		return invocationOutcome{adapterErr: true}
 	}
 
@@ -1798,7 +1798,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		terminalEr error
 	)
 	for event := range eventCh {
-		terminal, terminalEr = runner.observeEvent(event, run.task.ID, stageID, terminal, terminalEr)
+		terminal, terminalEr = runner.observeEvent(event, run.record.ID, stageID, terminal, terminalEr)
 	}
 	if terminal != nil {
 		sessionID := terminal.SessionID
@@ -1811,20 +1811,20 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		// output it claims and must not be recorded as though it had.
 		artifactOutputs, captureErr := runner.captureStageOutputs(ctx, run, stageID, invocation.ID, artifactDir, &terminal.ResultJSON)
 		if captureErr != nil {
-			runner.finalize(ctx, invocation, run.task, sessionID, "artifact_rejected", nil)
-			runner.closeInvocationEvidence(ctx, run.task, invocation.ID, "artifact_rejected", &telemetry)
+			runner.finalize(ctx, invocation, run.record, sessionID, "artifact_rejected", nil)
+			runner.closeInvocationEvidence(ctx, run.record, invocation.ID, "artifact_rejected", &telemetry)
 			runner.log.Error("stage output rejected",
-				"task", run.task.ID, "stage", stageID, "error", captureErr)
+				"run", run.record.ID, "stage", stageID, "error", captureErr)
 			return invocationOutcome{rejected: true}
 		}
-		runner.finalize(ctx, invocation, run.task, sessionID, "", &terminal.ResultJSON)
+		runner.finalize(ctx, invocation, run.record, sessionID, "", &terminal.ResultJSON)
 		// One manifest write closes the whole successful attempt: the CLOSE half of
 		// the invocation record, the artifact revisions the stage produced, and the
 		// project-context section. Emit the live pinning signal separately — it is a
 		// stream event, not evidence.
 		runner.completeStageEvidence(ctx, run, stageID, invocation.ID, telemetry, artifactOutputs)
-		runner.emit(ctx, run.task, EvContextPinned, contextPinnedPayload(stageID, run))
-		runner.emit(ctx, run.task, EvStageStopped, map[string]any{
+		runner.emit(ctx, run.record, EvContextPinned, contextPinnedPayload(stageID, run))
+		runner.emit(ctx, run.record, EvStageStopped, map[string]any{
 			"stage": stageID, "session_id": sessionID, "status": string(terminal.ResultJSON.Status),
 			"tokens": telemetry.Tokens.Total, "cost": telemetry.Cost,
 		})
@@ -1838,13 +1838,13 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// EventResult, which is exactly what did not arrive. It was always empty
 	// here — the drain loop never captured one — and passing "" says so
 	// instead of passing a variable that looks like it might hold something.
-	runner.finalize(ctx, invocation, run.task, "", reason, nil)
+	runner.finalize(ctx, invocation, run.record, "", reason, nil)
 	// CLOSE with the stop reason and NO telemetry. The adapter reports its
 	// accumulated cost only on the terminal EventResult, so on this path there
 	// is no measurement to record — and a zero-valued telemetry object would
 	// not read as "unknown", it would read as "this attempt was free", which is
 	// exactly the wrong thing to tell someone auditing an expensive failure.
-	runner.closeInvocationEvidence(ctx, run.task, invocation.ID, reason, nil)
+	runner.closeInvocationEvidence(ctx, run.record, invocation.ID, reason, nil)
 	return invocationOutcome{
 		adapterErr: reason == "adapter_error",
 		parseErr:   reason == "parse_error",
@@ -1863,13 +1863,13 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 // evidence write, a telemetry parameter that is never touched reads as if the
 // drain loop were the thing that measures.
 func (runner *Runner) observeEvent(
-	event agent.Event, taskID, stageID string,
+	event agent.Event, runID, stageID string,
 	terminal *agent.Result, terminalEr error,
 ) (*agent.Result, error) {
 	switch event.Kind {
 	case agent.EventStream:
 		if runner.sink != nil && event.Chunk != "" {
-			runner.sink(taskID, stageID, event.Chunk)
+			runner.sink(runID, stageID, event.Chunk)
 		}
 	case agent.EventResult:
 		terminal = event.Result
@@ -1892,7 +1892,7 @@ func classifyAdapterFailure(terminalEr error) string {
 }
 
 // finalize writes the stage_invocation outcome. result may be nil.
-func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocation, task sqlc.Task, sessionID, stopReason string, result any) {
+func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocation, record sqlc.Run, sessionID, stopReason string, result any) {
 	var raw json.RawMessage
 	if result != nil {
 		if data, err := json.Marshal(result); err == nil {
@@ -1901,7 +1901,7 @@ func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocat
 	}
 	if err := runner.store.FinishStageInvocation(ctx, sqlc.FinishStageInvocationParams{
 		ID:         invocation.ID,
-		TenantID:   task.TenantID,
+		TenantID:   record.TenantID,
 		SessionID:  nullStr(sessionID),
 		StopReason: nullStr(stopReason),
 		Result:     toNullRaw(raw),
@@ -1915,19 +1915,19 @@ func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocat
 //
 //   - a resume (resumed != nil) inherits the resumed invocation's cycle, so a
 //     `continue` does not consume budget or inflate the counter;
-//   - a fresh entry takes MAX(cycle for (task, stageID)) + 1. MaxCycleForStages
+//   - a fresh entry takes MAX(cycle for (run, stageID)) + 1. MaxCycleForStages
 //     returns -1 when the stage never ran (the COALESCE sentinel), which maps
 //     to cycle 0 — the first entry.
 //
 // Durability follows from deriving the value off committed rows: a worker
 // restart recomputes the same answer, and a crash between "transition chosen"
 // and "invocation created" leaves no row, so the recomputed value is identical.
-func (runner *Runner) nextCycleForStage(ctx context.Context, task sqlc.Task, stageID string, resumed *sqlc.StageInvocation) (int32, error) {
+func (runner *Runner) nextCycleForStage(ctx context.Context, record sqlc.Run, stageID string, resumed *sqlc.StageInvocation) (int32, error) {
 	if resumed != nil {
 		return resumed.Cycle, nil
 	}
 	maxCycle, err := runner.store.MaxCycleForStages(ctx, sqlc.MaxCycleForStagesParams{
-		TaskID: task.ID, TenantID: task.TenantID, Column3: []string{stageID},
+		RunID: record.ID, TenantID: record.TenantID, Column3: []string{stageID},
 	})
 	if err != nil {
 		return 0, fmt.Errorf("load max cycle for stage %q: %w", stageID, err)
@@ -1939,31 +1939,31 @@ func (runner *Runner) nextCycleForStage(ctx context.Context, task sqlc.Task, sta
 	return maxCycle + 1, nil
 }
 
-// failTask transitions the task to failed and emits the reason. Used when the
+// failRun transitions the run to failed and emits the reason. Used when the
 // runner cannot proceed (bad pack, missing stage, evaluator error) — these are
 // genuine failures, not retryable pause points.
-func (runner *Runner) failTask(ctx context.Context, task sqlc.Task, cause error) error {
-	runner.log.Error("runner failing task", "task", task.ID, "error", cause)
-	if _, err := runner.store.UpdateTaskState(ctx, sqlc.UpdateTaskStateParams{
-		ID: task.ID, TenantID: task.TenantID, State: string(engine.StateFailed),
+func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error) error {
+	runner.log.Error("runner failing run", "run", record.ID, "error", cause)
+	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
+		ID: record.ID, TenantID: record.TenantID, State: string(engine.StateFailed),
 	}); err != nil {
-		return fmt.Errorf("%w (and failed to mark task failed: %v)", cause, err)
+		return fmt.Errorf("%w (and failed to mark run failed: %v)", cause, err)
 	}
-	runner.emit(ctx, task, EvRunStateChanged, map[string]any{"from": task.State, "to": string(engine.StateFailed), "error": cause.Error()})
+	runner.emit(ctx, record, EvRunStateChanged, map[string]any{"from": record.State, "to": string(engine.StateFailed), "error": cause.Error()})
 	// Seal the manifest with reason=failed so the partial evidence is still
 	// the immutable record of what was attempted. The teardown job will run
 	// the git-evidence + seal again; the seal is idempotent.
-	failedTask, refreshErr := runner.store.GetTask(ctx, sqlc.GetTaskParams{ID: task.ID, TenantID: task.TenantID})
+	failedRecord, refreshErr := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
 	if refreshErr == nil {
-		runner.sealManifestAtTerminal(ctx, failedTask)
+		runner.sealManifestAtTerminal(ctx, failedRecord)
 	}
-	// Best-effort: schedule worktree teardown. A failed task's worktree is not
+	// Best-effort: schedule worktree teardown. A failed run's worktree is not
 	// needed for recovery (the session, if any, is gone); remove it. Enqueuing
 	// (not removing inline) serializes with the still-running driving job.
 	if _, teardownErr := runner.store.EnqueueJob(ctx, sqlc.EnqueueJobParams{
-		TenantID: task.TenantID, UserID: task.UserID, TaskID: task.ID, Kind: "teardown", Payload: []byte("{}"),
+		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID, Kind: "teardown", Payload: []byte("{}"),
 	}); teardownErr != nil {
-		runner.log.Warn("enqueue teardown for failed task", "task", task.ID, "error", teardownErr)
+		runner.log.Warn("enqueue teardown for failed run", "run", record.ID, "error", teardownErr)
 	}
 	return cause
 }
@@ -1977,10 +1977,10 @@ func (runner *Runner) failTask(ctx context.Context, task sqlc.Task, cause error)
 // auto_on_approval (applied a recorded human approval) write one: a plain
 // auto stage has no gate and nothing to decide, and a gate that DID stop the
 // work is decided by the human, whose handlers record that decision
-// themselves. task_approvals is deliberately not written: it is the namespace
+// themselves. run_approvals is deliberately not written: it is the namespace
 // of named pack approvals, and mixing the two kinds of records in one table
 // is what this separation exists to undo.
-func (runner *Runner) recordSystemGateDecision(ctx context.Context, task sqlc.Task, stageID, gate string) {
+func (runner *Runner) recordSystemGateDecision(ctx context.Context, record sqlc.Run, stageID, gate string) {
 	if runner.mfst == nil {
 		return
 	}
@@ -1989,21 +1989,21 @@ func (runner *Runner) recordSystemGateDecision(ctx context.Context, task sqlc.Ta
 		Gate:      gate,
 		Decision:  "approved",
 		Actor:     string(authz.ActorSystem),
-		UserID:    task.UserID,
+		UserID:    record.UserID,
 		Timestamp: time.Now().UTC(),
 	}}}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record system gate decision", "task", task.ID, "stage", stageID, "gate", gate, "error", err)
+		runner.log.Warn("record system gate decision", "run", record.ID, "stage", stageID, "gate", gate, "error", err)
 	}
 }
 
 // emit appends a meaningful event to the durable log (04 §7.1.5). Every event
 // the runner writes is the orchestrator speaking, and the actor column says
-// so: a system row must never read as the task author acting.
-func (runner *Runner) emit(ctx context.Context, task sqlc.Task, eventType string, payload any) {
+// so: a system row must never read as the run author acting.
+func (runner *Runner) emit(ctx context.Context, record sqlc.Run, eventType string, payload any) {
 	var raw json.RawMessage = json.RawMessage("{}")
 	if payload != nil {
 		if data, err := json.Marshal(payload); err == nil {
@@ -2011,10 +2011,10 @@ func (runner *Runner) emit(ctx context.Context, task sqlc.Task, eventType string
 		}
 	}
 	if _, err := runner.store.AppendEvent(ctx, sqlc.AppendEventParams{
-		TenantID: task.TenantID, UserID: task.UserID, TaskID: nullStr(task.ID),
+		TenantID: record.TenantID, UserID: record.UserID, RunID: nullStr(record.ID),
 		Type: eventType, Payload: raw, Actor: string(authz.ActorSystem),
 	}); err != nil {
-		runner.log.Warn("emit event", "type", eventType, "task", task.ID, "error", err)
+		runner.log.Warn("emit event", "type", eventType, "run", record.ID, "error", err)
 	}
 }
 
@@ -2023,8 +2023,8 @@ func (runner *Runner) emit(ctx context.Context, task sqlc.Task, eventType string
 // for MVP: any porcelain entry ⇒ not clean (conservative — surfaces for review
 // rather than wrongly auto-advancing). result.json lives under .agentum/, which
 // ensureIgnored excludes, so it does not count as a change.
-func (runner *Runner) isClean(repoPath, taskID string) bool {
-	wtPath := worktree.PathFor(repoPath, taskID)
+func (runner *Runner) isClean(repoPath, runID string) bool {
+	wtPath := worktree.PathFor(repoPath, runID)
 	out, err := execGit(wtPath, "status", "--porcelain")
 	if err != nil {
 		return false
@@ -2072,7 +2072,7 @@ const (
 	// (result_commit) differs from the one the delivery checks verified. Emitted
 	// at teardown when the two diverge — a human approval, a continue job, or a
 	// filesystem change moved the branch tip between the checks and teardown.
-	// The task is not failed (the human already approved); the divergence is
+	// The run is not failed (the human already approved); the divergence is
 	// recorded as an evidence gap and the sealed manifest reads incomplete, which
 	// is the signal a reviewer acts on.
 	EvDeliveryCommitDiverged = "run.delivery_commit_diverged"
@@ -2096,37 +2096,37 @@ const (
 	EvInstructionsRestored = "run.instructions_restored"
 )
 
-// CancelRegistry lets the cancel HTTP handler abort an in-flight run by task id.
+// CancelRegistry lets the cancel HTTP handler abort an in-flight run by run id.
 type CancelRegistry struct {
-	mu     sync.Mutex
-	byTask map[string]context.CancelFunc
+	mu    sync.Mutex
+	byRun map[string]context.CancelFunc
 }
 
 // NewCancelRegistry returns an empty registry.
 func NewCancelRegistry() *CancelRegistry {
-	return &CancelRegistry{byTask: make(map[string]context.CancelFunc)}
+	return &CancelRegistry{byRun: make(map[string]context.CancelFunc)}
 }
 
-// Register associates cancel with the task's in-flight run.
-func (reg *CancelRegistry) Register(taskID string, cancel context.CancelFunc) {
+// Register associates cancel with the run's in-flight run.
+func (reg *CancelRegistry) Register(runID string, cancel context.CancelFunc) {
 	reg.mu.Lock()
-	reg.byTask[taskID] = cancel
+	reg.byRun[runID] = cancel
 	reg.mu.Unlock()
 }
 
-// Unregister removes a task's registration. Safe to call when not registered.
-func (reg *CancelRegistry) Unregister(taskID string) {
+// Unregister removes a run's registration. Safe to call when not registered.
+func (reg *CancelRegistry) Unregister(runID string) {
 	reg.mu.Lock()
-	delete(reg.byTask, taskID)
+	delete(reg.byRun, runID)
 	reg.mu.Unlock()
 }
 
-// Cancel aborts the task's in-flight run, if any. Returns whether a run was
+// Cancel aborts the run's in-flight run, if any. Returns whether a run was
 // active. Does not touch the FSM — the caller owns the transition.
-func (reg *CancelRegistry) Cancel(taskID string) bool {
+func (reg *CancelRegistry) Cancel(runID string) bool {
 	reg.mu.Lock()
-	cancelFn, ok := reg.byTask[taskID]
-	delete(reg.byTask, taskID)
+	cancelFn, ok := reg.byRun[runID]
+	delete(reg.byRun, runID)
 	reg.mu.Unlock()
 	if !ok {
 		return false

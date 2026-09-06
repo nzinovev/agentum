@@ -4,14 +4,14 @@ Self-hostable orchestrator for AI engineering pipelines, built in Go.
 
 Agentum coordinates AI coding-agent stages against a target codebase —
 assembling prompts, running agents, gating output for humans, accumulating
-memory across tasks, and enforcing tool-capability boundaries. You install and
+memory across runs, and enforcing tool-capability boundaries. You install and
 configure your coding agent (opencode, …) yourself; Agentum coordinates runs,
 governance, memory, and audit. The executor is a registry entry, not a
 hard-coded name: Agentum ships the opencode adapter today, and the model, its
 parameters, and the runtime's version are evidence on every recorded
 invocation.
 
-> **Status:** early. The engine foundation, multi-tenant schema, explicit task
+> **Status:** early. The engine foundation, multi-tenant schema, explicit run
 > FSM, single-front-door HTTP API, and the project-memory schema are scaffolded.
 > See `AGENTS.md` for the build agreement and architecture seams.
 

@@ -12,9 +12,9 @@ import (
 func TestNext_LegalTransitions(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		from  TaskState
-		event TaskEvent
-		want  TaskState
+		from  RunState
+		event RunEvent
+		want  RunState
 	}{
 		{StateCreated, EventStart, StateRunning},
 		{StateCreated, EventCancel, StateCancelled},
@@ -53,15 +53,15 @@ func TestNext_LegalTransitions(t *testing.T) {
 }
 
 // TestNext_RejectsIllegal exercises the contract the API relies on: a second
-// EventStart on an already-running task must fail and surface as a 409, and a
+// EventStart on an already-running run must fail and surface as a 409, and a
 // transition out of a terminal state must fail too. Both must be the typed
 // ErrIllegalTransition so the HTTP layer can errors.As it.
 func TestNext_RejectsIllegal(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
-		from  TaskState
-		event TaskEvent
+		from  RunState
+		event RunEvent
 	}{
 		{"start on running", StateRunning, EventStart},
 		{"start on terminal done", StateDone, EventStart},
@@ -90,19 +90,19 @@ func TestNext_RejectsIllegal(t *testing.T) {
 // This catches both missing rejections and accidentally-added edges.
 func TestNext_NoSpuriousEdges(t *testing.T) {
 	t.Parallel()
-	allStates := []TaskState{
+	allStates := []RunState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
 		StateAwaitingFinalReview,
 		StateDone, StateFailed, StateCancelled,
 	}
-	allEvents := []TaskEvent{
+	allEvents := []RunEvent{
 		EventStart, EventStopOpenQ, EventStopGate, EventStopUser,
 		EventContinue, EventAdvance, EventReachFinalGate,
 		EventApprove, EventFail, EventCancel,
 	}
 	for _, s := range allStates {
-		legalForState := map[TaskEvent]bool{}
+		legalForState := map[RunEvent]bool{}
 		for ev := range transitions[s] {
 			legalForState[ev] = true
 		}
@@ -121,8 +121,8 @@ func TestNext_NoSpuriousEdges(t *testing.T) {
 
 func TestIsTerminal(t *testing.T) {
 	t.Parallel()
-	terminal := []TaskState{StateDone, StateFailed, StateCancelled}
-	nonTerminal := []TaskState{
+	terminal := []RunState{StateDone, StateFailed, StateCancelled}
+	nonTerminal := []RunState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
 		StateAwaitingFinalReview,
@@ -148,13 +148,13 @@ func TestIsTerminal(t *testing.T) {
 
 func TestIsPaused(t *testing.T) {
 	t.Parallel()
-	paused := []TaskState{StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop}
+	paused := []RunState{StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop}
 	for _, s := range paused {
 		if !IsPaused(s) {
 			t.Errorf("IsPaused(%q) = false, want true", s)
 		}
 	}
-	all := []TaskState{
+	all := []RunState{
 		StateCreated, StateRunning,
 		StatePausedOpenQuestions, StatePausedGate, StatePausedUserStop,
 		StateAwaitingFinalReview,

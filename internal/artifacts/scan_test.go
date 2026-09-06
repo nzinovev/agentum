@@ -284,7 +284,7 @@ func bytesEqual(left, right []byte) bool {
 
 // TestProseScanner_OnlyCredentialShapes pins the rule split. NewProseScanner
 // must ignore the label-context rules — they cannot tell a pasted credential
-// from a sentence discussing one, and human-authored task text is full of the
+// from a sentence discussing one, and human-authored request text is full of the
 // latter — while still catching material that identifies itself by its own
 // shape.
 //

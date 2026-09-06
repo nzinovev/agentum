@@ -42,7 +42,7 @@ func (adapter *requestCapturingAdapter) Invoke(ctx context.Context, inv agent.In
 }
 
 // TestRunner_RoutingBlockCarriesTaskRequest is the defect fix itself: the
-// routing block handed to the adapter must carry the task's title and
+// routing block handed to the adapter must carry the run's title and
 // description — the chain that was entirely missing before (Block had no
 // request field, the template no section, the runner no wiring).
 func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
@@ -51,11 +51,11 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tr", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0",
 		Title:        "Lower the log level of health endpoints",
@@ -63,11 +63,11 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 		Overrides:    json.RawMessage(`{"checks":{"required":["verify"]}}`),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &requestCapturingAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "planned"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(context.Background(), job("run", "Tr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -77,10 +77,10 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	}
 	block := adapter.blocks[0]
 	if !strings.Contains(block, "Lower the log level of health endpoints") {
-		t.Errorf("routing block does not carry the task title; got:\n%s", block)
+		t.Errorf("routing block does not carry the run title; got:\n%s", block)
 	}
 	if !strings.Contains(block, "Log /healthz and /readyz at Debug. Compare by exact path.") {
-		t.Errorf("routing block does not carry the task description; got:\n%s", block)
+		t.Errorf("routing block does not carry the run description; got:\n%s", block)
 	}
 	// The runner side of the same rule: the raw overrides JSON never appears in
 	// the block. The check it requests may legitimately arrive through the

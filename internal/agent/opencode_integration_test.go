@@ -44,7 +44,7 @@ func requireOpencode(t *testing.T) {
 // The git part matters — opencode derives its project root from the git root,
 // and both the relative permission patterns and `external_directory` are judged
 // against that root, so a bare temp dir would not exercise the same boundary a
-// task worktree does.
+// run worktree does.
 func liveWorktree(t *testing.T, stage string) (workdir, artifactDir, sourcePath string) {
 	t.Helper()
 	workdir = t.TempDir()
@@ -72,7 +72,7 @@ func liveWorktree(t *testing.T, stage string) (workdir, artifactDir, sourcePath 
 		_ = os.WriteFile(excludePath, append(existing, []byte("\n.agentum/\n")...), 0o644)
 	}
 
-	artifactDir = filepath.Join(workdir, ".agentum", "task-1", ".ag-artifacts", stage)
+	artifactDir = filepath.Join(workdir, ".agentum", "run-1", ".ag-artifacts", stage)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}

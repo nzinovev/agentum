@@ -21,9 +21,9 @@ import (
 // stashed on stageRun so the loop and invokeStage share one source of truth.
 //
 // A failure to pin or probe degrades evidence, it does not fail the run: the
-// task still proceeds with whatever context was pinnable, and the gaps are
+// run still proceeds with whatever context was pinnable, and the gaps are
 // recorded. Only a malformed .agentum.yaml that fails to parse, or a check-set
-// resolution error, returns an error — drive turns those into failTask. The
+// resolution error, returns an error — drive turns those into failRun. The
 // missing-file case is (nil, nil) from loadRegistryAtBaseCommit, not an error.
 func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, baseCommit string) error {
 	registry, registryErr := runner.loadRegistryAtBaseCommit(ctx, *run)
@@ -39,14 +39,14 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 	// cached set here never reaches the gate, only the routing block. The strict
 	// overrides decode lives here: after the API boundary guarantees well-formed
 	// overrides, a malformed column is an invariant break and this error reaches
-	// failTask through drive.
-	taskOverrides, overridesErr := taskinput.ParseOverrides(run.task.Overrides)
+	// failRun through drive.
+	runOverrides, overridesErr := taskinput.ParseOverrides(run.record.Overrides)
 	if overridesErr != nil {
-		return fmt.Errorf("project context: parse task overrides: %w", overridesErr)
+		return fmt.Errorf("project context: parse run overrides: %w", overridesErr)
 	}
-	packRequests := packCheckRequests(run.taskPack)
-	taskRequests := taskCheckRequests(taskOverrides)
-	set, resolveErr := checks.Resolve(registry, packRequests, taskRequests)
+	packRequests := packCheckRequests(run.runPack)
+	runRequests := runCheckRequests(runOverrides)
+	set, resolveErr := checks.Resolve(registry, packRequests, runRequests)
 	if resolveErr != nil {
 		return fmt.Errorf("project context: resolve checks: %w", resolveErr)
 	}
@@ -87,12 +87,12 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 	// probe's baseline), bytes read from base_commit via the worktree manager
 	// (which satisfies instructions.Reader through FileAtCommit).
 	declared := registry.InstructionPaths()
-	pinned, pinErr := instructions.Pin(ctx, runner.wt, checkoutPathOf(run.task, run.project), baseCommit, declared, report.AutoInstructions)
+	pinned, pinErr := instructions.Pin(ctx, runner.wt, checkoutPathOf(run.record, run.project), baseCommit, declared, report.AutoInstructions)
 	if pinErr != nil {
 		// A read failure (not a missing file) is recorded as an evidence gap;
 		// the run proceeds with whatever was pinnable. A missing file is already
 		// captured per-entry as MissingAtCommit.
-		runner.recordEvidenceGap(ctx, run.task, "context.instructions", "", pinErr)
+		runner.recordEvidenceGap(ctx, run.record, "context.instructions", "", pinErr)
 	}
 	run.instructionFiles = pinned
 	return nil
@@ -127,7 +127,7 @@ func resolvedChecksForRender(set *checks.Set) []routing.CheckRef {
 //
 // This runs STRICTLY BEFORE the invocation, never between the isClean sample
 // and the checkpoint commit (the load-bearing ordering in processStage). A
-// restore that fails to write is a task failure, matching the precedent that a
+// restore that fails to write is a run failure, matching the precedent that a
 // broken invariant at the delivery boundary fails rather than proceeds on a
 // claim we cannot stand behind (ErrDirtyTreeAtDeliveryBoundary).
 //
@@ -145,7 +145,7 @@ func (runner *Runner) restoreInstructions(ctx context.Context, run stageRun, sta
 	}
 	done, execErr := instructions.Execute(plan, run.instructionFiles, run.worktree.Root)
 	if execErr != nil {
-		// A restore IO error is a task failure — we cannot stand behind a run
+		// A restore IO error is a run failure — we cannot stand behind a run
 		// whose reviewer might be reading rewritten rules.
 		return fmt.Errorf("restore instruction files for stage %q: %w", stageID, execErr)
 	}
@@ -166,7 +166,7 @@ func (runner *Runner) restoreInstructions(ctx context.Context, run stageRun, sta
 			FoundHash: restoration.FoundHash,
 			At:        now,
 		})
-		runner.emit(ctx, run.task, EvInstructionsRestored, map[string]any{
+		runner.emit(ctx, run.record, EvInstructionsRestored, map[string]any{
 			"stage":      stageID,
 			"path":       restoration.Path,
 			"action":     action,
@@ -209,9 +209,9 @@ func (runner *Runner) recordRestorationEvidence(ctx context.Context, run stageRu
 		return
 	}
 	patch := manifest.Body{Context: &manifest.ContextEvidence{Restorations: restorations}}
-	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, run.record.TenantID, run.record.ID, patch); err != nil {
 		if !errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("record restoration evidence", "task", run.task.ID, "error", err)
+			runner.log.Warn("record restoration evidence", "run", run.record.ID, "error", err)
 		}
 	}
 }

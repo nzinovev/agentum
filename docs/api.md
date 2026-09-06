@@ -136,7 +136,7 @@ ambiguous with each other or with pause.
 `reject` is a **terminal reject at a human gate** — the plan gate
 (`paused_gate`) or the final gate (`awaiting_final_review`). It reuses `cancel`'s
 FSM event (the run lands in `cancelled`, branch preserved) but records a
-`rejected` decision on `task_approvals` and seals the manifest with
+`rejected` decision on `run_approvals` and seals the manifest with
 `SealRejected`, so a sealed record cannot describe a rejected result as a plain
 abort. At the plan gate nothing ever unlocked source-write, so there is no
 source change to undo. Idempotent: a repeat reject matching the recorded

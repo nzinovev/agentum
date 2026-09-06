@@ -50,7 +50,7 @@ func newSyncerForTest(index revisionIndex, blobs ObjectStore) *Syncer {
 type SyncTarget struct {
 	// Path is the absolute path inside the worktree where the bytes go.
 	Path string
-	// Name is the revisions-index name (the (task, name) key). Used when
+	// Name is the revisions-index name (the (run, name) key). Used when
 	// RevisionID is empty — Sync then reads the current revision for that name.
 	Name string
 	// RevisionID optionally pins a specific revision. Empty → current.
@@ -78,7 +78,7 @@ type SyncResult struct {
 // planted link out of the worktree and overwrite a host file.
 func (syncer *Syncer) Sync(
 	ctx context.Context,
-	tenantID, taskID string,
+	tenantID, runID string,
 	rootDir string,
 	targets []SyncTarget,
 ) ([]SyncResult, error) {
@@ -91,7 +91,7 @@ func (syncer *Syncer) Sync(
 
 	for _, target := range targets {
 		result := SyncResult{Target: target}
-		revision, found, resolveErr := syncer.resolveRevision(ctx, tenantID, taskID, target)
+		revision, found, resolveErr := syncer.resolveRevision(ctx, tenantID, runID, target)
 		if resolveErr != nil {
 			return results, resolveErr
 		}
@@ -122,7 +122,7 @@ func (syncer *Syncer) Sync(
 
 func (syncer *Syncer) resolveRevision(
 	ctx context.Context,
-	tenantID, taskID string,
+	tenantID, runID string,
 	target SyncTarget,
 ) (sqlc.ArtifactRevision, bool, error) {
 	if target.RevisionID != "" {
@@ -135,7 +135,7 @@ func (syncer *Syncer) resolveRevision(
 		return row, true, nil
 	}
 	row, err := syncer.index.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: taskID, TenantID: tenantID, Name: target.Name,
+		RunID: runID, TenantID: tenantID, Name: target.Name,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

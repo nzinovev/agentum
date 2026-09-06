@@ -52,8 +52,8 @@ instead of skipping — a skipped database test there would be a lost check.
   RBAC then has no fixed set of rules to attach to. Handlers do not hand-roll
   the check either: the guards live in `internal/api/access.go`, and every
   handler enters through `requireAccess` (principal + permission) or through one
-  built on it — `requireTaskRead` for `task:read` on `{id}`,
-  `requireTaskForAction` when the task row is needed too, `authorize` when a
+  built on it — `requireRunRead` for `run:read` on `{id}`,
+  `requireRunForAction` when the run row is needed too, `authorize` when a
   second resource must be cleared. `authz.Can` is therefore reached from exactly
   two places, `authorize` and the route gate in `internal/server`; a third call
   site is a bug. That is what makes every route answer an unauthenticated,
@@ -61,15 +61,15 @@ instead of skipping — a skipped database test there would be a lost check.
   means reusing a guard or adding one beside them, never copying a preamble.
 - **Multi-tenancy seam.** Every DB row carries `tenant_id` and `user_id`. Never
   write a query that omits them; never assume single-tenant outside `authz`.
-- **Explicit FSM.** Task lifecycle transitions live in `internal/engine/fsm.go`.
+- **Explicit FSM.** Run lifecycle transitions live in `internal/engine/fsm.go`.
   Add states/events there and route changes through `engine.Next`; never mutate
-  task state ad hoc.
-- **Memory commits at task-done.** Rows in `memory_entries` are inserted only on
+  run state ad hoc.
+- **Memory commits at run-done.** Rows in `memory_entries` are inserted only on
   final approval. Retrieval is recency-ordered; keyword pull must exist before
-  the flywheel test window closes (around task ~20).
+  the flywheel test window closes (around run ~20).
 - **The task request reaches an agent only through the routing block's `Task`
-  section**. `tasks.title` + `tasks.description` are the request and
-  are rendered there by `internal/routing`; `tasks.overrides` configures the
+  section**. `runs.title` + `runs.description` are the request and
+  are rendered there by `internal/routing`; `runs.overrides` configures the
   run and is orchestrator-only — never render it into any prompt, and the
   resolved `## Project checks` section is the only check information an agent
   sees.
@@ -141,6 +141,6 @@ instead of skipping — a skipped database test there would be a lost check.
   argument — so a developer can re-check the reasoning instead of inheriting
   it. An unreported suppression is the failure this rule exists to prevent:
   from the next commit onward it reads as clean code, and the claim behind it
-  is never audited. Worked example: `GoResourceLeak` in `internal/api/task.go`,
+  is never audited. Worked example: `GoResourceLeak` in `internal/api/run.go`,
   where the wrapper's `Close` only forwards to `r.Body.Close` and `net/http`
   closes the request body itself once the handler returns.

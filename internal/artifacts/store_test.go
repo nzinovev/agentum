@@ -83,7 +83,7 @@ func TestPlanRevision_StalePreconditionConflicts(t *testing.T) {
 
 // TestPlanRevision_PreconditionOnAnAbsentArtifactConflicts: pinning a revision
 // of an artifact that has none is just as stale — the row was demoted or the
-// caller is pointing at another task's revision.
+// caller is pointing at another run's revision.
 func TestPlanRevision_PreconditionOnAnAbsentArtifactConflicts(t *testing.T) {
 	t.Parallel()
 	_, err := planRevision(sqlc.ArtifactRevision{}, false, "rev-1", "hash-a")

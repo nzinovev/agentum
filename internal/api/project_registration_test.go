@@ -101,20 +101,20 @@ func runRegistrationGit(t *testing.T, dir string, args ...string) {
 
 // seedRun creates a run of the given project pinned to checkoutPath; state
 // "done" marks it terminal so a rebind must leave it alone.
-func (harness *registrationHarness) seedRun(projectID, state, checkoutPath string) sqlc.Task {
+func (harness *registrationHarness) seedRun(projectID, state, checkoutPath string) sqlc.Run {
 	harness.t.Helper()
-	run, err := harness.queries.CreateTask(context.Background(), sqlc.CreateTaskParams{
+	run, err := harness.queries.CreateRun(context.Background(), sqlc.CreateRunParams{
 		TenantID: testTenantID, UserID: testUserID, ProjectID: projectID, PipelinePack: "test@1",
 		Title: "run", Description: "seed", Overrides: []byte("{}"), BaseRef: "HEAD",
 	})
 	if err != nil {
-		harness.t.Fatalf("create task: %v", err)
+		harness.t.Fatalf("create run: %v", err)
 	}
 	if state == "done" {
-		if _, err := harness.queries.UpdateTaskState(context.Background(), sqlc.UpdateTaskStateParams{
+		if _, err := harness.queries.UpdateRunState(context.Background(), sqlc.UpdateRunStateParams{
 			ID: run.ID, TenantID: testTenantID, State: "done",
 		}); err != nil {
-			harness.t.Fatalf("finish task: %v", err)
+			harness.t.Fatalf("finish run: %v", err)
 		}
 	}
 	if checkoutPath != "" {
@@ -192,14 +192,14 @@ func TestProjectRegistration_MoveKeepsIdentityAndHistory(t *testing.T) {
 
 	// The unfinished run follows the working copy; the terminal run keeps the
 	// historical fact of where its work happened.
-	rebound, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	rebound, err := harness.queries.GetRun(context.Background(), sqlc.GetRunParams{ID: activeRun.ID, TenantID: testTenantID})
 	if err != nil {
 		t.Fatalf("load active run: %v", err)
 	}
 	if rebound.CheckoutPath != moved {
 		t.Fatalf("active run checkout_path = %q, want the new location %q", rebound.CheckoutPath, moved)
 	}
-	terminal, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: terminalRun.ID, TenantID: testTenantID})
+	terminal, err := harness.queries.GetRun(context.Background(), sqlc.GetRunParams{ID: terminalRun.ID, TenantID: testTenantID})
 	if err != nil {
 		t.Fatalf("load terminal run: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestProjectRegistration_SecondCopyLeavesRunsWhereTheyStarted(t *testing.T) 
 		t.Fatalf("a second copy must not capture runs; rebound = %d, want 0", secondResponse.RunsReboundToNewCheckout)
 	}
 
-	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	pinnedRun, err := harness.queries.GetRun(context.Background(), sqlc.GetRunParams{ID: activeRun.ID, TenantID: testTenantID})
 	if err != nil {
 		t.Fatalf("load run: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestProjectRegistration_UnreadablePreviousCopyDoesNotRebind(t *testing.T) {
 	if second.ID != first.ID {
 		t.Fatal("a clone of the same history must be the same project")
 	}
-	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	pinnedRun, err := harness.queries.GetRun(context.Background(), sqlc.GetRunParams{ID: activeRun.ID, TenantID: testTenantID})
 	if err != nil {
 		t.Fatalf("load run: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestProjectRegistration_ReplacedPreviousCopyRebinds(t *testing.T) {
 	if second.RunsAwaitingPreviousCheckout != 0 {
 		t.Fatalf("nothing waits for the replaced path; got %d", second.RunsAwaitingPreviousCheckout)
 	}
-	pinnedRun, err := harness.queries.GetTask(context.Background(), sqlc.GetTaskParams{ID: activeRun.ID, TenantID: testTenantID})
+	pinnedRun, err := harness.queries.GetRun(context.Background(), sqlc.GetRunParams{ID: activeRun.ID, TenantID: testTenantID})
 	if err != nil {
 		t.Fatalf("load run: %v", err)
 	}

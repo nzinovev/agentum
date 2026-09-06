@@ -11,7 +11,7 @@
 //     creates a new revision that chains back to the prior one via
 //     prev_revision_id. Revisions are never modified in place; the
 //     "is_current" flag is the single mutable bit and only one revision per
-//     (task, name) is current at a time.
+//     (run, name) is current at a time.
 //   - The optional execution coordinate (delivery_step / execution_unit /
 //     phase) rides along as provenance. It is inert unless Epic 8 fills it;
 //     single-unit runs leave it NULL and behavior is unchanged.
@@ -46,7 +46,7 @@ import (
 type Action string
 
 const (
-	// ActionCreate is the first revision of a (task, name).
+	// ActionCreate is the first revision of a (run, name).
 	ActionCreate Action = "create"
 	// ActionEdit is a subsequent revision that chains to a prior one.
 	ActionEdit Action = "edit"
@@ -81,7 +81,7 @@ type Revision struct {
 	ID          string
 	TenantID    string
 	UserID      string
-	TaskID      string
+	RunID       string
 	Name        string
 	Kind        string
 	ContentHash string
@@ -115,11 +115,11 @@ func (coordinate Coordinate) Empty() bool {
 
 // PutParams is the input to Store.Put. Bytes are the body the caller wants
 // stored; the store hashes them, writes the blob if absent, and inserts a new
-// revision row chained to the prior current revision of (task, name).
+// revision row chained to the prior current revision of (run, name).
 type PutParams struct {
 	TenantID string
 	UserID   string
-	TaskID   string
+	RunID    string
 	Name     string
 	Kind     string
 	Bytes    []byte
@@ -129,7 +129,7 @@ type PutParams struct {
 
 	// ExpectedCurrentRevision is an optimistic-concurrency precondition. When
 	// set, Put commits only if that revision is still the current one for
-	// (task, name) at the moment of the write; otherwise it fails with
+	// (run, name) at the moment of the write; otherwise it fails with
 	// ErrRevisionConflict and writes nothing.
 	//
 	// Empty means "no precondition": the write chains onto whatever is current,
@@ -145,7 +145,7 @@ type PutParams struct {
 // on hash) and commits the revision row in one transaction.
 type Store interface {
 	// Put writes the bytes as a new immutable revision and returns the row.
-	// The prior current revision of (task, name) is demoted; the new revision
+	// The prior current revision of (run, name) is demoted; the new revision
 	// is the single current one. If the bytes hash equals the current
 	// revision's hash, Put is a no-op and returns the existing row (an edit
 	// that produces identical content does not create a redundant revision).
@@ -166,24 +166,24 @@ type Store interface {
 	// buffering them in memory.
 	CopyTo(ctx context.Context, tenantID, revisionID string, writer io.Writer) (int64, error)
 
-	// Current returns the current revision for (task, name). Returns
-	// ErrNoCurrentRevision when the task has no revision of that name yet.
-	Current(ctx context.Context, tenantID, taskID, name string) (Revision, error)
+	// Current returns the current revision for (run, name). Returns
+	// ErrNoCurrentRevision when the run has no revision of that name yet.
+	Current(ctx context.Context, tenantID, runID, name string) (Revision, error)
 
-	// ListForTask returns every revision of every name in the task, ordered by
+	// ListForRun returns every revision of every name in the run, ordered by
 	// name then newest-first. Includes superseded, non-current revisions.
-	ListForTask(ctx context.Context, tenantID, taskID string) ([]Revision, error)
+	ListForRun(ctx context.Context, tenantID, runID string) ([]Revision, error)
 
 	// ListCurrent returns only the current revisions of every name in the
-	// task — the snapshot a resume / comparison reads.
-	ListCurrent(ctx context.Context, tenantID, taskID string) ([]Revision, error)
+	// run — the snapshot a resume / comparison reads.
+	ListCurrent(ctx context.Context, tenantID, runID string) ([]Revision, error)
 
 	// ListForInvocation returns the revisions produced by one invocation.
 	ListForInvocation(ctx context.Context, tenantID, invocationID string) ([]Revision, error)
 }
 
-// ErrNoCurrentRevision is returned by Store.Current when the task has no
-// revision of the given name yet (e.g. a fresh task before any stage runs).
+// ErrNoCurrentRevision is returned by Store.Current when the run has no
+// revision of the given name yet (e.g. a fresh run before any stage runs).
 var ErrNoCurrentRevision = errors.New("artifacts: no current revision for name")
 
 // ErrRevisionConflict is returned by Store.Put when the revision chain moved
@@ -240,7 +240,7 @@ func fromRow(row sqlc.ArtifactRevision) Revision {
 		ID:          row.ID,
 		TenantID:    row.TenantID,
 		UserID:      row.UserID,
-		TaskID:      row.TaskID,
+		RunID:       row.RunID,
 		Name:        row.Name,
 		Kind:        row.Kind,
 		ContentHash: row.ContentHash,

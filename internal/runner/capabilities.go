@@ -27,7 +27,7 @@ import (
 // via the adapter's ctx (zero = no cap). They are taken as-is: config owns the
 // policy decision about whether a cap applies; the profile is just the carrier.
 func (runner *Runner) computeProfile(
-	taskPack *pack.Pack,
+	runPack *pack.Pack,
 	stageID string,
 	stage pack.Stage,
 	supported []caps.Category,
@@ -35,7 +35,7 @@ func (runner *Runner) computeProfile(
 	withheld []caps.Category,
 	withheldReason string,
 ) caps.Profile {
-	packTokens := toTokens(taskPack.Capabilities)
+	packTokens := toTokens(runPack.Capabilities)
 	stageTokens := toTokens(stage.Capabilities)
 	if len(stageTokens) == 0 {
 		// Inheritance: a stage that does not declare its own subset inherits

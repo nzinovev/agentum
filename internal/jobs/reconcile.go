@@ -13,33 +13,33 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// TaskStore is the task-state surface the reconciler needs beyond the job
-// queue: probing for orphaned tasks and repairing them via the FSM. Declared
+// RunStore is the run-state surface the reconciler needs beyond the job
+// queue: probing for orphaned runs and repairing them via the FSM. Declared
 // here so the jobs package does not import the runner; the server wires the
 // sqlc querier (or its tx wrapper) behind it.
-type TaskStore interface {
-	FindOrphanedRunningTasks(ctx context.Context, tenantID string) ([]sqlc.Task, error)
-	UpdateTaskState(ctx context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error)
+type RunStore interface {
+	FindOrphanedRunningRuns(ctx context.Context, tenantID string) ([]sqlc.Run, error)
+	UpdateRunState(ctx context.Context, arg sqlc.UpdateRunStateParams) (sqlc.Run, error)
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 }
 
-// Reconciler repairs the queue and task state that a worker crash or an
+// Reconciler repairs the queue and run state that a worker crash or an
 // enqueue/transition race leaves behind (F.6.1 AC #6). It runs at boot AND on a
 // periodic ticker — not only process startup — so a dead worker's stale lease
-// or a task whose desired runnable state lost its job is repaired without a
+// or a run whose desired runnable state lost its job is repaired without a
 // restart.
 //
 // Two probes:
 //   - Stale jobs: status='running' whose heartbeat is older than staleAfter.
 //     Re-queued (or failed past the poison bound).
-//   - Orphaned tasks: state='running' with no live (pending/running) job — the
+//   - Orphaned runs: state='running' with no live (pending/running) job — the
 //     outcome of a crash between the FSM transition and EnqueueJob, or a job
 //     that exhausted attempts. Repaired to paused_user_stop (interrupted) so a
 //     human explicitly resumes; a half-run stage is never blindly replayed.
 type Reconciler struct {
 	tenantID string
 	queue    Store
-	tasks    TaskStore
+	runs     RunStore
 	stale    time.Duration
 	maxAtt   int
 	log      *slog.Logger
@@ -49,7 +49,7 @@ type Reconciler struct {
 type ReconcilerDeps struct {
 	TenantID    string
 	Queue       Store
-	Tasks       TaskStore
+	Runs        RunStore
 	StaleAfter  time.Duration
 	MaxAttempts int
 	Log         *slog.Logger
@@ -77,7 +77,7 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 		maxAtt = DefaultMaxAttempts
 	}
 	return &Reconciler{
-		tenantID: deps.TenantID, queue: deps.Queue, tasks: deps.Tasks,
+		tenantID: deps.TenantID, queue: deps.Queue, runs: deps.Runs,
 		stale: stale, maxAtt: maxAtt, log: log,
 	}
 }
@@ -87,12 +87,12 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 // failure in one does not skip the others.
 func (rec *Reconciler) Reconcile(ctx context.Context) error {
 	staleErr := rec.requeueStaleJobs(ctx)
-	orphanErr := rec.repairOrphanedTasks(ctx)
+	orphanErr := rec.repairOrphanedRuns(ctx)
 	if staleErr != nil {
 		return fmt.Errorf("reconcile stale jobs: %w", staleErr)
 	}
 	if orphanErr != nil {
-		return fmt.Errorf("reconcile orphaned tasks: %w", orphanErr)
+		return fmt.Errorf("reconcile orphaned runs: %w", orphanErr)
 	}
 	return nil
 }
@@ -110,44 +110,44 @@ func (rec *Reconciler) requeueStaleJobs(ctx context.Context) error {
 			if failErr := rec.queue.FailJob(ctx, job.ID, fmt.Sprintf("exceeded max attempts (%d)", rec.maxAtt)); failErr != nil {
 				rec.log.Error("reconcile: fail poison job", "job", job.ID, "error", failErr)
 			}
-			rec.log.Warn("reconcile: poison job failed", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+			rec.log.Warn("reconcile: poison job failed", "job", job.ID, "run", job.RunID, "attempts", job.Attempts)
 			continue
 		}
-		rec.log.Info("reconcile: requeued stale job", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+		rec.log.Info("reconcile: requeued stale job", "job", job.ID, "run", job.RunID, "attempts", job.Attempts)
 	}
 	return nil
 }
 
-// repairOrphanedTasks transitions running tasks with no live job to
+// repairOrphanedRuns transitions running runs with no live job to
 // paused_user_stop (interrupted). Conservative by design (04 §7.6): a human
 // resumes explicitly. Session-id resume keeps the re-run cheap if a session was
 // captured; a side-effectful stage is never blindly replayed.
-func (rec *Reconciler) repairOrphanedTasks(ctx context.Context) error {
-	orphaned, err := rec.tasks.FindOrphanedRunningTasks(ctx, rec.tenantID)
+func (rec *Reconciler) repairOrphanedRuns(ctx context.Context) error {
+	orphaned, err := rec.runs.FindOrphanedRunningRuns(ctx, rec.tenantID)
 	if err != nil {
 		return fmt.Errorf("find orphaned: %w", err)
 	}
-	for _, task := range orphaned {
+	for _, run := range orphaned {
 		// Re-check the state inside the loop — another reconciler pass or a human
-		// resume may have moved the task between the probe and the repair.
-		if engine.TaskState(task.State) != engine.StateRunning {
+		// resume may have moved the run between the probe and the repair.
+		if engine.RunState(run.State) != engine.StateRunning {
 			continue
 		}
-		if _, transitionErr := rec.tasks.UpdateTaskState(ctx, sqlc.UpdateTaskStateParams{
-			ID: task.ID, TenantID: task.TenantID, State: string(engine.StatePausedUserStop),
+		if _, transitionErr := rec.runs.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
+			ID: run.ID, TenantID: run.TenantID, State: string(engine.StatePausedUserStop),
 		}); transitionErr != nil {
-			rec.log.Error("reconcile: pause orphaned task", "task", task.ID, "error", transitionErr)
+			rec.log.Error("reconcile: pause orphaned run", "run", run.ID, "error", transitionErr)
 			continue
 		}
-		if _, emitErr := rec.tasks.AppendEvent(ctx, sqlc.AppendEventParams{
-			TenantID: task.TenantID, UserID: task.UserID,
-			TaskID: nullStrEvent(task.ID), Type: "run.reconciled",
+		if _, emitErr := rec.runs.AppendEvent(ctx, sqlc.AppendEventParams{
+			TenantID: run.TenantID, UserID: run.UserID,
+			RunID: nullStrEvent(run.ID), Type: "run.reconciled",
 			Payload: []byte(`{"from":"running","to":"paused_user_stop","reason":"interrupted"}`),
 			Actor:   string(authz.ActorSystem),
 		}); emitErr != nil {
-			rec.log.Warn("reconcile: emit event", "task", task.ID, "error", emitErr)
+			rec.log.Warn("reconcile: emit event", "run", run.ID, "error", emitErr)
 		}
-		rec.log.Info("reconcile: paused orphaned task", "task", task.ID, "from", "running", "to", "paused_user_stop")
+		rec.log.Info("reconcile: paused orphaned run", "run", run.ID, "from", "running", "to", "paused_user_stop")
 	}
 	return nil
 }
@@ -176,8 +176,8 @@ func (rec *Reconciler) Start(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// nullStrEvent adapts a task id to the nullable uuid shape AppendEvent expects.
-// Empty → NULL (a non-task-scoped event); present → the task id.
-func nullStrEvent(taskID string) sql.NullString {
-	return sql.NullString{String: taskID, Valid: taskID != ""}
+// nullStrEvent adapts a run id to the nullable uuid shape AppendEvent expects.
+// Empty → NULL (a non-run-scoped event); present → the run id.
+func nullStrEvent(runID string) sql.NullString {
+	return sql.NullString{String: runID, Valid: runID != ""}
 }

@@ -49,7 +49,7 @@ type Artifact struct {
 	Kind string `json:"kind,omitempty"`
 }
 
-// MemoryWrite is a proposed memory entry. Committed only at final task
+// MemoryWrite is a proposed memory entry. Committed only at final run
 // approval; until then it is staged.
 type MemoryWrite struct {
 	Kind     MemoryKind `json:"kind"`

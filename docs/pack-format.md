@@ -147,7 +147,7 @@ approvals:
 
 | Field | Required | Notes |
 |---|---|---|
-| `name` | yes | Unique within the list, non-empty. Recorded on the `task_approvals` row as the decision's name. |
+| `name` | yes | Unique within the list, non-empty. Recorded on the `run_approvals` row as the decision's name. |
 | `stage` | yes | A defined non-terminal stage. The approval is recorded when the run advances past this stage's gate. |
 | `artifact` | yes | A **bare file name** — no path separators. It lives in the stage's artifact dir and is captured as an immutable revision the human may edit via `PUT` before approving. |
 | `unlocks` | yes | Closed set of unlock names. v1 has exactly one member: `source_write`. |

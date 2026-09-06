@@ -13,13 +13,13 @@ import (
 // recomputes the same answer from committed rows.
 func TestNextCycleForStage(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{ID: "T-cycle", TenantID: "tn", UserID: "us", State: "running"}
-	store := newFakeStore(task, sqlc.Project{})
+	record := sqlc.Run{ID: "T-cycle", TenantID: "tn", UserID: "us", State: "running"}
+	store := newFakeStore(record, sqlc.Project{})
 	runner := New(Deps{Store: store})
 	ctx := t.Context()
 
 	// Fresh entry into "fix": no invocations yet -> cycle 0.
-	cycle, err := runner.nextCycleForStage(ctx, task, "fix", nil)
+	cycle, err := runner.nextCycleForStage(ctx, record, "fix", nil)
 	if err != nil {
 		t.Fatalf("fresh entry: %v", err)
 	}
@@ -29,11 +29,11 @@ func TestNextCycleForStage(t *testing.T) {
 
 	// Seed a fix invocation at cycle 0 (as the runner would after the first run).
 	store.invocations = append(store.invocations, sqlc.StageInvocation{
-		ID: "inv-1", TaskID: "T-cycle", TenantID: "tn", Stage: "fix", Sequence: 1, Cycle: 0,
+		ID: "inv-1", RunID: "T-cycle", TenantID: "tn", Stage: "fix", Sequence: 1, Cycle: 0,
 	})
 
 	// Repeat fresh entry into "fix" -> cycle 1.
-	cycle, err = runner.nextCycleForStage(ctx, task, "fix", nil)
+	cycle, err = runner.nextCycleForStage(ctx, record, "fix", nil)
 	if err != nil {
 		t.Fatalf("repeat entry: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestNextCycleForStage(t *testing.T) {
 	// Resume inherits the resumed invocation's cycle (0), so a continue does
 	// not consume budget.
 	resumed := store.invocations[0]
-	cycle, err = runner.nextCycleForStage(ctx, task, "fix", &resumed)
+	cycle, err = runner.nextCycleForStage(ctx, record, "fix", &resumed)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestNextCycleForStage(t *testing.T) {
 
 	// A different stage's cycles are independent: "review" has never run -> 0,
 	// even though "fix" is at cycle 0/1.
-	cycle, err = runner.nextCycleForStage(ctx, task, "review", nil)
+	cycle, err = runner.nextCycleForStage(ctx, record, "review", nil)
 	if err != nil {
 		t.Fatalf("independent stage: %v", err)
 	}
@@ -64,16 +64,16 @@ func TestNextCycleForStage(t *testing.T) {
 
 	// Seed review at cycle 0; another review entry -> 1, while fix is unaffected.
 	store.invocations = append(store.invocations, sqlc.StageInvocation{
-		ID: "inv-2", TaskID: "T-cycle", TenantID: "tn", Stage: "review", Sequence: 2, Cycle: 0,
+		ID: "inv-2", RunID: "T-cycle", TenantID: "tn", Stage: "review", Sequence: 2, Cycle: 0,
 	})
-	cycle, err = runner.nextCycleForStage(ctx, task, "review", nil)
+	cycle, err = runner.nextCycleForStage(ctx, record, "review", nil)
 	if err != nil {
 		t.Fatalf("review repeat: %v", err)
 	}
 	if cycle != 1 {
 		t.Errorf("review repeat cycle = %d, want 1", cycle)
 	}
-	cycle, err = runner.nextCycleForStage(ctx, task, "fix", nil)
+	cycle, err = runner.nextCycleForStage(ctx, record, "fix", nil)
 	if err != nil {
 		t.Fatalf("fix after review: %v", err)
 	}
@@ -87,10 +87,10 @@ func TestNextCycleForStage(t *testing.T) {
 // entries — the same shape the real query produces.
 func TestMaxCycleForStagesFake_Sentinel(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{ID: "T-sentinel", TenantID: "tn", UserID: "us", State: "running"}
-	store := newFakeStore(task, sqlc.Project{})
+	record := sqlc.Run{ID: "T-sentinel", TenantID: "tn", UserID: "us", State: "running"}
+	store := newFakeStore(record, sqlc.Project{})
 	max, err := store.MaxCycleForStages(t.Context(), sqlc.MaxCycleForStagesParams{
-		TaskID: "T-sentinel", TenantID: "tn", Column3: []string{"fix"},
+		RunID: "T-sentinel", TenantID: "tn", Column3: []string{"fix"},
 	})
 	if err != nil {
 		t.Fatalf("MaxCycleForStages: %v", err)

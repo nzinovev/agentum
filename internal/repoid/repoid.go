@@ -138,7 +138,7 @@ func Resolve(ctx context.Context, path string) (Identity, error) {
 // pulled in an unrelated history (a subtree merge) after registration gains a
 // new root — re-derivation would change its identity and pause every
 // in-flight run, Verify lets them pass. That is the kinder outcome (an added
-// subtree should not orphan a running task), and it is why the recorded roots
+// subtree should not orphan an in-flight run), and it is why the recorded roots
 // are the contract, not the current fingerprint.
 func Verify(ctx context.Context, path string, roots []string) (topLevel string, err error) {
 	if len(roots) == 0 {

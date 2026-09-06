@@ -40,7 +40,7 @@ func TestWriteSSEFrame(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if err := writeSSEFrame(rec, sqlc.Event{
 		ID: 42, Type: "stage.stopped",
-		TaskID:  sql.NullString{String: "t1", Valid: true},
+		RunID:   sql.NullString{String: "t1", Valid: true},
 		Payload: json.RawMessage(`{"stop_reason":"gate"}`),
 		Actor:   "system",
 	}); err != nil {
@@ -73,7 +73,7 @@ func TestWriteSSEFrame_MixInNeverRewrites(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if err := writeSSEFrame(rec, sqlc.Event{
 		ID: 7, Type: "run.state_changed",
-		TaskID:  sql.NullString{String: "row-id", Valid: true},
+		RunID:   sql.NullString{String: "row-id", Valid: true},
 		Payload: json.RawMessage(`{"run_id":"producer-id"}`),
 		Actor:   "human",
 	}); err != nil {

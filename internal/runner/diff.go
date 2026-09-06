@@ -13,7 +13,7 @@ import (
 )
 
 // diffPatchCap is the maximum size of the patch the orchestrator materializes
-// for a reviewer (ADR 0003 D5). 1 MiB is large enough for a focused single-task
+// for a reviewer (ADR 0003 D5). 1 MiB is large enough for a focused single-run
 // change set and small enough that the routing block and the revision store are
 // not dominated by it. When the patch exceeds the cap it is truncated on a hunk
 // boundary with an explicit marker, and the stat (never truncated) plus direct
@@ -40,35 +40,35 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 	if runner.art == nil {
 		return nil
 	}
-	baseCommit := run.task.BaseCommit.String
+	baseCommit := run.record.BaseCommit.String
 	if baseCommit == "" {
 		return nil
 	}
 	headCommit, err := runner.wt.HeadCommit(ctx, run.worktree.Root)
 	if err != nil {
-		runner.log.Warn("produce diff: resolve HEAD", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", "",
+		runner.log.Warn("produce diff: resolve HEAD", "run", run.record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.record, "artifacts", "",
 			fmt.Errorf("delivery diff: could not resolve HEAD: %w", err))
 		return nil
 	}
 	patchRaw, err := runner.wt.Diff(ctx, run.worktree.Root, baseCommit, headCommit, false)
 	if err != nil {
-		runner.log.Warn("produce diff: git diff", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", "",
+		runner.log.Warn("produce diff: git diff", "run", run.record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.record, "artifacts", "",
 			fmt.Errorf("delivery diff: git diff failed: %w", err))
 		return nil
 	}
 	statRaw, err := runner.wt.Diff(ctx, run.worktree.Root, baseCommit, headCommit, true)
 	if err != nil {
-		runner.log.Warn("produce diff: git diff --stat", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", "",
+		runner.log.Warn("produce diff: git diff --stat", "run", run.record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.record, "artifacts", "",
 			fmt.Errorf("delivery diff: git diff --stat failed: %w", err))
 		return nil
 	}
 	patchBody, truncated := capDiffPatch(patchRaw, diffPatchCap)
-	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.task.ID, stageID)
+	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.record.ID, stageID)
 	if mkErr := os.MkdirAll(artifactDir, 0o755); mkErr != nil {
-		runner.log.Warn("produce diff: mkdir artifact dir", "task", run.task.ID, "error", mkErr)
+		runner.log.Warn("produce diff: mkdir artifact dir", "run", run.record.ID, "error", mkErr)
 		return nil
 	}
 	ref := &routing.DiffRef{
@@ -82,11 +82,11 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 	// fs.read alone (it has no shell). The orchestrator-constructed artifact dir
 	// needs no containment check, like verdict.json and plan.md.
 	if writeErr := os.WriteFile(ref.PatchPath, patchBody, 0o644); writeErr != nil {
-		runner.log.Warn("produce diff: write patch", "task", run.task.ID, "error", writeErr)
+		runner.log.Warn("produce diff: write patch", "run", run.record.ID, "error", writeErr)
 		return nil
 	}
 	if writeErr := os.WriteFile(ref.StatPath, statRaw, 0o644); writeErr != nil {
-		runner.log.Warn("produce diff: write stat", "task", run.task.ID, "error", writeErr)
+		runner.log.Warn("produce diff: write stat", "run", run.record.ID, "error", writeErr)
 		return nil
 	}
 	// Capture both as immutable revisions with ActorSystem — the orchestrator
@@ -99,9 +99,9 @@ func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID str
 	if patchStored {
 		ref.PatchRevisionID = patchRev.ID
 	} else {
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", "",
+		runner.recordEvidenceGap(ctx, run.record, "artifacts", "",
 			fmt.Errorf("delivery diff: patch revision refused by the artifact store (secret policy?)"))
-		runner.emit(ctx, run.task, EvArtifactRejected, map[string]any{
+		runner.emit(ctx, run.record, EvArtifactRejected, map[string]any{
 			"stage": stageID, "name": stageID + "/diff.patch", "kind": "diff",
 		})
 	}

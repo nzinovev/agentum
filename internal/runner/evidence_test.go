@@ -118,7 +118,7 @@ func (store *recordingArtifactStore) Current(_ context.Context, _ string, _ stri
 	}
 	return artifacts.Revision{}, artifacts.ErrNoCurrentRevision
 }
-func (*recordingArtifactStore) ListForTask(context.Context, string, string) ([]artifacts.Revision, error) {
+func (*recordingArtifactStore) ListForRun(context.Context, string, string) ([]artifacts.Revision, error) {
 	return nil, errors.New("not used")
 }
 func (store *recordingArtifactStore) ListCurrent(context.Context, string, string) ([]artifacts.Revision, error) {
@@ -156,7 +156,7 @@ type captureFixture struct {
 }
 
 const (
-	fixtureTask  = "task-1"
+	fixtureRun   = "run-1"
 	fixtureStage = "spec"
 )
 
@@ -175,7 +175,7 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 		t.Fatalf("write host secret: %v", err)
 	}
 
-	artifactDir := worktree.ArtifactDir(worktreeDir, fixtureTask, fixtureStage)
+	artifactDir := worktree.ArtifactDir(worktreeDir, fixtureRun, fixtureStage)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
@@ -184,8 +184,8 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 		t.Fatalf("write result.json: %v", err)
 	}
 
-	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
-	events := newFakeStore(task, sqlc.Project{})
+	record := sqlc.Run{ID: fixtureRun, TenantID: "tenant-1", UserID: "user-1"}
+	events := newFakeStore(record, sqlc.Project{})
 	store := &recordingArtifactStore{}
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{}}
 	runner := New(Deps{
@@ -197,7 +197,7 @@ func newCaptureFixture(t *testing.T) *captureFixture {
 	return &captureFixture{
 		runner: runner, store: store, events: events,
 		run: stageRun{
-			task:     task,
+			record:   record,
 			worktree: &worktree.Worktree{Root: worktreeDir},
 		},
 		artifactDir: artifactDir,
@@ -558,11 +558,11 @@ func TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives(t *testin
 	fake := &fakeManifestService{addErr: errors.New("db connection lost")}
 	fixture.runner.mfst = fake
 
-	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
-	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+	record := sqlc.Run{ID: fixtureRun, TenantID: "tenant-1", UserID: "user-1"}
+	runPack := scriptPack(fixtureStage, map[string]pack.Stage{
 		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 	})
-	run := stageRun{task: task, taskPack: taskPack}
+	run := stageRun{record: record, runPack: runPack}
 
 	// Must not panic or fail the stage; the run continues.
 	outputs := []manifest.ArtifactRef{{
@@ -598,11 +598,11 @@ func TestCompleteStageEvidence_WritesOnce(t *testing.T) {
 	fake := &fakeManifestService{}
 	fixture.runner.mfst = fake
 
-	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
-	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+	record := sqlc.Run{ID: fixtureRun, TenantID: "tenant-1", UserID: "user-1"}
+	runPack := scriptPack(fixtureStage, map[string]pack.Stage{
 		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 	})
-	run := stageRun{task: task, taskPack: taskPack}
+	run := stageRun{record: record, runPack: runPack}
 	outputs := []manifest.ArtifactRef{{
 		Name: fixtureStage + "/result.json", RevisionID: "rev-1", ContentHash: "h",
 		Stage: fixtureStage, InvocationID: "inv-1",
@@ -632,7 +632,7 @@ func TestCompleteStageEvidence_WritesOnce(t *testing.T) {
 
 // TestRecordInitialEvidence_FailureFailsTheTask is D5's exception: the initial
 // evidence is the run's provenance root, so a failure there must propagate
-// (the caller fails the task through failTask) rather than degrade.
+// (the caller fails the run through failRun) rather than degrade.
 // recordInitialEvidence returns the error; this test pins that it does, so the
 // caller can fail the run.
 func TestRecordInitialEvidence_FailureFailsTheTask(t *testing.T) {
@@ -640,13 +640,13 @@ func TestRecordInitialEvidence_FailureFailsTheTask(t *testing.T) {
 	fixture := newCaptureFixture(t)
 	fixture.runner.mfst = &fakeManifestService{addErr: errors.New("db connection lost")}
 
-	task := sqlc.Task{ID: fixtureTask, TenantID: "tenant-1", UserID: "user-1"}
+	record := sqlc.Run{ID: fixtureRun, TenantID: "tenant-1", UserID: "user-1"}
 	project := sqlc.Project{ID: "proj-1"}
-	taskPack := scriptPack(fixtureStage, map[string]pack.Stage{
+	runPack := scriptPack(fixtureStage, map[string]pack.Stage{
 		fixtureStage: {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 	})
 
-	err := fixture.runner.recordInitialEvidence(context.Background(), task, project, taskPack)
+	err := fixture.runner.recordInitialEvidence(context.Background(), record, project, runPack)
 	if err == nil {
 		t.Fatal("recordInitialEvidence with a failing manifest service returned nil; the provenance root must fail rather than degrade")
 	}

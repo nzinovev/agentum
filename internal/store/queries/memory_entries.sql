@@ -1,8 +1,8 @@
 -- name: CommitMemoryEntry :one
--- Insert only at task-done / final approval. The producing agent emitted these
+-- Insert only at run-done / final approval. The producing agent emitted these
 -- via memory_writes in result.json; they commit here.
 INSERT INTO memory_entries (
-    tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_task_id, source_stage
+    tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_run_id, source_stage
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;

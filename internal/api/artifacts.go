@@ -42,7 +42,7 @@ type artifactRevisionResponse struct {
 func toArtifactRevisionResponse(revision artifacts.Revision) artifactRevisionResponse {
 	return artifactRevisionResponse{
 		ID:               revision.ID,
-		RunID:            revision.TaskID,
+		RunID:            revision.RunID,
 		Name:             revision.Name,
 		Kind:             revision.Kind,
 		ContentHash:      revision.ContentHash,
@@ -60,11 +60,11 @@ func toArtifactRevisionResponse(revision artifacts.Revision) artifactRevisionRes
 }
 
 // handleListArtifacts GET /api/v1/runs/{id}/artifacts?current=true
-// Returns artifact revisions for a task. ?current=true narrows to current
+// Returns artifact revisions for a run. ?current=true narrows to current
 // revisions only (the snapshot a resume / comparison reads). Default: all
 // revisions, including superseded.
 func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -75,9 +75,9 @@ func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	var revisions []artifacts.Revision
 	var err error
 	if currentOnly {
-		revisions, err = api.art.ListCurrent(r.Context(), principal.TenantID, taskID)
+		revisions, err = api.art.ListCurrent(r.Context(), principal.TenantID, runID)
 	} else {
-		revisions, err = api.art.ListForTask(r.Context(), principal.TenantID, taskID)
+		revisions, err = api.art.ListForRun(r.Context(), principal.TenantID, runID)
 	}
 	if err != nil {
 		logUnexpected(api.log, err, "ListArtifacts")
@@ -96,14 +96,14 @@ func (api *API) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 // sibling /content path; splitting keeps this handler cheap and lets a client
 // inspect a revision without buffering the bytes.
 func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
 	if !api.requireArtifactStore(w) {
 		return
 	}
-	revision, found := api.revisionForTask(w, r, principal.TenantID, taskID, "GetArtifactRevision")
+	revision, found := api.revisionForRun(w, r, principal.TenantID, runID, "GetArtifactRevision")
 	if !found {
 		return
 	}
@@ -115,14 +115,14 @@ func (api *API) handleGetArtifactRevision(w http.ResponseWriter, r *http.Request
 // kind when known, else application/octet-stream. Streams via CopyTo so large
 // blobs do not buffer in memory.
 func (api *API) handleGetArtifactContent(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
 	if !api.requireArtifactStore(w) {
 		return
 	}
-	revision, found := api.revisionForTask(w, r, principal.TenantID, taskID, "GetArtifactContent")
+	revision, found := api.revisionForRun(w, r, principal.TenantID, runID, "GetArtifactContent")
 	if !found {
 		return
 	}
@@ -146,12 +146,12 @@ func (api *API) requireArtifactStore(w http.ResponseWriter) bool {
 	return true
 }
 
-// revisionForTask loads the {rid} revision and confirms it belongs to taskID.
-// A revision the tenant may read but that hangs off a DIFFERENT task is
+// revisionForRun loads the {rid} revision and confirms it belongs to runID.
+// A revision the tenant may read but that hangs off a DIFFERENT run is
 // reported as not-found rather than acknowledged, so the response never leaks
-// its cross-task existence. Writes the error response itself; found=false means
+// its cross-run existence. Writes the error response itself; found=false means
 // the handler must return. where names the caller for the unexpected-error log.
-func (api *API) revisionForTask(w http.ResponseWriter, r *http.Request, tenantID, taskID, where string) (artifacts.Revision, bool) {
+func (api *API) revisionForRun(w http.ResponseWriter, r *http.Request, tenantID, runID, where string) (artifacts.Revision, bool) {
 	revision, err := api.art.Get(r.Context(), tenantID, r.PathValue("rid"))
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNoCurrentRevision) || errors.Is(err, sql.ErrNoRows) {
@@ -162,7 +162,7 @@ func (api *API) revisionForTask(w http.ResponseWriter, r *http.Request, tenantID
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return artifacts.Revision{}, false
 	}
-	if revision.TaskID != taskID {
+	if revision.RunID != runID {
 		writeError(w, http.StatusNotFound, codeNotFound, msgRevisionNotFound)
 		return artifacts.Revision{}, false
 	}

@@ -17,7 +17,7 @@ import (
 type fakeRevisionIndex struct {
 	mu         sync.Mutex
 	revisions  map[string]sqlc.ArtifactRevision // by id
-	byTaskName map[string]sqlc.ArtifactRevision // by taskID|name (current)
+	byTaskName map[string]sqlc.ArtifactRevision // by runID|name (current)
 }
 
 func newFakeRevisionIndex() *fakeRevisionIndex {
@@ -27,7 +27,7 @@ func newFakeRevisionIndex() *fakeRevisionIndex {
 	}
 }
 
-func keyForCurrent(taskID, name string) string { return taskID + "|" + name }
+func keyForCurrent(runID, name string) string { return runID + "|" + name }
 
 // seed inserts a revision that CurrentArtifactRevisionForName and
 // GetArtifactRevision will return.
@@ -35,7 +35,7 @@ func (fake *fakeRevisionIndex) seed(revision sqlc.ArtifactRevision) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	fake.revisions[revision.ID] = revision
-	fake.byTaskName[keyForCurrent(revision.TaskID, revision.Name)] = revision
+	fake.byTaskName[keyForCurrent(revision.RunID, revision.Name)] = revision
 }
 
 func (fake *fakeRevisionIndex) GetArtifactRevision(_ context.Context, arg sqlc.GetArtifactRevisionParams) (sqlc.ArtifactRevision, error) {
@@ -51,7 +51,7 @@ func (fake *fakeRevisionIndex) GetArtifactRevision(_ context.Context, arg sqlc.G
 func (fake *fakeRevisionIndex) CurrentArtifactRevisionForName(_ context.Context, arg sqlc.CurrentArtifactRevisionForNameParams) (sqlc.ArtifactRevision, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	row, ok := fake.byTaskName[keyForCurrent(arg.TaskID, arg.Name)]
+	row, ok := fake.byTaskName[keyForCurrent(arg.RunID, arg.Name)]
 	if !ok {
 		return sqlc.ArtifactRevision{}, sql.ErrNoRows
 	}
@@ -70,9 +70,9 @@ func TestSyncer_SyncWritesFile(t *testing.T) {
 
 	queries := newFakeRevisionIndex()
 	revisionID := "rev-1"
-	taskID := "T1"
+	runID := "T1"
 	queries.seed(sqlc.ArtifactRevision{
-		ID: revisionID, TenantID: "tn", TaskID: taskID, Name: "specs/auth.md",
+		ID: revisionID, TenantID: "tn", RunID: runID, Name: "specs/auth.md",
 		Kind: "spec", ContentHash: hash, IsCurrent: true,
 	})
 
@@ -80,7 +80,7 @@ func TestSyncer_SyncWritesFile(t *testing.T) {
 
 	root := t.TempDir()
 	target := filepath.Join(root, "specs/auth.md")
-	results, err := syncer.Sync(context.Background(), "tn", taskID, root, []SyncTarget{
+	results, err := syncer.Sync(context.Background(), "tn", runID, root, []SyncTarget{
 		{Path: target, Name: "specs/auth.md"},
 	})
 	if err != nil {
@@ -130,7 +130,7 @@ func TestSyncer_RejectsEscapePath(t *testing.T) {
 	_ = blobs.Put(hash, []byte("escape-attempt"))
 	queries := newFakeRevisionIndex()
 	queries.seed(sqlc.ArtifactRevision{
-		ID: "rev-1", TenantID: "tn", TaskID: "T1",
+		ID: "rev-1", TenantID: "tn", RunID: "T1",
 		Name: "specs/auth.md", ContentHash: hash, IsCurrent: true,
 	})
 	syncer := newSyncerForTest(queries, blobs)
@@ -151,7 +151,7 @@ func TestSyncer_PinnedRevisionID(t *testing.T) {
 	_ = blobs.Put(hash, []byte("pinned-revision"))
 	queries := newFakeRevisionIndex()
 	queries.seed(sqlc.ArtifactRevision{
-		ID: "rev-pinned", TenantID: "tn", TaskID: "T1",
+		ID: "rev-pinned", TenantID: "tn", RunID: "T1",
 		Name: "specs/auth.md", ContentHash: hash, IsCurrent: false,
 	})
 	syncer := newSyncerForTest(queries, blobs)

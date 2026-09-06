@@ -23,7 +23,7 @@ const (
 // Gate identifiers recorded on a GateDecision. These name the kind of gate the
 // decision applied to; the diff/audit surface reads them, so they are stable
 // across releases. They are GATE LABELS (the audit vocabulary), distinct from
-// the task_approvals.name key (the durable approval namespace) — the two must
+// the run_approvals.name key (the durable approval namespace) — the two must
 // not be conflated. gateFinal stays "final" to match the pre-existing gate
 // vocabulary; the approval row for the same action is "final_review"
 // (approvalNameFinalReview in lifecycle.go).
@@ -60,15 +60,15 @@ func humanDecisionPatch(stage, gate, decision, userID string, at time.Time) mani
 }
 
 // gateDecisionPatch is the humanDecisionPatch every lifecycle handler builds:
-// the task's current stage, the gate and decision the handler stands for, the
+// the run's current stage, the gate and decision the handler stands for, the
 // acting principal, and now. Only the gate and the decision vary between
 // handlers, so they are the only things a call site spells out.
-func gateDecisionPatch(task sqlc.Task, principal authz.Principal, gate, decision string) manifest.Body {
-	return humanDecisionPatch(currentStageOr(task.CurrentStage, ""), gate, decision, principal.UserID, time.Now().UTC())
+func gateDecisionPatch(run sqlc.Run, principal authz.Principal, gate, decision string) manifest.Body {
+	return humanDecisionPatch(currentStageOr(run.CurrentStage, ""), gate, decision, principal.UserID, time.Now().UTC())
 }
 
-// currentStageOr returns the task's current stage id, or fallback when the task
-// has no current stage set (a task that has not entered a stage yet). Used by
+// currentStageOr returns the run's current stage id, or fallback when the run
+// has no current stage set (a run that has not entered a stage yet). Used by
 // the lifecycle handlers to fill the Stage field of a GateDecision.
 func currentStageOr(stage sql.NullString, fallback string) string {
 	if stage.Valid && stage.String != "" {
@@ -82,7 +82,7 @@ func currentStageOr(stage sql.NullString, fallback string) string {
 // gate action (advance, approve, continue) must fail the request if the
 // decision cannot land on the record — the whole point of the gate is the
 // record. Cancel is an emergency exit and must be the most tolerant handler:
-// cancelling a task whose manifest sealed during a crash, or was never
+// cancelling a run whose manifest sealed during a crash, or was never
 // initialized (Init is best-effort), is legitimate, so a sealed or missing
 // manifest is absorbed there rather than blocking the cancel.
 type recordPolicy int
@@ -107,20 +107,20 @@ func (api *API) recordHumanDecisionTx(
 	ctx context.Context,
 	qtx *sqlc.Queries,
 	principal authz.Principal,
-	taskID string,
+	runID string,
 	decision manifest.Body,
 	policy recordPolicy,
 ) error {
 	if api.mfst == nil {
 		return nil
 	}
-	err := api.mfst.AddEvidenceTx(ctx, qtx, principal.TenantID, taskID, decision)
+	err := api.mfst.AddEvidenceTx(ctx, qtx, principal.TenantID, runID, decision)
 	if err == nil {
 		return nil
 	}
 	if policy == recordLenient && (errors.Is(err, manifest.ErrSealed) || errors.Is(err, manifest.ErrNoManifest)) {
-		// A cancel on a task whose manifest sealed during a crash, or whose
-		// Init failed (best-effort at task creation), is legitimate. Absorb it
+		// A cancel on a run whose manifest sealed during a crash, or whose
+		// Init failed (best-effort at run creation), is legitimate. Absorb it
 		// so the transition commits; the artifact/revision rows remain the
 		// durable record, and evidence_complete will honestly report the gap.
 		return nil

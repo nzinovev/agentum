@@ -109,7 +109,7 @@ type Tiers struct {
 // failure blocks delivery); Optional names run but do not block. Neither can
 // supply a command, remove a project baseline check, or weaken an already-
 // mandatory check — mandatory is monotonic across the project baseline, the
-// pack, and the task.
+// pack, and the run input.
 type CheckPolicy struct {
 	Required []string `yaml:"required,omitempty"`
 	Optional []string `yaml:"optional,omitempty"`
@@ -230,7 +230,7 @@ var knownUnlocks = map[Unlock]bool{UnlockSourceWrite: true}
 
 // Approval declares a human gate whose decision unlocks a capability subset for
 // the rest of the run (ADR 0003 D3). The approval is recorded as a durable,
-// orchestrator-owned task_approvals row keyed unique on (task, name), so a
+// orchestrator-owned run_approvals row keyed unique on (run, name), so a
 // worker restart, a worktree restore, and a Restore to a checkpoint all leave
 // the decision intact and a repeated approve is idempotent by construction.
 type Approval struct {

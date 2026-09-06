@@ -2,7 +2,7 @@
 -- Insert a pending job. Called by HTTP handlers transactionally with the FSM
 -- transition. kind ∈ {run, continue, advance, cancel}; payload carries the
 -- inputs the worker needs (edits/context/answers).
-INSERT INTO jobs (tenant_id, user_id, task_id, kind, payload)
+INSERT INTO jobs (tenant_id, user_id, run_id, kind, payload)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
@@ -28,7 +28,7 @@ WHERE id = $1;
 
 -- name: FailJob :exec
 -- Mark a job failed with the reason. The recovery pass (or the caller) decides
--- whether the task moves to a paused state; this only records the job outcome.
+-- whether the run moves to a paused state; this only records the job outcome.
 UPDATE jobs SET status = 'failed', last_error = $2, finished_at = now()
 WHERE id = $1;
 
@@ -50,7 +50,7 @@ WHERE id IN (
 )
 RETURNING *;
 
--- name: CountRunningJobsForTask :one
--- Belt-and-suspenders: how many running jobs a task has. Used to guard against
+-- name: CountRunningJobsForRun :one
+-- Belt-and-suspenders: how many running jobs a run has. Used to guard against
 -- double-enqueue races (the FSM is the primary guard).
-SELECT count(*)::int FROM jobs WHERE task_id = $1 AND status = 'running';
+SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running';

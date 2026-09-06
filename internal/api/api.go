@@ -12,10 +12,10 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// TaskCanceler aborts an in-flight run by task id. Implemented by the runner's
+// RunCanceler aborts an in-flight run by run id. Implemented by the runner's
 // CancelRegistry; declared here so the API does not import the runner package.
-type TaskCanceler interface {
-	Cancel(taskID string) bool
+type RunCanceler interface {
+	Cancel(runID string) bool
 }
 
 // API wires the sqlc querier behind the HTTP handlers. It is constructed once
@@ -27,7 +27,7 @@ type API struct {
 	db      *sql.DB
 	queries *sqlc.Queries
 	log     *slog.Logger
-	cancels TaskCanceler
+	cancels RunCanceler
 
 	// art is the immutable artifact revisions store. Nil when the server did
 	// not wire one (e.g. tests); the artifact read handlers 404 then.
@@ -36,7 +36,7 @@ type API struct {
 	// one; the manifest read handlers 404 then.
 	mfst *manifest.Service
 	// packs resolves pipeline packs by ref. Required for the gate handlers to
-	// detect a pack-declared approval and write the task_approvals row in the
+	// detect a pack-declared approval and write the run_approvals row in the
 	// same tx as the advance transition (ADR 0003 D4). Nil when the server did
 	// not wire one; the approval write is skipped then.
 	packs pack.Source
@@ -60,7 +60,7 @@ func WithManifestService(service *manifest.Service) Option {
 
 // WithPackSource attaches a pipeline-pack resolver to the API (ADR 0003 D4).
 // Required for the gate handlers to detect a pack-declared approval and write
-// the matching task_approvals row in the same tx as the advance transition.
+// the matching run_approvals row in the same tx as the advance transition.
 func WithPackSource(source pack.Source) Option {
 	return func(apiInst *API) { apiInst.packs = source }
 }
@@ -68,7 +68,7 @@ func WithPackSource(source pack.Source) Option {
 // New builds the API. db backs the transactional outbox; cancels lets the cancel
 // handler abort an in-flight run (nil leaves cancel as a no-op — the FSM
 // transition still applies). Options wire the artifact store + manifest service.
-func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels TaskCanceler, options ...Option) *API {
+func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels RunCanceler, options ...Option) *API {
 	apiInst := &API{db: db, queries: queries, log: log, cancels: cancels}
 	for _, option := range options {
 		option(apiInst)
@@ -80,7 +80,7 @@ func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels TaskCancel
 // rollback (and error propagation) otherwise. This is the transactional-outbox
 // primitive: a handler composes its FSM transition + EnqueueJob inside fn and
 // they land atomically — a post-transition enqueue failure can never leave the
-// task in a state whose runnable intent was lost.
+// run in a state whose runnable intent was lost.
 func (api *API) runInTx(ctx context.Context, fn func(qtx *sqlc.Queries) error) error {
 	tx, err := api.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -112,13 +112,13 @@ func (api *API) Register(mux interface {
 	mux.HandleFunc("GET /api/v1/projects/{id}", api.handleGetProject)
 
 	// Runs (lifecycle).
-	mux.HandleFunc("GET /api/v1/runs", api.handleListTasks)
-	mux.HandleFunc("POST /api/v1/runs", api.handleCreateTask)
-	mux.HandleFunc("GET /api/v1/runs/{id}", api.handleGetTask)
-	mux.HandleFunc("POST /api/v1/runs/{id}/start", api.handleStartTask)
-	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", api.handleCancelTask)
-	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectTask)
-	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupTask)
+	mux.HandleFunc("GET /api/v1/runs", api.handleListRuns)
+	mux.HandleFunc("POST /api/v1/runs", api.handleCreateRun)
+	mux.HandleFunc("GET /api/v1/runs/{id}", api.handleGetRun)
+	mux.HandleFunc("POST /api/v1/runs/{id}/start", api.handleStartRun)
+	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", api.handleCancelRun)
+	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectRun)
+	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupRun)
 	mux.HandleFunc("GET /api/v1/runs/{id}/final-review", api.handleFinalReview)
 
 	// Stage invocations (read-only for now).
@@ -163,5 +163,5 @@ func (api *API) Register(mux interface {
 
 	// SSE event streams.
 	mux.HandleFunc("GET /api/v1/events", api.handleEventStream)
-	mux.HandleFunc("GET /api/v1/runs/{id}/events", api.handleTaskEventStream)
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", api.handleRunEventStream)
 }

@@ -24,7 +24,7 @@ import (
 
 // Block is the input to Render: the per-invocation context the runner assembles.
 type Block struct {
-	TaskID      string // the task this invocation belongs to
+	RunID       string // the run this invocation belongs to
 	ProjectName string // human-readable project name
 	Stage       string // the stage id from the pack (e.g. "spec", "implement")
 	Gate        string // the stage's gate value (one of the six C11 values)
@@ -82,7 +82,7 @@ type Block struct {
 	ApprovedPlan *PlanRef
 
 	// Diff points a reviewer-role stage (and the final gate) at the
-	// orchestrator-produced diff against the task's base commit (ADR 0003 D5).
+	// orchestrator-produced diff against the run's base commit (ADR 0003 D5).
 	// Nil for non-reviewer stages; the reviewer reads the real change set with
 	// fs.read alone, since RoleReviewer grants no exec.bash to run git itself.
 	Diff *DiffRef

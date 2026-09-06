@@ -7,7 +7,7 @@ import (
 
 func TestRender_RequiredFields(t *testing.T) {
 	t.Parallel()
-	got := Render(Block{TaskID: "T1", ProjectName: "My App", Stage: "spec", Gate: "human_approval", ArtifactDir: "/wt/.agentum/T1/.ag-artifacts/spec"})
+	got := Render(Block{RunID: "T1", ProjectName: "My App", Stage: "spec", Gate: "human_approval", ArtifactDir: "/wt/.agentum/T1/.ag-artifacts/spec"})
 
 	checks := map[string]bool{
 		"stage id present":         strings.Contains(got, "stage **spec**"),
@@ -152,7 +152,7 @@ func TestRender_ReviewFindings_OmittedWhenNil(t *testing.T) {
 func TestRender_TaskSection(t *testing.T) {
 	t.Parallel()
 	rendered := Render(Block{
-		TaskID: "T1", ProjectName: "Proj", Stage: "spec", Gate: "auto", ArtifactDir: "/x",
+		RunID: "T1", ProjectName: "Proj", Stage: "spec", Gate: "auto", ArtifactDir: "/x",
 		Title:       "Lower the log level of health endpoints",
 		Description: "Log /healthz at Debug. Compare by exact path.",
 	})

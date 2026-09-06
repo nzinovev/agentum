@@ -19,9 +19,9 @@ import (
 // fire the final gate). It runs the resolved set against the worktree HEAD —
 // the post-stage checkpoint commit, which is also the commit that will become
 // result_commit — records the outcome as manifest evidence, and blocks delivery
-// when a mandatory check fails by failing the task. A nil executor (unit tests)
+// when a mandatory check fails by failing the record. A nil executor (unit tests)
 // is a no-op. A resolution error (e.g. a pack referencing an unknown check name)
-// or a registry load error also fails the task: the pack is misconfigured for
+// or a registry load error also fails the run: the pack is misconfigured for
 // this project.
 func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) error {
 	if runner.checkExec == nil {
@@ -29,11 +29,11 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) error
 	}
 	report, mandatoryPassed, err := runner.enforceProjectChecks(ctx, run)
 	if err != nil {
-		return runner.failTask(ctx, run.task, fmt.Errorf("project checks: %w", err))
+		return runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
 	}
 	if !mandatoryPassed {
 		failed := report.FailedMandatory()
-		return runner.failTask(ctx, run.task,
+		return runner.failRun(ctx, run.record,
 			fmt.Errorf("mandatory project check failed: %s", strings.Join(failed, ", ")))
 	}
 	return nil
@@ -47,12 +47,12 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) error
 var ErrDirtyTreeAtDeliveryBoundary = errors.New("runner: worktree dirty at delivery boundary; cannot bind checks to a commit")
 
 // enforceProjectChecks loads the project registry, resolves the effective set
-// (project baseline ∪ pack ∪ task), runs it, records the evidence, and returns
+// (project baseline ∪ pack ∪ run), runs it, records the evidence, and returns
 // the report plus whether mandatory checks passed. A nil registry (project
 // defines no checks) is a valid empty run that passes — recorded as Ran:false so
 // the manifest never presents an absent gate as a cleared one.
 //
-// The registry is read from the task's base_commit (the lineage anchor, captured
+// The registry is read from the run's base_commit (the lineage anchor, captured
 // before the worktree is created), NOT from the agent-mutable worktree. This is
 // the agent-immutability seam: an implementer with fs.write to its worktree
 // cannot weaken the checks that gate its own delivery by editing .agentum.yaml,
@@ -75,13 +75,13 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 	// registry load (PR #23): the value cached for rendering never reaches the
 	// delivery gate. After the API boundary guarantees well-formed overrides, a
 	// decode failure here is an invariant break and must be loud.
-	taskOverrides, overridesErr := taskinput.ParseOverrides(run.task.Overrides)
+	runOverrides, overridesErr := taskinput.ParseOverrides(run.record.Overrides)
 	if overridesErr != nil {
-		return checks.Report{}, false, fmt.Errorf("parse task overrides: %w", overridesErr)
+		return checks.Report{}, false, fmt.Errorf("parse run overrides: %w", overridesErr)
 	}
-	packRequests := packCheckRequests(run.taskPack)
-	taskRequests := taskCheckRequests(taskOverrides)
-	set, err := checks.Resolve(registry, packRequests, taskRequests)
+	packRequests := packCheckRequests(run.runPack)
+	runRequests := runCheckRequests(runOverrides)
+	set, err := checks.Resolve(registry, packRequests, runRequests)
 	if err != nil {
 		return checks.Report{}, false, err
 	}
@@ -101,7 +101,7 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		// A dirty tree at the delivery boundary is a broken invariant, not a
 		// recoverable state: the checkpoint commit exists but the working tree
 		// has drifted off it, so checks against the tree would not be checks
-		// against the commit. Fail the task rather than claim a verification we
+		// against the commit. Fail the run rather than claim a verification we
 		// cannot stand behind.
 		return checks.Report{}, false, fmt.Errorf(
 			"%w: worktree has uncommitted changes after checkpoint %s", ErrDirtyTreeAtDeliveryBoundary, commit,
@@ -116,7 +116,7 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		// precondition held, so the boundary commit is the honest anchor even
 		// when no check verified it.
 		empty := checks.Report{Set: set, Commit: commit, Profile: checks.ProfileLabel}
-		runner.recordCheckEvidence(ctx, run.task, empty, commit)
+		runner.recordCheckEvidence(ctx, run.record, empty, commit)
 		return empty, true, nil
 	}
 
@@ -125,8 +125,8 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		return checks.Report{}, false, fmt.Errorf("run checks: %w", err)
 	}
 	report.Commit = commit
-	runner.recordCheckEvidence(ctx, run.task, report, commit)
-	runner.emit(ctx, run.task, EvProjectChecksRun, map[string]any{
+	runner.recordCheckEvidence(ctx, run.record, report, commit)
+	runner.emit(ctx, run.record, EvProjectChecksRun, map[string]any{
 		"commit":            commit,
 		"set_version":       set.SetVersion,
 		"registry_revision": set.RegistryRevision,
@@ -137,20 +137,20 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 }
 
 // loadRegistryAtBaseCommit reads .agentum.yaml from the project repo at the
-// task's lineage anchor. A missing file (os.ErrNotExist) is a nil registry —
+// run's lineage anchor. A missing file (os.ErrNotExist) is a nil registry —
 // the project defines no checks, which is a real configuration. An absent or
 // empty base_commit is an error, not an early exit: this method runs only at the
-// delivery boundary, so by construction the task has reached exactly the state
+// delivery boundary, so by construction the run has reached exactly the state
 // whose entire purpose is to be anchored. A missing anchor there is a broken
 // invariant, and fail-closed at this boundary is non-negotiable — returning a
 // nil registry would route to an empty set and MandatoryPassed()=true vacuously,
 // which is the mirror image of the fail-open defects PR C and PR D fixed.
 func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun) (*checks.Registry, error) {
-	baseCommit := run.task.BaseCommit.String
-	if !run.task.BaseCommit.Valid || baseCommit == "" {
+	baseCommit := run.record.BaseCommit.String
+	if !run.record.BaseCommit.Valid || baseCommit == "" {
 		return nil, errors.New("delivery boundary reached without a resolved base_commit; lineage anchor is required to gate delivery")
 	}
-	raw, err := runner.wt.FileAtCommit(ctx, checkoutPathOf(run.task, run.project), baseCommit, checks.ConfigFile)
+	raw, err := runner.wt.FileAtCommit(ctx, checkoutPathOf(run.record, run.project), baseCommit, checks.ConfigFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -166,7 +166,7 @@ func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun
 // Ran reflects whether any check actually executed (!set.Empty()), so an empty
 // set is recorded honestly rather than as a cleared gate. No-op when the
 // manifest service is nil (unit tests).
-func (runner *Runner) recordCheckEvidence(ctx context.Context, task sqlc.Task, report checks.Report, commit string) {
+func (runner *Runner) recordCheckEvidence(ctx context.Context, record sqlc.Run, report checks.Report, commit string) {
 	if runner.mfst == nil {
 		return
 	}
@@ -197,12 +197,12 @@ func (runner *Runner) recordCheckEvidence(ctx context.Context, task sqlc.Task, r
 			Results:          results,
 		},
 	}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record check evidence", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "checks", "", err)
+		runner.log.Warn("record check evidence", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "checks", "", err)
 	}
 }
 
@@ -226,26 +226,26 @@ func registryRevisionOf(set *checks.Set) string {
 // packCheckRequests turns the resolved pack's CheckPolicy into the checks
 // Request list. Required names are mandatory; optional names run but do not
 // block. Names are validated against the project registry at resolve time.
-func packCheckRequests(taskPack *pack.Pack) []checks.Request {
-	if taskPack == nil {
+func packCheckRequests(runPack *pack.Pack) []checks.Request {
+	if runPack == nil {
 		return nil
 	}
-	requests := make([]checks.Request, 0, len(taskPack.Checks.Required)+len(taskPack.Checks.Optional))
-	for _, name := range taskPack.Checks.Required {
+	requests := make([]checks.Request, 0, len(runPack.Checks.Required)+len(runPack.Checks.Optional))
+	for _, name := range runPack.Checks.Required {
 		requests = append(requests, checks.Request{Name: name, Required: true})
 	}
-	for _, name := range taskPack.Checks.Optional {
+	for _, name := range runPack.Checks.Optional {
 		requests = append(requests, checks.Request{Name: name, Required: false})
 	}
 	return requests
 }
 
-// taskCheckRequests maps the typed task overrides onto the checks Request
+// runCheckRequests maps the typed run overrides onto the checks Request
 // list. The names must exist in the project registry — the resolve step
 // rejects unknown ones. The caller owns the strict decode: this function never
 // sees raw bytes, so the old lenient `return nil` on a malformed column cannot
 // come back through it.
-func taskCheckRequests(overrides taskinput.Overrides) []checks.Request {
+func runCheckRequests(overrides taskinput.Overrides) []checks.Request {
 	requests := make([]checks.Request, 0, len(overrides.Checks.Required)+len(overrides.Checks.Optional))
 	for _, name := range overrides.Checks.Required {
 		requests = append(requests, checks.Request{Name: name, Required: true})

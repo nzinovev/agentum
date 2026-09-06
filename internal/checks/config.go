@@ -3,7 +3,7 @@
 // A project ships a versioned registry of named checks (a `.agentum.yaml` file
 // tracked in the repo). Each named check carries its execution contract: an
 // argument-vector command (no shell), a worktree-relative working directory, a
-// timeout, and an output cap. Packs and per-task input may add checks to the
+// timeout, and an output cap. Packs and per-run input may add checks to the
 // effective set *by name only*; they can never supply a command, never remove a
 // mandatory (baseline) check, and never weaken the mandatory set — `Resolve`
 // enforces all three. The Executor then runs the resolved set under a fixed
@@ -34,7 +34,7 @@ const APIVersion = "agentum/v1"
 
 // ConfigFile is the versioned project configuration file the checks registry
 // lives in. It is read from the worktree root so the registry reflects the
-// task's commit. It is intentionally distinct from the worktree-local `.agentum/`
+// run's commit. It is intentionally distinct from the worktree-local `.agentum/`
 // directory (gitignored runtime state): this file is tracked source the project
 // owns, the registry is versioned with the code, and pack/agent input can never
 // override what it declares.
@@ -43,7 +43,7 @@ const ConfigFile = ".agentum.yaml"
 // Definition is one named check in the project registry. The command is an
 // argument vector (first element is the binary, the rest its args) so neither
 // pack nor agent input can inject shell operators — there is no shell. Only the
-// project's versioned config supplies commands; pack and task inputs reference
+// project's versioned config supplies commands; pack and run inputs reference
 // checks by name only.
 //
 // Required marks a project-baseline mandatory check: it is always included in

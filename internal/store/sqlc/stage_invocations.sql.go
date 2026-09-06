@@ -14,15 +14,15 @@ import (
 )
 
 const createStageInvocation = `-- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle)
+INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle
+RETURNING id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle
 `
 
 type CreateStageInvocationParams struct {
 	TenantID          string                `json:"tenant_id"`
 	UserID            string                `json:"user_id"`
-	TaskID            string                `json:"task_id"`
+	RunID             string                `json:"run_id"`
 	Stage             string                `json:"stage"`
 	Sequence          int32                 `json:"sequence"`
 	SessionID         sql.NullString        `json:"session_id"`
@@ -36,7 +36,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 	row := q.db.QueryRowContext(ctx, createStageInvocation,
 		arg.TenantID,
 		arg.UserID,
-		arg.TaskID,
+		arg.RunID,
 		arg.Stage,
 		arg.Sequence,
 		arg.SessionID,
@@ -50,7 +50,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Stage,
 		&i.Sequence,
 		&i.SessionID,
@@ -95,7 +95,7 @@ func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvo
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations WHERE id = $1 AND tenant_id = $2
 `
 
 type GetStageInvocationParams struct {
@@ -110,7 +110,7 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Stage,
 		&i.Sequence,
 		&i.SessionID,
@@ -126,26 +126,26 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 	return i, err
 }
 
-const latestStageForTask = `-- name: LatestStageForTask :one
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE task_id = $1 AND tenant_id = $2
+const latestStageForRun = `-- name: LatestStageForRun :one
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2
 ORDER BY sequence DESC
 LIMIT 1
 `
 
-type LatestStageForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type LatestStageForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
-func (q *Queries) LatestStageForTask(ctx context.Context, arg LatestStageForTaskParams) (StageInvocation, error) {
-	row := q.db.QueryRowContext(ctx, latestStageForTask, arg.TaskID, arg.TenantID)
+func (q *Queries) LatestStageForRun(ctx context.Context, arg LatestStageForRunParams) (StageInvocation, error) {
+	row := q.db.QueryRowContext(ctx, latestStageForRun, arg.RunID, arg.TenantID)
 	var i StageInvocation
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Stage,
 		&i.Sequence,
 		&i.SessionID,
@@ -161,21 +161,21 @@ func (q *Queries) LatestStageForTask(ctx context.Context, arg LatestStageForTask
 	return i, err
 }
 
-const listStageInvocationsForTask = `-- name: ListStageInvocationsForTask :many
-SELECT id, tenant_id, user_id, task_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE task_id = $1 AND tenant_id = $2
+const listStageInvocationsForRun = `-- name: ListStageInvocationsForRun :many
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2
 ORDER BY sequence ASC
 `
 
-type ListStageInvocationsForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type ListStageInvocationsForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
 // Ordered by sequence so each attempt is visible in run order; the cycle column
 // distinguishes retries from resumes. Backs GET /runs/{id}/invocations.
-func (q *Queries) ListStageInvocationsForTask(ctx context.Context, arg ListStageInvocationsForTaskParams) ([]StageInvocation, error) {
-	rows, err := q.db.QueryContext(ctx, listStageInvocationsForTask, arg.TaskID, arg.TenantID)
+func (q *Queries) ListStageInvocationsForRun(ctx context.Context, arg ListStageInvocationsForRunParams) ([]StageInvocation, error) {
+	rows, err := q.db.QueryContext(ctx, listStageInvocationsForRun, arg.RunID, arg.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func (q *Queries) ListStageInvocationsForTask(ctx context.Context, arg ListStage
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Stage,
 			&i.Sequence,
 			&i.SessionID,
@@ -215,23 +215,23 @@ func (q *Queries) ListStageInvocationsForTask(ctx context.Context, arg ListStage
 
 const maxCycleForStages = `-- name: MaxCycleForStages :one
 SELECT COALESCE(MAX(cycle), -1)::int FROM stage_invocations
-WHERE task_id = $1 AND tenant_id = $2 AND stage = ANY($3::text[])
+WHERE run_id = $1 AND tenant_id = $2 AND stage = ANY($3::text[])
 `
 
 type MaxCycleForStagesParams struct {
-	TaskID   string   `json:"task_id"`
+	RunID    string   `json:"run_id"`
 	TenantID string   `json:"tenant_id"`
 	Column3  []string `json:"column_3"`
 }
 
 // The durable fix-cycle counter: the highest cycle any of the given (fixer-
-// role) stages has reached for this task. Returns -1 when none of the stages
+// role) stages has reached for this run. Returns -1 when none of the stages
 // has run yet (MAX over zero rows is NULL; COALESCE to a sentinel that cannot
 // be a real cycle, since cycles are >= 0). The runner maps -1 -> 0 entries.
 // stage = ANY($3) takes the fixer set in one round-trip (pq.Array over pgx
 // stdlib, already exercised by projects.related_projects).
 func (q *Queries) MaxCycleForStages(ctx context.Context, arg MaxCycleForStagesParams) (int32, error) {
-	row := q.db.QueryRowContext(ctx, maxCycleForStages, arg.TaskID, arg.TenantID, pq.Array(arg.Column3))
+	row := q.db.QueryRowContext(ctx, maxCycleForStages, arg.RunID, arg.TenantID, pq.Array(arg.Column3))
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err

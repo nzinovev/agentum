@@ -6,10 +6,10 @@ WHERE tenant_id = $1 AND id > $2
 ORDER BY id ASC
 LIMIT $3;
 
--- name: ListEventsAfterTask :many
--- Per-task tail: same shape, scoped to one task. Used by GET /runs/{id}/events.
+-- name: ListEventsAfterRun :many
+-- Per-run tail: same shape, scoped to one run. Used by GET /runs/{id}/events.
 SELECT * FROM events
-WHERE tenant_id = $1 AND task_id = $2 AND id > $3
+WHERE tenant_id = $1 AND run_id = $2 AND id > $3
 ORDER BY id ASC
 LIMIT $4;
 
@@ -19,6 +19,6 @@ LIMIT $4;
 -- is a simple "> last_id" tail. The column has no default on purpose: every
 -- writer must name its actor — the runner and the reconciler pass 'system',
 -- request-driven writers pass 'human'.
-INSERT INTO events (tenant_id, user_id, task_id, type, payload, actor)
+INSERT INTO events (tenant_id, user_id, run_id, type, payload, actor)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;

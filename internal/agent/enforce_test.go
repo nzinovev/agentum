@@ -19,7 +19,7 @@ import (
 func testSubst(root string) scopeSubst {
 	return scopeSubst{
 		worktree: root,
-		artifact: filepath.Join(root, ".agentum", "task-1", ".ag-artifacts", "spec"),
+		artifact: filepath.Join(root, ".agentum", "run-1", ".ag-artifacts", "spec"),
 	}
 }
 
@@ -157,8 +157,8 @@ func TestPermissionScope_IsRelativeToTheWorktree(t *testing.T) {
 	}
 
 	// The paths opencode would present, given the layout above.
-	artifactFile := ".agentum/task-1/.ag-artifacts/spec/result.json"
-	otherStageFile := ".agentum/task-1/.ag-artifacts/review/result.json"
+	artifactFile := ".agentum/run-1/.ag-artifacts/spec/result.json"
+	otherStageFile := ".agentum/run-1/.ag-artifacts/review/result.json"
 	sourceFile := "internal/agent/opencode.go"
 
 	for _, testCase := range []struct {
@@ -290,7 +290,7 @@ func TestRenderConfig_AnalystWritesArtifactsButNotSource(t *testing.T) {
 	if rules[anyPath] != actionDeny {
 		t.Errorf("analyst edit baseline = %v, want deny", rules[anyPath])
 	}
-	const artifactPattern = ".agentum/task-1/.ag-artifacts/spec/**"
+	const artifactPattern = ".agentum/run-1/.ag-artifacts/spec/**"
 	if rules[artifactPattern] != actionAllow {
 		t.Errorf("analyst edit %q = %v, want allow (result.json must be writable)", artifactPattern, rules[artifactPattern])
 	}
@@ -501,7 +501,7 @@ func TestPrepareEnforcement_AuditKeepsAbsoluteScopes(t *testing.T) {
 			t.Errorf("audit grant still carries a placeholder: %q", granted)
 		}
 	}
-	if !strings.Contains(string(plan.config), ".agentum/task-1/.ag-artifacts/spec/**") {
+	if !strings.Contains(string(plan.config), ".agentum/run-1/.ag-artifacts/spec/**") {
 		t.Errorf("rendered config does not carry the relative artifact scope:\n%s", plan.config)
 	}
 }

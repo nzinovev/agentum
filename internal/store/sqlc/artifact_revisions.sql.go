@@ -12,7 +12,7 @@ import (
 
 const createArtifactRevision = `-- name: CreateArtifactRevision :one
 INSERT INTO artifact_revisions (
-    tenant_id, user_id, task_id,
+    tenant_id, user_id, run_id,
     name, kind,
     content_hash, content_size,
     action_type, prev_revision_id,
@@ -22,13 +22,13 @@ INSERT INTO artifact_revisions (
     is_current
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true)
-RETURNING id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current
+RETURNING id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current
 `
 
 type CreateArtifactRevisionParams struct {
 	TenantID           string         `json:"tenant_id"`
 	UserID             string         `json:"user_id"`
-	TaskID             string         `json:"task_id"`
+	RunID              string         `json:"run_id"`
 	Name               string         `json:"name"`
 	Kind               string         `json:"kind"`
 	ContentHash        string         `json:"content_hash"`
@@ -52,7 +52,7 @@ func (q *Queries) CreateArtifactRevision(ctx context.Context, arg CreateArtifact
 	row := q.db.QueryRowContext(ctx, createArtifactRevision,
 		arg.TenantID,
 		arg.UserID,
-		arg.TaskID,
+		arg.RunID,
 		arg.Name,
 		arg.Kind,
 		arg.ContentHash,
@@ -70,7 +70,7 @@ func (q *Queries) CreateArtifactRevision(ctx context.Context, arg CreateArtifact
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Name,
 		&i.Kind,
 		&i.ContentHash,
@@ -89,27 +89,27 @@ func (q *Queries) CreateArtifactRevision(ctx context.Context, arg CreateArtifact
 }
 
 const currentArtifactRevisionForName = `-- name: CurrentArtifactRevisionForName :one
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
-WHERE task_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+WHERE run_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
 `
 
 type CurrentArtifactRevisionForNameParams struct {
-	TaskID   string `json:"task_id"`
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 	Name     string `json:"name"`
 }
 
-// The revision a resume / next stage syncs into the worktree for (task_id,
+// The revision a resume / next stage syncs into the worktree for (run_id,
 // name). Backed by the partial unique index idx_artifact_rev_current; one row
-// max. Returns no rows when the task has no revision of that name yet.
+// max. Returns no rows when the run has no revision of that name yet.
 func (q *Queries) CurrentArtifactRevisionForName(ctx context.Context, arg CurrentArtifactRevisionForNameParams) (ArtifactRevision, error) {
-	row := q.db.QueryRowContext(ctx, currentArtifactRevisionForName, arg.TaskID, arg.TenantID, arg.Name)
+	row := q.db.QueryRowContext(ctx, currentArtifactRevisionForName, arg.RunID, arg.TenantID, arg.Name)
 	var i ArtifactRevision
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Name,
 		&i.Kind,
 		&i.ContentHash,
@@ -129,16 +129,16 @@ func (q *Queries) CurrentArtifactRevisionForName(ctx context.Context, arg Curren
 
 const demoteArtifactRevisionIfCurrent = `-- name: DemoteArtifactRevisionIfCurrent :execrows
 UPDATE artifact_revisions SET is_current = false
-WHERE task_id = $1 AND name = $2 AND id = $3 AND is_current = true
+WHERE run_id = $1 AND name = $2 AND id = $3 AND is_current = true
 `
 
 type DemoteArtifactRevisionIfCurrentParams struct {
-	TaskID string `json:"task_id"`
-	Name   string `json:"name"`
-	ID     string `json:"id"`
+	RunID string `json:"run_id"`
+	Name  string `json:"name"`
+	ID    string `json:"id"`
 }
 
-// Flip one specific revision of (task_id, name) from current to superseded.
+// Flip one specific revision of (run_id, name) from current to superseded.
 // Pinning the id (rather than "whatever is current") is what makes the write
 // safe under concurrency: the caller read that id inside this transaction, so
 // an affected-row count of 0 means another writer moved the chain in between
@@ -148,7 +148,7 @@ type DemoteArtifactRevisionIfCurrentParams struct {
 // Runs in the same transaction as CreateArtifactRevision so the
 // idx_artifact_rev_current unique partial index never sees two currents at once.
 func (q *Queries) DemoteArtifactRevisionIfCurrent(ctx context.Context, arg DemoteArtifactRevisionIfCurrentParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, demoteArtifactRevisionIfCurrent, arg.TaskID, arg.Name, arg.ID)
+	result, err := q.db.ExecContext(ctx, demoteArtifactRevisionIfCurrent, arg.RunID, arg.Name, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -156,7 +156,7 @@ func (q *Queries) DemoteArtifactRevisionIfCurrent(ctx context.Context, arg Demot
 }
 
 const getArtifactRevision = `-- name: GetArtifactRevision :one
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions WHERE id = $1 AND tenant_id = $2
 `
 
 type GetArtifactRevisionParams struct {
@@ -171,7 +171,7 @@ func (q *Queries) GetArtifactRevision(ctx context.Context, arg GetArtifactRevisi
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Name,
 		&i.Kind,
 		&i.ContentHash,
@@ -190,7 +190,7 @@ func (q *Queries) GetArtifactRevision(ctx context.Context, arg GetArtifactRevisi
 }
 
 const listArtifactRevisionsForInvocation = `-- name: ListArtifactRevisionsForInvocation :many
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
 WHERE source_invocation_id = $1 AND tenant_id = $2
 ORDER BY created_at ASC
 `
@@ -215,7 +215,7 @@ func (q *Queries) ListArtifactRevisionsForInvocation(ctx context.Context, arg Li
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Name,
 			&i.Kind,
 			&i.ContentHash,
@@ -243,21 +243,21 @@ func (q *Queries) ListArtifactRevisionsForInvocation(ctx context.Context, arg Li
 	return items, nil
 }
 
-const listArtifactRevisionsForTask = `-- name: ListArtifactRevisionsForTask :many
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
-WHERE task_id = $1 AND tenant_id = $2
+const listArtifactRevisionsForRun = `-- name: ListArtifactRevisionsForRun :many
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+WHERE run_id = $1 AND tenant_id = $2
 ORDER BY name ASC, created_at DESC
 `
 
-type ListArtifactRevisionsForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type ListArtifactRevisionsForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
-// All revisions for a task, newest first. Includes prior, non-current
+// All revisions for a run, newest first. Includes prior, non-current
 // revisions so the audit trail reads in full.
-func (q *Queries) ListArtifactRevisionsForTask(ctx context.Context, arg ListArtifactRevisionsForTaskParams) ([]ArtifactRevision, error) {
-	rows, err := q.db.QueryContext(ctx, listArtifactRevisionsForTask, arg.TaskID, arg.TenantID)
+func (q *Queries) ListArtifactRevisionsForRun(ctx context.Context, arg ListArtifactRevisionsForRunParams) ([]ArtifactRevision, error) {
+	rows, err := q.db.QueryContext(ctx, listArtifactRevisionsForRun, arg.RunID, arg.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +269,7 @@ func (q *Queries) ListArtifactRevisionsForTask(ctx context.Context, arg ListArti
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Name,
 			&i.Kind,
 			&i.ContentHash,
@@ -297,20 +297,20 @@ func (q *Queries) ListArtifactRevisionsForTask(ctx context.Context, arg ListArti
 	return items, nil
 }
 
-const listCurrentArtifactRevisionsForTask = `-- name: ListCurrentArtifactRevisionsForTask :many
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
-WHERE task_id = $1 AND tenant_id = $2 AND is_current = true
+const listCurrentArtifactRevisionsForRun = `-- name: ListCurrentArtifactRevisionsForRun :many
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+WHERE run_id = $1 AND tenant_id = $2 AND is_current = true
 ORDER BY name ASC
 `
 
-type ListCurrentArtifactRevisionsForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type ListCurrentArtifactRevisionsForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
 // The current revisions only — the snapshot a resume / comparison reads.
-func (q *Queries) ListCurrentArtifactRevisionsForTask(ctx context.Context, arg ListCurrentArtifactRevisionsForTaskParams) ([]ArtifactRevision, error) {
-	rows, err := q.db.QueryContext(ctx, listCurrentArtifactRevisionsForTask, arg.TaskID, arg.TenantID)
+func (q *Queries) ListCurrentArtifactRevisionsForRun(ctx context.Context, arg ListCurrentArtifactRevisionsForRunParams) ([]ArtifactRevision, error) {
+	rows, err := q.db.QueryContext(ctx, listCurrentArtifactRevisionsForRun, arg.RunID, arg.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +322,7 @@ func (q *Queries) ListCurrentArtifactRevisionsForTask(ctx context.Context, arg L
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Name,
 			&i.Kind,
 			&i.ContentHash,
@@ -351,20 +351,20 @@ func (q *Queries) ListCurrentArtifactRevisionsForTask(ctx context.Context, arg L
 }
 
 const lockCurrentArtifactRevisionForName = `-- name: LockCurrentArtifactRevisionForName :one
-SELECT id, tenant_id, user_id, task_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
-WHERE task_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
+SELECT id, tenant_id, user_id, run_id, name, kind, content_hash, content_size, action_type, prev_revision_id, source_invocation_id, delivery_step, execution_unit, phase, actor, created_at, is_current FROM artifact_revisions
+WHERE run_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true
 FOR UPDATE
 `
 
 type LockCurrentArtifactRevisionForNameParams struct {
-	TaskID   string `json:"task_id"`
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 	Name     string `json:"name"`
 }
 
 // The same lookup as CurrentArtifactRevisionForName, but taking a row lock so
 // the read-decide-write sequence in artifacts.SQLStore.Put is serialized
-// against concurrent writers to the same (task_id, name). Must be called inside
+// against concurrent writers to the same (run_id, name). Must be called inside
 // a transaction; a second writer blocks here until the first commits and then
 // observes the new current revision.
 //
@@ -372,13 +372,13 @@ type LockCurrentArtifactRevisionForNameParams struct {
 // two racing first-creates are caught instead by the idx_artifact_rev_current
 // unique partial index, and the loser's insert fails.
 func (q *Queries) LockCurrentArtifactRevisionForName(ctx context.Context, arg LockCurrentArtifactRevisionForNameParams) (ArtifactRevision, error) {
-	row := q.db.QueryRowContext(ctx, lockCurrentArtifactRevisionForName, arg.TaskID, arg.TenantID, arg.Name)
+	row := q.db.QueryRowContext(ctx, lockCurrentArtifactRevisionForName, arg.RunID, arg.TenantID, arg.Name)
 	var i ArtifactRevision
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Name,
 		&i.Kind,
 		&i.ContentHash,

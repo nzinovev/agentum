@@ -118,13 +118,13 @@ func TestInvocationEvidence_FixCycleLeavesTwoReviewRecords(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack, err := pack.Load(evidencePackDir(t))
+	runPack, err := pack.Load(evidencePackDir(t))
 	if err != nil {
 		t.Fatalf("load pack: %v", err)
 	}
-	task := sqlc.Task{ID: "T-inv-evidence", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "evidence-test@0.1.0"}
+	record := sqlc.Run{ID: "T-inv-evidence", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "evidence-test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &countingVerdictAdapter{
 		results: map[string]agent.ResultJSON{
 			"review": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "reviewed"},
@@ -135,11 +135,11 @@ func TestInvocationEvidence_FixCycleLeavesTwoReviewRecords(t *testing.T) {
 	}
 	fakeManifest := &fakeManifestService{}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if want := []string{"spec", "review", "fix", "review"}; !equalStringSlices(adapter.calls, want) {
@@ -208,18 +208,18 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-refused", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-refused", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	fakeManifest := &fakeManifestService{}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &refusingAdapter{}})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: &refusingAdapter{}})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -248,23 +248,23 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 // The stage is refused before any invocation row is created.
 func TestInvokeStage_MissingExecutionPlanEntryRefuses(t *testing.T) {
 	t.Parallel()
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-no-plan", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running"}
-	store := newFakeStore(task, sqlc.Project{ID: "P1", TenantID: "tn", Name: "P"})
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &refusingAdapter{}})
+	record := sqlc.Run{ID: "T-no-plan", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running"}
+	store := newFakeStore(record, sqlc.Project{ID: "P1", TenantID: "tn", Name: "P"})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: &refusingAdapter{}})
 
 	// A run whose plan is empty — the shape a future stage source that mutates
 	// the pack after run start would produce.
 	run := stageRun{
-		task:          task,
-		taskPack:      taskPack,
+		record:        record,
+		runPack:       runPack,
 		worktree:      &worktree.Worktree{Root: t.TempDir()},
 		executionPlan: map[string]models.Selection{},
 	}
-	outcome := runner.invokeStage(t.Context(), run, "spec", taskPack.Stages["spec"], "", stageTransition{})
+	outcome := runner.invokeStage(t.Context(), run, "spec", runPack.Stages["spec"], "", stageTransition{})
 
 	if !outcome.adapterErr {
 		t.Errorf("outcome = %+v; want an adapter error rather than a run on an unresolved model", outcome)
@@ -304,18 +304,18 @@ func TestInvocationEvidence_StreamFailureRecordsNoTelemetry(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-stream-fail", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-stream-fail", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	fakeManifest := &fakeManifestService{}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &failingStreamAdapter{}})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: &failingStreamAdapter{}})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func TestInvocationEvidence_StreamFailureRecordsNoTelemetry(t *testing.T) {
 }
 
 // TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation: a pack
-// stage naming a tier no configuration defines fails the task at run start —
+// stage naming a tier no configuration defines fails the run at run start —
 // before any stage_invocation row is created, naming the stage and the tier.
 func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testing.T) {
 	t.Parallel()
@@ -345,19 +345,19 @@ func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testin
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Tier: "exotic", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-bad-tier", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-bad-tier", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us"))
+	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("an unresolvable tier must fail the run")
 	}
@@ -365,7 +365,7 @@ func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testin
 		t.Errorf("failure must name the stage and the tier: %v", err)
 	}
 	if got := store.taskState(); got != "failed" {
-		t.Errorf("task state = %q, want failed", got)
+		t.Errorf("run state = %q, want failed", got)
 	}
 	store.mu.Lock()
 	invocationCount := len(store.invocations)
@@ -384,20 +384,20 @@ func TestResolveExecutionPlan_ValidatesEveryStageOfThePack(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "late"}}},
 		"late": {Gate: pack.GateAuto, Tier: "exotic", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-late-tier", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-late-tier", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us"))
+	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("a late stage's unresolvable tier must fail the run at start")
 	}
@@ -446,21 +446,21 @@ func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testi
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T-bad-option", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-bad-option", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &narrowedOptionAdapter{scriptAdapter: scriptAdapter{
 		scripts: map[string]agent.ResultJSON{
 			"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 		},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us"))
+	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("an option the adapter does not declare must fail the run")
 	}
@@ -473,7 +473,7 @@ func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testi
 		t.Errorf("failure must name the unsupported option: %v", err)
 	}
 	if got := store.taskState(); got != "failed" {
-		t.Errorf("task state = %q, want failed", got)
+		t.Errorf("run state = %q, want failed", got)
 	}
 	store.mu.Lock()
 	invocationCount := len(store.invocations)

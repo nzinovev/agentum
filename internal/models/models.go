@@ -65,7 +65,7 @@ type Config struct {
 type OptionName string
 
 // OptionModel selects the model string passed to the runtime's --model flag.
-// MVP task 6 adds OptionVariant.
+// A per-variant option selects OptionVariant.
 const OptionModel OptionName = "model"
 
 // Options is the structured model configuration handed to an adapter. It is a

@@ -539,6 +539,36 @@ Once tagged releases begin, this project adheres to
   yet — that is PR3.
 
 ### Changed
+- **The physical names of the launch entity are now `run` — schema, queries,
+  and Go identifiers.** Migration `0012` renames five tables (`tasks` →
+  `runs`, `task_approvals` → `run_approvals`, `task_checkpoints` →
+  `run_checkpoints`, `task_manifests` → `run_manifests`,
+  `task_manifest_corrections` → `run_manifest_corrections`), eight `task_id`
+  columns (`memory_entries.source_task_id` → `source_run_id`), and their
+  indexes and constraints; a rename carries no rows, so no data moves.
+  sqlc query names and types follow the schema (`sqlc.Run`, `GetRun`,
+  `UpdateRunState`, …), the authz action vocabulary renames its nine verbs to
+  `run:*` (`ActionRunCreate` … `ActionRunCleanup`; values were never exposed —
+  `Can` still ignores the action for the single owner), `engine.TaskState`
+  becomes `engine.RunState`, and the runner's stage-row field becomes
+  `record` (`run.record.ID`) so the variable and the field stop colliding.
+  The earlier vocabulary change deliberately left these physical names
+  untouched; that restriction is now lifted, and the reason is the failure
+  mode. After this rename no relation carries the old name, so any reference
+  the rename missed is a loud failure — a missing-relation error from
+  Postgres or a compile error from Go. Made together with the run /
+  work-item split instead, the same old name would land on a NEW table with
+  a different meaning, and a missed reference would compile and execute
+  against the wrong table. A schema vocabulary guard — a database test over
+  `information_schema`, `pg_constraint`, and `pg_indexes` — now fails when
+  any table, column, index, or constraint reintroduces the reserved token.
+  The old word survives only where it names something else: `taskinput` (the
+  typed request: title, description, overrides), the checks layer value
+  `task` (checks requested through the run's overrides), opencode's
+  permission key `task` (an external tool's name, not ours), and the pack
+  prompts' `## Task` section (the requested work). The routing template
+  renames only its variable, `{{.TaskID}}` → `{{.RunID}}` — the rendered
+  block, and therefore the prompt hashes, are byte-identical.
 - **The launch entity is named `run` across every human-facing surface.**
   HTTP routes move from `/api/v1/tasks…` to `/api/v1/runs…` (no aliases: the
   UI has not been started and nothing else calls the API, and an alias would

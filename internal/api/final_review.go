@@ -19,7 +19,7 @@ import (
 // revision-content endpoints — the payload carries ids, not blobs, so a large
 // diff does not have to be inlined.
 type finalReviewResponse struct {
-	Run       taskResponse          `json:"run"`
+	Run       runResponse           `json:"run"`
 	Plan      *finalReviewPlan      `json:"plan,omitempty"`
 	Git       *finalReviewGit       `json:"git,omitempty"`
 	Diff      *finalReviewDiff      `json:"diff,omitempty"`
@@ -93,51 +93,51 @@ type finalReviewDecision struct {
 // handleFinalReview GET /api/v1/runs/{id}/final-review
 // Returns 200 in awaiting_final_review AND in done/cancelled/failed — "the
 // result stays reviewable after the worktree is removed" is a requirement, not
-// a nicety (ADR 0003 D8). 409 for a task that has not reached the gate.
+// a nicety (ADR 0003 D8). 409 for a run that has not reached the gate.
 // Assembled from durable rows + revisions only; the handler runs no git.
 func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
-	_, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskRead, "GetTask(final-review)")
+	_, run, ok := api.requireRunForAction(w, r, authz.ActionRunRead, "GetRun(final-review)")
 	if !ok {
 		return
 	}
-	state := engine.TaskState(task.State)
+	state := engine.RunState(run.State)
 	if state != engine.StateAwaitingFinalReview && !engine.IsTerminal(state) {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"final-review requires awaiting_final_review or a terminal state; run is "+task.State)
+			"final-review requires awaiting_final_review or a terminal state; run is "+run.State)
 		return
 	}
-	response := finalReviewResponse{Run: toTaskResponse(task)}
+	response := finalReviewResponse{Run: toRunResponse(run)}
 	response.Git = &finalReviewGit{
-		Branch:       branchForTask(task.ID),
-		BaseCommit:   nullStringOr(task.BaseCommit),
-		ResultCommit: nullStringOr(task.ResultCommit),
+		Branch:       branchForRun(run.ID),
+		BaseCommit:   nullStringOr(run.BaseCommit),
+		ResultCommit: nullStringOr(run.ResultCommit),
 	}
 	// Plan: the pack-declared approval artifact's current revision, plus the
 	// approval row that bound the human decision to it.
 	if api.packs != nil {
-		if taskPack, pErr := api.packs.Resolve(r.Context(), task.PipelinePack); pErr == nil {
-			if approval, hasApproval := taskPack.SourceWriteApproval(); hasApproval {
-				response.Plan = api.finalReviewPlan(r.Context(), task, approval)
+		if runPack, pErr := api.packs.Resolve(r.Context(), run.PipelinePack); pErr == nil {
+			if approval, hasApproval := runPack.SourceWriteApproval(); hasApproval {
+				response.Plan = api.finalReviewPlan(r.Context(), run, approval)
 			}
 		}
 	}
 	// Decisions: the approval rows, oldest first.
-	response.Decisions = api.finalReviewDecisions(r.Context(), task)
+	response.Decisions = api.finalReviewDecisions(r.Context(), run)
 	// Stages + artifacts: current revisions grouped by stage.
-	response.Stages = api.finalReviewStages(r.Context(), task)
+	response.Stages = api.finalReviewStages(r.Context(), run)
 	// Diff + review verdict: scanned from the current revisions.
-	response.Diff, response.Review = api.finalReviewDiffAndVerdict(r.Context(), task, response.Stages)
+	response.Diff, response.Review = api.finalReviewDiffAndVerdict(r.Context(), run, response.Stages)
 	// Manifest summary (when wired).
-	response.Manifest = api.finalReviewManifest(r.Context(), task)
+	response.Manifest = api.finalReviewManifest(r.Context(), run)
 	writeJSON(w, http.StatusOK, response)
 }
 
 // finalReviewPlan reads the approval artifact's current revision and the
 // matching approval row. Returns nil when there is no current revision.
-func (api *API) finalReviewPlan(ctx context.Context, task sqlc.Task, approval pack.Approval) *finalReviewPlan {
+func (api *API) finalReviewPlan(ctx context.Context, run sqlc.Run, approval pack.Approval) *finalReviewPlan {
 	revisionName := approval.Stage + "/" + approval.Artifact
 	rev, err := api.queries.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: task.ID, TenantID: task.TenantID, Name: revisionName,
+		RunID: run.ID, TenantID: run.TenantID, Name: revisionName,
 	})
 	if err != nil {
 		return nil
@@ -148,7 +148,7 @@ func (api *API) finalReviewPlan(ctx context.Context, task sqlc.Task, approval pa
 		ContentHash: rev.ContentHash,
 	}
 	if row, err := api.queries.GetApproval(ctx, sqlc.GetApprovalParams{
-		TenantID: task.TenantID, TaskID: task.ID, Name: approval.Name,
+		TenantID: run.TenantID, RunID: run.ID, Name: approval.Name,
 	}); err == nil {
 		out.ApprovedBy = row.UserID
 		out.ApprovedAt = row.CreatedAt.UTC().Format("2006-01-02T15:04:05.000000000Z")
@@ -156,11 +156,11 @@ func (api *API) finalReviewPlan(ctx context.Context, task sqlc.Task, approval pa
 	return out
 }
 
-// finalReviewDecisions reads every approval row for the task as the audit
+// finalReviewDecisions reads every approval row for the run as the audit
 // narrative of human decisions at both gates.
-func (api *API) finalReviewDecisions(ctx context.Context, task sqlc.Task) []finalReviewDecision {
-	rows, err := api.queries.ListApprovalsForTask(ctx, sqlc.ListApprovalsForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+func (api *API) finalReviewDecisions(ctx context.Context, run sqlc.Run) []finalReviewDecision {
+	rows, err := api.queries.ListApprovalsForRun(ctx, sqlc.ListApprovalsForRunParams{
+		RunID: run.ID, TenantID: run.TenantID,
 	})
 	if err != nil {
 		return nil
@@ -181,9 +181,9 @@ func (api *API) finalReviewDecisions(ctx context.Context, task sqlc.Task) []fina
 // names are "<stage>/<file>". Agent-declared source files (kind file/code/test,
 // names like "internal/api/foo.go") are worktree paths, not stage artifacts, and
 // must not be split into a fake stage named "internal".
-func (api *API) finalReviewStages(ctx context.Context, task sqlc.Task) []finalReviewStage {
-	revs, err := api.queries.ListCurrentArtifactRevisionsForTask(ctx, sqlc.ListCurrentArtifactRevisionsForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+func (api *API) finalReviewStages(ctx context.Context, run sqlc.Run) []finalReviewStage {
+	revs, err := api.queries.ListCurrentArtifactRevisionsForRun(ctx, sqlc.ListCurrentArtifactRevisionsForRunParams{
+		RunID: run.ID, TenantID: run.TenantID,
 	})
 	if err != nil || len(revs) == 0 {
 		return nil
@@ -239,7 +239,7 @@ func isStageScopedKind(kind string) bool {
 // carries the actual verdict + findings, not an empty struct. Both are
 // best-effort: a missing store, a missing revision, or an unparseable verdict
 // yield nil rather than failing the whole payload.
-func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, stages []finalReviewStage) (*finalReviewDiff, *finalReviewVerdict) {
+func (api *API) finalReviewDiffAndVerdict(ctx context.Context, run sqlc.Run, stages []finalReviewStage) (*finalReviewDiff, *finalReviewVerdict) {
 	var diff *finalReviewDiff
 	for _, stage := range stages {
 		patchID, statID := "", ""
@@ -257,7 +257,7 @@ func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, s
 		}
 	}
 	if diff != nil && diff.PatchRevisionID != "" && api.art != nil {
-		if patchBytes, err := api.art.GetBytes(ctx, task.TenantID, diff.PatchRevisionID); err == nil {
+		if patchBytes, err := api.art.GetBytes(ctx, run.TenantID, diff.PatchRevisionID); err == nil {
 			diff.Truncated = bytes.Contains(patchBytes, []byte(artifacts.DiffTruncationMarker))
 		}
 	}
@@ -270,7 +270,7 @@ func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, s
 			if artifact.Kind != "verdict_json" || api.art == nil {
 				continue
 			}
-			verdictBytes, err := api.art.GetBytes(ctx, task.TenantID, artifact.RevisionID)
+			verdictBytes, err := api.art.GetBytes(ctx, run.TenantID, artifact.RevisionID)
 			if err != nil || len(verdictBytes) == 0 {
 				continue
 			}
@@ -289,11 +289,11 @@ func (api *API) finalReviewDiffAndVerdict(ctx context.Context, task sqlc.Task, s
 
 // finalReviewManifest summarizes the manifest seal/evidence state when the
 // manifest service is wired. Returns nil otherwise.
-func (api *API) finalReviewManifest(ctx context.Context, task sqlc.Task) *finalReviewManifest {
+func (api *API) finalReviewManifest(ctx context.Context, run sqlc.Run) *finalReviewManifest {
 	if api.mfst == nil {
 		return nil
 	}
-	body, sealInfo, _, err := api.mfst.Get(ctx, task.TenantID, task.ID)
+	body, sealInfo, _, err := api.mfst.Get(ctx, run.TenantID, run.ID)
 	if err != nil {
 		return nil
 	}
@@ -319,6 +319,6 @@ func splitStageFile(name string) (stage, file string, ok bool) {
 	return "", "", false
 }
 
-// branchForTask mirrors worktree.BranchFor without importing the runner. The
-// branch name is a pure function of the task id, so the API can render it.
-func branchForTask(taskID string) string { return "agentum/" + taskID }
+// branchForRun mirrors worktree.BranchFor without importing the runner. The
+// branch name is a pure function of the run id, so the API can render it.
+func branchForRun(runID string) string { return "agentum/" + runID }

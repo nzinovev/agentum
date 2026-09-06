@@ -181,11 +181,11 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	if pathChanged {
 		response.PreviousRepoPath = existing.RepoPath
 		if previousState != previousCopyGone {
-			awaiting, countErr := api.queries.CountActiveTasksOnCheckout(r.Context(), sqlc.CountActiveTasksOnCheckoutParams{
+			awaiting, countErr := api.queries.CountActiveRunsOnCheckout(r.Context(), sqlc.CountActiveRunsOnCheckoutParams{
 				TenantID: principal.TenantID, ProjectID: proj.ID, CheckoutPath: existing.RepoPath,
 			})
 			if countErr != nil {
-				logUnexpected(api.log, countErr, "CountActiveTasksOnCheckout")
+				logUnexpected(api.log, countErr, "CountActiveRunsOnCheckout")
 			} else {
 				response.RunsAwaitingPreviousCheckout = awaiting
 			}
