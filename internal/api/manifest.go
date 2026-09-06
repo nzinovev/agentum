@@ -22,7 +22,7 @@ const (
 // manifest body (sealed body with the latest correction applied); seal_info
 // carries the seal metadata; corrections lists post-seal amendments in order.
 type manifestResponse struct {
-	TaskID      string           `json:"task_id"`
+	RunID       string           `json:"run_id"`
 	Body        manifest.Body    `json:"body"`
 	Seal        sealInfoResponse `json:"seal"`
 	Corrections []correctionResp `json:"corrections"`
@@ -46,8 +46,8 @@ type correctionResp struct {
 
 func toManifestResponse(taskID string, body manifest.Body, seal manifest.SealInfo, corrections []manifest.Correction) manifestResponse {
 	resp := manifestResponse{
-		TaskID: taskID,
-		Body:   body,
+		RunID: taskID,
+		Body:  body,
 		Seal: sealInfoResponse{
 			Sealed:    seal.Sealed,
 			Reason:    seal.Reason,
@@ -71,7 +71,7 @@ func toManifestResponse(taskID string, body manifest.Body, seal manifest.SealInf
 	return resp
 }
 
-// handleGetManifest GET /api/v1/tasks/{id}/manifest
+// handleGetManifest GET /api/v1/runs/{id}/manifest
 // Returns the manifest body, seal metadata, and any corrections.
 func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	principal, taskID, ok := requireTaskRead(w, r)
@@ -94,7 +94,7 @@ func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toManifestResponse(taskID, body, seal, corrections))
 }
 
-// handleDiffManifest GET /api/v1/tasks/{id}/manifest/diff?other=<task-id>
+// handleDiffManifest GET /api/v1/runs/{id}/manifest/diff?other=<task-id>
 // Compares this task's sealed manifest body with another task's sealed body
 // and returns the input-level differences. Outputs (artifacts produced) and
 // human decisions are NOT compared — those are results, not inputs. The
@@ -140,7 +140,7 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, manifest.DiffManifests(leftBody, rightBody))
 }
 
-// handleCorrectManifest POST /api/v1/tasks/{id}/manifest/corrections
+// handleCorrectManifest POST /api/v1/runs/{id}/manifest/corrections
 // Body: {reason: string, body?: partial manifest body}. Adds a post-seal
 // correction to the manifest. The body is merged into the sealed body; fields
 // the caller does not include are left unchanged. 409 when the manifest is not

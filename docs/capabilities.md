@@ -39,7 +39,7 @@ A **capability** is one of:
 | `artifact.write` | Write the per-stage artifact dir (`result.json` + declared artifacts) | opencode `edit` rule, scoped to the artifact dir — opencode has **no** separate `write` permission; write and patch are both governed by `edit` |
 | `exec.bash` | Run shell commands | opencode `bash` rule + deny patterns for delivery-ref mutation |
 | `git.read` | Inspect git state (log, status, diff) | Routed through `exec.bash` deny-pattern gate |
-| `git.write` | Mutate git inside the worktree (commit to the task branch) | Same as `exec.bash`; scoped to the worktree |
+| `git.write` | Mutate git inside the worktree (commit to the run branch) | Same as `exec.bash`; scoped to the worktree |
 | `net.fetch` | Outbound HTTP (web research) | opencode `webfetch` + `websearch` rules; without the grant the common network clients are also denied in `bash` |
 | `secret.<name>` | Access a named credential | env scrub: the var is dropped unless the grant un-redacts it |
 
@@ -52,7 +52,7 @@ the invocation refuses to start.
 
 Two capabilities are **never granted to an agent**:
 
-- `git.delivery` — operating on `agentum/<task-id>` branch tips and checkpoint
+- `git.delivery` — operating on `agentum/<run-id>` branch tips and checkpoint
   SHAs. The orchestrator owns these (the worktree manager applies them
   directly); no agent role includes `git.delivery`, and deny-by-default keeps it
   out of every profile regardless of what a pack declares.
@@ -150,7 +150,7 @@ profile into four concrete controls:
      deny baseline refuses every write while the config still reads correctly,
      and an analyst simply cannot produce `result.json`. An implementer's
      `fs.write:${worktree}/**` becomes `**`; an analyst's artifact scope becomes
-     `.agentum/<task>/.ag-artifacts/<stage>/**`. A scope that cannot be
+     `.agentum/<run-id>/.ag-artifacts/<stage>/**`. A scope that cannot be
      expressed relative to the worktree is an error, not a dropped grant — the
      invocation refuses to start. The absolute paths remain in the *audit*
      profile, which is evidence rather than configuration.
@@ -348,7 +348,7 @@ agent without project rules.
   `AGENTS.md` (or any declared path) via the edit tool; a pre-stage hash check
   (CRLF-normalised, so a `core.autocrlf=true` checkout is not a false positive)
   stops a `bash`-side rewrite and restores the pinned bytes. Each restoration
-  emits `task.instructions_restored` and lands in the manifest context section;
+  emits `run.instructions_restored` and lands in the manifest context section;
   the rewrite is orchestrator-authored, so the next checkpoint commit shows it
   as a revert.
 - **Skills, allowed and recorded.** `skill` resolves to `allow` — a skill grants

@@ -14,7 +14,7 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	body := Body{
 		Schema: schemaVersion,
 		Input: &InputEvidence{
-			TaskID: "T1", Title: "title", Revision: "abc",
+			RunID: "T1", Title: "title", Revision: "abc",
 			Description: "the requested behaviour",
 			Overrides:   []byte(`{"checks":{"required":["verify"],"optional":[]}}`),
 		},
@@ -67,8 +67,8 @@ func TestDecodeEmptyBodyReturnsSchema(t *testing.T) {
 
 func TestMergeBodies_ScalarOverwrites(t *testing.T) {
 	t.Parallel()
-	base := Body{Input: &InputEvidence{TaskID: "T1", Revision: "v1"}}
-	patch := Body{Input: &InputEvidence{TaskID: "T1", Revision: "v2"}}
+	base := Body{Input: &InputEvidence{RunID: "T1", Revision: "v1"}}
+	patch := Body{Input: &InputEvidence{RunID: "T1", Revision: "v2"}}
 	merged := mergeBodies(base, patch)
 	if merged.Input.Revision != "v2" {
 		t.Errorf("scalar not overwritten: %+v", merged.Input)

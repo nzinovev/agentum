@@ -539,6 +539,25 @@ Once tagged releases begin, this project adheres to
   yet — that is PR3.
 
 ### Changed
+- **The launch entity is named `run` across every human-facing surface.**
+  HTTP routes move from `/api/v1/tasks…` to `/api/v1/runs…` (no aliases: the
+  UI has not been started and nothing else calls the API, and an alias would
+  preserve the very second vocabulary this change removes); JSON fields rename
+  `task_id` → `run_id` (artifact revisions, manifests, the SSE frame's mixed-in
+  fact) and the final-review payload's `task` object becomes `run`; event
+  types rename their `task.*` prefix to `run.*` (state changes, worktree
+  lifecycle, checkpoints, checks, delivery divergence, checkout loss,
+  reconcile, instruction restore); the manifest's `input.task_id` becomes
+  `input.run_id` (no `schema_version` bump — the version names the evidence
+  structure, not field spellings, and bodies are written in the new form from
+  the first run). Vocabulary guards in `internal/api` fail the build when a
+  route, a response JSON tag, or an event-type literal reintroduces the
+  reserved word. Deliberately untouched: physical schema names (`tasks`,
+  `task_approvals`, `task_id` columns) and Go identifiers — the word occurs
+  ~2800 times in Go and a rename of that size would bury the substantive
+  changes it travels with; the physical rename lands together with the
+  run / work-item split, where the schema changes anyway
+  (`docs/domain-model.md` records `task` as the run's physical name).
 - **The authz action vocabulary is declared, not spelled at the call site.**
   Every permission the API checks — the nine `task:*` verbs, the three
   `project:*` ones, `event:stream`, and the route gate's `access` — is now an

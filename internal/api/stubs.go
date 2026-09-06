@@ -18,7 +18,7 @@ const (
 
 // --- Stage invocations (read-only) ---
 //
-// GET /tasks/{id}/invocations and GET /tasks/{id}/invocations/{iid} are
+// GET /runs/{id}/invocations and GET /runs/{id}/invocations/{iid} are
 // implemented in invocations.go (the per-attempt read surface, including the
 // cycle column that distinguishes retries from resumes).
 
@@ -27,28 +27,28 @@ const (
 // continue / advance / cancel / approve are implemented in lifecycle.go (the
 // runner's flow controls). The remaining gate actions land with Epic 2.
 
-// POST /api/v1/tasks/{id}/invocations/{iid}/edit
+// POST /api/v1/runs/{id}/invocations/{iid}/edit
 // Edit-and-approve: the human edits the artifact directly; the edit IS the
 // approval.
 func (api *API) handleInvocationEdit(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "POST /tasks/{id}/invocations/{iid}/edit")
+	notImplemented(w, epicGateActions, "POST /runs/{id}/invocations/{iid}/edit")
 }
 
-// POST /api/v1/tasks/{id}/invocations/{iid}/ask-to-edit
+// POST /api/v1/runs/{id}/invocations/{iid}/ask-to-edit
 // Scoped agent-mediated edit; re-stops for review (recursive stop point).
 func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "POST /tasks/{id}/invocations/{iid}/ask-to-edit")
+	notImplemented(w, epicGateActions, "POST /runs/{id}/invocations/{iid}/ask-to-edit")
 }
 
-// POST /api/v1/tasks/{id}/invocations/{iid}/add-context
+// POST /api/v1/runs/{id}/invocations/{iid}/add-context
 // Additive guidance; the agent resumes (does not regenerate).
 func (api *API) handleInvocationAddContext(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "POST /tasks/{id}/invocations/{iid}/add-context")
+	notImplemented(w, epicGateActions, "POST /runs/{id}/invocations/{iid}/add-context")
 }
 
 // --- Artifacts ---
 //
-// GET / PUT /tasks/{id}/invocations/{iid}/artifacts/{name} are implemented in
+// GET / PUT /runs/{id}/invocations/{iid}/artifacts/{name} are implemented in
 // artifact_edit.go (the human-edit path over the immutable revisions store).
 
 // GET /api/v1/projects/{id}/memory?keyword=...

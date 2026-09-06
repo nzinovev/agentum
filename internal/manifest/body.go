@@ -164,7 +164,7 @@ func newEmptyBody() Body {
 // request hash equal regardless of how either request body was formatted, and
 // the input-revision diff axis means what it always claimed.
 type InputEvidence struct {
-	TaskID      string          `json:"task_id"`
+	RunID       string          `json:"run_id"`
 	Title       string          `json:"title"`
 	Description string          `json:"description"`
 	Overrides   json.RawMessage `json:"overrides,omitempty"`

@@ -18,8 +18,8 @@ func TestDiffManifests_IdenticalEmpty(t *testing.T) {
 
 func TestDiffManifests_InputRevision(t *testing.T) {
 	t.Parallel()
-	left := Body{Input: &InputEvidence{TaskID: "T1", Revision: "v1"}}
-	right := Body{Input: &InputEvidence{TaskID: "T1", Revision: "v2"}}
+	left := Body{Input: &InputEvidence{RunID: "T1", Revision: "v1"}}
+	right := Body{Input: &InputEvidence{RunID: "T1", Revision: "v2"}}
 	diff := DiffManifests(left, right)
 	if diff.Input == nil {
 		t.Fatal("Input diff missing for revision change")
@@ -47,7 +47,7 @@ func TestDiffManifests_InputRevisionCanonicalAcrossFormatting(t *testing.T) {
 			Overrides:   overrides,
 		}
 		return &InputEvidence{
-			TaskID: "T1", Title: request.Title,
+			RunID: "T1", Title: request.Title,
 			Description: request.Description,
 			Revision:    request.Revision(),
 			PipelineRef: "backend-development@0.1.0",

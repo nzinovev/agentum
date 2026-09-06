@@ -174,7 +174,7 @@ func writeTaskCreateError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 }
 
-// handleCreateTask POST /api/v1/tasks
+// handleCreateTask POST /api/v1/runs
 // Body: {project_id, pipeline_pack, title, description, overrides?, base_ref?}.
 // tenant/user come from the Principal, never the body. The stored overrides
 // are the canonical serialization, so two identically-valued requests produce
@@ -260,7 +260,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toTaskResponse(task))
 }
 
-// handleGetTask GET /api/v1/tasks/{id}
+// handleGetTask GET /api/v1/runs/{id}
 func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	_, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskRead, "GetTask")
 	if !ok {
@@ -269,7 +269,7 @@ func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
-// handleListTasks GET /api/v1/tasks?project_id=...&limit=...&offset=...
+// handleListTasks GET /api/v1/runs?project_id=...&limit=...&offset=...
 func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requireAccess(w, r, authz.ActionTaskList, "")
 	if !ok {
@@ -302,7 +302,7 @@ func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleStartTask POST /api/v1/tasks/{id}/start
+// handleStartTask POST /api/v1/runs/{id}/start
 // Transitions created -> running through engine.Next and enqueues a run job.
 // The worker (not this request) drives the stages; the handler returns as soon
 // as the job is queued. An illegal transition is a 409, never a silent write.

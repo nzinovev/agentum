@@ -14,7 +14,7 @@ import (
 // patch alone.
 func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 	t.Parallel()
-	locked := Body{Schema: "1", Input: &InputEvidence{TaskID: "T1", Revision: "v1"}}
+	locked := Body{Schema: "1", Input: &InputEvidence{RunID: "T1", Revision: "v1"}}
 	lockedBytes, err := json.Marshal(locked)
 	if err != nil {
 		t.Fatalf("marshal locked: %v", err)
@@ -54,7 +54,7 @@ func TestMergeIntoLocked_UndecodableBodyIsAnError(t *testing.T) {
 // baseline and accept the patch rather than erroring.
 func TestMergeIntoLocked_EmptyLockedBodyStartsFresh(t *testing.T) {
 	t.Parallel()
-	patch := Body{Input: &InputEvidence{TaskID: "T1", Revision: "v1"}}
+	patch := Body{Input: &InputEvidence{RunID: "T1", Revision: "v1"}}
 	merged, err := mergeIntoLocked(nil, patch)
 	if err != nil {
 		t.Fatalf("mergeIntoLocked on empty body: %v", err)
@@ -66,7 +66,7 @@ func TestMergeIntoLocked_EmptyLockedBodyStartsFresh(t *testing.T) {
 	if decoded.Schema != schemaVersion {
 		t.Errorf("Schema = %q, want %q", decoded.Schema, schemaVersion)
 	}
-	if decoded.Input == nil || decoded.Input.TaskID != "T1" {
+	if decoded.Input == nil || decoded.Input.RunID != "T1" {
 		t.Errorf("patch not applied: %+v", decoded.Input)
 	}
 }
@@ -78,8 +78,8 @@ func TestMergeIntoLocked_EmptyLockedBodyStartsFresh(t *testing.T) {
 // prevent, and invisible because both correction rows still exist.
 func TestCorrectionBase_PreferLatestOverSealed(t *testing.T) {
 	t.Parallel()
-	sealed := Body{Input: &InputEvidence{TaskID: "T1", Revision: "sealed"}}
-	latest := Body{Input: &InputEvidence{TaskID: "T1", Revision: "correction-1"}}
+	sealed := Body{Input: &InputEvidence{RunID: "T1", Revision: "sealed"}}
+	latest := Body{Input: &InputEvidence{RunID: "T1", Revision: "correction-1"}}
 
 	base := correctionBase(sealed, &latest)
 	if base.Input == nil || base.Input.Revision != "correction-1" {
@@ -91,7 +91,7 @@ func TestCorrectionBase_PreferLatestOverSealed(t *testing.T) {
 // when no correction exists yet, the sealed body is the base.
 func TestCorrectionBase_FallsBackToSealedWhenNoLatest(t *testing.T) {
 	t.Parallel()
-	sealed := Body{Input: &InputEvidence{TaskID: "T1", Revision: "sealed"}}
+	sealed := Body{Input: &InputEvidence{RunID: "T1", Revision: "sealed"}}
 
 	base := correctionBase(sealed, nil)
 	if base.Input == nil || base.Input.Revision != "sealed" {
@@ -106,7 +106,7 @@ func TestCorrectionBase_FallsBackToSealedWhenNoLatest(t *testing.T) {
 func TestCorrectionChain_PreservesEarlierCorrections(t *testing.T) {
 	t.Parallel()
 	sealed := Body{Missing: []string{"memory"}}
-	first := mergeBodies(sealed, Body{Input: &InputEvidence{TaskID: "T1", Revision: "v1"}})
+	first := mergeBodies(sealed, Body{Input: &InputEvidence{RunID: "T1", Revision: "v1"}})
 	second := mergeBodies(first, Body{Invocations: []InvocationEvidence{testInvocation("inv-2", "spec", 1)}})
 
 	if second.Input == nil || second.Input.Revision != "v1" {

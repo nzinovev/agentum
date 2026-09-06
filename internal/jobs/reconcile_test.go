@@ -80,8 +80,8 @@ func TestReconciler_PausesOrphanedRunningTasks(t *testing.T) {
 		t.Fatalf("transition = %q, want T-orphan:running→paused_user_stop", tasks.transitions[0])
 	}
 	// An audit event was emitted.
-	if len(tasks.events) != 1 || tasks.events[0] != "task.reconciled" {
-		t.Fatalf("events = %v, want [task.reconciled]", tasks.events)
+	if len(tasks.events) != 1 || tasks.events[0] != "run.reconciled" {
+		t.Fatalf("events = %v, want [run.reconciled]", tasks.events)
 	}
 	// The task is now paused, not running.
 	for _, task := range tasks.tasks {

@@ -9,7 +9,7 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// invocationResponse is the GET /tasks/{id}/invocations list/get shape. It
+// invocationResponse is the GET /runs/{id}/invocations list/get shape. It
 // surfaces the per-attempt record (sequence, cycle, stage, stop_reason,
 // session_id, resume_of, timestamps) so "each attempt is visible separately"
 // is answerable from the API — the cycle column distinguishes retries from
@@ -27,7 +27,7 @@ type invocationResponse struct {
 	FinishedAt string `json:"finished_at,omitempty"`
 }
 
-// handleListInvocations GET /api/v1/tasks/{id}/invocations
+// handleListInvocations GET /api/v1/runs/{id}/invocations
 // Returns a task's stage invocations ordered by sequence, so each attempt is
 // visible in run order. The cycle column distinguishes a retry from a resume.
 func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +62,7 @@ func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGetInvocation GET /api/v1/tasks/{id}/invocations/{iid}
+// handleGetInvocation GET /api/v1/runs/{id}/invocations/{iid}
 // Returns a single stage invocation by id.
 func (api *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
 	principal, taskID, ok := requireTaskRead(w, r)

@@ -16,14 +16,14 @@ import (
 // handler frames each row as id:/event:/data: and the UI consumes them. See
 // docs/api.md for the contract.
 const (
-	EvTaskStateChanged = "task.state_changed"
-	EvStageInvocation  = "stage.invocation_started"
-	EvStageStream      = "stage.stream"
-	EvStageTool        = "stage.tool"
-	EvStageStopped     = "stage.stopped"
-	EvStageResult      = "stage.result"
-	EvMemoryCommitted  = "memory.committed"
-	EvRunLog           = "run.log"
+	EvRunStateChanged = "run.state_changed"
+	EvStageInvocation = "stage.invocation_started"
+	EvStageStream     = "stage.stream"
+	EvStageTool       = "stage.tool"
+	EvStageStopped    = "stage.stopped"
+	EvStageResult     = "stage.result"
+	EvMemoryCommitted = "memory.committed"
+	EvRunLog          = "run.log"
 )
 
 // sse poll/tune knobs.
@@ -38,14 +38,14 @@ func (api *API) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	api.runSSE(w, r, "", "/api/v1/events")
 }
 
-// handleTaskEventStream GET /api/v1/tasks/{id}/events — per-task SSE stream.
+// handleTaskEventStream GET /api/v1/runs/{id}/events — per-task SSE stream.
 func (api *API) handleTaskEventStream(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if taskID == "" {
 		writeError(w, http.StatusBadRequest, codeBadInput, "missing task id")
 		return
 	}
-	api.runSSE(w, r, taskID, "/api/v1/tasks/{id}/events")
+	api.runSSE(w, r, taskID, "/api/v1/runs/{id}/events")
 }
 
 // runSSE serves the SSE contract: replay events with id > Last-Event-ID, then
@@ -141,8 +141,8 @@ func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher h
 // event's source recorded: the run id and the actor. Both live on the row
 // rather than in every producer's payload, which is why the docs can promise
 // them on every frame while individual payloads never repeat them — and why a
-// system-written event cannot read on the stream as the task author acting.
-// The task id is mixed in only when the row carries one (a tenant-global event
+// system-written event cannot read on the stream as the run author acting.
+// The run id is mixed in only when the row carries one (a tenant-global event
 // gets no empty placeholder), a producer's own key always wins over the
 // mixed-in value, and a non-object payload is passed through untouched rather
 // than rewritten into one.
@@ -158,7 +158,7 @@ func writeSSEFrame(w http.ResponseWriter, event sqlc.Event) error {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &data); err == nil && data != nil {
 		if event.TaskID.Valid && event.TaskID.String != "" {
-			mixInFrameFact(data, "task_id", event.TaskID.String)
+			mixInFrameFact(data, "run_id", event.TaskID.String)
 		}
 		mixInFrameFact(data, "actor", event.Actor)
 		if encoded, encodeErr := json.Marshal(data); encodeErr == nil {

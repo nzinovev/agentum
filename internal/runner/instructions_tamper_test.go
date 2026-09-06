@@ -120,7 +120,7 @@ func initRepoWithAgentsCommit(dir, marker string) error {
 // as a test. An implementer (via the tamperAdapter, standing in for bash)
 // rewrites AGENTS.md during the implement stage. Before the review stage runs,
 // restoreInstructions must (1) detect the drift, (2) rewrite the pinned bytes
-// over the tampered copy, (3) emit task.instructions_restored, and (4) record
+// over the tampered copy, (3) emit run.instructions_restored, and (4) record
 // the restoration in the manifest context section. The review invocation's
 // instruction content then carries the ORIGINAL marker, not the tampered one.
 func TestInstructions_TamperReproduction(t *testing.T) {
@@ -157,7 +157,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// (1) A task.instructions_restored event was emitted for the review stage,
+	// (1) A run.instructions_restored event was emitted for the review stage,
 	// carrying the tampered hash and action "restored".
 	var sawRestorationEvent bool
 	for _, event := range store.events {
@@ -177,7 +177,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		sawRestorationEvent = true
 	}
 	if !sawRestorationEvent {
-		t.Error("expected a task.instructions_restored event for the review stage; the tamper was not caught")
+		t.Error("expected a run.instructions_restored event for the review stage; the tamper was not caught")
 	}
 
 	// (2) The worktree's AGENTS.md was restored to the original marker (the

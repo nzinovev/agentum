@@ -33,7 +33,7 @@ A project binds a repository to an Agentum project id (one repository = one
 project per tenant). The project's key is the repository's **identity** — a
 fingerprint of its own history (`repo_identity`, computed at registration from
 the repository itself and never accepted from a request body) — not its local
-path. Tasks reference a project; the runner creates a per-task worktree off
+path. Runs reference a project; the runner creates a per-run worktree off
 the project's working copy. Registration is idempotent: registering the same
 repository — the same copy, a moved directory, or a clone of the same history —
 returns the same project, updating `repo_path` / `name` / `related_projects`
@@ -100,20 +100,20 @@ repository / checkout, run vs work item, actor / creator / owner).
 registration that moved the working copy and are omitted otherwise; at most
 one of the two counters is non-zero on any given registration.
 
-## Tasks
+## Runs
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/tasks` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Task`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
-| `GET` | `/tasks` | ✅ | `?project_id=&limit=&offset=` → `200 Task[]` |
-| `GET` | `/tasks/{id}` | ✅ | → `200 Task` / `404 not_found` |
-| `POST` | `/tasks/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Task` / `409 illegal_transition` |
-| `POST` | `/tasks/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Task` / `409 illegal_transition` |
-| `POST` | `/tasks/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Task` / `409 illegal_transition` |
-| `GET` | `/tasks/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the task author approving. |
-| `POST` | `/tasks/{id}/cleanup` | ✅ | terminal task → branch deleted (idempotent, audited) → `202 Task` / `409 illegal_transition` (if not terminal) |
+| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Run`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]` |
+| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found` |
+| `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
+| `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
+| `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
+| `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
+| `POST` | `/runs/{id}/cleanup` | ✅ | terminal run → branch deleted (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) |
 
-`base_ref` is the git ref the task builds against (branch / tag / SHA / `HEAD`).
+`base_ref` is the git ref the run builds against (branch / tag / SHA / `HEAD`).
 It is resolved once to an immutable `base_commit` before the worktree is
 created; omitted defaults to `HEAD`. See `docs/execution.md` § "Safe lifecycle,
 checkpoints, and code egress" for the full lineage / abort / cleanup model.
@@ -123,19 +123,19 @@ A run executes in the working copy it pinned at first start (the project's
 re-registered from another clone — its branch, checkpoints, and worktree stay
 together. If the pinned copy becomes unavailable or holds a different
 repository, the run pauses with stop reason `checkout_unavailable` (the
-`task.checkout_unavailable` event names the path) and stays resumable: restore
+`run.checkout_unavailable` event names the path) and stays resumable: restore
 the directory or re-register the project, then continue. The run never rebuilds
 its worktree in a different copy.
 
 `cancel` is a **terminal abort**: the in-flight run is aborted and the worktree
-is torn down, but the `agentum/<task-id>` branch and any committed recovery work
+is torn down, but the `agentum/<run-id>` branch and any committed recovery work
 survive for review. `cleanup` is the **explicit, post-terminal disposal** that
 deletes the branch; it is a distinct verb because cancel and cleanup must not be
 ambiguous with each other or with pause.
 
 `reject` is a **terminal reject at a human gate** — the plan gate
 (`paused_gate`) or the final gate (`awaiting_final_review`). It reuses `cancel`'s
-FSM event (the task lands in `cancelled`, branch preserved) but records a
+FSM event (the run lands in `cancelled`, branch preserved) but records a
 `rejected` decision on `task_approvals` and seals the manifest with
 `SealRejected`, so a sealed record cannot describe a rejected result as a plain
 abort. At the plan gate nothing ever unlocked source-write, so there is no
@@ -149,7 +149,7 @@ memory-commit state name was retired; migration 0009 rewrites existing rows).
 not only at teardown — see `docs/execution.md` § "`result_commit` at the final
 gate".
 
-### Task
+### Run
 
 ```json
 {
@@ -161,9 +161,9 @@ gate".
   "overrides": {},
   "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_final_review | done | failed | cancelled",
   "base_ref": "main",
-  "base_commit": "a1b2... full SHA the task branched from, set on first run",
+  "base_commit": "a1b2... full SHA the run branched from, set on first run",
   "result_commit": "c3d4... full SHA pinned at the final gate (the commit the human reviews); empty before the gate",
-  "branch": "agentum/<task-id>",
+  "branch": "agentum/<run-id>",
   "created_at": "2026-07-05T...",
   "updated_at": "2026-07-05T..."
 }
@@ -171,16 +171,16 @@ gate".
 
 ## Stage invocations
 
-A stage invocation is one agent run within a task (`stage_invocations` row).
+A stage invocation is one agent session within a run (`stage_invocations` row).
 Each carries a `session_id` (for non-destructive resume), `stop_reason`
 (`open_questions | gate | user_stop | fix_budget_exhausted | verdict_unreadable`),
-`cycle` (the 0-based repeat index of the stage within the task — distinguishes
+`cycle` (the 0-based repeat index of the stage within the run — distinguishes
 retries from resumes), and `pending_edits`.
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
-| `GET` | `/tasks/{id}/invocations` | ✅ | list invocations for a task, ordered by sequence. `200 Invocation[]` / `404 not_found` (unknown task). |
-| `GET` | `/tasks/{id}/invocations/{iid}` | ✅ | one invocation. `200 Invocation` / `404 not_found`. |
+| `GET` | `/runs/{id}/invocations` | ✅ | list invocations for a run, ordered by sequence. `200 Invocation[]` / `404 not_found` (unknown run). |
+| `GET` | `/runs/{id}/invocations/{iid}` | ✅ | one invocation. `200 Invocation` / `404 not_found`. |
 
 `Invocation` shape: `{id, stage, sequence, cycle, stop_reason?, session_id?,
 resume_of?, started_at, finished_at?}`. `sequence` is the global run order;
@@ -202,31 +202,31 @@ The three gate **actions** from §3.4:
 
 | Method | Path | Status | Action |
 |---|---|---|---|
-| `POST` | `/tasks/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job) |
-| `POST` | `/tasks/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
-| `POST` | `/tasks/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → task done + memory commits. Pins `result_commit` at the gate. Idempotent. |
-| `POST` | `/tasks/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
-| `POST` | `/tasks/{id}/invocations/{iid}/ask-to-edit` | stub | scoped agent-mediated edit; re-stops for review. Epic 2 |
-| `POST` | `/tasks/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
+| `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job) |
+| `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
+| `POST` | `/runs/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → run done + memory commits. Pins `result_commit` at the gate. Idempotent. |
+| `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
+| `POST` | `/runs/{id}/invocations/{iid}/ask-to-edit` | stub | scoped agent-mediated edit; re-stops for review. Epic 2 |
+| `POST` | `/runs/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
 
-> `continue` / `advance` are implemented but operate on the **task**, not the
+> `continue` / `advance` are implemented but operate on the **run**, not the
 > invocation id: they enqueue a job that drives the runner. The `{iid}` path
 > parameter is accepted for contract stability but the runner resumes from the
-> task's current state. `cancel` is `POST /tasks/{id}/cancel`.
+> run's current state. `cancel` is `POST /runs/{id}/cancel`.
 
 ## Artifacts
 
 Two surfaces: the per-invocation edit surface under
-`/tasks/{id}/invocations/{iid}/artifacts/{name...}` and the F.7 immutable
+`/runs/{id}/invocations/{iid}/artifacts/{name...}` and the F.7 immutable
 revisions surface.
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
-| `GET` | `/tasks/{id}/artifacts` | ✅ | list revisions for a task. `?current=true` narrows to current revisions. |
-| `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
-| `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
-| `GET` | `/tasks/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | current revision of `(task, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
-| `PUT` | `/tasks/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
+| `GET` | `/runs/{id}/artifacts` | ✅ | list revisions for a run. `?current=true` narrows to current revisions. |
+| `GET` | `/runs/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
+| `GET` | `/runs/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
+| `GET` | `/runs/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | current revision of `(run, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
+| `PUT` | `/runs/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
 
 The artifact route uses `{name...}` (multi-segment) so orchestrator-built names
 like `plan/plan.md`, `review/verdict.json`, and `<stage>/result.json` are
@@ -254,14 +254,14 @@ rather than a silent lost update. A first create (no current revision) omits it.
 
 The revisions store is content-addressed and lives outside any worktree. Each
 edit creates a new immutable revision that chains to the prior one; the
-`current` pointer is the single mutable bit per `(task, name)`.
+`current` pointer is the single mutable bit per `(run, name)`.
 
 ### Artifact revision
 
 ```json
 {
   "id": "uuid",
-  "task_id": "uuid",
+  "run_id": "uuid",
   "name": "specs/auth.md",
   "kind": "spec | code | adr | result_json | …",
   "content_hash": "sha256 hex",
@@ -280,7 +280,7 @@ edit creates a new immutable revision that chains to the prior one; the
 
 ## Evidence manifest
 
-One manifest per task. Records the inputs that shaped the run (input task +
+One manifest per run. Records the inputs that shaped the run (input request +
 revision, project + base commit, pack + version + hash, one invocation record
 per stage attempt — adapter + runtime versions, model selection, both prompt
 hashes, effective capability profile, telemetry — the adapter wiring and its
@@ -290,9 +290,9 @@ actor and user_id), branch + checkpoints + result commits).
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
-| `GET` | `/tasks/{id}/manifest` | ✅ | manifest body + seal info + corrections |
-| `GET` | `/tasks/{id}/manifest/diff?other=<task-id>` | ✅ | input-level diff vs another task's manifest |
-| `POST` | `/tasks/{id}/manifest/corrections` | ✅ | add a post-seal correction (body: `{reason, body?}`) |
+| `GET` | `/runs/{id}/manifest` | ✅ | manifest body + seal info + corrections |
+| `GET` | `/runs/{id}/manifest/diff?other=<run-id>` | ✅ | input-level diff vs another run's manifest |
+| `POST` | `/runs/{id}/manifest/corrections` | ✅ | add a post-seal correction (body: `{reason, body?}`) |
 
 The manifest body is filled append-only while the run is in flight and sealed
 at terminal state (`done | failed | cancelled | interrupted`). Corrections
@@ -310,7 +310,7 @@ invocation records for the diff.
 ```json
 {
   "schema_version": "2",
-  "input":            { "task_id": "…", "title": "…", "description": "…", "overrides": {}, "revision": "…", "pipeline_pack": "…" },
+  "input":            { "run_id": "…", "title": "…", "description": "…", "overrides": {}, "revision": "…", "pipeline_pack": "…" },
   "project":          { "project_id": "…", "repo_path": "…", "name": "…", "base_ref": "…", "base_commit": "…" },
   "pack":             { "ref": "…", "name": "…", "version": "1.0.0", "content_hash": "…", "forked": false },
   "adapter":          { "id": "opencode", "adapter_version": "1.0.0", "declared_capabilities": ["fs.read", "…"], "runtime_probe": "ok" },
@@ -378,7 +378,7 @@ manifest body. Reason strings:
 `adapter-runtime-version` compares the set of runtime versions observed
 across each run's invocations: two runs on the same tier and model but
 different runtime builds differ on this axis and no other. The rendered
-prompt hash is never a diff axis — it embeds the task id and absolute paths,
+prompt hash is never a diff axis — it embeds the run id and absolute paths,
 so it never repeats across runs.
 
 Independently of the value reasons above, any axis whose section is present on
@@ -410,7 +410,7 @@ Two streams, both honoring `Last-Event-ID` replay:
 | Method | Path | Status | Scope |
 |---|---|---|---|
 | `GET` | `/events` | ✅ | tenant-global (inbox / feed) |
-| `GET` | `/tasks/{id}/events` | ✅ | per-task (run view) |
+| `GET` | `/runs/{id}/events` | ✅ | per-run |
 
 ### Framing
 
@@ -419,15 +419,15 @@ Each event is one SSE block:
 ```
 id: 42
 event: stage.stopped
-data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
+data: {"run_id":"...","stage":"implement","stop_reason":"gate"}
 
 ```
 
 - `id` is the monotonic `events.id` (bigint). **`Last-Event-ID`** replays every
-  row with `id > lastID`, scoped to the tenant (and task for per-task). A
+  row with `id > lastID`, scoped to the tenant (and run for per-run). A
   missing/invalid `Last-Event-ID` replays from the start.
 - The `data` object carries two facts from the event row on every frame:
-  `task_id` (present only when the event belongs to a run) and `actor`
+  `run_id` (present only when the event belongs to a run) and `actor`
   (`human | agent | system` — who produced the event). A payload's own key
   always wins over the mixed-in value.
 - After replay completes, the connection live-tails new rows and emits a
@@ -439,17 +439,17 @@ data: {"task_id":"...","stage":"implement","stop_reason":"gate"}
 
 | `event` | Carries | Emitted by |
 |---|---|---|
-| `task.state_changed` | `{task_id, from, to, stop_reason?, stage?}` | engine on every transition |
-| `task.checkout_unavailable` | `{task_id, checkout_path, reason}` | runner when a run's pinned working copy is gone or holds a different repository; the run pauses (`stop_reason: checkout_unavailable`) and stays resumable |
-| `stage.invocation_started` | `{task_id, invocation_id, stage, sequence}` | runner |
-| `stage.stream` | `{task_id, invocation_id, chunk}` | adapter (agent text → SSE) |
-| `stage.tool` | `{task_id, invocation_id, tool, target, status}` | adapter (tool activity) |
-| `stage.stopped` | `{task_id, invocation_id, stop_reason}` | runner at a stop point |
-| `stage.result` | `{task_id, invocation_id, status, open_questions, ...}` | runner after result.json |
-| `stage.artifact_rejected` | `{task_id, stage, path, reason}` | runner when a declared artifact is refused (`reason` ∈ `escapes_worktree`, `unresolvable`, `secret_detected`) |
-| `task.delivery_commit_diverged` | `{task_id, result_commit, checks_commit, checkpoint_label}` | runner at teardown when `result_commit` differs from the commit the delivery checks verified; the task is not failed, but the sealed manifest reads `evidence_complete: false` |
-| `memory.committed` | `{task_id, entries:[...]}` | memory layer at final approval |
-| `run.log` | `{task_id, level, message}` | runner / adapter diagnostics |
+| `run.state_changed` | `{run_id, from, to, stop_reason?, stage?}` | engine on every transition |
+| `run.checkout_unavailable` | `{run_id, checkout_path, reason}` | runner when a run's pinned working copy is gone or holds a different repository; the run pauses (`stop_reason: checkout_unavailable`) and stays resumable |
+| `stage.invocation_started` | `{run_id, invocation_id, stage, sequence}` | runner |
+| `stage.stream` | `{run_id, invocation_id, chunk}` | adapter (agent text → SSE) |
+| `stage.tool` | `{run_id, invocation_id, tool, target, status}` | adapter (tool activity) |
+| `stage.stopped` | `{run_id, invocation_id, stop_reason}` | runner at a stop point |
+| `stage.result` | `{run_id, invocation_id, status, open_questions, ...}` | runner after result.json |
+| `stage.artifact_rejected` | `{run_id, stage, path, reason}` | runner when a declared artifact is refused (`reason` ∈ `escapes_worktree`, `unresolvable`, `secret_detected`) |
+| `run.delivery_commit_diverged` | `{run_id, result_commit, checks_commit, checkpoint_label}` | runner at teardown when `result_commit` differs from the commit the delivery checks verified; the run is not failed, but the sealed manifest reads `evidence_complete: false` |
+| `memory.committed` | `{run_id, entries:[...]}` | memory layer at final approval |
+| `run.log` | `{run_id, level, message}` | runner / adapter diagnostics |
 
 Pre-release: the `payload` shapes are stable in shape but may gain fields; the
 UI must ignore unknown payload fields.

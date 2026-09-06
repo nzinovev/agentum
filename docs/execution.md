@@ -15,14 +15,14 @@ carries `tenant_id` + `user_id`.
 
 ```
 POST /projects          → register repo (one repo = one project)
-POST /tasks             → created (project + pack + input)
-POST /tasks/{id}/start  → running  (enqueues a `run` job)
+POST /runs             → created (project + pack + input)
+POST /runs/{id}/start  → running  (enqueues a `run` job)
    worker: stage loop — invoke adapter, parse result.json, evaluate stop
    ▸ paused_open_questions  → POST .../continue (resume, same session)
    ▸ paused_gate            → POST .../advance  (next stage, fresh session)
    ▸ paused_user_stop       → POST .../continue (resume)
    ▸ awaiting_final_review → POST .../approve  (task done)
-POST /tasks/{id}/cancel → cancelled (aborts in-flight run)
+POST /runs/{id}/cancel → cancelled (aborts in-flight run)
 ```
 
 Every `→` is the worker enqueuing or completing a job; HTTP handlers never
@@ -64,9 +64,9 @@ somewhere else; a repository that moved is re-linked with `git worktree
 repair` before the run continues. Created by `internal/worktree` on the first
 stage of a run; reused across stages and resumes; torn down at terminal state.
 
-- **Location:** `<repo>/.agentum/worktrees/<task-id>/`
-- **Branch:** `agentum/<task-id>` (off the repo's current HEAD)
-- **Artifacts:** `<worktree>/.agentum/<task-id>/.ag-artifacts/<stage>/result.json`
+- **Location:** `<repo>/.agentum/worktrees/<run-id>/`
+- **Branch:** `agentum/<run-id>` (off the repo's current HEAD)
+- **Artifacts:** `<worktree>/.agentum/<run-id>/.ag-artifacts/<stage>/result.json`
   (the per-stage path convention from `04 §6.4`; filesystem-as-bus, C1/C4)
 - **`.agentum/` is gitignored** locally (`.git/info/exclude`, never a tracked
   `.gitignore`) so worktrees and artifacts don't pollute the user's working tree.
@@ -82,10 +82,10 @@ calls `Runner.Handle`, which dispatches by `kind`:
 
 | Job kind | Entry point | Triggered by |
 |---|---|---|
-| `run` | fresh run, first stage | `POST /tasks/{id}/start` |
+| `run` | fresh run, first stage | `POST /runs/{id}/start` |
 | `continue` | resume after `open_questions` / `user_stop` | `POST .../continue` |
 | `advance` | next stage, fresh session | `POST .../advance` |
-| `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /tasks/{id}/cancel` |
+| `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
 | `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failTask` |
 
 `run` / `continue` / `advance` enter the shared **stage loop** (`04 §7.2`):
@@ -229,7 +229,7 @@ only at teardown — it names the commit the human is asked to review (the
 checkpoint the delivery checks verified). Teardown re-records only if it was
 unset. A divergence between the recorded `result_commit` and the live branch tip
 at teardown (something moved the branch between review and teardown) is recorded
-as an evidence gap + `task.delivery_commit_diverged` event; the human already
+as an evidence gap + `run.delivery_commit_diverged` event; the human already
 approved, so the task is not failed.
 
 ## Job queue
@@ -265,11 +265,11 @@ that can't enqueue rolls back the transition):
 
 | Endpoint | FSM transition | Enqueued kind |
 |---|---|---|
-| `POST /tasks/{id}/start` | `created → running` | `run` |
+| `POST /runs/{id}/start` | `created → running` | `run` |
 | `POST .../continue` | `paused_*→ running` | `continue` |
 | `POST .../advance` | `paused_gate → running` | `advance` |
 | `POST .../approve` | `awaiting_final_review → done` | `teardown` |
-| `POST /tasks/{id}/cancel` | `*→ cancelled` | `teardown` |
+| `POST /runs/{id}/cancel` | `*→ cancelled` | `teardown` |
 
 A `run` / `continue` / `advance` job is "advance until pause/terminal." Only one
 such job per task should be live at a time — enforced by the FSM (you can't
@@ -285,7 +285,7 @@ On boot, before the worker starts (`04 §7.6`):
 2. **Recover orphaned tasks** — `state='running'` with no live job (the job was
    lost between enqueue and claim, or the process died mid-FSM-transition).
    Transition to `paused_user_stop` with `stop_reason='interrupted'` and emit
-   `task.state_changed`. The user explicitly continues — safer than auto-resume,
+   `run.state_changed`. The user explicitly continues — safer than auto-resume,
    which could re-run a half-completed stage. Session-id resume makes the
    re-run cheap if a session was captured.
 
@@ -297,7 +297,7 @@ silent re-execution.
 Worktrees are torn down by Agentum on **terminal state** — `done`, `cancelled`,
 or `failed` — not by a TTL and not manually (`04 §7.1.3`). Teardown is a runner
 job (`kind=teardown`) that runs `git worktree remove --force` **only**. The
-`agentum/<task-id>` branch and its commits are NOT deleted at teardown — they
+`agentum/<run-id>` branch and its commits are NOT deleted at teardown — they
 are the durable delivery output that survives for review and Epic 8 handoff.
 Branch deletion is a separate, explicit `cleanup` action (below). It is
 enqueued by:
@@ -307,7 +307,7 @@ enqueued by:
 - `failTask` (best-effort) — when a run moves the task to `failed`.
 
 Before removing the worktree, the teardown job captures the tip of
-`agentum/<task-id>` as `result_commit` on the task row — the immutable record of
+`agentum/<run-id>` as `result_commit` on the task row — the immutable record of
 what was delivered (done) or recovered (cancelled/failed). The branch survives
 teardown, so `result_commit` is always resolvable after the fact; the
 `base_commit..result_commit` range is the review/handoff surface.
@@ -329,9 +329,9 @@ concepts that were previously conflated:
 | Concept | Verb | Effect | Branch + commits |
 |---|---|---|---|
 | **Pause** | FSM `stop_*` events | Non-terminal; resumable via `continue`/`advance` | preserved |
-| **Terminal abort** | `POST /tasks/{id}/cancel` (FSM `cancel`) | Terminal (`cancelled`); worktree torn down | **preserved** |
+| **Terminal abort** | `POST /runs/{id}/cancel` (FSM `cancel`) | Terminal (`cancelled`); worktree torn down | **preserved** |
 | **Worktree teardown** | `teardown` job | Removes the disposable working tree | **preserved** |
-| **Cleanup** | `POST /tasks/{id}/cleanup` (`cleanup` job) | Explicit branch deletion; idempotent; audited | deleted |
+| **Cleanup** | `POST /runs/{id}/cleanup` (`cleanup` job) | Explicit branch deletion; idempotent; audited | deleted |
 
 A generic `cancel` cannot ambiguously mean all three — each is a distinct,
 named action. Pause is non-terminal; abort is terminal-but-preserves-delivery;
@@ -342,13 +342,13 @@ cleanup is post-terminal disposal.
 Every task records its git lineage explicitly:
 
 - **`base_ref`** (input): the ref the task builds against — branch / tag / SHA /
-  `HEAD`. Set at `POST /tasks`, defaults to `HEAD`. The input record is
+  `HEAD`. Set at `POST /runs`, defaults to `HEAD`. The input record is
   reproducible from this.
 - **`base_commit`** (anchor): the full SHA `base_ref` resolved to, captured
   **once** before the worktree is created (`SetBaseCommit` is a `WHERE
   base_commit IS NULL` no-op after the first capture). The worktree branches
   from this SHA, so a later move of `base_ref` cannot retcon the task's lineage.
-- **`result_commit`** (delivery): the tip of `agentum/<task-id>` captured at
+- **`result_commit`** (delivery): the tip of `agentum/<run-id>` captured at
   the final gate (`awaiting_final_review`), naming the commit the human reviews.
   Immutable; the branch survives teardown so this is always resolvable.
   `base_commit..result_commit` is the review/handoff diff.
@@ -363,7 +363,7 @@ at X" alongside "delivered Y". The verified commit is read back from
 correctness would depend on an FSM property a future ask-to-edit feature could
 break) and compared against `result_commit`. The divergence is recorded as an
 evidence gap (so the sealed manifest reads `evidence_complete: false`) and
-emitted as a `task.delivery_commit_diverged` event naming both SHAs. The task is
+emitted as a `run.delivery_commit_diverged` event naming both SHAs. The task is
 not failed: the human already approved, and the manifest's incompleteness is the
 signal a reviewer acts on.
 
@@ -377,7 +377,7 @@ An *absent* checks commit (a task that never reached delivery, or a project that
 defines no checks) is an absence rather than a failure and records nothing.
 
 The task response exposes all three plus `branch` (the canonical
-`agentum/<task-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
+`agentum/<run-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
 without touching git. Provider PR creation belongs to Epic P and is not required
 for safe local egress.
 
@@ -391,7 +391,7 @@ re-crosses a boundary upserts rather than duplicates.
 
 The orchestrator authors the post-stage checkpoint commit itself
 (`worktree.Manager.Commit`), staging the worktree's working state and committing
-it on `agentum/<task-id>` under the identity `agentum <agentum@orchestrator>`
+it on `agentum/<run-id>` under the identity `agentum <agentum@orchestrator>`
 (passed inline via `git -c`, so it does not depend on ambient config and the
 audit trail shows Agentum authored the boundary). This is the `git.delivery`
 privilege the capability model reserves for the orchestrator and no agent role
@@ -401,7 +401,7 @@ that produced no change records the unchanged HEAD honestly with no empty commit
 — an empty commit per stage would pollute the lineage a reviewer reads.
 
 Agents may edit and inspect git but cannot create, delete, reset, or rebase
-delivery refs — `agentum/<task-id>` and checkpoint SHAs are orchestrator-owned.
+delivery refs — `agentum/<run-id>` and checkpoint SHAs are orchestrator-owned.
 The routing block tells the agent this; Agentum enforces it by being the only
 thing that touches those refs (and now, by being the thing that commits them).
 
@@ -475,9 +475,9 @@ to the DB; `Last-Event-ID` replay reconstructs state changes, stage boundaries,
 stop reasons, telemetry, and errors — not the full transcript. This keeps write
 volume sane and matches the audit-trail intent.
 
-F.6 emits: `task.state_changed`, `stage.started`, `stage.stopped`,
-`stage.telemetry`, `task.worktree_created`, `task.worktree_removed`.
-F.7 adds: `task.revisions_synced` (current revisions materialized into the
+F.6 emits: `run.state_changed`, `stage.started`, `stage.stopped`,
+`stage.telemetry`, `run.worktree_created`, `run.worktree_removed`.
+F.7 adds: `run.revisions_synced` (current revisions materialized into the
 worktree at stage start).
 
 See `docs/api.md#events-sse` for the SSE contract.
@@ -492,7 +492,7 @@ from CI (no `opencode` binary or credentials there); run locally:
 go test -tags integration ./internal/runner/ -run TestRunnerLive -v -timeout 5m
 ```
 
-It proves: `POST /tasks/{id}/start` runs `packs/minimal` via the real opencode
+It proves: `POST /runs/{id}/start` runs `packs/minimal` via the real opencode
 adapter to a stop point (the `spec` stage's `human_approval` gate pauses the
 task at `paused_gate`) and a `session_id` is captured. This is the F.6 proof
 that the loop works with a live agent, not just fakes.
@@ -622,7 +622,7 @@ strictly before each stage invocation (`restoreInstructions`), never between the
 `auto_if_clean` gate). The compare is CRLF-normalised on BOTH sides so neither
 an autocrlf checkout (CRLF in the worktree, LF in the object) nor a CRLF-committed
 repo reads as tampering; the pin's `SourceHash` stays over the raw bytes for
-evidence identity. Each restoration emits `task.instructions_restored` and lands
+evidence identity. Each restoration emits `run.instructions_restored` and lands
 in the manifest context section; the rewrite is orchestrator-authored, so the
 next checkpoint commit shows it as a revert — the tamper and its reversal are
 both in the git lineage. A restore IO error fails the task, mirroring a dirty
@@ -721,7 +721,7 @@ artifact_revisions(
 - A new revision chains via `prev_revision_id`. Edits never overwrite.
 - `is_current` is the single "current" pointer per `(task, name)`; the partial
   unique index `idx_artifact_rev_current` enforces one current per name.
-- A `PUT /tasks/{id}/invocations/{iid}/artifacts/{name}` creates a new
+- A `PUT /runs/{id}/invocations/{iid}/artifacts/{name}` creates a new
   revision; a revision already referenced by an `invocation` is never
   modified, so a later edit cannot retroactively change what an agent saw.
 - On `continue` / `advance`, the runner syncs the current revisions back into
@@ -832,10 +832,10 @@ race whatever the bytes say.
 
 | Phase | Action | Who |
 |---|---|---|
-| Init | `POST /tasks` creates a manifest row (empty body) | API |
+| Init | `POST /runs` creates a manifest row (empty body) | API |
 | Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage / human-gate decisions. The merge base is the body read under the row lock inside the write transaction, so two concurrent writes cannot lose each other's contribution. | runner / API |
 | Seal | At terminal state, `Seal(reason)` derives `body.missing` and `body.evidence_complete` from the body under the row lock and freezes it. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failTask`) |
-| Correct | `POST /tasks/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot. Corrections chain: correction N's body is correction N-1's body with the patch merged in, so the newest correction is the authoritative state by construction. | API |
+| Correct | `POST /runs/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot. Corrections chain: correction N's body is correction N-1's body with the patch merged in, so the newest correction is the authoritative state by construction. | API |
 
 **Concurrency.** `AddEvidence` computes its merge from the body read under the
 row lock (`GetManifestForUpdate`) inside the write transaction itself — not a
@@ -895,7 +895,7 @@ a run-level scalar.
 
 ### Comparing two runs
 
-`GET /tasks/{id}/manifest/diff?other=<task-id>` returns the structural
+`GET /runs/{id}/manifest/diff?other=<run-id>` returns the structural
 comparison between two sealed manifest bodies. The diff surfaces *input-level*
 differences only — the things that meaningfully change what an agent would do:
 
@@ -939,9 +939,9 @@ accessor.
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/tasks/{id}/artifacts` | list revisions; `?current=true` narrows to current |
-| `GET` | `/tasks/{id}/artifacts/revisions/{rid}` | one revision (no bytes) |
-| `GET` | `/tasks/{id}/artifacts/revisions/{rid}/content` | streams the blob bytes |
-| `GET` | `/tasks/{id}/manifest` | manifest body + seal info + corrections |
-| `GET` | `/tasks/{id}/manifest/diff?other=<task-id>` | input-level diff |
-| `POST` | `/tasks/{id}/manifest/corrections` | add a post-seal correction |
+| `GET` | `/runs/{id}/artifacts` | list revisions; `?current=true` narrows to current |
+| `GET` | `/runs/{id}/artifacts/revisions/{rid}` | one revision (no bytes) |
+| `GET` | `/runs/{id}/artifacts/revisions/{rid}/content` | streams the blob bytes |
+| `GET` | `/runs/{id}/manifest` | manifest body + seal info + corrections |
+| `GET` | `/runs/{id}/manifest/diff?other=<run-id>` | input-level diff |
+| `POST` | `/runs/{id}/manifest/corrections` | add a post-seal correction |

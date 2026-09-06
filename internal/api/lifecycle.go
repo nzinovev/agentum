@@ -13,7 +13,7 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// handleInvocationContinue POST /api/v1/tasks/{id}/invocations/{iid}/continue
+// handleInvocationContinue POST /api/v1/runs/{id}/invocations/{iid}/continue
 // Resume after open_questions / user_stop (session-id resume). The body carries
 // optional answers/context appended to the resumed session.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +145,7 @@ func (api *API) decisionIsIdempotent(w http.ResponseWriter, r *http.Request, tas
 	return true
 }
 
-// handleInvocationAdvance POST /api/v1/tasks/{id}/invocations/{iid}/advance
+// handleInvocationAdvance POST /api/v1/runs/{id}/invocations/{iid}/advance
 // Pass a gate → the next stage runs (a fresh invocation). When the task's
 // current stage is the pack's approval stage (ADR 0003 D3/D4), advancing IS the
 // approval: the task_approvals row is written in the same tx as the transition,
@@ -186,7 +186,7 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// handleRejectTask POST /api/v1/tasks/{id}/reject
+// handleRejectTask POST /api/v1/runs/{id}/reject
 // Terminal reject at either human gate (ADR 0003 D4). Reuse of EventCancel
 // means the task lands in `cancelled`; a distinct task_approvals row
 // (final_review, decision=rejected) and seal reason SealRejected keep the
@@ -303,7 +303,7 @@ func (conflict conflictingGateDecision) Error() string {
 	return "gate " + conflict.name + " already decided " + conflict.existing
 }
 
-// handleInvocationApprove POST /api/v1/tasks/{id}/invocations/{iid}/approve
+// handleInvocationApprove POST /api/v1/runs/{id}/invocations/{iid}/approve
 // Final approval → task done. Memory commit (Epic 1) is deferred. The teardown
 // job records result_commit (the agentum/<task-id> tip) and removes the worktree
 // only — the branch + result_commit remain resolvable for review (F.6.1 AC #3).
@@ -368,7 +368,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toTaskResponse(updated))
 }
 
-// handleCancelTask POST /api/v1/tasks/{id}/cancel
+// handleCancelTask POST /api/v1/runs/{id}/cancel
 // Terminal abort: any non-terminal task → cancelled. The in-flight run (if any)
 // is aborted via the cancel registry, then the FSM transition + teardown-job
 // enqueue commit atomically. F.6.1: cancel is a terminal ABORT, distinct from
@@ -553,7 +553,7 @@ func (api *API) resolveApprovalRevisionID(ctx context.Context, qtx *sqlc.Queries
 	return sql.NullString{String: revision.ID, Valid: true}, nil
 }
 
-// handleCleanupTask POST /api/v1/tasks/{id}/cleanup
+// handleCleanupTask POST /api/v1/runs/{id}/cleanup
 // Explicit, idempotent branch deletion (F.6.1 AC #4). Distinct verb from
 // cancel (terminal abort) and pause: cleanup operates on an ALREADY-terminal
 // task and removes its delivery artifacts. A generic cancel cannot ambiguously
