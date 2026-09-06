@@ -1677,7 +1677,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// fixer is pointed at the predecessor's findings artifact rather than a log.
 	// Both render nothing when unset. Title/Description carry the run request
 	// into the block's first section — the ONLY delivery path from
-	// tasks.title/description to any agent prompt. There is deliberately no
+	// runs.title/description to any agent prompt. There is deliberately no
 	// Overrides on this literal: the overrides are orchestrator-only, and the
 	// resolved Checks below already render the effective set.
 	routingBlock := routing.Block{

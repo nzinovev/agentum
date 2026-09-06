@@ -173,7 +173,7 @@ func (store *fakeStore) ListCheckpointsForRun(_ context.Context, _ sqlc.ListChec
 func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.RunCheckpoint, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	// Upsert by label, mirroring the SQL's ON CONFLICT (task_id, label).
+	// Upsert by label, mirroring the SQL's ON CONFLICT (run_id, label).
 	for index, checkpoint := range store.checkpoints {
 		if checkpoint.Label == arg.Label {
 			store.checkpoints[index].CommitSha = arg.CommitSha

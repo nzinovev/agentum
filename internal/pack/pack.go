@@ -217,7 +217,7 @@ type Unlock string
 
 const (
 	// UnlockSourceWrite re-enables the source-writing capability categories for
-	// every stage of the run. The runner records a durable task_approvals row
+	// every stage of the run. The runner records a durable run_approvals row
 	// when a human advances past the approval stage, and removes the withholding
 	// only when that row exists. See ADR 0003 D3.
 	UnlockSourceWrite Unlock = "source_write"
@@ -235,7 +235,7 @@ var knownUnlocks = map[Unlock]bool{UnlockSourceWrite: true}
 // the decision intact and a repeated approve is idempotent by construction.
 type Approval struct {
 	// Name is the approval's unique identifier and the key the durable
-	// task_approvals row is keyed on. It is also the value the runner reads back
+	// run_approvals row is keyed on. It is also the value the runner reads back
 	// to decide whether the unlock applies.
 	Name string `yaml:"name"`
 	// Stage is the stage whose gate, when advanced past by a human, IS the
