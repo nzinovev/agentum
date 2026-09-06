@@ -1,6 +1,6 @@
 # Execution model
 
-How a task actually runs: a project binds a repo, the runner drives a pack's
+How a run actually works: a project binds a repo, the runner drives a pack's
 stages through an agent adapter, stop conditions route into the FSM, events flow
 into the durable log, and a Postgres-backed queue decouples HTTP handlers from
 multi-minute agent runs. This is **F.6** — the loop Epics 1–4 and 6 wire into
@@ -21,12 +21,12 @@ POST /runs/{id}/start  → running  (enqueues a `run` job)
    ▸ paused_open_questions  → POST .../continue (resume, same session)
    ▸ paused_gate            → POST .../advance  (next stage, fresh session)
    ▸ paused_user_stop       → POST .../continue (resume)
-   ▸ awaiting_final_review → POST .../approve  (task done)
+   ▸ awaiting_final_review → POST .../approve  (run done)
 POST /runs/{id}/cancel → cancelled (aborts in-flight run)
 ```
 
 Every `→` is the worker enqueuing or completing a job; HTTP handlers never
-execute task work inline.
+execute run work inline.
 
 ## Projects
 
@@ -43,7 +43,7 @@ project per tenant; registration is idempotent on `(tenant_id, repo_identity)`
   keeps the same project (and its run history); the stored `repo_path` just
   points at the new location. See `docs/domain-model.md` for the level
   vocabulary (workspace / project / repository / checkout).
-- `tasks.project_id` is a real FK; a task cannot exist without a project.
+- `tasks.project_id` is a real FK; a run cannot exist without a project.
 - `related_projects` is an **inert seam**: stored now, grants nothing.
   Cross-project / sibling-folder access lands in Epic 6 as a path-scoped
   `fs.read` capability derived from this set — the configured relation is the
@@ -53,8 +53,8 @@ See `docs/api.md#projects` for the endpoint surface.
 
 ## Worktrees
 
-Each task runs in its own git worktree off the run's pinned working copy
-(C5 — isolated workspace per task). A run pins its copy once at first start
+Each run executes in its own git worktree off the run's pinned working copy
+(C5 — isolated workspace per run). A run pins its copy once at first start
 (`tasks.checkout_path`, resolve-once like `base_commit`) and executes there
 for its whole life — worktree creation, checks, evidence, teardown — even if
 the project is later re-registered from another clone. A pinned copy that is
@@ -92,7 +92,7 @@ calls `Runner.Handle`, which dispatches by `kind`:
 
 1. **Resolve** the pack + current stage (or `pack.Entry` on first run) → stage
    def (gate, prompt, tier).
-2. **Prepare the worktree** — created once per task; reused thereafter.
+2. **Prepare the worktree** — created once per run; reused thereafter.
 3. **Render the routing block** (`internal/routing.Render`) with role/stage/gate
    context, the artifact-dir, the result.json preamble, and memory/capability
    stubs (inert until Epic 1 / Epic 6).
@@ -104,9 +104,9 @@ calls `Runner.Handle`, which dispatches by `kind`:
    `stop_reason`, parsed `result.json`. Emit `stage.started` / `stage.stopped`
    / `stage.telemetry` events.
 7. **Evaluate the stop condition** (`04 §7.4`) → FSM event → `engine.Next`.
-   - On a pause event → loop completes; task stays paused.
+   - On a pause event → loop completes; run stays paused.
    - On advance → read the pack's transition; loop to step 1 with the next stage.
-   - On `reach_final_gate` → task moves to `awaiting_final_review`; loop completes.
+   - On `reach_final_gate` → run moves to `awaiting_final_review`; loop completes.
    - On terminal → worker tears down the worktree; loop completes.
 
 The loop honors `ctx` cancellation throughout: a cancel job or shutdown
@@ -146,7 +146,7 @@ budget-bound: `budgets.fix_cycles: N` ⇒ at most `N` fixer entries; the `N+1`-t
 is refused with `fix_budget_exhausted`.
 
 The fix-cycle counter is durable — derived from `stage_invocations.cycle` (the
-0-based repeat index of a stage within the task), not process memory. It
+0-based repeat index of a stage within the run), not process memory. It
 survives a worker restart (recomputed from committed rows) and cannot be
 inflated by a resume (a resume inherits its cycle). Each retry is a separate
 invocation row with its own `sequence` and `cycle`.
@@ -224,18 +224,18 @@ orchestrator authored, so it describes a real commit range.
 
 ### `result_commit` at the final gate
 
-`result_commit` is recorded when the task reaches `awaiting_final_review`, not
+`result_commit` is recorded when the run reaches `awaiting_final_review`, not
 only at teardown — it names the commit the human is asked to review (the
 checkpoint the delivery checks verified). Teardown re-records only if it was
 unset. A divergence between the recorded `result_commit` and the live branch tip
 at teardown (something moved the branch between review and teardown) is recorded
 as an evidence gap + `run.delivery_commit_diverged` event; the human already
-approved, so the task is not failed.
+approved, so the run is not failed.
 
 ## Job queue
 
-The runner is a **Postgres-backed job queue + worker**, not goroutine-per-task
-(`04 §7.5`). No Redis, no new infra; transactional with task state.
+The runner is a **Postgres-backed job queue + worker**, not goroutine-per-run
+(`04 §7.5`). No Redis, no new infra; transactional with run state.
 
 - **Table:** `jobs` (migration `0003_runner.sql`) — `kind`, `status`
   (`pending | running | done | failed`), `worker_id`, `heartbeat_at`,
@@ -255,7 +255,7 @@ The runner is a **Postgres-backed job queue + worker**, not goroutine-per-task
 - **Heartbeat:** the worker bumps `heartbeat_at` every 5s during a run. A
   boot-time recovery pass uses this to detect a worker that died mid-run.
 - **Poison bound:** `config.Config.JobMaxAttempts` (default 3) — over the bound
-  the job moves to `failed` and the task to `paused_user_stop` with
+  the job moves to `failed` and the run to `paused_user_stop` with
   `stop_reason='interrupted'`. Config-driven, not a magic constant.
 
 ### Enqueue points
@@ -272,7 +272,7 @@ that can't enqueue rolls back the transition):
 | `POST /runs/{id}/cancel` | `*→ cancelled` | `teardown` |
 
 A `run` / `continue` / `advance` job is "advance until pause/terminal." Only one
-such job per task should be live at a time — enforced by the FSM (you can't
+such job per run should be live at a time — enforced by the FSM (you can't
 enqueue `continue` from a non-paused state).
 
 ### Crash recovery
@@ -282,7 +282,7 @@ On boot, before the worker starts (`04 §7.6`):
 1. **Re-queue stale jobs** — `status='running' AND heartbeat_at < now() - 60s`.
    Set `status='pending'`, `worker_id=NULL`, increment `attempts`. The poison
    bound caps retries.
-2. **Recover orphaned tasks** — `state='running'` with no live job (the job was
+2. **Recover orphaned runs** — `state='running'` with no live job (the job was
    lost between enqueue and claim, or the process died mid-FSM-transition).
    Transition to `paused_user_stop` with `stop_reason='interrupted'` and emit
    `run.state_changed`. The user explicitly continues — safer than auto-resume,
@@ -302,12 +302,12 @@ are the durable delivery output that survives for review and Epic 8 handoff.
 Branch deletion is a separate, explicit `cleanup` action (below). It is
 enqueued by:
 
-- `handleInvocationApprove` — after the task moves to `done`.
-- `handleCancelTask` — after the task moves to `cancelled`.
-- `failTask` (best-effort) — when a run moves the task to `failed`.
+- `handleInvocationApprove` — after the run moves to `done`.
+- `handleCancelTask` — after the run moves to `cancelled`.
+- `failTask` (best-effort) — when a run moves to `failed`.
 
 Before removing the worktree, the teardown job captures the tip of
-`agentum/<run-id>` as `result_commit` on the task row — the immutable record of
+`agentum/<run-id>` as `result_commit` on the run's row — the immutable record of
 what was delivered (done) or recovered (cancelled/failed). The branch survives
 teardown, so `result_commit` is always resolvable after the fact; the
 `base_commit..result_commit` range is the review/handoff surface.
@@ -339,15 +339,15 @@ cleanup is post-terminal disposal.
 
 ### Git lineage: base_ref, base_commit, result_commit
 
-Every task records its git lineage explicitly:
+Every run records its git lineage explicitly:
 
-- **`base_ref`** (input): the ref the task builds against — branch / tag / SHA /
+- **`base_ref`** (input): the ref the run builds against — branch / tag / SHA /
   `HEAD`. Set at `POST /runs`, defaults to `HEAD`. The input record is
   reproducible from this.
 - **`base_commit`** (anchor): the full SHA `base_ref` resolved to, captured
   **once** before the worktree is created (`SetBaseCommit` is a `WHERE
   base_commit IS NULL` no-op after the first capture). The worktree branches
-  from this SHA, so a later move of `base_ref` cannot retcon the task's lineage.
+  from this SHA, so a later move of `base_ref` cannot retcon the run's lineage.
 - **`result_commit`** (delivery): the tip of `agentum/<run-id>` captured at
   the final gate (`awaiting_final_review`), naming the commit the human reviews.
   Immutable; the branch survives teardown so this is always resolvable.
@@ -363,7 +363,7 @@ at X" alongside "delivered Y". The verified commit is read back from
 correctness would depend on an FSM property a future ask-to-edit feature could
 break) and compared against `result_commit`. The divergence is recorded as an
 evidence gap (so the sealed manifest reads `evidence_complete: false`) and
-emitted as a `run.delivery_commit_diverged` event naming both SHAs. The task is
+emitted as a `run.delivery_commit_diverged` event naming both SHAs. The run is
 not failed: the human already approved, and the manifest's incompleteness is the
 signal a reviewer acts on.
 
@@ -373,10 +373,10 @@ read back, teardown records an evidence gap rather than returning quietly —
 delivery, and a manifest silent about both would be the fail-open shape this
 comparison exists to remove. No divergence event is emitted in that case:
 nothing was compared, so asserting a divergence would be equally unsupported.
-An *absent* checks commit (a task that never reached delivery, or a project that
+An *absent* checks commit (a run that never reached delivery, or a project that
 defines no checks) is an absence rather than a failure and records nothing.
 
-The task response exposes all three plus `branch` (the canonical
+The run response exposes all three plus `branch` (the canonical
 `agentum/<run-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
 without touching git. Provider PR creation belongs to Epic P and is not required
 for safe local egress.
@@ -444,7 +444,7 @@ classified as one of:
 | `clean` | HEAD at base_commit (or last checkpoint), tree clean | proceed |
 | `resumable` | committed work beyond base, tree clean | proceed from HEAD |
 | `restorable` | uncommitted changes | `Restore` to last checkpoint (or base), then proceed |
-| `needs_attention` | worktree missing, or HEAD in an unexpected lineage | fail the task — surface for a human |
+| `needs_attention` | worktree missing, or HEAD in an unexpected lineage | fail the run — surface for a human |
 
 A side-effectful stage is never blindly replayed against a half-modified tree.
 `Restore` is `git reset --hard <checkpoint>` + `git clean -fd`, so the
@@ -456,14 +456,14 @@ files from the crashed run are discarded).
 Every HTTP-driven FSM transition that carries a runnable-job intent enqueues the
 job **inside the same database transaction** as the transition
 (`api.runInTx`). A handler that cannot enqueue rolls back the transition — a
-task can never be left `running` with no driver intent.
+run can never be left `running` with no driver intent.
 
 A periodic reconciler (`internal/jobs.Reconciler`, started on boot and on a
 ticker) repairs what crashes still leave behind, not only at process startup:
 
 - **Stale job leases** — `status='running' AND heartbeat_at < now() - stale` —
   re-queued, or failed past `AGENTUM_JOB_MAX_ATTEMPTS`.
-- **Orphaned tasks** — `state='running'` with no live (pending/running) job —
+- **Orphaned runs** — `state='running'` with no live (pending/running) job —
   transitioned to `paused_user_stop` (reason `interrupted`) so a human resumes
   explicitly. Conservative by design: a half-run stage is never auto-replayed.
 
@@ -494,7 +494,7 @@ go test -tags integration ./internal/runner/ -run TestRunnerLive -v -timeout 5m
 
 It proves: `POST /runs/{id}/start` runs `packs/minimal` via the real opencode
 adapter to a stop point (the `spec` stage's `human_approval` gate pauses the
-task at `paused_gate`) and a `session_id` is captured. This is the F.6 proof
+run at `paused_gate`) and a `session_id` is captured. This is the F.6 proof
 that the loop works with a live agent, not just fakes.
 
 ## Project checks (orchestrator-owned)
@@ -528,7 +528,7 @@ checks:
 
 Each check is an **argument vector** (first element is the binary; no shell
 unless a check explicitly invokes one). Only this file supplies commands — it is
-versioned with the code and read from the task's `base_commit` (the lineage
+versioned with the code and read from the run's `base_commit` (the lineage
 anchor, captured before the worktree is created), so the registry an agent is
 gated against is the one the project committed, not one the agent could edit in
 its worktree.
@@ -551,7 +551,7 @@ checks by editing `.agentum.yaml` inside its worktree.
 ### When checks run
 
 The runner runs the resolved set once, at the **final delivery boundary**: after
-the last stage's checkpoint is recorded and before the task reaches the review
+the last stage's checkpoint is recorded and before the run reaches the review
 gate (`awaiting_final_review`).
 
 **Commit binding.** The checks must verify exactly the commit they claim to. The
@@ -559,7 +559,7 @@ runner resolves the worktree HEAD (the post-stage checkpoint commit the
 orchestrator authored) *before* the executor runs and asserts the tree is clean
 first: a dirty tree means something wrote after the checkpoint, and running the
 checks against it would test content that exists in no commit while the manifest
-asserts a specific SHA was verified. A dirty tree at this boundary fails the task
+asserts a specific SHA was verified. A dirty tree at this boundary fails the run
 rather than claiming a verification it cannot stand behind. Only then does the
 executor run, and the recorded `checks.commit` is that checkpoint SHA by
 construction — not a pre-run HEAD read that could drift. The outcome is recorded
@@ -574,10 +574,10 @@ as manifest evidence:
   `ran: false` so it is not misread as a gate that ran and cleared.
 
 A **mandatory failure blocks delivery**: instead of reaching the review gate, the
-task fails, and the check evidence in the sealed manifest is the record. Optional
+run fails, and the check evidence in the sealed manifest is the record. Optional
 check failures are recorded as evidence but do not block. A successful run is the
 evidence available to the final reviewer. Reaching the delivery boundary without
-a resolved `base_commit` also fails the task — the anchor is required to load the
+a resolved `base_commit` also fails the run — the anchor is required to load the
 registry and to gate delivery, and its absence there is a broken invariant, not
 an early exit to an empty set.
 
@@ -625,7 +625,7 @@ repo reads as tampering; the pin's `SourceHash` stays over the raw bytes for
 evidence identity. Each restoration emits `run.instructions_restored` and lands
 in the manifest context section; the rewrite is orchestrator-authored, so the
 next checkpoint commit shows it as a revert — the tamper and its reversal are
-both in the git lineage. A restore IO error fails the task, mirroring a dirty
+both in the git lineage. A restore IO error fails the run, mirroring a dirty
 tree at the delivery boundary.
 
 **Skills, allowed and recorded.** `skill` resolves to `allow`: a skill grants
@@ -663,7 +663,7 @@ These land with their epics — the seams exist, the behavior does not:
   section is an inert stub until 1.2/1.3 land).
 - **MCP capability pass-through** → **Epic 6** (the routing block's
   "Capabilities available" section is an inert stub).
-- **Multi-step delivery / handoff** → **F.8** (one task = one step today).
+- **Multi-step delivery / handoff** → **F.8** (one run = one step today).
 - **Idle/hard timeout values** — the ctx seam is used, but no idle timer ships
   (`04 §5.2`).
 - **`LISTEN/NOTIFY` low-latency wake** — poll is fine for MVP.
@@ -680,8 +680,8 @@ into two pieces:
   an immutable, content-addressed revision stored outside the worktree. Edits
   chain via `prev_revision_id`; the worktree-independent blob store survives
   teardown.
-- **Evidence manifest** — one row per task that records everything that went
-  into the run: input task + revision, project + base commit, pack + version +
+- **Evidence manifest** — one row per run that records everything that went
+  into the run: input request + revision, project + base commit, pack + version +
   hash, one invocation record per stage attempt (adapter + runtime versions,
   model selection, both prompt hashes, effective capability profile,
   telemetry), the adapter wiring + runtime probe, memory slice, input/output
@@ -707,7 +707,7 @@ the same content share one blob.
 ```sql
 artifact_revisions(
   id, tenant_id, user_id, task_id,
-  name, kind,                          -- identity within the task
+  name, kind,                          -- identity within the run
   content_hash, content_size,          -- content addressing
   action_type,                         -- create | edit
   prev_revision_id,                    -- chain to the prior revision
@@ -719,7 +719,7 @@ artifact_revisions(
 ```
 
 - A new revision chains via `prev_revision_id`. Edits never overwrite.
-- `is_current` is the single "current" pointer per `(task, name)`; the partial
+- `is_current` is the single "current" pointer per `(run, name)`; the partial
   unique index `idx_artifact_rev_current` enforces one current per name.
 - A `PUT /runs/{id}/invocations/{iid}/artifacts/{name}` creates a new
   revision; a revision already referenced by an `invocation` is never
@@ -752,7 +752,7 @@ open also removes the window between validating a path and using it.
 A declared path that escapes **fails the stage**. The capture is
 all-or-nothing — nothing is ingested — the invocation is finalized with
 `stop_reason = artifact_rejected`, a `stage.artifact_rejected` event records
-the path and reason, and the task pauses for review. A declared path that
+the path and reason, and the run pauses for review. A declared path that
 simply was not written is a different thing: a contract gap, logged and
 skipped, with the run continuing.
 
@@ -811,7 +811,7 @@ responsible for what their agents emit.
 A revision write is `read current → demote it → insert the new one`, and all
 three steps run in one transaction. The read takes a row lock
 (`LockCurrentArtifactRevisionForName`), so a second writer for the same
-`(task, name)` blocks until the first commits and then observes the new
+`(run, name)` blocks until the first commits and then observes the new
 current revision rather than chaining a sibling off the one it already read.
 The demotion targets that exact revision id, so an affected-row count of zero
 is a conflict rather than a silent no-op. Two racing *first* creates have no
@@ -879,7 +879,7 @@ and rendered prompt hash; nothing is overwritten. Two prompt hashes are
 recorded per attempt: `stage_prompt_hash` (the pack's stage prompt — the
 cross-run diff axis) and `rendered_hash` (prompt + routing block — what makes
 two attempts at the same stage distinguishable; deliberately never a diff
-axis, because the routing block embeds the task id and absolute paths).
+axis, because the routing block embeds the run id and absolute paths).
 Telemetry (tokens, cost) is recorded per invocation and only there. Output
 artifact refs carry the `invocation_id` that produced them.
 
@@ -899,7 +899,7 @@ a run-level scalar.
 comparison between two sealed manifest bodies. The diff surfaces *input-level*
 differences only — the things that meaningfully change what an agent would do:
 
-- input task + revision
+- input request + revision
 - project + base_commit
 - pack (name, version, content hash)
 - per-attempt prompts (the `stage_prompt_hash` on each invocation record)
@@ -930,7 +930,7 @@ Two runs on the same tier and model but different runtime builds differ on
 Outputs (artifacts produced) and human decisions are **not** compared — those
 are *results*, not inputs. Two runs that produced different output but had
 identical inputs are the same comparable run; the diff is empty. The rendered
-prompt hash is never an axis (it embeds the task id and absolute paths, so it
+prompt hash is never an axis (it embeds the run id and absolute paths, so it
 never repeats across runs). A schema-1 manifest against a schema-2 manifest
 of the same run diffs empty: both go through the same invocation-record
 accessor.

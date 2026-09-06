@@ -103,7 +103,7 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	state := engine.TaskState(task.State)
 	if state != engine.StateAwaitingFinalReview && !engine.IsTerminal(state) {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
-			"final-review requires awaiting_final_review or a terminal state; task is "+task.State)
+			"final-review requires awaiting_final_review or a terminal state; run is "+task.State)
 		return
 	}
 	response := finalReviewResponse{Run: toTaskResponse(task)}

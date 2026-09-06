@@ -24,9 +24,9 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// msgTaskNotFound is the user-facing message for a missing task. Shared by the
+// msgRunNotFound is the user-facing message for a missing run. Shared by the
 // guard and the lifecycle handlers so the wording stays stable.
-const msgTaskNotFound = "task not found"
+const msgRunNotFound = "run not found"
 
 // requirePrincipal extracts the Principal, writing a structured error on failure.
 // Returns false when the caller should return.
@@ -99,7 +99,7 @@ func (api *API) requireTaskForAction(w http.ResponseWriter, r *http.Request, act
 	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, msgTaskNotFound)
+			writeError(w, http.StatusNotFound, codeNotFound, msgRunNotFound)
 			return authz.Principal{}, sqlc.Task{}, false
 		}
 		logUnexpected(api.log, err, where)

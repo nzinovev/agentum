@@ -115,7 +115,7 @@ type ListEventsAfterTaskParams struct {
 	Limit    int32          `json:"limit"`
 }
 
-// Per-task tail: same shape, scoped to one task. Used by GET /tasks/{id}/events.
+// Per-task tail: same shape, scoped to one task. Used by GET /runs/{id}/events.
 func (q *Queries) ListEventsAfterTask(ctx context.Context, arg ListEventsAfterTaskParams) ([]Event, error) {
 	rows, err := q.db.QueryContext(ctx, listEventsAfterTask,
 		arg.TenantID,

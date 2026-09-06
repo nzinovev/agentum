@@ -42,7 +42,7 @@ func (api *API) handleEventStream(w http.ResponseWriter, r *http.Request) {
 func (api *API) handleTaskEventStream(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if taskID == "" {
-		writeError(w, http.StatusBadRequest, codeBadInput, "missing task id")
+		writeError(w, http.StatusBadRequest, codeBadInput, "missing run id")
 		return
 	}
 	api.runSSE(w, r, taskID, "/api/v1/runs/{id}/events")

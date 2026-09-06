@@ -40,7 +40,7 @@ func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
 	// that reads as "the task exists but has no invocations."
 	if _, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, codeNotFound, "task not found")
+			writeError(w, http.StatusNotFound, codeNotFound, "run not found")
 			return
 		}
 		logUnexpected(api.log, err, "GetTask (invocations)")

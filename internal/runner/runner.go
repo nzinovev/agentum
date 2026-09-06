@@ -51,7 +51,7 @@ type Store interface {
 	// of the given stages has reached for the task. Returns -1 when none has run
 	// (the query's COALESCE sentinel); the runner maps -1 -> 0 entries.
 	MaxCycleForStages(ctx context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error)
-	// ListStageInvocationsForTask backs GET /tasks/{id}/invocations and makes
+	// ListStageInvocationsForTask backs GET /runs/{id}/invocations and makes
 	// "each attempt visible separately" checkable.
 	ListStageInvocationsForTask(ctx context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error)
 	LatestCheckpointForTask(ctx context.Context, arg sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error)
@@ -300,7 +300,7 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 }
 
 // cleanup is the explicit, idempotent, audited deletion of a terminal task's
-// delivery artifacts (F.6.1 AC #4). Triggered by POST /tasks/{id}/cleanup, it
+// delivery artifacts (F.6.1 AC #4). Triggered by POST /runs/{id}/cleanup, it
 // removes the agentum/<task-id> branch AND any lingering worktree (the latter
 // idempotent — a task whose teardown already ran has only the branch left).
 // Distinct from teardown (worktree-only at terminal state) and from cancel

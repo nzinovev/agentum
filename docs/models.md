@@ -66,7 +66,7 @@ your active agent understands.
   strings work with this runtime" is runtime knowledge.
 - An empty tier falls back to the configured default.
 - An unknown tier is an **error** — Agentum never silently picks a model, and
-  never substitutes a default for a name it could not resolve. A task whose
+  never substitutes a default for a name it could not resolve. A run whose
   pack names an unresolvable tier fails at run start, before the first
   invocation.
 - The resolved model selection is a typed struct (`tier`, derived `provider`,
@@ -107,7 +107,7 @@ built-in defaults", which is the common case.
 - API keys, OAuth tokens, refresh tokens.
 - Provider base URLs / custom endpoints.
 - Generating or placing the agent's own `opencode.json` or auth files.
-- Per-task credential isolation (the agent binary owns its own auth).
+- Per-run credential isolation (the agent binary owns its own auth).
 
 If your agent binary needs configuration to reach a provider, configure that
 binary directly. Agentum will pass the tier's model string and get out of the

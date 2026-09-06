@@ -75,7 +75,7 @@ func nullStringOr(value sql.NullString) string {
 	return ""
 }
 
-// taskCreateRequest is the POST /tasks body. The request half — title +
+// taskCreateRequest is the POST /runs body. The request half — title +
 // description — reaches the model; the overrides half configures the run and
 // is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
 // `input` blob is a loud 400, not a silently dropped key that weakens the run.

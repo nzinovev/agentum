@@ -106,7 +106,7 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	rightID := r.URL.Query().Get("other")
 	if rightID == "" {
-		writeError(w, http.StatusBadRequest, codeBadInput, "other query parameter (task id) is required")
+		writeError(w, http.StatusBadRequest, codeBadInput, "other query parameter (run id) is required")
 		return
 	}
 	// The comparison reads a second task, so it needs its own read decision —
