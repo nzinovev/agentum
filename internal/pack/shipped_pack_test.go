@@ -7,7 +7,7 @@ import (
 
 // TestShipped_BackendDevelopmentPack loads and validates the committed
 // packs/backend-development pack the way DirSource.Resolve does, so a malformed
-// shipped pack fails CI rather than a run. The pack is task 3's deliverable
+// shipped pack fails CI rather than a run. The pack is an early deliverable of this work
 // (ADR 0003 D1) and its prompts reference routing sections and contract fields
 // that the validator cannot check — this test is the structural floor.
 func TestShipped_BackendDevelopmentPack(t *testing.T) {

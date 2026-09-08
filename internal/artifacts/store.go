@@ -17,7 +17,7 @@ import (
 // (idempotent on hash) so the index never references a hash the FS does not
 // have. The read of the prior current revision, the demotion of that exact
 // revision, and the insert of the new one all happen inside one transaction, so
-// the (task, name) chain cannot fork under concurrent writers.
+// the (run, name) chain cannot fork under concurrent writers.
 type SQLStore struct {
 	db      *sql.DB
 	queries *sqlc.Queries
@@ -110,7 +110,7 @@ func (sqlStore *SQLStore) scanAndHash(params PutParams) ([]byte, string, error) 
 		// not alter, because it is binary — is something an operator has to be
 		// able to see after the fact.
 		sqlStore.log.Warn("artifact scan findings",
-			"task", params.TaskID, "name", params.Name,
+			"run", params.RunID, "name", params.Name,
 			"findings", strings.Join(result.Findings, ","), "rewritten", result.Rewritten)
 	}
 	return result.Bytes, Hash(result.Bytes), nil
@@ -170,7 +170,7 @@ func planRevision(prior sqlc.ArtifactRevision, hasPrior bool, expected, contentH
 
 // commitRevision runs the whole read-decide-write inside one transaction. The
 // prior current revision is read under a row lock, so a concurrent Put for the
-// same (task, name) blocks until this one commits and then sees the new
+// same (run, name) blocks until this one commits and then sees the new
 // current — rather than both reading the same prior revision and chaining two
 // siblings off it.
 func (sqlStore *SQLStore) commitRevision(
@@ -195,7 +195,7 @@ func (sqlStore *SQLStore) commitRevision(
 		return Revision{}, planErr
 	}
 	if plan.noop {
-		// Identical content under the same (task, name): return the existing
+		// Identical content under the same (run, name): return the existing
 		// revision rather than growing the chain with a revision that changed
 		// nothing. The transaction rolls back; it only ever read.
 		return fromRow(plan.current), nil
@@ -203,7 +203,7 @@ func (sqlStore *SQLStore) commitRevision(
 
 	if plan.hasCurrent {
 		affected, demoteErr := qtx.DemoteArtifactRevisionIfCurrent(ctx, sqlc.DemoteArtifactRevisionIfCurrentParams{
-			TaskID: params.TaskID, Name: params.Name, ID: plan.current.ID,
+			RunID: params.RunID, Name: params.Name, ID: plan.current.ID,
 		})
 		if demoteErr != nil {
 			return Revision{}, fmt.Errorf("artifacts: demote prior current: %w", demoteErr)
@@ -220,7 +220,7 @@ func (sqlStore *SQLStore) commitRevision(
 	row, insertErr := qtx.CreateArtifactRevision(ctx, sqlc.CreateArtifactRevisionParams{
 		TenantID:           params.TenantID,
 		UserID:             params.UserID,
-		TaskID:             params.TaskID,
+		RunID:              params.RunID,
 		Name:               params.Name,
 		Kind:               params.Kind,
 		ContentHash:        contentHash,
@@ -249,14 +249,14 @@ func (sqlStore *SQLStore) commitRevision(
 	return fromRow(row), nil
 }
 
-// lockCurrent reads the current revision of (task, name) under a row lock.
+// lockCurrent reads the current revision of (run, name) under a row lock.
 // Reports (row, true) when one exists and (zero, false) when none does; a real
 // store error is propagated rather than being flattened into "no current",
 // because chaining a revision as a create when the lookup merely failed would
 // silently fork the chain.
 func lockCurrent(ctx context.Context, qtx *sqlc.Queries, params PutParams) (sqlc.ArtifactRevision, bool, error) {
 	prior, err := qtx.LockCurrentArtifactRevisionForName(ctx, sqlc.LockCurrentArtifactRevisionForNameParams{
-		TaskID: params.TaskID, TenantID: params.TenantID, Name: params.Name,
+		RunID: params.RunID, TenantID: params.TenantID, Name: params.Name,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -268,7 +268,7 @@ func lockCurrent(ctx context.Context, qtx *sqlc.Queries, params PutParams) (sqlc
 }
 
 // currentRevisionIndex is the partial unique index that enforces one current
-// revision per (task_id, name). Named here so the driver-agnostic conflict
+// revision per (run_id, name). Named here so the driver-agnostic conflict
 // check has something to match on.
 const currentRevisionIndex = "idx_artifact_rev_current"
 
@@ -322,9 +322,9 @@ func (sqlStore *SQLStore) Reader(ctx context.Context, tenantID, revisionID strin
 }
 
 // Current implements Store.
-func (sqlStore *SQLStore) Current(ctx context.Context, tenantID, taskID, name string) (Revision, error) {
+func (sqlStore *SQLStore) Current(ctx context.Context, tenantID, runID, name string) (Revision, error) {
 	row, err := sqlStore.queries.CurrentArtifactRevisionForName(ctx, sqlc.CurrentArtifactRevisionForNameParams{
-		TaskID: taskID, TenantID: tenantID, Name: name,
+		RunID: runID, TenantID: tenantID, Name: name,
 	})
 	if err != nil {
 		return Revision{}, wrapNoRows(err, ErrNoCurrentRevision)
@@ -332,10 +332,10 @@ func (sqlStore *SQLStore) Current(ctx context.Context, tenantID, taskID, name st
 	return fromRow(row), nil
 }
 
-// ListForTask implements Store.
-func (sqlStore *SQLStore) ListForTask(ctx context.Context, tenantID, taskID string) ([]Revision, error) {
-	rows, err := sqlStore.queries.ListArtifactRevisionsForTask(ctx, sqlc.ListArtifactRevisionsForTaskParams{
-		TaskID: taskID, TenantID: tenantID,
+// ListForRun implements Store.
+func (sqlStore *SQLStore) ListForRun(ctx context.Context, tenantID, runID string) ([]Revision, error) {
+	rows, err := sqlStore.queries.ListArtifactRevisionsForRun(ctx, sqlc.ListArtifactRevisionsForRunParams{
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		return nil, err
@@ -348,9 +348,9 @@ func (sqlStore *SQLStore) ListForTask(ctx context.Context, tenantID, taskID stri
 }
 
 // ListCurrent implements Store.
-func (sqlStore *SQLStore) ListCurrent(ctx context.Context, tenantID, taskID string) ([]Revision, error) {
-	rows, err := sqlStore.queries.ListCurrentArtifactRevisionsForTask(ctx, sqlc.ListCurrentArtifactRevisionsForTaskParams{
-		TaskID: taskID, TenantID: tenantID,
+func (sqlStore *SQLStore) ListCurrent(ctx context.Context, tenantID, runID string) ([]Revision, error) {
+	rows, err := sqlStore.queries.ListCurrentArtifactRevisionsForRun(ctx, sqlc.ListCurrentArtifactRevisionsForRunParams{
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		return nil, err

@@ -35,25 +35,25 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 
 	manager := New()
-	taskID := "task-001"
+	runID := "run-001"
 
 	// First create: makes the worktree. Empty baseCommit → HEAD (the
 	// pre-F.6.1 path; production always passes a resolved SHA).
-	worktree, err := manager.Create(t.Context(), repo, taskID, "")
+	worktree, err := manager.Create(t.Context(), repo, runID, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if worktree.Branch != "agentum/task-001" {
+	if worktree.Branch != "agentum/run-001" {
 		t.Errorf("Branch = %q", worktree.Branch)
 	}
 	if !isWorktree(context.Background(), worktree.Root) {
 		t.Fatalf("worktree not created at %s", worktree.Root)
 	}
 	// The branch is checked out in the worktree.
-	assertBranchCheckedOut(t, worktree.Root, "agentum/task-001")
+	assertBranchCheckedOut(t, worktree.Root, "agentum/run-001")
 
 	// Second create: idempotent — returns the existing worktree, no error.
-	secondWorktree, err := manager.Create(t.Context(), repo, taskID, "")
+	secondWorktree, err := manager.Create(t.Context(), repo, runID, "")
 	if err != nil {
 		t.Fatalf("idempotent Create: %v", err)
 	}
@@ -63,25 +63,25 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 
 	// RemoveWorktree: tears down the working tree only. The branch must survive
 	// (F.6.1 AC #3 — branch + commits remain resolvable after teardown).
-	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
+	if err := manager.RemoveWorktree(t.Context(), repo, runID); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if isWorktree(context.Background(), worktree.Root) {
 		t.Error("worktree still present after RemoveWorktree")
 	}
-	assertBranchListHas(t, repo, "agentum/task-001", true)
+	assertBranchListHas(t, repo, "agentum/run-001", true)
 
 	// DeleteBranch: explicit cleanup removes the branch now. Idempotent.
-	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+	if err := manager.DeleteBranch(t.Context(), repo, runID); err != nil {
 		t.Fatalf("DeleteBranch: %v", err)
 	}
-	assertBranchListHas(t, repo, "agentum/task-001", false)
+	assertBranchListHas(t, repo, "agentum/run-001", false)
 
-	// Both ops idempotent on a fully-cleaned task: no-op, no error.
-	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
+	// Both ops idempotent on a fully-cleaned run: no-op, no error.
+	if err := manager.RemoveWorktree(t.Context(), repo, runID); err != nil {
 		t.Errorf("second RemoveWorktree should be a no-op, got: %v", err)
 	}
-	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+	if err := manager.DeleteBranch(t.Context(), repo, runID); err != nil {
 		t.Errorf("second DeleteBranch should be a no-op, got: %v", err)
 	}
 }
@@ -99,8 +99,8 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	manager := New()
-	const taskID = "task-moved"
-	worktree, err := manager.Create(t.Context(), repo, taskID, "")
+	const runID = "run-moved"
+	worktree, err := manager.Create(t.Context(), repo, runID, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 	if err := os.Rename(repo, movedRepo); err != nil {
 		t.Fatalf("move repo: %v", err)
 	}
-	movedWorktreeRoot := PathFor(movedRepo, taskID)
+	movedWorktreeRoot := PathFor(movedRepo, runID)
 
 	// The directory (and its .git file) traveled with the repository, but the
 	// link is dead: presence is true, liveness is not.
@@ -124,7 +124,7 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 		t.Fatal("a moved worktree's stale link must not read as a live worktree")
 	}
 
-	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+	if err := manager.Repair(t.Context(), movedRepo, runID); err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
 	if !isWorktree(context.Background(), movedWorktreeRoot) {
@@ -141,7 +141,7 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 	// Create after repair returns the SAME worktree (idempotent), not a
 	// rebuild: the lineage a run left behind is the whole point of repairing
 	// instead of recreating.
-	restored, err := manager.Create(t.Context(), movedRepo, taskID, headBeforeMove)
+	restored, err := manager.Create(t.Context(), movedRepo, runID, headBeforeMove)
 	if err != nil {
 		t.Fatalf("Create after repair: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 	}
 
 	// Repair is idempotent: a second run on a healthy worktree is a no-op.
-	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+	if err := manager.Repair(t.Context(), movedRepo, runID); err != nil {
 		t.Fatalf("idempotent Repair: %v", err)
 	}
 }
@@ -167,8 +167,8 @@ func TestManager_RemoveWorktreeAfterRepoMove(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	manager := New()
-	const taskID = "task-remove-after-move"
-	if _, err := manager.Create(t.Context(), repo, taskID, ""); err != nil {
+	const runID = "run-remove-after-move"
+	if _, err := manager.Create(t.Context(), repo, runID, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -178,26 +178,26 @@ func TestManager_RemoveWorktreeAfterRepoMove(t *testing.T) {
 	}
 	// The worktree traveled with the repository; its recorded links still
 	// point at the old location.
-	movedWorktreeRoot := PathFor(movedRepo, taskID)
+	movedWorktreeRoot := PathFor(movedRepo, runID)
 
 	// Without repair the removal is a no-op: this is the regression guard.
-	if err := manager.RemoveWorktree(t.Context(), movedRepo, taskID); err != nil {
+	if err := manager.RemoveWorktree(t.Context(), movedRepo, runID); err != nil {
 		t.Fatalf("RemoveWorktree on stale links: %v", err)
 	}
 	if !DirPresent(movedWorktreeRoot) {
 		t.Fatal("control check failed: the stale worktree directory vanished without repair — the no-op premise changed")
 	}
 
-	if err := manager.Repair(t.Context(), movedRepo, taskID); err != nil {
+	if err := manager.Repair(t.Context(), movedRepo, runID); err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
-	if err := manager.RemoveWorktree(t.Context(), movedRepo, taskID); err != nil {
+	if err := manager.RemoveWorktree(t.Context(), movedRepo, runID); err != nil {
 		t.Fatalf("RemoveWorktree after Repair: %v", err)
 	}
 	if DirPresent(movedWorktreeRoot) {
 		t.Fatal("the worktree directory survived a repaired removal")
 	}
-	worktreeAdminDir := filepath.Join(movedRepo, ".git", "worktrees", taskID)
+	worktreeAdminDir := filepath.Join(movedRepo, ".git", "worktrees", runID)
 	if _, statErr := os.Stat(worktreeAdminDir); !os.IsNotExist(statErr) {
 		t.Fatalf("the .git/worktrees record survived: stat err = %v", statErr)
 	}
@@ -232,7 +232,7 @@ func TestManager_EnsureIgnored(t *testing.T) {
 	}
 	manager := New()
 
-	if _, err := manager.Create(t.Context(), repo, "task-002", ""); err != nil {
+	if _, err := manager.Create(t.Context(), repo, "run-002", ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -373,7 +373,7 @@ func headOf(dir string) (string, error) {
 
 // TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean is the E1 foundation
 // test: the orchestrator's Commit must turn a dirty working tree into a real
-// commit on the task branch, authored by the orchestrator, leaving the tree
+// commit on the run branch, authored by the orchestrator, leaving the tree
 // clean. Without this, every post-stage checkpoint is the base SHA and the
 // agent's uncommitted work is silently discarded at teardown — the defect class
 // this whole PR exists to close.
@@ -403,11 +403,11 @@ func TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean(t *testing.T) {
 	}
 
 	// The commit is a real commit beyond the base, authored by the orchestrator
-	// (not a human), on the task branch, and it contains the agent's work.
+	// (not a human), on the run branch, and it contains the agent's work.
 	assertCommitBeyondBase(t, repo, commitSHA)
 	assertCommitAuthor(t, repo, commitSHA, orchestratorIdentityName, orchestratorIdentityEmail)
 	assertCommitContainsFile(t, repo, commitSHA, "feature.txt", "new work")
-	assertBranchAtCommit(t, repo, "agentum/task-commit-dirty", commitSHA)
+	assertBranchAtCommit(t, repo, "agentum/run-commit-dirty", commitSHA)
 }
 
 // TestManager_Commit_CleanTreeCreatesNothing pins the no-empty-commit contract:
@@ -465,7 +465,7 @@ func TestManager_Commit_DoesNotSweepAgentumDir(t *testing.T) {
 
 	// Write real work AND orchestrator bookkeeping under .agentum/.
 	mustWrite(wt.Root, "feature.txt", "real work")
-	agentumArtifactDir := filepath.Join(wt.Root, ".agentum", "task-x", ".ag-artifacts", "spec")
+	agentumArtifactDir := filepath.Join(wt.Root, ".agentum", "run-x", ".ag-artifacts", "spec")
 	if err := os.MkdirAll(agentumArtifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestManager_Commit_DoesNotSweepAgentumDir(t *testing.T) {
 
 // setupWorktreeWithIdentity builds a repo (with git identity configured, as the
 // existing init helper does) and a worktree branched from its HEAD, mirroring
-// what the runner creates per task. Returns both so a test can write into the
+// what the runner creates per run. Returns both so a test can write into the
 // worktree and assert against the repo.
 func setupWorktreeWithIdentity(t *testing.T) (repo string, wt *Worktree) {
 	t.Helper()
@@ -498,7 +498,7 @@ func setupWorktreeWithIdentity(t *testing.T) (repo string, wt *Worktree) {
 	if err != nil {
 		t.Fatalf("resolve HEAD: %v", err)
 	}
-	wt, err = manager.Create(t.Context(), repo, "task-commit-dirty", baseCommit)
+	wt, err = manager.Create(t.Context(), repo, "run-commit-dirty", baseCommit)
 	if err != nil {
 		t.Fatalf("create worktree: %v", err)
 	}
@@ -519,7 +519,7 @@ func setupWorktreeWithoutIdentity(t *testing.T) (repo string, wt *Worktree) {
 	if err != nil {
 		t.Fatalf("resolve HEAD: %v", err)
 	}
-	wt, err = manager.Create(t.Context(), repo, "task-commit-noidentity", baseCommit)
+	wt, err = manager.Create(t.Context(), repo, "run-commit-noidentity", baseCommit)
 	if err != nil {
 		t.Fatalf("create worktree: %v", err)
 	}
@@ -605,6 +605,6 @@ func assertBranchAtCommit(t *testing.T, repo, branch, commitSHA string) {
 	t.Helper()
 	tip := strings.TrimSpace(mustGit(t, repo, "rev-parse", branch))
 	if tip != commitSHA {
-		t.Errorf("branch %s tip = %s, want the checkpoint commit %s (Commit must land on the task branch)", branch, tip, commitSHA)
+		t.Errorf("branch %s tip = %s, want the checkpoint commit %s (Commit must land on the run branch)", branch, tip, commitSHA)
 	}
 }

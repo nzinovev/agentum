@@ -103,7 +103,7 @@ func TestDescribe_ReturnedTiersAreACopy(t *testing.T) {
 }
 
 // TestOpencodeDescriptor_DeclaredOptionsMatchArgv is the assertion that keeps
-// the descriptor's declaration honest as MVP task 6 lands: the declared model
+// the descriptor's declaration honest when a per-variant option lands: the declared model
 // options must equal the set of option fields buildOpencodeArgs can actually
 // emit. A descriptor that declares an option the argv builder ignores would
 // silently accept and drop it; an argv builder that emits an undeclared option

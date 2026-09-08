@@ -109,7 +109,7 @@ type Tiers struct {
 // failure blocks delivery); Optional names run but do not block. Neither can
 // supply a command, remove a project baseline check, or weaken an already-
 // mandatory check — mandatory is monotonic across the project baseline, the
-// pack, and the task.
+// pack, and the run input.
 type CheckPolicy struct {
 	Required []string `yaml:"required,omitempty"`
 	Optional []string `yaml:"optional,omitempty"`
@@ -217,7 +217,7 @@ type Unlock string
 
 const (
 	// UnlockSourceWrite re-enables the source-writing capability categories for
-	// every stage of the run. The runner records a durable task_approvals row
+	// every stage of the run. The runner records a durable run_approvals row
 	// when a human advances past the approval stage, and removes the withholding
 	// only when that row exists. See ADR 0003 D3.
 	UnlockSourceWrite Unlock = "source_write"
@@ -230,12 +230,12 @@ var knownUnlocks = map[Unlock]bool{UnlockSourceWrite: true}
 
 // Approval declares a human gate whose decision unlocks a capability subset for
 // the rest of the run (ADR 0003 D3). The approval is recorded as a durable,
-// orchestrator-owned task_approvals row keyed unique on (task, name), so a
+// orchestrator-owned run_approvals row keyed unique on (run, name), so a
 // worker restart, a worktree restore, and a Restore to a checkpoint all leave
 // the decision intact and a repeated approve is idempotent by construction.
 type Approval struct {
 	// Name is the approval's unique identifier and the key the durable
-	// task_approvals row is keyed on. It is also the value the runner reads back
+	// run_approvals row is keyed on. It is also the value the runner reads back
 	// to decide whether the unlock applies.
 	Name string `yaml:"name"`
 	// Stage is the stage whose gate, when advanced past by a human, IS the

@@ -9,60 +9,60 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// fakeTaskStore is an in-memory TaskStore for reconciler tests. It seeds one
-// tenant's task table and records the repairs the reconciler applies.
-type fakeTaskStore struct {
+// fakeRunStore is an in-memory RunStore for reconciler tests. It seeds one
+// tenant's run table and records the repairs the reconciler applies.
+type fakeRunStore struct {
 	mu          sync.Mutex
-	tasks       []sqlc.Task
+	runs        []sqlc.Run
 	transitions []string // recorded "id:from→to"
 	events      []string // recorded event types
 }
 
-func (store *fakeTaskStore) FindOrphanedRunningTasks(_ context.Context, tenantID string) ([]sqlc.Task, error) {
+func (store *fakeRunStore) FindOrphanedRunningRuns(_ context.Context, tenantID string) ([]sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	var orphaned []sqlc.Task
-	for _, task := range store.tasks {
-		if task.TenantID == tenantID && task.State == "running" {
-			orphaned = append(orphaned, task)
+	var orphaned []sqlc.Run
+	for _, run := range store.runs {
+		if run.TenantID == tenantID && run.State == "running" {
+			orphaned = append(orphaned, run)
 		}
 	}
 	return orphaned, nil
 }
 
-func (store *fakeTaskStore) UpdateTaskState(_ context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error) {
+func (store *fakeRunStore) UpdateRunState(_ context.Context, arg sqlc.UpdateRunStateParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	for index, task := range store.tasks {
-		if task.ID == arg.ID && task.TenantID == arg.TenantID {
-			store.transitions = append(store.transitions, task.ID+":"+task.State+"→"+arg.State)
-			store.tasks[index].State = arg.State
-			return store.tasks[index], nil
+	for index, run := range store.runs {
+		if run.ID == arg.ID && run.TenantID == arg.TenantID {
+			store.transitions = append(store.transitions, run.ID+":"+run.State+"→"+arg.State)
+			store.runs[index].State = arg.State
+			return store.runs[index], nil
 		}
 	}
-	return sqlc.Task{}, nil
+	return sqlc.Run{}, nil
 }
 
-func (store *fakeTaskStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
+func (store *fakeRunStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.events = append(store.events, arg.Type)
 	return sqlc.Event{}, nil
 }
 
-// TestReconciler_PausesOrphanedRunningTasks is the F.6.1 AC #6 proof: a task
+// TestReconciler_PausesOrphanedRunningRuns is the F.6.1 AC #6 proof: a run
 // left running with no live job (the crash-between-transition-and-enqueue case)
 // is repaired to paused_user_stop so a human resumes — never blindly replayed.
-func TestReconciler_PausesOrphanedRunningTasks(t *testing.T) {
+func TestReconciler_PausesOrphanedRunningRuns(t *testing.T) {
 	t.Parallel()
-	tasks := &fakeTaskStore{tasks: []sqlc.Task{
+	runStore := &fakeRunStore{runs: []sqlc.Run{
 		{ID: "T-orphan", TenantID: "tn", UserID: "us", State: "running"},
 		{ID: "T-healthy", TenantID: "tn", UserID: "us", State: "paused_gate"},
 		{ID: "T-done", TenantID: "tn", UserID: "us", State: "done"},
 	}}
 	queue := newFakeQueue()
 	reconciler := NewReconciler(ReconcilerDeps{
-		TenantID: "tn", Queue: queue, Tasks: tasks,
+		TenantID: "tn", Queue: queue, Runs: runStore,
 		StaleAfter: time.Minute, MaxAttempts: 3,
 	})
 
@@ -70,23 +70,23 @@ func TestReconciler_PausesOrphanedRunningTasks(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	tasks.mu.Lock()
-	defer tasks.mu.Unlock()
-	// Exactly one task was repaired — the running one. Healthy/done untouched.
-	if len(tasks.transitions) != 1 {
-		t.Fatalf("transitions = %v, want exactly 1", tasks.transitions)
+	runStore.mu.Lock()
+	defer runStore.mu.Unlock()
+	// Exactly one run was repaired — the running one. Healthy/done untouched.
+	if len(runStore.transitions) != 1 {
+		t.Fatalf("transitions = %v, want exactly 1", runStore.transitions)
 	}
-	if tasks.transitions[0] != "T-orphan:running→paused_user_stop" {
-		t.Fatalf("transition = %q, want T-orphan:running→paused_user_stop", tasks.transitions[0])
+	if runStore.transitions[0] != "T-orphan:running→paused_user_stop" {
+		t.Fatalf("transition = %q, want T-orphan:running→paused_user_stop", runStore.transitions[0])
 	}
 	// An audit event was emitted.
-	if len(tasks.events) != 1 || tasks.events[0] != "run.reconciled" {
-		t.Fatalf("events = %v, want [run.reconciled]", tasks.events)
+	if len(runStore.events) != 1 || runStore.events[0] != "run.reconciled" {
+		t.Fatalf("events = %v, want [run.reconciled]", runStore.events)
 	}
-	// The task is now paused, not running.
-	for _, task := range tasks.tasks {
-		if task.ID == "T-orphan" && task.State != "paused_user_stop" {
-			t.Fatalf("T-orphan state = %q, want paused_user_stop", task.State)
+	// The run is now paused, not running.
+	for _, run := range runStore.runs {
+		if run.ID == "T-orphan" && run.State != "paused_user_stop" {
+			t.Fatalf("T-orphan state = %q, want paused_user_stop", run.State)
 		}
 	}
 }
@@ -96,10 +96,10 @@ func TestReconciler_PausesOrphanedRunningTasks(t *testing.T) {
 // worker's job is re-queued (or failed past the poison bound) without a restart.
 func TestReconciler_StaleJobsRequeued(t *testing.T) {
 	t.Parallel()
-	tasks := &fakeTaskStore{}
+	runStore := &fakeRunStore{}
 	queue := newFakeQueue()
 	reconciler := NewReconciler(ReconcilerDeps{
-		TenantID: "tn", Queue: queue, Tasks: tasks,
+		TenantID: "tn", Queue: queue, Runs: runStore,
 		StaleAfter: 45 * time.Second, MaxAttempts: 3,
 	})
 
@@ -118,31 +118,31 @@ func TestReconciler_StaleJobsRequeued(t *testing.T) {
 	}
 }
 
-// TestReconciler_SkipsAlreadyRepaired proves the in-loop re-check: a task that
+// TestReconciler_SkipsAlreadyRepaired proves the in-loop re-check: a run that
 // moved out of running between the probe and the repair is not transitioned
 // again (no clobbering a concurrent human resume).
 func TestReconciler_SkipsAlreadyRepaired(t *testing.T) {
 	t.Parallel()
-	// Seed running, but simulate a concurrent resume by having UpdateTaskState's
+	// Seed running, but simulate a concurrent resume by having UpdateRunState's
 	// first caller flip the state before the reconciler would. We do this by
-	// pre-marking the task as paused in the store right before Reconcile reads
+	// pre-marking the run as paused in the store right before Reconcile reads
 	// — the re-check inside the loop guards it.
-	tasks := &fakeTaskStore{tasks: []sqlc.Task{
+	runStore := &fakeRunStore{runs: []sqlc.Run{
 		{ID: "T-racy", TenantID: "tn", UserID: "us", State: "paused_user_stop"},
 	}}
 	queue := newFakeQueue()
 	reconciler := NewReconciler(ReconcilerDeps{
-		TenantID: "tn", Queue: queue, Tasks: tasks, StaleAfter: time.Minute,
+		TenantID: "tn", Queue: queue, Runs: runStore, StaleAfter: time.Minute,
 	})
 
-	// FindOrphanedRunningTasks returns only state='running'; the paused task is
+	// FindOrphanedRunningRuns returns only state='running'; the paused run is
 	// not a target, so Reconcile must not touch it.
 	if err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	tasks.mu.Lock()
-	defer tasks.mu.Unlock()
-	if len(tasks.transitions) != 0 {
-		t.Fatalf("expected no transitions, got %v", tasks.transitions)
+	runStore.mu.Lock()
+	defer runStore.mu.Unlock()
+	if len(runStore.transitions) != 0 {
+		t.Fatalf("expected no transitions, got %v", runStore.transitions)
 	}
 }

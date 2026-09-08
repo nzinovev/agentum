@@ -39,7 +39,7 @@ var (
 // A column's type is whatever its LAST declaration says: a line in CREATE
 // TABLE or an ADD COLUMN states it, and ALTER COLUMN … TYPE restates it. This
 // lets a later migration legitimately correct an earlier shape
-// (task_approvals.tenant_id was text and was cast to uuid) while still
+// (run_approvals.tenant_id was text and was cast to uuid) while still
 // failing on any declaration or alteration that leaves a seam column
 // non-uuid. Mentions in UNIQUE (...), PRIMARY KEY (...), WHERE clauses, and
 // ::casts never put a type word after the bare column name, so they cannot

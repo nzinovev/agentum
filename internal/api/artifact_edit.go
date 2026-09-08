@@ -35,11 +35,11 @@ type artifactEditRequest struct {
 }
 
 // handleArtifactGet GET /api/v1/runs/{id}/invocations/{iid}/artifacts/{name}
-// Returns the current revision of (task, name) plus its content. The revision
+// Returns the current revision of (run, name) plus its content. The revision
 // id is surfaced in the X-Revision-Id response header so a client can use it as
 // the expected_revision_id precondition for a subsequent PUT.
 func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -47,7 +47,7 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	revision, err := api.art.Current(r.Context(), principal.TenantID, taskID, name)
+	revision, err := api.art.Current(r.Context(), principal.TenantID, runID, name)
 	if err != nil {
 		writeError(w, statusForArtifactStoreErr(err), codeForArtifactStoreErr(err), errForCaller(err))
 		return
@@ -65,11 +65,11 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 
 // handleArtifactPut PUT /api/v1/runs/{id}/invocations/{iid}/artifacts/{name}
 // Creates a new revision from the request body. A human edit has no source
-// invocation (actor = human), unlike a stage capture. When the task is paused at
+// invocation (actor = human), unlike a stage capture. When the run is paused at
 // a human gate, the edit IS the approval, so a successful PUT also records a
 // GateDecision{decision: "edited"} on the manifest — a plain AddEvidence, since
 // this handler performs no FSM transition and needs no shared transaction. The
-// decision is recorded only at a gate: a PUT issued while the task is running or
+// decision is recorded only at a gate: a PUT issued while the run is running or
 // terminal is a legitimate artifact edit but not a gate decision, and recording
 // one would be a false claim in a record whose purpose is to be trustworthy.
 //
@@ -94,7 +94,7 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // being collapsed into "no current revision" — the latter would silently
 // disable the precondition and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -127,7 +127,7 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	// handler never confirmed was absent: a blind overwrite, which is exactly the
 	// failure the precondition policy exists to prevent. Only ErrNoCurrentRevision
 	// is an honest "no current revision"; anything else is a hard refusal.
-	current, currentErr := api.art.Current(r.Context(), principal.TenantID, taskID, name)
+	current, currentErr := api.art.Current(r.Context(), principal.TenantID, runID, name)
 	hasCurrent := false
 	switch {
 	case currentErr == nil:
@@ -169,7 +169,7 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	revision, err := api.art.Put(r.Context(), artifacts.PutParams{
 		TenantID:                principal.TenantID,
 		UserID:                  principal.UserID,
-		TaskID:                  taskID,
+		RunID:                   runID,
 		Name:                    name,
 		Kind:                    kind,
 		Bytes:                   []byte(req.Content),
@@ -183,7 +183,7 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	// The edit IS the approval at a human_edit gate. Record it on the manifest
 	// so the human decision trail carries who edited what and when. A plain
 	// AddEvidence is fine here: no FSM transition, so no shared transaction.
-	api.recordHumanEditDecision(r.Context(), principal, taskID)
+	api.recordHumanEditDecision(r.Context(), principal, runID)
 	writeJSON(w, http.StatusOK, toArtifactRevisionResponse(revision))
 }
 
@@ -192,38 +192,38 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 const maxArtifactEditBytes = 16 << 20 // 16 MiB
 
 // recordHumanEditDecision records a GateDecision{decision: edited} for a
-// successful human artifact edit — but only when the task is actually paused at
-// a human gate. The edit endpoint is available regardless of task state (a
+// successful human artifact edit — but only when the run is actually paused at
+// a human gate. The edit endpoint is available regardless of run state (a
 // reviewer may inspect or tweak an artifact at many points), but a
 // GateDecision claims a human passed a gate. Recording one on a PUT issued
-// while the task is `running`, far from any gate, would be a false claim in a
+// while the run is `running`, far from any gate, would be a false claim in a
 // record whose entire purpose is to be trustworthy: a reader would conclude a
 // gate was passed when none was active. The artifact revision row is always the
 // durable record of the edit itself; the GateDecision is gated to the gate.
 //
 // Best-effort: a nil manifest service (tests, a server that did not wire one)
 // is a no-op, and a sealed / missing manifest is dropped.
-func (api *API) recordHumanEditDecision(ctx context.Context, principal authz.Principal, taskID string) {
+func (api *API) recordHumanEditDecision(ctx context.Context, principal authz.Principal, runID string) {
 	if api.mfst == nil {
 		return
 	}
-	task, err := api.queries.GetTask(ctx, sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID})
+	run, err := api.queries.GetRun(ctx, sqlc.GetRunParams{ID: runID, TenantID: principal.TenantID})
 	if err != nil {
 		return
 	}
-	// Only record a gate decision when the task is actually at a gate. A PUT
+	// Only record a gate decision when the run is actually at a gate. A PUT
 	// while running / terminal / at a non-gate pause is still a legitimate
 	// artifact edit, but it is not a gate decision and must not claim to be one.
-	if engine.TaskState(task.State) != engine.StatePausedGate {
+	if engine.RunState(run.State) != engine.StatePausedGate {
 		return
 	}
-	stage := currentStageOr(task.CurrentStage, "")
+	stage := currentStageOr(run.CurrentStage, "")
 	patch := humanDecisionPatch(stage, gateHumanEdit, decisionEdited, principal.UserID, time.Now().UTC())
-	if err := api.mfst.AddEvidence(ctx, principal.TenantID, taskID, patch); err != nil {
+	if err := api.mfst.AddEvidence(ctx, principal.TenantID, runID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) || errors.Is(err, manifest.ErrNoManifest) {
 			return
 		}
-		api.log.Warn("record human-edit decision", "task", taskID, "error", err)
+		api.log.Warn("record human-edit decision", "run", runID, "error", err)
 	}
 }
 

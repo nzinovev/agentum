@@ -45,7 +45,7 @@ func computeHostSuffix() string {
 // The BlobStore is intentionally separate from the index (Store): a revision
 // row references a blob by hash, but the blob has no metadata of its own. This
 // keeps the durable layer composable — the same blob backs every revision that
-// references it, regardless of task or name.
+// references it, regardless of run or name.
 type BlobStore struct {
 	Root string
 }

@@ -1,5 +1,5 @@
-// Package manifest owns the evidence manifest for a task run. The manifest is
-// the immutable record of what went into a single run: the input task and its
+// Package manifest owns the evidence manifest for a run. The manifest is
+// the immutable record of what went into a single run: the input run and its
 // revision, the project and base commit, the pack and its resolved version +
 // hash, the prompt revisions the adapter saw, the adapter + its declared
 // capabilities, the model + tier, the effective capability profile, the memory
@@ -9,12 +9,12 @@
 //
 // Lifecycle (see internal/store/migrations/0006_manifests.sql):
 //
-//   - Init creates one manifest row per task at task creation.
+//   - Init creates one manifest row per run at run creation.
 //   - AddEvidence merges keys into the body. Append-only by convention; the Go
 //     service constructs patches that extend arrays rather than replace them.
 //   - Seal sets sealed_at + seal_reason. After sealing, AddEvidence is a typed
 //     error; corrections go through Correct, which adds a linked row in
-//     task_manifest_corrections.
+//     run_manifest_corrections.
 //
 // Subsystems not yet wired (project memory, capability enforcement, project
 // checks) are recorded as explicit `missing` entries — the manifest never
@@ -37,18 +37,18 @@ import (
 type SealReason string
 
 const (
-	// SealCompleted is the normal terminal path: task reached `done`.
+	// SealCompleted is the normal terminal path: run reached `done`.
 	SealCompleted SealReason = "completed"
 	// SealInterrupted is for an unclean exit: process crash, reconciler moved
-	// the task to paused_user_stop with reason `interrupted`. The manifest is
+	// the run to paused_user_stop with reason `interrupted`. The manifest is
 	// sealed anyway — the evidence gathered so far is the durable record.
 	SealInterrupted SealReason = "interrupted"
 	// SealCancelled is the terminal abort path (POST /runs/{id}/cancel).
 	SealCancelled SealReason = "cancelled"
-	// SealFailed is the failure path (runner.failTask).
+	// SealFailed is the failure path (runner.failRun).
 	SealFailed SealReason = "failed"
 	// SealRejected is the terminal reject path (POST /runs/{id}/reject — ADR
-	// 0003 D4). Reuse of EventCancel means the task lands in `cancelled`; this
+	// 0003 D4). Reuse of EventCancel means the run lands in `cancelled`; this
 	// distinct seal reason keeps the sealed record from describing a rejected
 	// result as an undifferentiated abort.
 	SealRejected SealReason = "rejected"
@@ -83,21 +83,21 @@ func New(deps Deps) *Service {
 // Callers must use Correct to amend a sealed manifest.
 var ErrSealed = errors.New("manifest: sealed; use Correct to amend")
 
-// ErrNoManifest is returned when a task has no manifest row yet (Init was not
+// ErrNoManifest is returned when a run has no manifest row yet (Init was not
 // called or failed).
-var ErrNoManifest = errors.New("manifest: no manifest for task")
+var ErrNoManifest = errors.New("manifest: no manifest for run")
 
-// Init creates the per-task manifest row. Idempotent: a second call for the
-// same task is a no-op (ON CONFLICT DO NOTHING). The initial body carries the
+// Init creates the per-run manifest row. Idempotent: a second call for the
+// same run is a no-op (ON CONFLICT DO NOTHING). The initial body carries the
 // schema version and an empty evidence map; sections fill in via AddEvidence.
-func (service *Service) Init(ctx context.Context, tenantID, userID, taskID string) error {
+func (service *Service) Init(ctx context.Context, tenantID, userID, runID string) error {
 	empty := newEmptyBody()
 	encoded, err := encodeBody(empty)
 	if err != nil {
 		return fmt.Errorf("manifest: encode initial body: %w", err)
 	}
 	_, err = service.queries.InitManifest(ctx, sqlc.InitManifestParams{
-		TenantID: tenantID, UserID: userID, TaskID: taskID, Body: encoded,
+		TenantID: tenantID, UserID: userID, RunID: runID, Body: encoded,
 	})
 	if err != nil {
 		return fmt.Errorf("manifest: init: %w", err)
@@ -111,9 +111,9 @@ func (service *Service) Init(ctx context.Context, tenantID, userID, taskID strin
 // moves on rather than recursing — the gap is recorded when it can be, and the
 // absence of a gap row does not imply the evidence succeeded. Sealed manifests
 // refuse the gap (it would mutate an immutable body); the caller drops it.
-func (service *Service) RecordGap(ctx context.Context, tenantID, taskID string, gap EvidenceGap) error {
+func (service *Service) RecordGap(ctx context.Context, tenantID, runID string, gap EvidenceGap) error {
 	patch := Body{EvidenceGaps: []EvidenceGap{gap}}
-	if err := service.AddEvidence(ctx, tenantID, taskID, patch); err != nil {
+	if err := service.AddEvidence(ctx, tenantID, runID, patch); err != nil {
 		if errors.Is(err, ErrSealed) {
 			return nil
 		}
@@ -138,7 +138,7 @@ func (service *Service) RecordGap(ctx context.Context, tenantID, taskID string, 
 // an unknown section in the patch is an error.
 func (service *Service) AddEvidence(
 	ctx context.Context,
-	tenantID, taskID string,
+	tenantID, runID string,
 	patch Body,
 ) error {
 	tx, txErr := service.db.BeginTx(ctx, nil)
@@ -147,7 +147,7 @@ func (service *Service) AddEvidence(
 	}
 	defer func() { _ = tx.Rollback() }()
 	qtx := service.queries.WithTx(tx)
-	if err := service.AddEvidenceTx(ctx, qtx, tenantID, taskID, patch); err != nil {
+	if err := service.AddEvidenceTx(ctx, qtx, tenantID, runID, patch); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -159,7 +159,7 @@ func (service *Service) AddEvidence(
 // AddEvidenceTx merges a patch into the manifest body using the caller's
 // transaction, so evidence can be committed atomically with the state change it
 // describes (a human-gate decision lands in the same tx as the FSM transition
-// that advances the task past the gate). AddEvidence is this with a transaction
+// that advances the run past the gate). AddEvidence is this with a transaction
 // of its own.
 //
 // The caller's transaction must have begun before this is called; AddEvidenceTx
@@ -169,7 +169,7 @@ func (service *Service) AddEvidence(
 func (service *Service) AddEvidenceTx(
 	ctx context.Context,
 	qtx *sqlc.Queries,
-	tenantID, taskID string,
+	tenantID, runID string,
 	patch Body,
 ) error {
 	// Lock the row and read the body under the lock in the same transaction that
@@ -177,7 +177,7 @@ func (service *Service) AddEvidenceTx(
 	// write time, not a pre-transaction snapshot a concurrent writer can have
 	// changed between read and write.
 	locked, err := qtx.GetManifestForUpdate(ctx, sqlc.GetManifestForUpdateParams{
-		TaskID: taskID, TenantID: tenantID,
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -231,7 +231,7 @@ func mergeIntoLocked(locked []byte, patch Body) ([]byte, error) {
 // via Correct. Idempotent: a second Seal is a no-op.
 func (service *Service) Seal(
 	ctx context.Context,
-	tenantID, userID, taskID string,
+	tenantID, userID, runID string,
 	reason SealReason,
 ) error {
 	tx, err := service.db.BeginTx(ctx, nil)
@@ -242,7 +242,7 @@ func (service *Service) Seal(
 	qtx := service.queries.WithTx(tx)
 
 	locked, err := qtx.GetManifestForUpdate(ctx, sqlc.GetManifestForUpdateParams{
-		TaskID: taskID, TenantID: tenantID,
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -303,7 +303,7 @@ func (service *Service) Seal(
 // the parent manifest row is the lock target.
 func (service *Service) Correct(
 	ctx context.Context,
-	tenantID, userID, taskID string,
+	tenantID, userID, runID string,
 	reason string,
 	correction Body,
 ) error {
@@ -315,9 +315,9 @@ func (service *Service) Correct(
 	qtx := service.queries.WithTx(tx)
 	// Lock the parent manifest. This is what serializes concurrent corrections
 	// (and corrections against a late AddEvidence): every correction takes this
-	// lock, so only one runs at a time per task.
+	// lock, so only one runs at a time per run.
 	locked, err := qtx.GetManifestForUpdate(ctx, sqlc.GetManifestForUpdateParams{
-		TaskID: taskID, TenantID: tenantID,
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -384,8 +384,8 @@ func correctionBase(sealed Body, latest *Body) Body {
 // divergence check needs: it compares result_commit against exactly the commit
 // recorded as verified, not a proxy whose correctness depends on an FSM property
 // a future feature (ask-to-edit / add-context) could break silently.
-func (service *Service) ChecksCommit(ctx context.Context, tenantID, taskID string) (string, error) {
-	body, _, _, err := service.Get(ctx, tenantID, taskID)
+func (service *Service) ChecksCommit(ctx context.Context, tenantID, runID string) (string, error) {
+	body, _, _, err := service.Get(ctx, tenantID, runID)
 	if err != nil {
 		if errors.Is(err, ErrNoManifest) {
 			return "", nil
@@ -405,10 +405,10 @@ func (service *Service) ChecksCommit(ctx context.Context, tenantID, taskID strin
 // deltas are available via GetRaw for callers that need the audit trail.
 func (service *Service) Get(
 	ctx context.Context,
-	tenantID, taskID string,
+	tenantID, runID string,
 ) (Body, SealInfo, []Correction, error) {
 	row, err := service.queries.GetManifest(ctx, sqlc.GetManifestParams{
-		TaskID: taskID, TenantID: tenantID,
+		RunID: runID, TenantID: tenantID,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

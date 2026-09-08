@@ -89,8 +89,8 @@ func (handler *recordingHandler) Handle(_ context.Context, job sqlc.Job) error {
 func TestWorker_RunsJobsToCompletion(t *testing.T) {
 	t.Parallel()
 	queue := newFakeQueue(
-		sqlc.Job{ID: 1, Kind: "run", TaskID: "T1"},
-		sqlc.Job{ID: 2, Kind: "advance", TaskID: "T1"},
+		sqlc.Job{ID: 1, Kind: "run", RunID: "T1"},
+		sqlc.Job{ID: 2, Kind: "advance", RunID: "T1"},
 	)
 	handler := &recordingHandler{}
 	worker := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
@@ -120,7 +120,7 @@ func TestWorker_RunsJobsToCompletion(t *testing.T) {
 
 func TestWorker_FailsJobOnHandlerError(t *testing.T) {
 	t.Parallel()
-	queue := newFakeQueue(sqlc.Job{ID: 7, Kind: "run", TaskID: "T7"})
+	queue := newFakeQueue(sqlc.Job{ID: 7, Kind: "run", RunID: "T7"})
 	handler := &recordingHandler{byKind: map[string]error{"run": errors.New("boom")}}
 	worker := New(Deps{Store: queue, Handler: handler, Heartbeat: 10 * time.Millisecond, Poll: time.Millisecond})
 
@@ -152,7 +152,7 @@ func TestWorker_HeartbeatsDuringRun(t *testing.T) {
 	t.Parallel()
 	var started atomic.Bool
 	release := make(chan struct{})
-	queue := newFakeQueue(sqlc.Job{ID: 9, Kind: "run", TaskID: "T9"})
+	queue := newFakeQueue(sqlc.Job{ID: 9, Kind: "run", RunID: "T9"})
 
 	// A handler that blocks until released, so the heartbeat has time to fire.
 	blocking := &blockingHandler{started: &started, release: release}

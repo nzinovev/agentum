@@ -23,7 +23,7 @@ import (
 
 // Byte budgets for the instruction channel. A single instruction file is capped
 // at MaxFileBytes; the whole set is capped at MaxTotalBytes. Both exist because
-// context is finite and a 10 MiB AGENTS.md would silently displace the task,
+// context is finite and a 10 MiB AGENTS.md would silently displace the run,
 // and because truncation must be a recorded fact rather than a silent shrink
 // (ADR 0002 D3). Files are processed in declaration order; a file that would
 // cross the per-file budget is cut at the last line boundary that fits, and
@@ -422,7 +422,7 @@ func containsCRLF(data []byte) bool {
 // Execute applies a restoration plan to the worktree and returns one entry per
 // restoration it acted on (ActionKeep omitted). It is the only function in this
 // package that writes. A write or remove IO error is returned as error so the
-// runner can fail the task — matching the existing precedent that a broken
+// runner can fail the run — matching the existing precedent that a broken
 // invariant at the delivery boundary fails rather than proceeds on a claim we
 // cannot stand behind (runner.ErrDirtyTreeAtDeliveryBoundary).
 //

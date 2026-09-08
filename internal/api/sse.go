@@ -38,20 +38,20 @@ func (api *API) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	api.runSSE(w, r, "", "/api/v1/events")
 }
 
-// handleTaskEventStream GET /api/v1/runs/{id}/events — per-task SSE stream.
-func (api *API) handleTaskEventStream(w http.ResponseWriter, r *http.Request) {
-	taskID := r.PathValue("id")
-	if taskID == "" {
+// handleRunEventStream GET /api/v1/runs/{id}/events — per-run SSE stream.
+func (api *API) handleRunEventStream(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	if runID == "" {
 		writeError(w, http.StatusBadRequest, codeBadInput, "missing run id")
 		return
 	}
-	api.runSSE(w, r, taskID, "/api/v1/runs/{id}/events")
+	api.runSSE(w, r, runID, "/api/v1/runs/{id}/events")
 }
 
 // runSSE serves the SSE contract: replay events with id > Last-Event-ID, then
-// live-tail new rows. taskID == "" means tenant-global; otherwise scoped.
-func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where string) {
-	principal, ok := requireAccess(w, r, authz.ActionEventStream, taskID)
+// live-tail new rows. runID == "" means tenant-global; otherwise scoped.
+func (api *API) runSSE(w http.ResponseWriter, r *http.Request, runID, where string) {
+	principal, ok := requireAccess(w, r, authz.ActionEventStream, runID)
 	if !ok {
 		return
 	}
@@ -70,7 +70,7 @@ func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where str
 	ctx := r.Context()
 
 	// Replay: everything with id > lastID that already exists.
-	sent, err := api.drainBatch(ctx, w, flusher, principal.TenantID, taskID, lastID)
+	sent, err := api.drainBatch(ctx, w, flusher, principal.TenantID, runID, lastID)
 	if err != nil {
 		api.log.Warn("sse replay failed", "where", where, "error", err)
 		return
@@ -83,7 +83,7 @@ func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where str
 	for {
 		// Poll for new rows. ctx cancel wins on the next tick; a future upgrade
 		// to LISTEN/NOTIFY removes the polling latency.
-		got, err := api.drainBatch(ctx, w, flusher, principal.TenantID, taskID, lastID)
+		got, err := api.drainBatch(ctx, w, flusher, principal.TenantID, runID, lastID)
 		if err != nil {
 			api.log.Warn("sse tail failed", "where", where, "error", err)
 			return
@@ -107,18 +107,18 @@ func (api *API) runSSE(w http.ResponseWriter, r *http.Request, taskID, where str
 
 // drainBatch queries one batch of events with id > afterID and writes them as
 // SSE frames. Returns the new high-water id (== afterID if nothing was sent).
-func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, tenantID, taskID string, afterID int64) (int64, error) {
+func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, tenantID, runID string, afterID int64) (int64, error) {
 	var (
 		rows []sqlc.Event
 		err  error
 	)
-	if taskID == "" {
+	if runID == "" {
 		rows, err = api.queries.ListEventsAfter(ctx, sqlc.ListEventsAfterParams{
 			TenantID: tenantID, ID: afterID, Limit: sseReplayBatch,
 		})
 	} else {
-		rows, err = api.queries.ListEventsAfterTask(ctx, sqlc.ListEventsAfterTaskParams{
-			TenantID: tenantID, TaskID: nullStr(taskID), ID: afterID, Limit: sseReplayBatch,
+		rows, err = api.queries.ListEventsAfterRun(ctx, sqlc.ListEventsAfterRunParams{
+			TenantID: tenantID, RunID: nullStr(runID), ID: afterID, Limit: sseReplayBatch,
 		})
 	}
 	if err != nil {
@@ -157,8 +157,8 @@ func writeSSEFrame(w http.ResponseWriter, event sqlc.Event) error {
 	merged := payload
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &data); err == nil && data != nil {
-		if event.TaskID.Valid && event.TaskID.String != "" {
-			mixInFrameFact(data, "run_id", event.TaskID.String)
+		if event.RunID.Valid && event.RunID.String != "" {
+			mixInFrameFact(data, "run_id", event.RunID.String)
 		}
 		mixInFrameFact(data, "actor", event.Actor)
 		if encoded, encodeErr := json.Marshal(data); encodeErr == nil {

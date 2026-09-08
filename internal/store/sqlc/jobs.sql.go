@@ -33,7 +33,7 @@ WHERE id = (
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
-RETURNING id, tenant_id, user_id, task_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
+RETURNING id, tenant_id, user_id, run_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
 `
 
 // Atomically claim the oldest pending job for worker_id. FOR UPDATE SKIP LOCKED
@@ -47,7 +47,7 @@ func (q *Queries) ClaimNextJob(ctx context.Context, workerID sql.NullString) (Jo
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Kind,
 		&i.Status,
 		&i.WorkerID,
@@ -71,29 +71,29 @@ func (q *Queries) CompleteJob(ctx context.Context, id int64) error {
 	return err
 }
 
-const countRunningJobsForTask = `-- name: CountRunningJobsForTask :one
-SELECT count(*)::int FROM jobs WHERE task_id = $1 AND status = 'running'
+const countRunningJobsForRun = `-- name: CountRunningJobsForRun :one
+SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running'
 `
 
-// Belt-and-suspenders: how many running jobs a task has. Used to guard against
+// Belt-and-suspenders: how many running jobs a run has. Used to guard against
 // double-enqueue races (the FSM is the primary guard).
-func (q *Queries) CountRunningJobsForTask(ctx context.Context, taskID string) (int32, error) {
-	row := q.db.QueryRowContext(ctx, countRunningJobsForTask, taskID)
+func (q *Queries) CountRunningJobsForRun(ctx context.Context, runID string) (int32, error) {
+	row := q.db.QueryRowContext(ctx, countRunningJobsForRun, runID)
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
 }
 
 const enqueueJob = `-- name: EnqueueJob :one
-INSERT INTO jobs (tenant_id, user_id, task_id, kind, payload)
+INSERT INTO jobs (tenant_id, user_id, run_id, kind, payload)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, tenant_id, user_id, task_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
+RETURNING id, tenant_id, user_id, run_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
 `
 
 type EnqueueJobParams struct {
 	TenantID string          `json:"tenant_id"`
 	UserID   string          `json:"user_id"`
-	TaskID   string          `json:"task_id"`
+	RunID    string          `json:"run_id"`
 	Kind     string          `json:"kind"`
 	Payload  json.RawMessage `json:"payload"`
 }
@@ -105,7 +105,7 @@ func (q *Queries) EnqueueJob(ctx context.Context, arg EnqueueJobParams) (Job, er
 	row := q.db.QueryRowContext(ctx, enqueueJob,
 		arg.TenantID,
 		arg.UserID,
-		arg.TaskID,
+		arg.RunID,
 		arg.Kind,
 		arg.Payload,
 	)
@@ -114,7 +114,7 @@ func (q *Queries) EnqueueJob(ctx context.Context, arg EnqueueJobParams) (Job, er
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Kind,
 		&i.Status,
 		&i.WorkerID,
@@ -139,7 +139,7 @@ type FailJobParams struct {
 }
 
 // Mark a job failed with the reason. The recovery pass (or the caller) decides
-// whether the task moves to a paused state; this only records the job outcome.
+// whether the run moves to a paused state; this only records the job outcome.
 func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) error {
 	_, err := q.db.ExecContext(ctx, failJob, arg.ID, arg.LastError)
 	return err
@@ -152,7 +152,7 @@ WHERE id IN (
     SELECT j.id FROM jobs j
     WHERE j.status = 'running' AND j.heartbeat_at < $1
 )
-RETURNING id, tenant_id, user_id, task_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
+RETURNING id, tenant_id, user_id, run_id, kind, status, worker_id, heartbeat_at, attempts, last_error, payload, created_at, finished_at
 `
 
 // Recovery: re-queue jobs a worker died mid-run on (heartbeat older than the
@@ -171,7 +171,7 @@ func (q *Queries) RequeueStaleJobs(ctx context.Context, heartbeatAt sql.NullTime
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Kind,
 			&i.Status,
 			&i.WorkerID,

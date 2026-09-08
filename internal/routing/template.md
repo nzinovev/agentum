@@ -1,6 +1,6 @@
 # Agentum routing block
 
-You are running as stage **{{.Stage}}** (gate: {{.Gate}}) in task {{.TaskID}} on project {{.ProjectName}}.
+You are running as stage **{{.Stage}}** (gate: {{.Gate}}) in task {{.RunID}} on project {{.ProjectName}}.
 
 ## Task
 

@@ -19,26 +19,26 @@ import (
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
-// fakeStore is an in-memory runner.Store. It holds one task, one project, a
+// fakeStore is an in-memory runner.Store. It holds one run, one project, a
 // log of stage invocations + events, and the checkpoints CreateCheckpoint
-// recorded. The task/project are seeded at construct.
+// recorded. The run/project are seeded at construct.
 type fakeStore struct {
 	mu          sync.Mutex
-	task        sqlc.Task
+	record      sqlc.Run
 	project     sqlc.Project
 	invocations []sqlc.StageInvocation
 	events      []sqlc.Event
 	enqueued    []string
-	checkpoints []sqlc.TaskCheckpoint
-	// approvals maps (taskID, name) -> decision row. ADR 0003 tests seed this to
+	checkpoints []sqlc.RunCheckpoint
+	// approvals maps (runID, name) -> decision row. ADR 0003 tests seed this to
 	// grant or withhold the source_write approval.
-	approvals map[string]sqlc.TaskApproval
+	approvals map[string]sqlc.RunApproval
 	// artifactRevisions maps revision name -> current revision. Used by the
 	// plan_revision_drift check.
 	artifactRevisions map[string]sqlc.ArtifactRevision
 }
 
-func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
+func newFakeStore(record sqlc.Run, project sqlc.Project) *fakeStore {
 	// Fill the project's recorded registration facts (identity + root
 	// commits) from its path when the path resolves, so a fixture repo
 	// behaves like a registered one for the runner's checkout confirmation.
@@ -49,58 +49,58 @@ func newFakeStore(task sqlc.Task, project sqlc.Project) *fakeStore {
 		project.RepoIdentity = identity.Value
 		project.RepoRootCommits = identity.Roots
 	}
-	return &fakeStore{task: task, project: project}
+	return &fakeStore{record: record, project: project}
 }
 
-func (store *fakeStore) GetTask(_ context.Context, _ sqlc.GetTaskParams) (sqlc.Task, error) {
+func (store *fakeStore) GetRun(_ context.Context, _ sqlc.GetRunParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return store.task, nil
+	return store.record, nil
 }
 func (store *fakeStore) GetProject(_ context.Context, _ sqlc.GetProjectParams) (sqlc.Project, error) {
 	return store.project, nil
 }
-func (store *fakeStore) UpdateTaskState(_ context.Context, arg sqlc.UpdateTaskStateParams) (sqlc.Task, error) {
+func (store *fakeStore) UpdateRunState(_ context.Context, arg sqlc.UpdateRunStateParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.task.State = arg.State
-	return store.task, nil
+	store.record.State = arg.State
+	return store.record, nil
 }
-func (store *fakeStore) UpdateTaskStage(_ context.Context, arg sqlc.UpdateTaskStageParams) (sqlc.Task, error) {
+func (store *fakeStore) UpdateRunStage(_ context.Context, arg sqlc.UpdateRunStageParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.task.State = arg.State
+	store.record.State = arg.State
 	if arg.CurrentStage.Valid {
-		store.task.CurrentStage = arg.CurrentStage
+		store.record.CurrentStage = arg.CurrentStage
 	}
-	return store.task, nil
+	return store.record, nil
 }
-func (store *fakeStore) SetBaseCommit(_ context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Task, error) {
+func (store *fakeStore) SetBaseCommit(_ context.Context, arg sqlc.SetBaseCommitParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.task.BaseCommit = arg.BaseCommit
-	return store.task, nil
+	store.record.BaseCommit = arg.BaseCommit
+	return store.record, nil
 }
-func (store *fakeStore) SetCheckoutPath(_ context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Task, error) {
+func (store *fakeStore) SetCheckoutPath(_ context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.task.CheckoutPath == "" {
-		store.task.CheckoutPath = arg.CheckoutPath
+	if store.record.CheckoutPath == "" {
+		store.record.CheckoutPath = arg.CheckoutPath
 	}
-	return store.task, nil
+	return store.record, nil
 }
-func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Task, error) {
+func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.task.ResultCommit = arg.ResultCommit
-	return store.task, nil
+	store.record.ResultCommit = arg.ResultCommit
+	return store.record, nil
 }
 func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	invocation := sqlc.StageInvocation{
 		ID: fmt.Sprintf("inv-%d", len(store.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
-		TaskID: arg.TaskID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
+		RunID: arg.RunID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
 		CapabilityProfile: arg.CapabilityProfile, Cycle: arg.Cycle,
 	}
 	store.invocations = append(store.invocations, invocation)
@@ -118,7 +118,7 @@ func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.Finish
 	}
 	return nil
 }
-func (store *fakeStore) LatestStageForTask(_ context.Context, _ sqlc.LatestStageForTaskParams) (sqlc.StageInvocation, error) {
+func (store *fakeStore) LatestStageForRun(_ context.Context, _ sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if len(store.invocations) == 0 {
@@ -131,7 +131,7 @@ func (store *fakeStore) MaxCycleForStages(_ context.Context, arg sqlc.MaxCycleFo
 	defer store.mu.Unlock()
 	var max int32 = -1
 	for _, invocation := range store.invocations {
-		if invocation.TaskID != arg.TaskID {
+		if invocation.RunID != arg.RunID {
 			continue
 		}
 		for _, stageID := range arg.Column3 {
@@ -142,45 +142,45 @@ func (store *fakeStore) MaxCycleForStages(_ context.Context, arg sqlc.MaxCycleFo
 	}
 	return max, nil
 }
-func (store *fakeStore) ListStageInvocationsForTask(_ context.Context, arg sqlc.ListStageInvocationsForTaskParams) ([]sqlc.StageInvocation, error) {
+func (store *fakeStore) ListStageInvocationsForRun(_ context.Context, arg sqlc.ListStageInvocationsForRunParams) ([]sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	out := make([]sqlc.StageInvocation, 0, len(store.invocations))
 	for _, invocation := range store.invocations {
-		if invocation.TaskID == arg.TaskID {
+		if invocation.RunID == arg.RunID {
 			out = append(out, invocation)
 		}
 	}
 	return out, nil
 }
-func (store *fakeStore) LatestCheckpointForTask(_ context.Context, _ sqlc.LatestCheckpointForTaskParams) (sqlc.TaskCheckpoint, error) {
+func (store *fakeStore) LatestCheckpointForRun(_ context.Context, _ sqlc.LatestCheckpointForRunParams) (sqlc.RunCheckpoint, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if len(store.checkpoints) == 0 {
-		return sqlc.TaskCheckpoint{}, sql.ErrNoRows
+		return sqlc.RunCheckpoint{}, sql.ErrNoRows
 	}
 	// Return the most recently created checkpoint, mirroring the SQL's
 	// ORDER BY created_at DESC LIMIT 1.
 	return store.checkpoints[len(store.checkpoints)-1], nil
 }
-func (store *fakeStore) ListCheckpointsForTask(_ context.Context, _ sqlc.ListCheckpointsForTaskParams) ([]sqlc.TaskCheckpoint, error) {
+func (store *fakeStore) ListCheckpointsForRun(_ context.Context, _ sqlc.ListCheckpointsForRunParams) ([]sqlc.RunCheckpoint, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	out := make([]sqlc.TaskCheckpoint, len(store.checkpoints))
+	out := make([]sqlc.RunCheckpoint, len(store.checkpoints))
 	copy(out, store.checkpoints)
 	return out, nil
 }
-func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.TaskCheckpoint, error) {
+func (store *fakeStore) CreateCheckpoint(_ context.Context, arg sqlc.CreateCheckpointParams) (sqlc.RunCheckpoint, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	// Upsert by label, mirroring the SQL's ON CONFLICT (task_id, label).
+	// Upsert by label, mirroring the SQL's ON CONFLICT (run_id, label).
 	for index, checkpoint := range store.checkpoints {
 		if checkpoint.Label == arg.Label {
 			store.checkpoints[index].CommitSha = arg.CommitSha
 			return store.checkpoints[index], nil
 		}
 	}
-	created := sqlc.TaskCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}
+	created := sqlc.RunCheckpoint{Label: arg.Label, CommitSha: arg.CommitSha}
 	store.checkpoints = append(store.checkpoints, created)
 	return created, nil
 }
@@ -198,24 +198,24 @@ func (store *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams)
 	return sqlc.Job{Kind: arg.Kind}, nil
 }
 
-// approvalKey is the map key for fakeStore.approvals: taskID + "/" + name.
-func approvalKey(taskID, name string) string { return taskID + "/" + name }
+// approvalKey is the map key for fakeStore.approvals: runID + "/" + name.
+func approvalKey(runID, name string) string { return runID + "/" + name }
 
-func (store *fakeStore) GetApproval(_ context.Context, arg sqlc.GetApprovalParams) (sqlc.TaskApproval, error) {
+func (store *fakeStore) GetApproval(_ context.Context, arg sqlc.GetApprovalParams) (sqlc.RunApproval, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if row, ok := store.approvals[approvalKey(arg.TaskID, arg.Name)]; ok {
+	if row, ok := store.approvals[approvalKey(arg.RunID, arg.Name)]; ok {
 		return row, nil
 	}
-	return sqlc.TaskApproval{}, sql.ErrNoRows
+	return sqlc.RunApproval{}, sql.ErrNoRows
 }
 
-func (store *fakeStore) ListApprovalsForTask(_ context.Context, arg sqlc.ListApprovalsForTaskParams) ([]sqlc.TaskApproval, error) {
+func (store *fakeStore) ListApprovalsForRun(_ context.Context, arg sqlc.ListApprovalsForRunParams) ([]sqlc.RunApproval, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	var rows []sqlc.TaskApproval
+	var rows []sqlc.RunApproval
 	for _, row := range store.approvals {
-		if row.TaskID == arg.TaskID && row.TenantID == arg.TenantID {
+		if row.RunID == arg.RunID && row.TenantID == arg.TenantID {
 			rows = append(rows, row)
 		}
 	}
@@ -234,7 +234,7 @@ func (store *fakeStore) CurrentArtifactRevisionForName(_ context.Context, arg sq
 func (store *fakeStore) taskState() string {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return store.task.State
+	return store.record.State
 }
 
 // scriptAdapter emits a scripted Result per stage. The map stageID→ResultJSON
@@ -298,22 +298,22 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	}
 
 	// Pack: spec(human_approval)→impl(auto)→done(terminal).
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "impl"}}},
 		"impl": {Gate: pack.GateAuto, Prompt: "impl.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {}, // terminal marker
 	})
 
-	task := sqlc.Task{ID: "T1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "TestProj"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec done"},
 		"impl": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
 
-	src := &staticSource{pk: taskPack}
+	src := &staticSource{pk: runPack}
 	runner := New(Deps{Store: store, Packs: src, Adapter: adapter})
 
 	// run: spec completes but the human_approval gate pauses.
@@ -338,9 +338,9 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	if count := len(store.invocations); count != 2 {
 		t.Fatalf("expected 2 invocations (spec+impl), got %d", count)
 	}
-	// The task recorded it reached the final stage.
+	// The run recorded it reached the final stage.
 	store.mu.Lock()
-	currentStage := store.task.CurrentStage.String
+	currentStage := store.record.CurrentStage.String
 	store.mu.Unlock()
 	if currentStage != "done" {
 		t.Fatalf("current_stage = %q, want done", currentStage)
@@ -348,7 +348,7 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 }
 
 // TestRunner_PlanApprovalNotApprovedStopsAtPausedGate (ADR 0003 D3/F9): a pack
-// declaring a source_write approval, whose task has no approval row, must refuse
+// declaring a source_write approval, whose run has no approval row, must refuse
 // to enter the implementer stage and stop in paused_gate (plan_not_approved)
 // pinned to the APPROVAL stage — not the refused stage. The pause point is
 // load-bearing: the advance job resolves the current stage's transition, so
@@ -363,16 +363,16 @@ func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := approvalGatePack()
-	task := sqlc.Task{ID: "Tpa", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := approvalGatePack()
+	record := sqlc.Run{ID: "Tpa", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// No approvals map seeded → GetApproval returns sql.ErrNoRows → unlock absent.
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tpa", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -388,7 +388,7 @@ func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 	// advance resolves the current stage's transition; pinning "implement"
 	// (never invoked) there made advance skip the implementer.
 	store.mu.Lock()
-	currentStage := store.task.CurrentStage.String
+	currentStage := store.record.CurrentStage.String
 	store.mu.Unlock()
 	if currentStage != "plan" {
 		t.Fatalf("current_stage = %q, want plan (the approval stage — pausing at the refused stage makes advance skip it)", currentStage)
@@ -407,15 +407,15 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := approvalGatePack()
-	task := sqlc.Task{ID: "Tpa2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := approvalGatePack()
+	record := sqlc.Run{ID: "Tpa2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tpa2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -428,8 +428,8 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 	// plan artifact's current revision, then enqueue the advance job. The runner
 	// test seeds the row and drives the job directly.
 	store.mu.Lock()
-	store.approvals = map[string]sqlc.TaskApproval{
-		approvalKey("Tpa2", "plan"): {TaskID: "Tpa2", TenantID: "tn", Name: "plan", Decision: "approved"},
+	store.approvals = map[string]sqlc.RunApproval{
+		approvalKey("Tpa2", "plan"): {RunID: "Tpa2", TenantID: "tn", Name: "plan", Decision: "approved"},
 	}
 	store.mu.Unlock()
 
@@ -446,7 +446,7 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 		t.Fatalf("after advance, state = %q, want awaiting_final_review (implement → done terminal → final gate)", got)
 	}
 	store.mu.Lock()
-	currentStage := store.task.CurrentStage.String
+	currentStage := store.record.CurrentStage.String
 	store.mu.Unlock()
 	if currentStage != "done" {
 		t.Fatalf("current_stage = %q, want done", currentStage)
@@ -463,13 +463,13 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := approvalGatePack()
-	task := sqlc.Task{ID: "Tdr", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := approvalGatePack()
+	record := sqlc.Run{ID: "Tdr", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// Approval granted, bound to a plan revision that is no longer current.
-	store.approvals = map[string]sqlc.TaskApproval{
-		approvalKey("Tdr", "plan"): {TaskID: "Tdr", TenantID: "tn", Name: "plan", Decision: "approved",
+	store.approvals = map[string]sqlc.RunApproval{
+		approvalKey("Tdr", "plan"): {RunID: "Tdr", TenantID: "tn", Name: "plan", Decision: "approved",
 			ArtifactRevisionID: nullStr("rev-approved-long-ago")},
 	}
 	store.artifactRevisions = map[string]sqlc.ArtifactRevision{
@@ -479,7 +479,7 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
 		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "Tdr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -506,7 +506,7 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 		t.Fatalf("after advance on drift, invocations = %d, want 1 (the implementer must not be skipped past)", count)
 	}
 	store.mu.Lock()
-	currentStage := store.task.CurrentStage.String
+	currentStage := store.record.CurrentStage.String
 	store.mu.Unlock()
 	if currentStage != "plan" {
 		t.Fatalf("after advance on drift, current_stage = %q, want plan", currentStage)
@@ -536,17 +536,17 @@ func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusBlocked, OpenQuestions: []string{"which framework?"}},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "T2", "tn", "us")); err != nil {
 		t.Fatalf("run: %v", err)
@@ -562,19 +562,19 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "T3", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T3", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
 	// slowAdapter blocks until the run is cancelled, proving the registry aborts it.
 	adapter := &slowAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	done := make(chan error, 1)
 	go func() { done <- runner.Handle(t.Context(), job("run", "T3", "tn", "us")) }()
@@ -597,8 +597,8 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 
 // --- helpers ---
 
-func job(kind, taskID, tenant, user string) sqlc.Job {
-	return sqlc.Job{Kind: kind, TaskID: taskID, TenantID: tenant, UserID: user}
+func job(kind, runID, tenant, user string) sqlc.Job {
+	return sqlc.Job{Kind: kind, RunID: runID, TenantID: tenant, UserID: user}
 }
 
 // staticSource serves a single fixed pack for any ref.
@@ -633,11 +633,11 @@ func (adapter *slowAdapter) Invoke(ctx context.Context, inv agent.Invocation) (<
 	return eventCh, nil
 }
 
-func waitForRegistered(registry *CancelRegistry, taskID string, timeout time.Duration) {
+func waitForRegistered(registry *CancelRegistry, runID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		registry.mu.Lock()
-		_, ok := registry.byTask[taskID]
+		_, ok := registry.byRun[runID]
 		registry.mu.Unlock()
 		if ok {
 			return

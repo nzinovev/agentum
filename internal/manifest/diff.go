@@ -262,8 +262,8 @@ func diffPacks(left, right *PackEvidence) *SectionDelta {
 }
 
 // diffPrompts compares the per-attempt stage prompt hashes. The axis is
-// deliberately stage_prompt_hash only: the rendered hash embeds the task id
-// and absolute artifact paths, so two runs of the same task shape never
+// deliberately stage_prompt_hash only: the rendered hash embeds the run id
+// and absolute artifact paths, so two runs of the same request shape never
 // produce equal rendered hashes, and wiring it in here would make every
 // comparison report a difference.
 func diffPrompts(left, right []InvocationEvidence) *SectionDelta {
@@ -349,8 +349,8 @@ func adapterDeclaredCapabilities(section *AdapterEvidence) []string {
 }
 
 // diffModels compares each shared attempt's model selection: tier, provider,
-// model id, and the remaining options (task 6's variant lands there). The
-// former run-level scalar comparison is gone with the run-level section — a
+// model id, and the remaining options (a per-variant option lands there
+// eventually). The former run-level scalar comparison is gone with the run-level section — a
 // "primary model" summary maintained by a merge function is what produced the
 // overwritten-evidence defect in the first place.
 func diffModels(left, right []InvocationEvidence) *SectionDelta {
@@ -370,9 +370,9 @@ func diffModels(left, right []InvocationEvidence) *SectionDelta {
 			return newDelta("model-provider", "model provider differs")
 		}
 		if leftRecord.Model.Options != rightRecord.Model.Options {
-			// Same model string, different remaining options (e.g. the
-			// variant task 6 adds). Unreachable today — Options carries one
-			// field — but wired so the field lands on the right axis.
+			// Same model string, different remaining options (e.g. what a
+			// future per-variant field would add). Unreachable today — Options
+			// carries one field — but wired so the field lands on the right axis.
 			return newDelta("model-options", "model options differ")
 		}
 		return nil
@@ -425,7 +425,7 @@ func diffMemory(left, right *MemorySlice) *SectionDelta {
 }
 
 // diffContext compares the project-context channel. Both instructions and
-// skills are RUN INPUTS — which is what makes "same task, same commit, same
+// skills are RUN INPUTS — which is what makes "same request, same commit, same
 // config, different skills ⇒ the runs differ" answerable. The instruction axis
 // compares path → delivered_hash; the skill axis compares the name → hash set.
 // A change in either surfaces a delta; the absence of one side is itself

@@ -58,21 +58,21 @@ func TestRunner_RunExecutesInPinnedCheckoutNotProjectPath(t *testing.T) {
 	cloneRepo(t, source, secondCopy)
 
 	// The run pinned the original copy; the project now points at the second.
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "T-pin", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", CheckoutPath: originalCopy,
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: secondCopy, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "T-pin", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -96,19 +96,19 @@ func TestRunner_UnavailableCheckoutPausesWithoutWorktree(t *testing.T) {
 	t.Parallel()
 
 	goneCopy := filepath.Join(t.TempDir(), "gone")
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "T-gone", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", CheckoutPath: goneCopy,
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: goneCopy, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{},
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 
 	if err := runner.Handle(t.Context(), job("run", "T-gone", "tn", "us")); err != nil {
@@ -163,12 +163,12 @@ func TestRunner_ForeignCheckoutPauses(t *testing.T) {
 
 	// The project's identity comes from the registered repository; its path
 	// was somehow pointed at the foreign one.
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "T-foreign", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0",
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: foreignRepo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	store.mu.Lock()
 	registeredIdentity, err := repoIdentityOf(registeredRepo)
 	if err != nil {
@@ -181,12 +181,12 @@ func TestRunner_ForeignCheckoutPauses(t *testing.T) {
 	store.project.RepoRootCommits = registeredIdentity.Roots
 	store.mu.Unlock()
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{},
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 
 	if err := runner.Handle(t.Context(), job("run", "T-foreign", "tn", "us")); err != nil {
@@ -228,25 +228,25 @@ func TestRunner_RepoMoveContinuesInMovedCopy(t *testing.T) {
 	if err := initRepoWithCommit(original); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskID := "T-move"
-	task := sqlc.Task{
-		ID: taskID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+	runID := "T-move"
+	record := sqlc.Run{
+		ID: runID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0",
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: original, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	// First run: creates the worktree and pauses at the human gate.
-	if err := runner.Handle(t.Context(), job("run", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -261,17 +261,17 @@ func TestRunner_RepoMoveContinuesInMovedCopy(t *testing.T) {
 	}
 	store.mu.Lock()
 	store.project.RepoPath = moved
-	store.task.CheckoutPath = moved
+	store.record.CheckoutPath = moved
 	store.mu.Unlock()
 
 	// The advance job continues the run in the moved copy.
-	if err := runner.Handle(t.Context(), job("advance", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("advance", runID, "tn", "us")); err != nil {
 		t.Fatalf("advance after move: %v", err)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {
 		t.Fatalf("state after move+advance = %q, want awaiting_final_review", got)
 	}
-	movedWorktree := worktree.PathFor(moved, taskID)
+	movedWorktree := worktree.PathFor(moved, runID)
 	if !worktree.DirPresent(movedWorktree) {
 		t.Fatal("the run's worktree must be usable in the moved copy")
 	}
@@ -318,24 +318,24 @@ func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	if err := initRepoWithCommit(original); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskID := "T-teardown-move"
-	task := sqlc.Task{
-		ID: taskID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+	runID := "T-teardown-move"
+	record := sqlc.Run{
+		ID: runID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0",
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: original, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 
@@ -345,14 +345,14 @@ func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	}
 	store.mu.Lock()
 	store.project.RepoPath = moved
-	store.task.CheckoutPath = moved
-	store.task.State = "done"
+	store.record.CheckoutPath = moved
+	store.record.State = "done"
 	store.mu.Unlock()
 
-	if err := runner.Handle(t.Context(), job("teardown", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("teardown", runID, "tn", "us")); err != nil {
 		t.Fatalf("teardown after move: %v", err)
 	}
-	if worktree.DirPresent(worktree.PathFor(moved, taskID)) {
+	if worktree.DirPresent(worktree.PathFor(moved, runID)) {
 		t.Fatal("teardown left the worktree behind in the moved copy")
 	}
 }
@@ -371,24 +371,24 @@ func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskID := "T-unrepairable"
-	task := sqlc.Task{
-		ID: taskID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
+	runID := "T-unrepairable"
+	record := sqlc.Run{
+		ID: runID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0",
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateHumanApproval, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "spec"},
 	}}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -398,16 +398,16 @@ func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
 	// The advance handler transitions paused_gate -> running before enqueuing
 	// the job; mirror that, as the real flow delivers it.
 	store.mu.Lock()
-	store.task.State = "running"
+	store.record.State = "running"
 	store.mu.Unlock()
 
 	// Prune the worktree's admin metadata: the directory and its .git file
 	// remain, but git can neither enter nor relink it.
-	if err := os.RemoveAll(filepath.Join(repo, ".git", "worktrees", taskID)); err != nil {
+	if err := os.RemoveAll(filepath.Join(repo, ".git", "worktrees", runID)); err != nil {
 		t.Fatalf("prune worktree metadata: %v", err)
 	}
 
-	if err := runner.Handle(t.Context(), job("advance", taskID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("advance", runID, "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {
@@ -426,7 +426,7 @@ func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
 	}
 	// No worktree was rebuilt: the original directory is still there (stale)
 	// and git's worktree records were not recreated.
-	if _, statErr := os.Stat(filepath.Join(repo, ".git", "worktrees", taskID)); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(repo, ".git", "worktrees", runID)); !os.IsNotExist(statErr) {
 		t.Fatalf("worktree records reappeared: stat err = %v", statErr)
 	}
 }

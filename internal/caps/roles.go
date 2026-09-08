@@ -23,7 +23,7 @@ const (
 	// own review artifact. It cannot change tracked source or delivery refs.
 	RoleReviewer Role = "reviewer"
 	// RoleImplementer changes the working tree (source + commits inside the
-	// task worktree). Cannot touch delivery refs, the network, or secrets.
+	// run worktree). Cannot touch delivery refs, the network, or secrets.
 	RoleImplementer Role = "implementer"
 	// RoleFixer is the implementer variant scoped to the edit_targets of a
 	// fix cycle. Same baseline as implementer; the runner may further narrow
@@ -113,7 +113,7 @@ func RoleTemplate(role Role) []Token {
 		}
 	case RoleImplementer, RoleFixer:
 		// Implementer/fixer change source inside their worktree, commit to the
-		// task branch, and run project tooling. Scopes pin fs.write and
+		// run branch, and run project tooling. Scopes pin fs.write and
 		// git.write to the worktree so an implementer cannot edit outside it.
 		// git.delivery is deliberately absent.
 		return []Token{

@@ -80,40 +80,40 @@ const (
 	// the request path, not a row id.
 	ActionAccess = "access"
 
-	// ActionTaskCreate and ActionTaskList are tenant-scoped: they carry no
-	// resource id, because the task does not exist yet (create) or the resource
+	// ActionRunCreate and ActionRunList are tenant-scoped: they carry no
+	// resource id, because the run does not exist yet (create) or the resource
 	// is the whole collection (list).
-	ActionTaskCreate = "task:create"
-	ActionTaskList   = "task:list"
+	ActionRunCreate = "run:create"
+	ActionRunList   = "run:list"
 
-	// ActionTaskRead is the right to read a task and its artifacts / manifest.
-	// Every read-side handler (tasks, artifacts, manifest, diff) checks it.
-	ActionTaskRead = "task:read"
+	// ActionRunRead is the right to read a run and its artifacts / manifest.
+	// Every read-side handler (runs, artifacts, manifest, diff) checks it.
+	ActionRunRead = "run:read"
 
-	// ActionTaskStart moves a fresh task into the running pipeline.
-	ActionTaskStart = "task:start"
+	// ActionRunStart moves a fresh run into the running pipeline.
+	ActionRunStart = "run:start"
 
-	// ActionTaskAdvance and its approve/reject/cancel siblings are the
+	// ActionRunAdvance and its approve/reject/cancel siblings are the
 	// human-gate verbs. Each is its own action rather than one collapsed
-	// "task:write": approving a result, rejecting it, and aborting a run are
+	// "run:write": approving a result, rejecting it, and aborting a run are
 	// different rights, and RBAC will have to grant them separately.
-	ActionTaskAdvance = "task:advance"
-	ActionTaskApprove = "task:approve"
-	ActionTaskReject  = "task:reject"
-	ActionTaskCancel  = "task:cancel"
+	ActionRunAdvance = "run:advance"
+	ActionRunApprove = "run:approve"
+	ActionRunReject  = "run:reject"
+	ActionRunCancel  = "run:cancel"
 
-	// ActionTaskCleanup deletes the delivery artifacts (the task branch) of an
-	// already-terminal task — destructive, so it is not folded into cancel.
-	ActionTaskCleanup = "task:cleanup"
+	// ActionRunCleanup deletes the delivery artifacts (the run branch) of an
+	// already-terminal run — destructive, so it is not folded into cancel.
+	ActionRunCleanup = "run:cleanup"
 
-	// ActionProjectCreate and its read/list siblings mirror the task actions.
-	// A project is the repository a task runs against.
+	// ActionProjectCreate and its read/list siblings mirror the run actions.
+	// A project is the repository a run runs against.
 	ActionProjectCreate = "project:create"
 	ActionProjectRead   = "project:read"
 	ActionProjectList   = "project:list"
 
 	// ActionEventStream is the right to tail the event stream: tenant-global
-	// when the resource is empty, task-scoped otherwise.
+	// when the resource is empty, run-scoped otherwise.
 	ActionEventStream = "event:stream"
 )
 

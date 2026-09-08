@@ -132,7 +132,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 
 	// Pack: implement(auto)→review(auto)→done(terminal). All auto gates so the
 	// isClean gate does not interfere; the focus is the instruction restore.
-	taskPack := scriptPack("implement", map[string]pack.Stage{
+	runPack := scriptPack("implement", map[string]pack.Stage{
 		"implement": {Gate: pack.GateAuto, Prompt: "impl.md", Transitions: []pack.Transition{{To: "review"}}},
 		"review":    {Gate: pack.GateAuto, Prompt: "review.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done":      {},
@@ -142,18 +142,18 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 		"implement": {SchemaVersion: "1", Status: "complete", Summary: "implemented"},
 		"review":    {SchemaVersion: "1", Status: "complete", Summary: "reviewed"},
 	}}
-	task := sqlc.Task{ID: "T-tamper", TenantID: "tn", UserID: "us", ProjectID: "P1",
+	record := sqlc.Run{ID: "T-tamper", TenantID: "tn", UserID: "us", ProjectID: "P1",
 		State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "TamperProj"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -276,24 +276,24 @@ func TestInstructions_NoTamperIsNoOp(t *testing.T) {
 	if err := initRepoWithAgentsCommit(repo, marker); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("implement", map[string]pack.Stage{
+	runPack := scriptPack("implement", map[string]pack.Stage{
 		"implement": {Gate: pack.GateAuto, Prompt: "impl.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done":      {},
 	})
 	adapter := &tamperAdapter{scripts: map[string]agent.ResultJSON{
 		"implement": {SchemaVersion: "1", Status: "complete", Summary: "implemented"},
 	}}
-	task := sqlc.Task{ID: "T-clean", TenantID: "tn", UserID: "us", ProjectID: "P1",
+	record := sqlc.Run{ID: "T-clean", TenantID: "tn", UserID: "us", ProjectID: "P1",
 		State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "CleanProj"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", task.ID, "tn", "us")); err != nil {
+	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 

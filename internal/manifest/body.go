@@ -58,9 +58,9 @@ type TokenUsage struct {
 // section. A zero-valued field is treated as "not provided" by the merge
 // logic; the slice / pointer fields are nil unless set.
 //
-// Sections map 1:1 to the task brief:
+// Sections map 1:1 to the run brief:
 //
-//   - Input         — input task + its revision
+//   - Input         — typed request + its revision
 //   - Project       — project + source commit
 //   - Pack          — pack name, version, content hash
 //   - Invocations   — one record per stage ATTEMPT: adapter, model, prompts,
@@ -158,7 +158,7 @@ func newEmptyBody() Body {
 	return Body{Schema: schemaVersion}
 }
 
-// InputEvidence records the typed task request and its revision: the
+// InputEvidence records the typed run request and its revision: the
 // description the run exists to satisfy, the run overrides, and a canonical
 // hash over {title, description, overrides} — so two runs with the same
 // request hash equal regardless of how either request body was formatted, and
@@ -169,7 +169,7 @@ type InputEvidence struct {
 	Description string          `json:"description"`
 	Overrides   json.RawMessage `json:"overrides,omitempty"`
 	Revision    string          `json:"revision"`                // canonical hash of {title, description, overrides}
-	PipelineRef string          `json:"pipeline_pack,omitempty"` // tasks.pipeline_pack
+	PipelineRef string          `json:"pipeline_pack,omitempty"` // runs.pipeline_pack
 }
 
 // ProjectEvidence records the project and the source commit the run branched
@@ -231,7 +231,7 @@ type InvocationAdapter struct {
 // InvocationPrompt carries the two prompt hashes of one attempt. Bodies are
 // never stored — hashes only, as with instructions and skills. RenderedHash is
 // what makes two attempts at the same stage distinguishable in evidence; it is
-// deliberately NOT a diff axis (the routing block embeds the task id and
+// deliberately NOT a diff axis (the routing block embeds the run id and
 // absolute paths, so it never repeats across runs).
 type InvocationPrompt struct {
 	StagePromptHash string `json:"stage_prompt_hash"` // sha256 of the pack's stage prompt
@@ -349,7 +349,7 @@ type ArtifactRef struct {
 // orchestrator runs the resolved set itself (not the agent) at the delivery
 // boundary, against the commit recorded here, and records the outcome as
 // evidence a final review reconstructs. MandatoryPassed is the delivery gate: a
-// false value blocked the task from reaching successful final delivery.
+// false value blocked the run from reaching successful final delivery.
 //
 // Ran reports whether any check actually executed. An empty set is a legitimate
 // configuration (the project defines no checks), but recording it as

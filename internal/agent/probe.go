@@ -74,7 +74,7 @@ func (adapter *OpencodeAdapter) runVersionProbe(ctx context.Context) Readiness {
 	// The probe's result is PROCESS-scoped, not request-scoped: it is memoized
 	// for the lifetime of the process, so it must not inherit the cancellation
 	// of whichever caller happened to reach it first. Without this, cancelling
-	// the task that triggered the first probe would pin "runtime not ready"
+	// the run that triggered the first probe would pin "runtime not ready"
 	// for every later run until a restart. Values are kept (tracing); only
 	// cancellation is dropped, and probeTimeout remains the bound.
 	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeTimeout)

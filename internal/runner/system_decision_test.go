@@ -55,11 +55,11 @@ func TestRunner_AutoIfCleanPassRecordsSystemDecision(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "T-aic", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-aic", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
@@ -67,7 +67,7 @@ func TestRunner_AutoIfCleanPassRecordsSystemDecision(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	manifestFake := &fakeManifestService{}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Manifest: nil})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Manifest: nil})
 	runner.mfst = manifestFake
 
 	if err := runner.Handle(t.Context(), job("run", "T-aic", "tn", "us")); err != nil {
@@ -93,11 +93,11 @@ func TestRunner_PlainAutoGateRecordsNoDecision(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "T-auto", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-auto", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
@@ -105,7 +105,7 @@ func TestRunner_PlainAutoGateRecordsNoDecision(t *testing.T) {
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	manifestFake := &fakeManifestService{}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 	runner.mfst = manifestFake
 
 	if err := runner.Handle(t.Context(), job("run", "T-auto", "tn", "us")); err != nil {
@@ -122,11 +122,11 @@ func TestRunner_AutoIfCleanDirtyTreeStopsForHumanWithoutSystemDecision(t *testin
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "T-dirty", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "T-dirty", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
@@ -134,7 +134,7 @@ func TestRunner_AutoIfCleanDirtyTreeStopsForHumanWithoutSystemDecision(t *testin
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}}
 	manifestFake := &fakeManifestService{}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 	runner.mfst = manifestFake
 
 	if err := runner.Handle(t.Context(), job("run", "T-dirty", "tn", "us")); err != nil {
@@ -157,29 +157,29 @@ func TestRunner_AutoOnApprovalAdvanceRecordsSystemDecision(t *testing.T) {
 		t.Fatalf("setup repo: %v", err)
 	}
 	// The run sits at the gate of an auto_on_approval stage that already ran.
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "T-aoa", TenantID: "tn", UserID: "us", ProjectID: "P1",
 		State: "paused_gate", PipelinePack: "test@0.1.0",
 		CurrentStage: nullStr("gate"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// The advance path reads the prior stage's stored result to resolve the
 	// transition; seed one completed invocation.
 	store.mu.Lock()
 	store.invocations = append(store.invocations, sqlc.StageInvocation{
-		ID: "inv-1", TaskID: "T-aoa", Stage: "gate", Sequence: 1,
+		ID: "inv-1", RunID: "T-aoa", Stage: "gate", Sequence: 1,
 		Result: toNullRaw([]byte(`{"schema_version":"1","status":"complete","summary":"ok"}`)),
 	})
 	store.mu.Unlock()
 
-	taskPack := scriptPack("gate", map[string]pack.Stage{
+	runPack := scriptPack("gate", map[string]pack.Stage{
 		"gate": {Gate: pack.GateAutoOnApproval, Prompt: "gate.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	manifestFake := &fakeManifestService{}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{},
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 	runner.mfst = manifestFake
 
@@ -202,27 +202,27 @@ func TestRunner_HumanApprovalAdvanceRecordsNoSystemDecision(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "T-hum", TenantID: "tn", UserID: "us", ProjectID: "P1",
 		State: "paused_gate", PipelinePack: "test@0.1.0",
 		CurrentStage: nullStr("plan"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	store.mu.Lock()
 	store.invocations = append(store.invocations, sqlc.StageInvocation{
-		ID: "inv-1", TaskID: "T-hum", Stage: "plan", Sequence: 1,
+		ID: "inv-1", RunID: "T-hum", Stage: "plan", Sequence: 1,
 		Result: toNullRaw([]byte(`{"schema_version":"1","status":"complete","summary":"ok"}`)),
 	})
 	store.mu.Unlock()
 
-	taskPack := scriptPack("plan", map[string]pack.Stage{
+	runPack := scriptPack("plan", map[string]pack.Stage{
 		"plan": {Gate: pack.GateHumanApproval, Prompt: "plan.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	manifestFake := &fakeManifestService{}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{},
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 	runner.mfst = manifestFake
 

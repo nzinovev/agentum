@@ -34,7 +34,7 @@ func TestRunnerLive_EndToEnd(t *testing.T) {
 
 	// Load the real minimal pack (faithful to "runs the minimal pack"). Resolved
 	// relative to the package dir; skipped if not found (e.g. run elsewhere).
-	taskPack, err := pack.Load("../../packs/minimal")
+	runPack, err := pack.Load("../../packs/minimal")
 	if err != nil {
 		t.Skipf("minimal pack not loadable from %s: %v", "../../packs/minimal", err)
 	}
@@ -44,12 +44,12 @@ func TestRunnerLive_EndToEnd(t *testing.T) {
 		t.Fatalf("setup repo: %v", err)
 	}
 
-	task := sqlc.Task{ID: "LIVE1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "minimal@0.1.0"}
+	record := sqlc.Run{ID: "LIVE1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "minimal@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "LiveProj"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack},
+		Store: store, Packs: &staticSource{pk: runPack},
 		Adapter: agent.NewOpencodeAdapter("opencode"),
 	})
 
@@ -57,7 +57,7 @@ func TestRunnerLive_EndToEnd(t *testing.T) {
 	defer cancel()
 
 	// run: spec stage invoked by the real adapter → result.json → human_approval
-	// gate pauses the task.
+	// gate pauses the record.
 	if err := runner.Handle(ctx, job("run", "LIVE1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}

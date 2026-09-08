@@ -103,7 +103,7 @@ func TestParseTaskCreate(t *testing.T) {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := parseTaskCreate([]byte(testCase.body()))
+			_, _, err := parseRunCreate([]byte(testCase.body()))
 			if !testCase.wantErr {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -135,13 +135,13 @@ func TestWriteTaskCreateError_SecretMapsTo422(t *testing.T) {
 		`"Paste ghp_0123456789abcdefghijklmnopqrstuvwxyz0123456789 into the config."`, 1))
 
 	secretRecorder := httptest.NewRecorder()
-	writeTaskCreateError(secretRecorder, secretErr)
+	writeRunCreateError(secretRecorder, secretErr)
 	if secretRecorder.Code != 422 {
 		t.Errorf("secret status = %d, want 422", secretRecorder.Code)
 	}
 
 	badInputRecorder := httptest.NewRecorder()
-	writeTaskCreateError(badInputRecorder, errors.New("description is required"))
+	writeRunCreateError(badInputRecorder, errors.New("description is required"))
 	if badInputRecorder.Code != 400 {
 		t.Errorf("plain validation status = %d, want 400", badInputRecorder.Code)
 	}
@@ -160,24 +160,24 @@ func TestWriteTaskCreateError_SecretMapsTo422(t *testing.T) {
 
 func parseErrorOf(t *testing.T, body string) error {
 	t.Helper()
-	_, _, err := parseTaskCreate([]byte(body))
+	_, _, err := parseRunCreate([]byte(body))
 	if err == nil {
 		t.Fatal("expected a parse error for the credential-shaped body")
 	}
 	return err
 }
 
-// TestToTaskResponse_CarriesRequestNotInput pins the response shape: the task
+// TestToTaskResponse_CarriesRequestNotInput pins the response shape: the run
 // echoes the description and the stored overrides, and the legacy `input` key
 // is gone.
 func TestToTaskResponse_CarriesRequestNotInput(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{
+	run := sqlc.Run{
 		ID: "T1", ProjectID: "P1", PipelinePack: "backend-development@0.1.0",
 		Title: "Baseline run", Description: "Lower the log level.",
 		Overrides: json.RawMessage(`{"checks":{"required":["verify"],"optional":[]}}`),
 	}
-	encoded, err := json.Marshal(toTaskResponse(task))
+	encoded, err := json.Marshal(toRunResponse(run))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -197,11 +197,11 @@ func TestToTaskResponse_CarriesRequestNotInput(t *testing.T) {
 }
 
 // TestToTaskResponse_EmptyOverridesRenderAsObject keeps the JSON valid for a
-// task with no overrides: the fallback renders {} rather than null (the
+// run with no overrides: the fallback renders {} rather than null (the
 // len==0 → "{}" fallback moved from the old input field).
 func TestToTaskResponse_EmptyOverridesRenderAsObject(t *testing.T) {
 	t.Parallel()
-	encoded, err := json.Marshal(toTaskResponse(sqlc.Task{ID: "T2"}))
+	encoded, err := json.Marshal(toRunResponse(sqlc.Run{ID: "T2"}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -220,10 +220,10 @@ func TestToTaskResponse_EmptyOverridesRenderAsObject(t *testing.T) {
 
 // TestParseTaskCreate_ProseAboutCredentialsIsAccepted is the regression test
 // for the scan narrowing. Before it, DefaultScanner's label-context rules
-// rejected ordinary backend task descriptions under PolicyReject and the
+// rejected ordinary backend run descriptions under PolicyReject and the
 // author had no override path: "Add Bearer authentication to /settings"
 // matched bearer-token, and a sentence naming an env var next to the word
-// "secret" matched labeled-secret. An auth task — the product's own documented
+// "secret" matched labeled-secret. An auth run — the product's own documented
 // example — could not be created at all. These must all be accepted.
 func TestParseTaskCreate_ProseAboutCredentialsIsAccepted(t *testing.T) {
 	t.Parallel()
@@ -240,7 +240,7 @@ func TestParseTaskCreate_ProseAboutCredentialsIsAccepted(t *testing.T) {
 			body := strings.Replace(validCreateBody,
 				`"Log /healthz and /readyz at Debug instead of Info; everything else stays at Info. Compare by exact path."`,
 				`"`+description+`"`, 1)
-			if _, _, err := parseTaskCreate([]byte(body)); err != nil {
+			if _, _, err := parseRunCreate([]byte(body)); err != nil {
 				t.Errorf("prose about credentials must be accepted, got: %v", err)
 			}
 		})
@@ -256,7 +256,7 @@ func TestParseTaskCreate_CredentialInTitleRefused(t *testing.T) {
 	body := strings.Replace(validCreateBody,
 		`"Lower the log level of health endpoints"`,
 		`"Rotate ghp_0123456789abcdefghijklmnopqrstuvwxyz0123456789"`, 1)
-	_, _, err := parseTaskCreate([]byte(body))
+	_, _, err := parseRunCreate([]byte(body))
 	if err == nil {
 		t.Fatal("a credential in the title must be refused")
 	}

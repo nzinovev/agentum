@@ -151,7 +151,7 @@ func indexOfArg(argv []string, flag string) int {
 // before any subprocess starts, and the error names BOTH the adapter id and
 // the option. A narrowed descriptor supplies the negative case, because
 // today's only option (model) is one this adapter declares — this is the
-// mechanism test MVP task 6 inherits for --variant.
+// mechanism a future --variant option inherits.
 //
 // Cannot use t.Parallel: it narrows the package-level descriptor (restored on
 // cleanup), which other Describe() callers read.

@@ -1,7 +1,7 @@
-// Package runner drives a task through its pack's stages: it composes the
+// Package runner drives a run through its pack's stages: it composes the
 // adapter (F.2), the pack loader (F.5), the worktree service and routing block
 // (PR2), the models resolver (F.4), and the engine FSM (F.1) into the loop that
-// makes a task actually run (04 §7.2). A job worker (internal/jobs) claims jobs
+// makes a run actually run (04 §7.2). A job worker (internal/jobs) claims jobs
 // and calls the Runner as its Handler.
 package runner
 
@@ -18,13 +18,13 @@ type Action int
 
 const (
 	// ActionAdvance means the stage auto-completed; continue to the next stage.
-	// The task stays `running` — no FSM transition, only current_stage moves.
+	// The run stays `running` — no FSM transition, only current_stage moves.
 	ActionAdvance Action = iota
-	// ActionPause stops the loop and surfaces the FSMEvent; the task moves to a
+	// ActionPause stops the loop and surfaces the FSMEvent; the run moves to a
 	// paused state and awaits a human (continue/advance/cancel).
 	ActionPause
 	// ActionFinal means the terminal stage completed; fire reach_final_gate so
-	// the task moves to awaiting_final_review ahead of final approval.
+	// the run moves to awaiting_final_review ahead of final approval.
 	ActionFinal
 )
 
@@ -35,7 +35,7 @@ type Decision struct {
 
 	// FSMEvent is fed to engine.Next. Empty for ActionAdvance (auto-advance
 	// stays in `running`). Set for ActionPause and ActionFinal.
-	FSMEvent engine.TaskEvent
+	FSMEvent engine.RunEvent
 
 	// StopReason is recorded on the stage_invocation row. Empty unless pausing.
 	StopReason string
@@ -87,7 +87,7 @@ type StageInput struct {
 	// ArtifactRejected is set when the agent declared an artifact path that the
 	// orchestrator refused to read (it resolved outside the worktree). Distinct
 	// from ParseError: result.json parsed fine, but acting on it would have
-	// meant reading outside the task's own tree.
+	// meant reading outside the run's own tree.
 	ArtifactRejected bool
 }
 
@@ -95,7 +95,7 @@ type StageInput struct {
 // The mapping follows 04 §7.4; error/parse/timeout outcomes reuse the
 // paused_user_stop shape (per §5.3) rather than introducing a new FSM state.
 func Evaluate(input StageInput) (Decision, error) {
-	// Adapter error: the run itself failed. Retryable stop-point, not task
+	// Adapter error: the run itself failed. Retryable stop-point, not run
 	// failure — the user retries (fresh invocation; there is no session to
 	// resume from a crashed run).
 	if input.AdapterError {

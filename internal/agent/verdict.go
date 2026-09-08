@@ -49,7 +49,7 @@ const (
 	// approved plan without a justified equivalent solution.
 	CategoryPlanDeviation FindingCategory = "plan_deviation"
 	// CategoryPlanDefect — the approved plan or acceptance criteria are
-	// themselves inconsistent with the task or repository.
+	// themselves inconsistent with the request or repository.
 	CategoryPlanDefect FindingCategory = "plan_defect"
 	// CategoryRequirementAmbiguity — newly discovered ambiguity requires a human
 	// product or architectural decision.

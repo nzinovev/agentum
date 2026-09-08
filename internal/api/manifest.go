@@ -44,9 +44,9 @@ type correctionResp struct {
 	CreatedAt string        `json:"created_at"`
 }
 
-func toManifestResponse(taskID string, body manifest.Body, seal manifest.SealInfo, corrections []manifest.Correction) manifestResponse {
+func toManifestResponse(runID string, body manifest.Body, seal manifest.SealInfo, corrections []manifest.Correction) manifestResponse {
 	resp := manifestResponse{
-		RunID: taskID,
+		RunID: runID,
 		Body:  body,
 		Seal: sealInfoResponse{
 			Sealed:    seal.Sealed,
@@ -74,14 +74,14 @@ func toManifestResponse(taskID string, body manifest.Body, seal manifest.SealInf
 // handleGetManifest GET /api/v1/runs/{id}/manifest
 // Returns the manifest body, seal metadata, and any corrections.
 func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
 	if !api.requireManifestService(w) {
 		return
 	}
-	body, seal, corrections, err := api.mfst.Get(r.Context(), principal.TenantID, taskID)
+	body, seal, corrections, err := api.mfst.Get(r.Context(), principal.TenantID, runID)
 	if err != nil {
 		if errors.Is(err, manifest.ErrNoManifest) {
 			writeError(w, http.StatusNotFound, codeNotFound, msgManifestNotInitialized)
@@ -91,16 +91,16 @@ func (api *API) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, toManifestResponse(taskID, body, seal, corrections))
+	writeJSON(w, http.StatusOK, toManifestResponse(runID, body, seal, corrections))
 }
 
-// handleDiffManifest GET /api/v1/runs/{id}/manifest/diff?other=<task-id>
-// Compares this task's sealed manifest body with another task's sealed body
+// handleDiffManifest GET /api/v1/runs/{id}/manifest/diff?other=<run-id>
+// Compares this run's sealed manifest body with another run's sealed body
 // and returns the input-level differences. Outputs (artifacts produced) and
 // human decisions are NOT compared — those are results, not inputs. The
 // response is empty when the two manifests are equivalent on the input axes.
 func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
-	principal, leftID, ok := requireTaskRead(w, r)
+	principal, leftID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -109,9 +109,9 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "other query parameter (run id) is required")
 		return
 	}
-	// The comparison reads a second task, so it needs its own read decision —
-	// being allowed to read the left task says nothing about the right one.
-	if !authorize(w, r, principal, authz.ActionTaskRead, rightID) {
+	// The comparison reads a second run, so it needs its own read decision —
+	// being allowed to read the left run says nothing about the right one.
+	if !authorize(w, r, principal, authz.ActionRunRead, rightID) {
 		return
 	}
 	if !api.requireManifestService(w) {
@@ -147,7 +147,7 @@ func (api *API) handleDiffManifest(w http.ResponseWriter, r *http.Request) {
 // yet sealed (the caller should use AddEvidence via the runner — there is no
 // public AddEvidence path yet).
 func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -181,7 +181,7 @@ func (api *API) handleCorrectManifest(w http.ResponseWriter, r *http.Request) {
 			"patch carries schema-1 sections (prompts, model, capabilities.effective, adapter.name/version) removed in schema 2; correct the invocations section instead")
 		return
 	}
-	if err := api.mfst.Correct(r.Context(), principal.TenantID, principal.UserID, taskID, req.Reason, patch); err != nil {
+	if err := api.mfst.Correct(r.Context(), principal.TenantID, principal.UserID, runID, req.Reason, patch); err != nil {
 		if errors.Is(err, manifest.ErrNoManifest) {
 			writeError(w, http.StatusNotFound, codeNotFound, msgManifestNotInitialized)
 			return

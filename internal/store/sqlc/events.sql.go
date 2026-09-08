@@ -12,15 +12,15 @@ import (
 )
 
 const appendEvent = `-- name: AppendEvent :one
-INSERT INTO events (tenant_id, user_id, task_id, type, payload, actor)
+INSERT INTO events (tenant_id, user_id, run_id, type, payload, actor)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, tenant_id, user_id, task_id, type, payload, created_at, actor
+RETURNING id, tenant_id, user_id, run_id, type, payload, created_at, actor
 `
 
 type AppendEventParams struct {
 	TenantID string          `json:"tenant_id"`
 	UserID   string          `json:"user_id"`
-	TaskID   sql.NullString  `json:"task_id"`
+	RunID    sql.NullString  `json:"run_id"`
 	Type     string          `json:"type"`
 	Payload  json.RawMessage `json:"payload"`
 	Actor    string          `json:"actor"`
@@ -35,7 +35,7 @@ func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event
 	row := q.db.QueryRowContext(ctx, appendEvent,
 		arg.TenantID,
 		arg.UserID,
-		arg.TaskID,
+		arg.RunID,
 		arg.Type,
 		arg.Payload,
 		arg.Actor,
@@ -45,7 +45,7 @@ func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Type,
 		&i.Payload,
 		&i.CreatedAt,
@@ -55,7 +55,7 @@ func (q *Queries) AppendEvent(ctx context.Context, arg AppendEventParams) (Event
 }
 
 const listEventsAfter = `-- name: ListEventsAfter :many
-SELECT id, tenant_id, user_id, task_id, type, payload, created_at, actor FROM events
+SELECT id, tenant_id, user_id, run_id, type, payload, created_at, actor FROM events
 WHERE tenant_id = $1 AND id > $2
 ORDER BY id ASC
 LIMIT $3
@@ -82,7 +82,7 @@ func (q *Queries) ListEventsAfter(ctx context.Context, arg ListEventsAfterParams
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Type,
 			&i.Payload,
 			&i.CreatedAt,
@@ -101,25 +101,25 @@ func (q *Queries) ListEventsAfter(ctx context.Context, arg ListEventsAfterParams
 	return items, nil
 }
 
-const listEventsAfterTask = `-- name: ListEventsAfterTask :many
-SELECT id, tenant_id, user_id, task_id, type, payload, created_at, actor FROM events
-WHERE tenant_id = $1 AND task_id = $2 AND id > $3
+const listEventsAfterRun = `-- name: ListEventsAfterRun :many
+SELECT id, tenant_id, user_id, run_id, type, payload, created_at, actor FROM events
+WHERE tenant_id = $1 AND run_id = $2 AND id > $3
 ORDER BY id ASC
 LIMIT $4
 `
 
-type ListEventsAfterTaskParams struct {
+type ListEventsAfterRunParams struct {
 	TenantID string         `json:"tenant_id"`
-	TaskID   sql.NullString `json:"task_id"`
+	RunID    sql.NullString `json:"run_id"`
 	ID       int64          `json:"id"`
 	Limit    int32          `json:"limit"`
 }
 
-// Per-task tail: same shape, scoped to one task. Used by GET /runs/{id}/events.
-func (q *Queries) ListEventsAfterTask(ctx context.Context, arg ListEventsAfterTaskParams) ([]Event, error) {
-	rows, err := q.db.QueryContext(ctx, listEventsAfterTask,
+// Per-run tail: same shape, scoped to one run. Used by GET /runs/{id}/events.
+func (q *Queries) ListEventsAfterRun(ctx context.Context, arg ListEventsAfterRunParams) ([]Event, error) {
+	rows, err := q.db.QueryContext(ctx, listEventsAfterRun,
 		arg.TenantID,
-		arg.TaskID,
+		arg.RunID,
 		arg.ID,
 		arg.Limit,
 	)
@@ -134,7 +134,7 @@ func (q *Queries) ListEventsAfterTask(ctx context.Context, arg ListEventsAfterTa
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Type,
 			&i.Payload,
 			&i.CreatedAt,

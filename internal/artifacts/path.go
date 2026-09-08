@@ -19,7 +19,7 @@ var ErrPathEscapesRoot = errors.New("artifacts: path escapes its root")
 // checking against a Container.
 type DeclaredPath struct {
 	// Name is the root-relative, slash-separated path. It is both the
-	// (task, name) key in the revisions index and the handle every subsequent
+	// (run, name) key in the revisions index and the handle every subsequent
 	// read or write goes through, so it must never carry ".." or a drive
 	// letter.
 	Name string

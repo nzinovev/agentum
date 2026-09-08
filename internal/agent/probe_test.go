@@ -140,7 +140,7 @@ func TestProbe_MemoizedPerProcess(t *testing.T) {
 
 // TestProbe_SurvivesACancelledCaller: the memoized answer is process-scoped,
 // so it must not be decided by the lifetime of whichever caller reached it
-// first. Without the detached context, cancelling the task that triggered the
+// first. Without the detached context, cancelling the run that triggered the
 // first probe would pin "runtime not ready" for every later run in the
 // process, with an empty runtime_version in all of their evidence, until a
 // restart.

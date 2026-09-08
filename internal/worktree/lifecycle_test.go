@@ -10,7 +10,7 @@ import (
 )
 
 // TestCommittedChangeSurvivesTeardown is the F.6.1 AC #8 proof: a committed
-// change on the agentum/<task-id> branch survives RemoveWorktree and remains
+// change on the agentum/<run-id> branch survives RemoveWorktree and remains
 // diffable as base_commit..result_commit. The branch is the durable delivery
 // output; the worktree is disposable.
 func TestCommittedChangeSurvivesTeardown(t *testing.T) {
@@ -20,21 +20,21 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 	}
 
 	manager := New()
-	taskID := "task-survive"
+	runID := "run-survive"
 
 	// Resolve the repo's HEAD as base_commit (mirrors what the runner does once
-	// per task before creating the worktree).
+	// per run before creating the worktree).
 	baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
 	if err != nil {
 		t.Fatalf("resolve HEAD: %v", err)
 	}
 
-	wt, err := manager.Create(t.Context(), repo, taskID, baseCommit)
+	wt, err := manager.Create(t.Context(), repo, runID, baseCommit)
 	if err != nil {
 		t.Fatalf("create worktree off base_commit: %v", err)
 	}
 
-	// Simulate an agent making a committed change on the task branch.
+	// Simulate an agent making a committed change on the run branch.
 	commitInWorktree(t, wt, "feature.txt", "new work", "implement feature")
 
 	// Capture the result_commit (the branch tip) before teardown.
@@ -47,7 +47,7 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 	}
 
 	// Terminal teardown: working tree removed only.
-	if err := manager.RemoveWorktree(t.Context(), repo, taskID); err != nil {
+	if err := manager.RemoveWorktree(t.Context(), repo, runID); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if isWorktree(context.Background(), wt.Root) {
@@ -56,17 +56,17 @@ func TestCommittedChangeSurvivesTeardown(t *testing.T) {
 
 	// The branch and its commits remain resolvable; result_commit is the
 	// diffable delivery anchor.
-	assertDeliverySurvives(t, repo, taskID, baseCommit, resultCommit)
+	assertDeliverySurvives(t, repo, runID, baseCommit, resultCommit)
 
 	// Explicit cleanup deletes the branch (and only the branch; worktree already
 	// gone). Idempotent.
-	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+	if err := manager.DeleteBranch(t.Context(), repo, runID); err != nil {
 		t.Fatalf("DeleteBranch: %v", err)
 	}
-	if err := refExists(repo, "agentum/"+taskID); err == nil {
+	if err := refExists(repo, "agentum/"+runID); err == nil {
 		t.Fatal("branch still resolvable after DeleteBranch")
 	}
-	if err := manager.DeleteBranch(t.Context(), repo, taskID); err != nil {
+	if err := manager.DeleteBranch(t.Context(), repo, runID); err != nil {
 		t.Fatalf("DeleteBranch must be idempotent: %v", err)
 	}
 }
@@ -90,19 +90,19 @@ func commitInWorktree(t *testing.T, wt *Worktree, filename, body, msg string) {
 }
 
 // assertDeliverySurvives checks the F.6.1 invariant that terminal teardown
-// preserves: the agentum/<task-id> branch stays resolvable, the
+// preserves: the agentum/<run-id> branch stays resolvable, the
 // base_commit..result_commit diff is exactly the committed feature, and the
 // branch tip equals the recorded result_commit.
-func assertDeliverySurvives(t *testing.T, repo, taskID, baseCommit, resultCommit string) {
+func assertDeliverySurvives(t *testing.T, repo, runID, baseCommit, resultCommit string) {
 	t.Helper()
-	if err := refExists(repo, "agentum/"+taskID); err != nil {
+	if err := refExists(repo, "agentum/"+runID); err != nil {
 		t.Fatalf("branch not resolvable after teardown: %v", err)
 	}
 	diff := mustGit(t, repo, "diff", "--name-only", baseCommit+".."+resultCommit)
 	if strings.TrimSpace(diff) != "feature.txt" {
 		t.Fatalf("base..result diff = %q, want feature.txt", diff)
 	}
-	branchTip := strings.TrimSpace(mustGit(t, repo, "rev-parse", "agentum/"+taskID))
+	branchTip := strings.TrimSpace(mustGit(t, repo, "rev-parse", "agentum/"+runID))
 	if branchTip != resultCommit {
 		t.Fatalf("branch tip = %s, result_commit = %s; they must match", branchTip, resultCommit)
 	}
@@ -229,9 +229,9 @@ func TestReconcile_Classifications(t *testing.T) {
 			t.Fatalf("setup: %v", err)
 		}
 		manager := New()
-		// Never created a worktree for this task — Reconcile must not re-create
+		// Never created a worktree for this run — Reconcile must not re-create
 		// one silently; it surfaces for a human.
-		state, err := manager.Reconcile(t.Context(), repo, "ghost-task", "", "")
+		state, err := manager.Reconcile(t.Context(), repo, "ghost-run", "", "")
 		if err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
@@ -256,14 +256,14 @@ func assertReconcileClass(t *testing.T, arrange func(*testing.T, string, *Worktr
 	if err != nil {
 		t.Fatalf("resolve base: %v", err)
 	}
-	taskID := "task-" + sanitized(t.Name())
-	wt, err := manager.Create(t.Context(), repo, taskID, baseCommit)
+	runID := "run-" + sanitized(t.Name())
+	wt, err := manager.Create(t.Context(), repo, runID, baseCommit)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	lastCheckpoint := arrange(t, repo, wt, baseCommit)
 
-	state, err := manager.Reconcile(t.Context(), repo, taskID, baseCommit, lastCheckpoint)
+	state, err := manager.Reconcile(t.Context(), repo, runID, baseCommit, lastCheckpoint)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestReconcile_RestorableResetsToCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("base: %v", err)
 	}
-	wt, err := manager.Create(t.Context(), repo, "task-restore", baseCommit)
+	wt, err := manager.Create(t.Context(), repo, "run-restore", baseCommit)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestReconcile_RestorableResetsToCheckpoint(t *testing.T) {
 	}
 	mustWrite(wt.Root, "scratch.txt", "uncommitted")
 
-	state, err := manager.Reconcile(t.Context(), repo, "task-restore", baseCommit, checkpoint)
+	state, err := manager.Reconcile(t.Context(), repo, "run-restore", baseCommit, checkpoint)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

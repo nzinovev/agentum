@@ -1,7 +1,7 @@
 package api
 
-// Vocabulary guards. The launch entity is a run; "task" is reserved for the
-// work item, which is not an entity yet. These tests exist so the vocabulary
+// Vocabulary guards. The launch entity is a run; the old word is reserved
+// for the work item, which is not an entity yet. These tests exist so the vocabulary
 // cannot drift back one handler at a time: each new route or response field
 // named the old way fails here, naming the exact spot, instead of surviving
 // until a reviewer greps for it.
@@ -30,7 +30,7 @@ func (recorder *routeRecorder) HandleFunc(pattern string, handler func(http.Resp
 }
 
 // TestRouteVocabularyHasNoTaskToken fails when any registered path names the
-// launch entity "task"/"tasks". Segments are compared whole, not as
+// launch entity by the old word. Segments are compared whole, not as
 // substrings: a substring check would either miss real renames back or start
 // flagging unrelated words that merely contain the letters.
 func TestRouteVocabularyHasNoTaskToken(t *testing.T) {
@@ -54,14 +54,14 @@ func TestRouteVocabularyHasNoTaskToken(t *testing.T) {
 }
 
 // TestResponseJSONTagsHaveNoTaskToken walks the public response shapes and
-// fails on any json tag carrying the task token. The roots are listed by hand:
+// fails on any json tag carrying the old token. The roots are listed by hand:
 // an automatic package walk would drag in internal types whose tags mirror
 // physical column names, and the guard would then demand breaking those.
 func TestResponseJSONTagsHaveNoTaskToken(t *testing.T) {
 	t.Parallel()
 	roots := []any{
 		projectResponse{},
-		taskResponse{},
+		runResponse{},
 		invocationResponse{},
 		artifactRevisionResponse{},
 		manifestResponse{},

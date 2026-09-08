@@ -56,8 +56,8 @@ type Report struct {
 	Profile  string
 }
 
-// MandatoryPassed reports whether every required (baseline/pack/task-mandatory)
-// check passed. Optional checks do not affect this — their failures are recorded
+// MandatoryPassed reports whether every required (baseline-, pack-, or
+// run-input-mandated) check passed. Optional checks do not affect this — their failures are recorded
 // as evidence but do not block delivery.
 func (report Report) MandatoryPassed() bool {
 	for _, outcome := range report.Outcomes {

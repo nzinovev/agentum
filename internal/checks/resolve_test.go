@@ -28,7 +28,7 @@ checks:
 
 func TestResolveBaselineAlwaysIncluded(t *testing.T) {
 	registry := sampleRegistry()
-	// No pack or task requests: only the baseline (required) checks run.
+	// No pack or request-layer input: only the baseline (required) checks run.
 	set, err := Resolve(registry, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestResolveCannotWeakenBaseline(t *testing.T) {
 
 func TestResolveRequiredIsMonotonicAcrossLayers(t *testing.T) {
 	registry := sampleRegistry()
-	// lint is optional in the registry. Pack optional + task required → required.
+	// lint is optional in the registry. Pack optional + LayerTask required → required.
 	set, err := Resolve(registry,
 		[]Request{{Name: "lint", Required: false}},
 		[]Request{{Name: "lint", Required: true}},
@@ -107,10 +107,10 @@ func TestResolveRequiredIsMonotonicAcrossLayers(t *testing.T) {
 	}
 	lint := setItem(set, "lint")
 	if !lint.Required {
-		t.Fatal("task required must make lint mandatory even if pack listed it optional")
+		t.Fatal("a required request from the run input must make lint mandatory even if the pack listed it optional")
 	}
 	if !contains(lint.Sources, LayerPack) || !contains(lint.Sources, LayerTask) {
-		t.Errorf("lint sources must include pack and task, got %v", lint.Sources)
+		t.Errorf("lint sources must include pack and the request layer, got %v", lint.Sources)
 	}
 }
 

@@ -93,7 +93,7 @@ trailing slash, and the root itself all resolve to the same project row.
 
 The path stopped being the project's key, so it can change under a run that is
 already in flight. Therefore a run pins its working copy once, exactly the way
-it pins `base_commit`: `tasks.checkout_path` is set at first start and never
+it pins `base_commit`: `runs.checkout_path` is set at first start and never
 re-resolved. Everything a run does — worktree creation, checks, instruction
 pinning, evidence, teardown — goes to the pinned copy, not to whatever the
 project points at now.
@@ -132,10 +132,9 @@ continues.
 - **stage invocation** — one request to an agent inside a run. The term is
   unambiguous and used identically everywhere; it is not renamed.
 
-In the schema and the internal packages, `task` is the **physical name** of
-the run — a leftover from the first migration; it denotes no second concept.
-The one product term is **run**. The physical rename happens together with
-the run / work-item split, where the schema changes anyway.
+The one name of execution is **run**, on every layer — schema, Go, API, and
+docs alike. `task` remains only the name of the work item, which is not an
+entity yet.
 
 ## Actor, creator, owner
 
@@ -144,11 +143,11 @@ Every recorded action carries two facts beside it:
 | Role | What it answers | Where |
 | --- | --- | --- |
 | **owner** | who owns the project | `projects.user_id` |
-| **creator** | who created the run | `tasks.user_id` |
+| **creator** | who created the run | `runs.user_id` |
 | **actor** | who performed *this* action | `actor` + `user_id` on the action's row |
 
 `actor` is one shared vocabulary — `human | agent | system` (`internal/authz`)
-— used by artifact revisions, gate decisions (`task_approvals.actor`), and
+— used by artifact revisions, gate decisions (`run_approvals.actor`), and
 events (`events.actor`) alike. There is no second vocabulary for the same
 thing. `user_id` answers "on whose behalf"; the two name the same person only
 when `actor = human`. When the orchestrator passes an automatic gate or pauses

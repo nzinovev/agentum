@@ -16,7 +16,7 @@ type ArtifactRevision struct {
 	ID                 string         `json:"id"`
 	TenantID           string         `json:"tenant_id"`
 	UserID             string         `json:"user_id"`
-	TaskID             string         `json:"task_id"`
+	RunID              string         `json:"run_id"`
 	Name               string         `json:"name"`
 	Kind               string         `json:"kind"`
 	ContentHash        string         `json:"content_hash"`
@@ -36,7 +36,7 @@ type Event struct {
 	ID        int64           `json:"id"`
 	TenantID  string          `json:"tenant_id"`
 	UserID    string          `json:"user_id"`
-	TaskID    sql.NullString  `json:"task_id"`
+	RunID     sql.NullString  `json:"run_id"`
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
@@ -47,7 +47,7 @@ type Job struct {
 	ID          int64           `json:"id"`
 	TenantID    string          `json:"tenant_id"`
 	UserID      string          `json:"user_id"`
-	TaskID      string          `json:"task_id"`
+	RunID       string          `json:"run_id"`
 	Kind        string          `json:"kind"`
 	Status      string          `json:"status"`
 	WorkerID    sql.NullString  `json:"worker_id"`
@@ -60,19 +60,19 @@ type Job struct {
 }
 
 type MemoryEntry struct {
-	ID           string         `json:"id"`
-	TenantID     string         `json:"tenant_id"`
-	UserID       string         `json:"user_id"`
-	ProjectID    string         `json:"project_id"`
-	Scope        string         `json:"scope"`
-	Kind         string         `json:"kind"`
-	Title        string         `json:"title"`
-	Body         string         `json:"body"`
-	Keywords     []string       `json:"keywords"`
-	SourceTaskID sql.NullString `json:"source_task_id"`
-	SourceStage  sql.NullString `json:"source_stage"`
-	Status       string         `json:"status"`
-	CreatedAt    time.Time      `json:"created_at"`
+	ID          string         `json:"id"`
+	TenantID    string         `json:"tenant_id"`
+	UserID      string         `json:"user_id"`
+	ProjectID   string         `json:"project_id"`
+	Scope       string         `json:"scope"`
+	Kind        string         `json:"kind"`
+	Title       string         `json:"title"`
+	Body        string         `json:"body"`
+	Keywords    []string       `json:"keywords"`
+	SourceRunID sql.NullString `json:"source_run_id"`
+	SourceStage sql.NullString `json:"source_stage"`
+	Status      string         `json:"status"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 type Project struct {
@@ -88,25 +88,7 @@ type Project struct {
 	RepoRootCommits []string  `json:"repo_root_commits"`
 }
 
-type StageInvocation struct {
-	ID                string                `json:"id"`
-	TenantID          string                `json:"tenant_id"`
-	UserID            string                `json:"user_id"`
-	TaskID            string                `json:"task_id"`
-	Stage             string                `json:"stage"`
-	Sequence          int32                 `json:"sequence"`
-	SessionID         sql.NullString        `json:"session_id"`
-	ResumeOf          sql.NullString        `json:"resume_of"`
-	StopReason        sql.NullString        `json:"stop_reason"`
-	PendingEdits      json.RawMessage       `json:"pending_edits"`
-	Result            pqtype.NullRawMessage `json:"result"`
-	StartedAt         time.Time             `json:"started_at"`
-	FinishedAt        sql.NullTime          `json:"finished_at"`
-	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
-	Cycle             int32                 `json:"cycle"`
-}
-
-type Task struct {
+type Run struct {
 	ID           string          `json:"id"`
 	TenantID     string          `json:"tenant_id"`
 	UserID       string          `json:"user_id"`
@@ -125,10 +107,10 @@ type Task struct {
 	CheckoutPath string          `json:"checkout_path"`
 }
 
-type TaskApproval struct {
+type RunApproval struct {
 	ID                 string         `json:"id"`
 	TenantID           string         `json:"tenant_id"`
-	TaskID             string         `json:"task_id"`
+	RunID              string         `json:"run_id"`
 	Name               string         `json:"name"`
 	Decision           string         `json:"decision"`
 	ArtifactRevisionID sql.NullString `json:"artifact_revision_id"`
@@ -137,21 +119,21 @@ type TaskApproval struct {
 	UserID             string         `json:"user_id"`
 }
 
-type TaskCheckpoint struct {
+type RunCheckpoint struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenant_id"`
 	UserID    string    `json:"user_id"`
-	TaskID    string    `json:"task_id"`
+	RunID     string    `json:"run_id"`
 	Label     string    `json:"label"`
 	CommitSha string    `json:"commit_sha"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type TaskManifest struct {
+type RunManifest struct {
 	ID         string          `json:"id"`
 	TenantID   string          `json:"tenant_id"`
 	UserID     string          `json:"user_id"`
-	TaskID     string          `json:"task_id"`
+	RunID      string          `json:"run_id"`
 	Body       json.RawMessage `json:"body"`
 	SealedAt   sql.NullTime    `json:"sealed_at"`
 	SealedBy   sql.NullString  `json:"sealed_by"`
@@ -160,7 +142,7 @@ type TaskManifest struct {
 	UpdatedAt  time.Time       `json:"updated_at"`
 }
 
-type TaskManifestCorrection struct {
+type RunManifestCorrection struct {
 	ID         string          `json:"id"`
 	TenantID   string          `json:"tenant_id"`
 	UserID     string          `json:"user_id"`
@@ -168,4 +150,22 @@ type TaskManifestCorrection struct {
 	Body       json.RawMessage `json:"body"`
 	Reason     string          `json:"reason"`
 	CreatedAt  time.Time       `json:"created_at"`
+}
+
+type StageInvocation struct {
+	ID                string                `json:"id"`
+	TenantID          string                `json:"tenant_id"`
+	UserID            string                `json:"user_id"`
+	RunID             string                `json:"run_id"`
+	Stage             string                `json:"stage"`
+	Sequence          int32                 `json:"sequence"`
+	SessionID         sql.NullString        `json:"session_id"`
+	ResumeOf          sql.NullString        `json:"resume_of"`
+	StopReason        sql.NullString        `json:"stop_reason"`
+	PendingEdits      json.RawMessage       `json:"pending_edits"`
+	Result            pqtype.NullRawMessage `json:"result"`
+	StartedAt         time.Time             `json:"started_at"`
+	FinishedAt        sql.NullTime          `json:"finished_at"`
+	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
+	Cycle             int32                 `json:"cycle"`
 }

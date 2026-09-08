@@ -375,7 +375,7 @@ func TestDiffManifests_V1AgainstV2OfSameRunIsEmpty(t *testing.T) {
 }
 
 // TestDiffManifests_RenderedHashIsNotADiffAxis: the rendered prompt hash
-// differs on every run by construction (task id, absolute paths), so it must
+// differs on every run by construction (run id, absolute paths), so it must
 // never light any axis.
 func TestDiffManifests_RenderedHashIsNotADiffAxis(t *testing.T) {
 	t.Parallel()

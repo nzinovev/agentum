@@ -32,7 +32,7 @@ var ErrArtifactEscapesWorktree = errors.New("runner: declared artifact escapes t
 // captureStageOutputs reads the artifacts the agent declared in result.json,
 // plus result.json itself, and ingests each into the durable revisions store.
 // Each captured artifact becomes a new immutable revision chained to the prior
-// current revision of its (task, name). The source invocation id is recorded so
+// current revision of its (run, name). The source invocation id is recorded so
 // the manifest can resolve "what did this invocation produce."
 //
 // Two failure modes, deliberately different:
@@ -44,7 +44,7 @@ var ErrArtifactEscapesWorktree = errors.New("runner: declared artifact escapes t
 //     input, and the orchestrator reads it with its own privileges — honouring
 //     "/etc/passwd" or a link the agent planted itself would copy host files
 //     into a durable, API-readable evidence store. Nothing is read, the whole
-//     capture aborts, and the caller pauses the task for review rather than
+//     capture aborts, and the caller pauses the run for review rather than
 //     recording a success built on output it refused to accept.
 func (runner *Runner) captureStageOutputs(
 	ctx context.Context,
@@ -88,8 +88,8 @@ func (runner *Runner) captureStageOutputs(
 	// (inside the stage's artifact dir, next to result.json), so it needs no
 	// containment check — the same exemption verdict.json relies on. The kind
 	// plan_md is what the sync redirect and the drift check key on.
-	if run.taskPack != nil {
-		if approval, hasApproval := run.taskPack.SourceWriteApproval(); hasApproval && approval.Stage == stageID {
+	if run.runPack != nil {
+		if approval, hasApproval := run.runPack.SourceWriteApproval(); hasApproval && approval.Stage == stageID {
 			outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, approval.Artifact, "plan_md", outputs)
 		}
 	}
@@ -98,7 +98,7 @@ func (runner *Runner) captureStageOutputs(
 		if readErr != nil {
 			if !errors.Is(readErr, os.ErrNotExist) {
 				runner.log.Warn("capture artifact: read",
-					"task", run.task.ID, "name", artifact.name, "error", readErr)
+					"run", run.record.ID, "name", artifact.name, "error", readErr)
 			}
 			continue
 		}
@@ -164,7 +164,7 @@ func (runner *Runner) resolveDeclaredArtifacts(
 			if errors.Is(err, artifacts.ErrPathEscapesRoot) {
 				reason = "escapes_worktree"
 			}
-			runner.emit(ctx, run.task, EvArtifactRejected, map[string]any{
+			runner.emit(ctx, run.record, EvArtifactRejected, map[string]any{
 				"stage": stageID, "path": declared.Path, "reason": reason,
 			})
 			return nil, fmt.Errorf("%w: %q: %w", ErrArtifactEscapesWorktree, declared.Path, err)
@@ -192,7 +192,7 @@ func (runner *Runner) captureFile(
 	bytes, err := os.ReadFile(filepath.Join(artifactDir, name))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			runner.log.Warn("capture artifact: read", "task", run.task.ID, "name", name, "error", err)
+			runner.log.Warn("capture artifact: read", "run", run.record.ID, "name", name, "error", err)
 		}
 		return outputs
 	}
@@ -234,9 +234,9 @@ func (runner *Runner) ingest(
 	actor artifacts.Actor,
 ) (artifacts.Revision, bool) {
 	revision, putErr := runner.art.Put(ctx, artifacts.PutParams{
-		TenantID: run.task.TenantID,
-		UserID:   run.task.UserID,
-		TaskID:   run.task.ID,
+		TenantID: run.record.TenantID,
+		UserID:   run.record.UserID,
+		RunID:    run.record.ID,
 		Name:     revisionName,
 		Kind:     kind,
 		Bytes:    bytes,
@@ -245,12 +245,12 @@ func (runner *Runner) ingest(
 	})
 	if putErr != nil {
 		runner.log.Warn("capture artifact: put",
-			"task", run.task.ID, "stage", stageID, "name", revisionName, "error", putErr)
+			"run", run.record.ID, "stage", stageID, "name", revisionName, "error", putErr)
 		if errors.Is(putErr, artifacts.ErrSecretDetected) {
 			// The operator configured reject-on-secret and the store enforced
 			// it. Surface it on the event stream: a silently absent artifact is
 			// indistinguishable from one the agent never wrote.
-			runner.emit(ctx, run.task, EvArtifactRejected, map[string]any{
+			runner.emit(ctx, run.record, EvArtifactRejected, map[string]any{
 				"stage": stageID, "path": revisionName, "reason": "secret_detected",
 			})
 		}
@@ -304,13 +304,13 @@ func (runner *Runner) openInvocationEvidence(
 		},
 	}
 	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{record}}
-	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, run.record.TenantID, run.record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("open invocation evidence: manifest sealed", "task", run.task.ID)
+			runner.log.Warn("open invocation evidence: manifest sealed", "run", run.record.ID)
 			return
 		}
-		runner.log.Warn("open invocation evidence", "task", run.task.ID, "stage", stageID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "invocations", stageID, err)
+		runner.log.Warn("open invocation evidence", "run", run.record.ID, "stage", stageID, "error", err)
+		runner.recordEvidenceGap(ctx, run.record, "invocations", stageID, err)
 	}
 }
 
@@ -322,26 +322,26 @@ func (runner *Runner) openInvocationEvidence(
 // rejection, refused start.
 func (runner *Runner) closeInvocationEvidence(
 	ctx context.Context,
-	task sqlc.Task,
+	record sqlc.Run,
 	invocationID, stopReason string,
 	telemetry *agent.Telemetry,
 ) {
 	if runner.mfst == nil {
 		return
 	}
-	record := manifest.InvocationEvidence{
+	evidence := manifest.InvocationEvidence{
 		InvocationID: invocationID,
 		StopReason:   stopReason,
 		Telemetry:    invocationTelemetry(telemetry),
 	}
-	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{record}}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	patch := manifest.Body{Invocations: []manifest.InvocationEvidence{evidence}}
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("close invocation evidence: manifest sealed", "task", task.ID)
+			runner.log.Warn("close invocation evidence: manifest sealed", "run", record.ID)
 			return
 		}
-		runner.log.Warn("close invocation evidence", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "invocations", "", err)
+		runner.log.Warn("close invocation evidence", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "invocations", "", err)
 	}
 }
 
@@ -411,17 +411,17 @@ func (runner *Runner) completeStageEvidence(
 		patch.Artifacts = &manifest.ArtifactEvidence{Outputs: artifactOutputs}
 		sections = append(sections, "artifacts")
 	}
-	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, run.record.TenantID, run.record.ID, patch); err != nil {
 		// Sealed manifest is unexpected mid-run; logged but not fatal — the
 		// run continues and the gap is recorded in the manifest's evidence
 		// gaps at seal time.
 		if errors.Is(err, manifest.ErrSealed) {
-			runner.log.Warn("complete stage evidence: manifest sealed", "task", run.task.ID)
+			runner.log.Warn("complete stage evidence: manifest sealed", "run", run.record.ID)
 			return
 		}
-		runner.log.Warn("complete stage evidence", "task", run.task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("complete stage evidence", "run", run.record.ID, "stage", stageID, "error", err)
 		for _, section := range sections {
-			runner.recordEvidenceGap(ctx, run.task, section, stageID, err)
+			runner.recordEvidenceGap(ctx, run.record, section, stageID, err)
 		}
 		return
 	}
@@ -429,7 +429,7 @@ func (runner *Runner) completeStageEvidence(
 	// degraded — we do not know what knowledge was in play). An unsupported
 	// probe is not: it is a permanent capability gap recorded in the section.
 	if probeFailed(run.contextReport.SkillsProbe) {
-		runner.recordEvidenceGap(ctx, run.task, "context.skills", stageID,
+		runner.recordEvidenceGap(ctx, run.record, "context.skills", stageID,
 			fmt.Errorf("skill probe failed: %s", run.contextReport.SkillsError))
 	}
 }
@@ -455,7 +455,7 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 	}
 }
 
-// recordInitialEvidence seeds the manifest with the task / project / pack /
+// recordInitialEvidence seeds the manifest with the run / project / pack /
 // git lineage evidence at run start. Idempotent — AddEvidence merges by
 // section. Called once at the start of drive(). No-op when the manifest
 // service is nil (unit tests). Unlike the per-stage evidence helpers, a
@@ -465,19 +465,19 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 // a silent gap at the root would orphan everything that follows.
 func (runner *Runner) recordInitialEvidence(
 	ctx context.Context,
-	task sqlc.Task,
+	record sqlc.Run,
 	project sqlc.Project,
-	taskPack *pack.Pack,
+	runPack *pack.Pack,
 ) error {
 	if runner.mfst == nil {
 		return nil
 	}
 	packHash := ""
-	if taskPack.Dir != "" {
+	if runPack.Dir != "" {
 		// Best-effort hash of the resolved pack. Empty when the pack was built
 		// in memory (override resolver) — the derived `missing` at seal time
 		// records the gap if it matters.
-		if hash, err := hashDir(taskPack.Dir); err == nil {
+		if hash, err := hashDir(runPack.Dir); err == nil {
 			packHash = hash
 		}
 	}
@@ -486,21 +486,21 @@ func (runner *Runner) recordInitialEvidence(
 	// it. A malformed column is an invariant break (the API guarantees
 	// well-formed overrides): fail the provenance root rather than record a
 	// revision nobody can reproduce.
-	taskOverrides, overridesErr := taskinput.ParseOverrides(task.Overrides)
+	runOverrides, overridesErr := taskinput.ParseOverrides(record.Overrides)
 	if overridesErr != nil {
-		return fmt.Errorf("record initial evidence: parse task overrides: %w", overridesErr)
+		return fmt.Errorf("record initial evidence: parse run overrides: %w", overridesErr)
 	}
-	taskRequest := taskinput.Request{
-		Title: task.Title, Description: task.Description, Overrides: taskOverrides,
+	typedRequest := taskinput.Request{
+		Title: record.Title, Description: record.Description, Overrides: runOverrides,
 	}
 	patch := manifest.Body{
 		Input: &manifest.InputEvidence{
-			RunID:       task.ID,
-			Title:       task.Title,
-			Description: task.Description,
-			Overrides:   task.Overrides,
-			Revision:    taskRequest.Revision(),
-			PipelineRef: task.PipelinePack,
+			RunID:       record.ID,
+			Title:       record.Title,
+			Description: record.Description,
+			Overrides:   record.Overrides,
+			Revision:    typedRequest.Revision(),
+			PipelineRef: record.PipelinePack,
 		},
 		Project: &manifest.ProjectEvidence{
 			ProjectID: project.ID,
@@ -508,31 +508,31 @@ func (runner *Runner) recordInitialEvidence(
 			// checkout — not the project's current path: after a
 			// re-registration the two differ, and evidence describes what
 			// happened, not what is configured now.
-			RepoPath:   checkoutPathOf(task, project),
+			RepoPath:   checkoutPathOf(record, project),
 			Name:       project.Name,
-			BaseRef:    task.BaseRef,
-			BaseCommit: nullStringOr(task.BaseCommit),
+			BaseRef:    record.BaseRef,
+			BaseCommit: nullStringOr(record.BaseCommit),
 		},
 		Pack: &manifest.PackEvidence{
-			Ref:         taskPack.BaseRef,
-			Name:        taskPack.Pack.Name,
-			Version:     taskPack.Pack.Version,
+			Ref:         runPack.BaseRef,
+			Name:        runPack.Pack.Name,
+			Version:     runPack.Pack.Version,
 			ContentHash: packHash,
-			Forked:      taskPack.Forked,
+			Forked:      runPack.Forked,
 		},
 		Capabilities: &manifest.CapabilityProfile{
-			Declared: taskPack.Capabilities,
+			Declared: runPack.Capabilities,
 		},
 		Adapter: runner.adapterEvidence(ctx),
 	}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		return fmt.Errorf("record initial evidence: %w", err)
 	}
 	// A failed readiness probe is an evidence gap, mirroring the skills probe:
 	// the run records "runtime not ready, because …" and the invocation that
 	// needs the runtime surfaces the failure itself.
 	if readiness := runner.adapter.Probe(ctx); !readiness.Ready {
-		runner.recordEvidenceGap(ctx, task, "adapter.runtime", "",
+		runner.recordEvidenceGap(ctx, record, "adapter.runtime", "",
 			fmt.Errorf("runtime probe failed: %s", readiness.Reason))
 	}
 	return nil
@@ -542,15 +542,15 @@ func (runner *Runner) recordInitialEvidence(
 // checkpoint, result_commit when known) to the manifest. Called at boundaries
 // (base resolve, post-stage checkpoint, terminal teardown). No-op when the
 // manifest service is nil.
-func (runner *Runner) recordGitEvidence(ctx context.Context, task sqlc.Task) {
+func (runner *Runner) recordGitEvidence(ctx context.Context, record sqlc.Run) {
 	if runner.mfst == nil {
 		return
 	}
-	checkpoints, err := runner.store.ListCheckpointsForTask(ctx, sqlc.ListCheckpointsForTaskParams{
-		TaskID: task.ID, TenantID: task.TenantID,
+	checkpoints, err := runner.store.ListCheckpointsForRun(ctx, sqlc.ListCheckpointsForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
 	})
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		runner.log.Warn("list checkpoints for manifest", "task", task.ID, "error", err)
+		runner.log.Warn("list checkpoints for manifest", "run", record.ID, "error", err)
 		return
 	}
 	manifestCheckpoints := make([]manifest.CheckpointRef, 0, len(checkpoints))
@@ -561,13 +561,13 @@ func (runner *Runner) recordGitEvidence(ctx context.Context, task sqlc.Task) {
 	}
 	patch := manifest.Body{
 		Git: &manifest.GitEvidence{
-			Branch:       worktreeBranchFor(task.ID),
-			BaseCommit:   nullStringOr(task.BaseCommit),
-			ResultCommit: nullStringOr(task.ResultCommit),
+			Branch:       worktreeBranchFor(record.ID),
+			BaseCommit:   nullStringOr(record.BaseCommit),
+			ResultCommit: nullStringOr(record.ResultCommit),
 			Checkpoints:  manifestCheckpoints,
 		},
 	}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		// Sealed manifest means the terminal seal already ran; subsequent
 		// git evidence is recorded via Correct, not AddEvidence. The gap is
 		// not recorded in that case — the seal refused it, which is the
@@ -575,31 +575,31 @@ func (runner *Runner) recordGitEvidence(ctx context.Context, task sqlc.Task) {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record git evidence", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "git", "", err)
+		runner.log.Warn("record git evidence", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "git", "", err)
 	}
 }
 
-// sealManifestAtTerminal finalizes the manifest when the task reaches a
+// sealManifestAtTerminal finalizes the manifest when the run reaches a
 // terminal state. The reason maps the terminal state to a seal reason for the
 // audit trail. No-op when the manifest service is nil.
-func (runner *Runner) sealManifestAtTerminal(ctx context.Context, task sqlc.Task) {
+func (runner *Runner) sealManifestAtTerminal(ctx context.Context, record sqlc.Run) {
 	if runner.mfst == nil {
 		return
 	}
 	// Final git evidence flush before sealing — result_commit may have been
 	// recorded between the last stage and the teardown job.
-	runner.recordGitEvidence(ctx, task)
+	runner.recordGitEvidence(ctx, record)
 	reason := manifest.SealCompleted
-	switch engine.TaskState(task.State) {
+	switch engine.RunState(record.State) {
 	case engine.StateCancelled:
 		reason = manifest.SealCancelled
 		// ADR 0003 D4: a reject fires EventCancel (→ cancelled) but records a
-		// task_approvals row with decision="rejected". Distinguish the two so a
+		// run_approvals row with decision="rejected". Distinguish the two so a
 		// sealed record does not describe a rejected result as an undifferentiated
 		// abort. Read the approval rows; a rejected decision flips the seal reason.
-		if approvals, apErr := runner.store.ListApprovalsForTask(ctx, sqlc.ListApprovalsForTaskParams{
-			TaskID: task.ID, TenantID: task.TenantID,
+		if approvals, apErr := runner.store.ListApprovalsForRun(ctx, sqlc.ListApprovalsForRunParams{
+			RunID: record.ID, TenantID: record.TenantID,
 		}); apErr == nil {
 			for _, approval := range approvals {
 				if approval.Decision == "rejected" {
@@ -611,8 +611,8 @@ func (runner *Runner) sealManifestAtTerminal(ctx context.Context, task sqlc.Task
 	case engine.StateFailed:
 		reason = manifest.SealFailed
 	}
-	if err := runner.mfst.Seal(ctx, task.TenantID, task.UserID, task.ID, reason); err != nil {
-		runner.log.Warn("seal manifest", "task", task.ID, "state", task.State, "error", err)
+	if err := runner.mfst.Seal(ctx, record.TenantID, record.UserID, record.ID, reason); err != nil {
+		runner.log.Warn("seal manifest", "run", record.ID, "state", record.State, "error", err)
 	}
 }
 
@@ -629,9 +629,9 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	if runner.syncer == nil {
 		return
 	}
-	currentRevisions, err := runner.currentRevisionList(ctx, run.task.TenantID, run.task.ID)
+	currentRevisions, err := runner.currentRevisionList(ctx, run.record.TenantID, run.record.ID)
 	if err != nil {
-		runner.log.Warn("sync revisions: list current", "task", run.task.ID, "error", err)
+		runner.log.Warn("sync revisions: list current", "run", run.record.ID, "error", err)
 		return
 	}
 	if len(currentRevisions) == 0 {
@@ -641,7 +641,7 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	revisionByName := make(map[string]artifacts.Revision, len(currentRevisions))
 	for _, revision := range currentRevisions {
 		// Artifact-dir-resident kinds (result_json, verdict_json, plan_md,
-		// diff, diff_stat) live under .agentum/<task>/.ag-artifacts/<stage>/,
+		// diff, diff_stat) live under .agentum/<run>/.ag-artifacts/<stage>/,
 		// not the worktree proper. ADR 0003 D6.2: instead of skipping them,
 		// materialize them at their artifact-dir path. The revision name is
 		// "<stage>/<file>", so the destination is the stage's artifact dir +
@@ -682,9 +682,9 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	if len(targets) == 0 {
 		return
 	}
-	results, err := runner.syncer.Sync(ctx, run.task.TenantID, run.task.ID, run.worktree.Root, targets)
+	results, err := runner.syncer.Sync(ctx, run.record.TenantID, run.record.ID, run.worktree.Root, targets)
 	if err != nil {
-		runner.log.Warn("sync revisions into worktree", "task", run.task.ID, "error", err)
+		runner.log.Warn("sync revisions into worktree", "run", run.record.ID, "error", err)
 		return
 	}
 	synced := 0
@@ -707,7 +707,7 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 		})
 	}
 	if synced > 0 {
-		runner.emit(ctx, run.task, EvRevisionsSynced, map[string]any{
+		runner.emit(ctx, run.record, EvRevisionsSynced, map[string]any{
 			"stage": stageID, "synced": synced,
 		})
 	}
@@ -739,7 +739,7 @@ func worktreeArtifactPath(run stageRun, revisionName string) string {
 	if !split {
 		return ""
 	}
-	return filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.task.ID, stage), file)
+	return filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, stage), file)
 }
 
 // splitArtifactRevisionName splits "<stage>/<file>" into its two parts. Returns
@@ -769,22 +769,22 @@ func (runner *Runner) recordArtifactInputs(ctx context.Context, run stageRun, st
 		return
 	}
 	patch := manifest.Body{Artifacts: &manifest.ArtifactEvidence{Inputs: inputs}}
-	if err := runner.mfst.AddEvidence(ctx, run.task.TenantID, run.task.ID, patch); err != nil {
+	if err := runner.mfst.AddEvidence(ctx, run.record.TenantID, run.record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record artifact inputs evidence", "task", run.task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, run.task, "artifacts", stageID, err)
+		runner.log.Warn("record artifact inputs evidence", "run", run.record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, run.record, "artifacts", stageID, err)
 	}
 }
 
 // currentRevisionList is the bridge between the artifacts Store and the
 // runner's sync helper. Returns an empty slice when the store is nil.
-func (runner *Runner) currentRevisionList(ctx context.Context, tenantID, taskID string) ([]artifacts.Revision, error) {
+func (runner *Runner) currentRevisionList(ctx context.Context, tenantID, runID string) ([]artifacts.Revision, error) {
 	if runner.art == nil {
 		return nil, nil
 	}
-	return runner.art.ListCurrent(ctx, tenantID, taskID)
+	return runner.art.ListCurrent(ctx, tenantID, runID)
 }
 
 // recordEvidenceGap records that an evidence write failed, so the fact is
@@ -793,7 +793,7 @@ func (runner *Runner) currentRevisionList(ctx context.Context, tenantID, taskID 
 // manifest service (unit tests) is a no-op. Sealed manifests refuse the gap,
 // which is expected for the post-seal git-evidence flush and is dropped
 // silently (the seal already froze the body).
-func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, section, stage string, cause error) {
+func (runner *Runner) recordEvidenceGap(ctx context.Context, record sqlc.Run, section, stage string, cause error) {
 	if runner.mfst == nil {
 		return
 	}
@@ -803,8 +803,8 @@ func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, sec
 		Reason:  cause.Error(),
 		At:      time.Now().UTC(),
 	}
-	if err := runner.mfst.RecordGap(ctx, task.TenantID, task.ID, gap); err != nil {
-		runner.log.Warn("record evidence gap", "task", task.ID, "section", section, "cause", cause, "gap_error", err)
+	if err := runner.mfst.RecordGap(ctx, record.TenantID, record.ID, gap); err != nil {
+		runner.log.Warn("record evidence gap", "run", record.ID, "section", section, "cause", cause, "gap_error", err)
 	}
 }
 
@@ -813,20 +813,20 @@ func (runner *Runner) recordEvidenceGap(ctx context.Context, task sqlc.Task, sec
 // branch is auditable even when the next stage never starts (e.g. budget
 // exhaustion stops the run before the target runs). Best-effort and a no-op
 // when the manifest service is nil (unit tests).
-func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Task, record manifest.TransitionRecord) {
+func (runner *Runner) recordTransitionEvidence(ctx context.Context, record sqlc.Run, transition manifest.TransitionRecord) {
 	if runner.mfst == nil {
 		return
 	}
-	if record.At.IsZero() {
-		record.At = time.Now().UTC()
+	if transition.At.IsZero() {
+		transition.At = time.Now().UTC()
 	}
-	patch := manifest.Body{Transitions: []manifest.TransitionRecord{record}}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	patch := manifest.Body{Transitions: []manifest.TransitionRecord{transition}}
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record transition evidence", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "transitions", record.From, err)
+		runner.log.Warn("record transition evidence", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "transitions", transition.From, err)
 	}
 }
 
@@ -835,20 +835,20 @@ func (runner *Runner) recordTransitionEvidence(ctx context.Context, task sqlc.Ta
 // carries the full stop history (budget, verdict, gate, adapter_error, etc.),
 // not just the budget/verdict ones. (Stage, Reason, Cycle) collapses repeats.
 // Best-effort and a no-op when the manifest service is nil.
-func (runner *Runner) recordStopEvidence(ctx context.Context, task sqlc.Task, record manifest.StopRecord) {
+func (runner *Runner) recordStopEvidence(ctx context.Context, record sqlc.Run, stop manifest.StopRecord) {
 	if runner.mfst == nil {
 		return
 	}
-	if record.At.IsZero() {
-		record.At = time.Now().UTC()
+	if stop.At.IsZero() {
+		stop.At = time.Now().UTC()
 	}
-	patch := manifest.Body{Stops: []manifest.StopRecord{record}}
-	if err := runner.mfst.AddEvidence(ctx, task.TenantID, task.ID, patch); err != nil {
+	patch := manifest.Body{Stops: []manifest.StopRecord{stop}}
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil {
 		if errors.Is(err, manifest.ErrSealed) {
 			return
 		}
-		runner.log.Warn("record stop evidence", "task", task.ID, "error", err)
-		runner.recordEvidenceGap(ctx, task, "stops", record.Stage, err)
+		runner.log.Warn("record stop evidence", "run", record.ID, "error", err)
+		runner.recordEvidenceGap(ctx, record, "stops", stop.Stage, err)
 	}
 }
 
@@ -917,11 +917,11 @@ func sortStrings(values []string) []string {
 	return out
 }
 
-// worktreeBranchFor is the canonical branch name for a task. Re-declared here
+// worktreeBranchFor is the canonical branch name for a record. Re-declared here
 // (rather than importing worktree) so the manifest recording does not pull a
 // new dependency cycle through the worktree package's tests. The string is
 // identical to worktree.BranchFor.
-func worktreeBranchFor(taskID string) string { return "agentum/" + taskID }
+func worktreeBranchFor(runID string) string { return "agentum/" + runID }
 
 // nullStringOr returns the String value when Valid, else "". Lifted to the
 // runner so the manifest / git evidence paths do not need their own helper.

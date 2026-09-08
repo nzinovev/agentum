@@ -63,7 +63,7 @@ type Adapter interface {
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives
 // on the Principal in the caller's context; the adapter is identity-agnostic.
 type Invocation struct {
-	Workdir       string           // the task worktree root (the agent's working directory)
+	Workdir       string           // the run worktree root (the agent's working directory)
 	ArtifactDir   string           // per-stage dir; result.json is read here after the run
 	Prompt        string           // role-pure system prompt, loaded from the pack
 	RoutingBlock  string           // rendered: stage/gate/memory/capabilities + result.json contract

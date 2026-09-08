@@ -14,26 +14,26 @@ import (
 
 const commitMemoryEntry = `-- name: CommitMemoryEntry :one
 INSERT INTO memory_entries (
-    tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_task_id, source_stage
+    tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_run_id, source_stage
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_task_id, source_stage, status, created_at
+RETURNING id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_run_id, source_stage, status, created_at
 `
 
 type CommitMemoryEntryParams struct {
-	TenantID     string         `json:"tenant_id"`
-	UserID       string         `json:"user_id"`
-	ProjectID    string         `json:"project_id"`
-	Scope        string         `json:"scope"`
-	Kind         string         `json:"kind"`
-	Title        string         `json:"title"`
-	Body         string         `json:"body"`
-	Keywords     []string       `json:"keywords"`
-	SourceTaskID sql.NullString `json:"source_task_id"`
-	SourceStage  sql.NullString `json:"source_stage"`
+	TenantID    string         `json:"tenant_id"`
+	UserID      string         `json:"user_id"`
+	ProjectID   string         `json:"project_id"`
+	Scope       string         `json:"scope"`
+	Kind        string         `json:"kind"`
+	Title       string         `json:"title"`
+	Body        string         `json:"body"`
+	Keywords    []string       `json:"keywords"`
+	SourceRunID sql.NullString `json:"source_run_id"`
+	SourceStage sql.NullString `json:"source_stage"`
 }
 
-// Insert only at task-done / final approval. The producing agent emitted these
+// Insert only at run-done / final approval. The producing agent emitted these
 // via memory_writes in result.json; they commit here.
 func (q *Queries) CommitMemoryEntry(ctx context.Context, arg CommitMemoryEntryParams) (MemoryEntry, error) {
 	row := q.db.QueryRowContext(ctx, commitMemoryEntry,
@@ -45,7 +45,7 @@ func (q *Queries) CommitMemoryEntry(ctx context.Context, arg CommitMemoryEntryPa
 		arg.Title,
 		arg.Body,
 		pq.Array(arg.Keywords),
-		arg.SourceTaskID,
+		arg.SourceRunID,
 		arg.SourceStage,
 	)
 	var i MemoryEntry
@@ -59,7 +59,7 @@ func (q *Queries) CommitMemoryEntry(ctx context.Context, arg CommitMemoryEntryPa
 		&i.Title,
 		&i.Body,
 		pq.Array(&i.Keywords),
-		&i.SourceTaskID,
+		&i.SourceRunID,
 		&i.SourceStage,
 		&i.Status,
 		&i.CreatedAt,
@@ -68,7 +68,7 @@ func (q *Queries) CommitMemoryEntry(ctx context.Context, arg CommitMemoryEntryPa
 }
 
 const recentMemoryByProject = `-- name: RecentMemoryByProject :many
-SELECT id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_task_id, source_stage, status, created_at FROM memory_entries
+SELECT id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_run_id, source_stage, status, created_at FROM memory_entries
 WHERE project_id = $1 AND scope = 'project' AND status = 'active'
 ORDER BY created_at DESC
 LIMIT $2
@@ -100,7 +100,7 @@ func (q *Queries) RecentMemoryByProject(ctx context.Context, arg RecentMemoryByP
 			&i.Title,
 			&i.Body,
 			pq.Array(&i.Keywords),
-			&i.SourceTaskID,
+			&i.SourceRunID,
 			&i.SourceStage,
 			&i.Status,
 			&i.CreatedAt,
@@ -119,7 +119,7 @@ func (q *Queries) RecentMemoryByProject(ctx context.Context, arg RecentMemoryByP
 }
 
 const searchMemoryByKeyword = `-- name: SearchMemoryByKeyword :many
-SELECT id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_task_id, source_stage, status, created_at FROM memory_entries
+SELECT id, tenant_id, user_id, project_id, scope, kind, title, body, keywords, source_run_id, source_stage, status, created_at FROM memory_entries
 WHERE project_id = $1 AND scope = 'project' AND status = 'active'
   AND (title ILIKE '%' || $2 || '%' OR $2 = ANY(keywords) OR body ILIKE '%' || $2 || '%')
 ORDER BY created_at DESC
@@ -154,7 +154,7 @@ func (q *Queries) SearchMemoryByKeyword(ctx context.Context, arg SearchMemoryByK
 			&i.Title,
 			&i.Body,
 			pq.Array(&i.Keywords),
-			&i.SourceTaskID,
+			&i.SourceRunID,
 			&i.SourceStage,
 			&i.Status,
 			&i.CreatedAt,

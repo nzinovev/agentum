@@ -28,30 +28,30 @@ type invocationResponse struct {
 }
 
 // handleListInvocations GET /api/v1/runs/{id}/invocations
-// Returns a task's stage invocations ordered by sequence, so each attempt is
+// Returns a run's stage invocations ordered by sequence, so each attempt is
 // visible in run order. The cycle column distinguishes a retry from a resume.
 func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
-	// Confirm the task exists (and the tenant can see it) before listing its
-	// invocations, so an unknown task returns 404 rather than an empty 200 list
-	// that reads as "the task exists but has no invocations."
-	if _, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID}); err != nil {
+	// Confirm the run exists (and the tenant can see it) before listing its
+	// invocations, so an unknown run returns 404 rather than an empty 200 list
+	// that reads as "the run exists but has no invocations."
+	if _, err := api.queries.GetRun(r.Context(), sqlc.GetRunParams{ID: runID, TenantID: principal.TenantID}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, codeNotFound, "run not found")
 			return
 		}
-		logUnexpected(api.log, err, "GetTask (invocations)")
+		logUnexpected(api.log, err, "GetRun (invocations)")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
-	invocations, err := api.queries.ListStageInvocationsForTask(r.Context(), sqlc.ListStageInvocationsForTaskParams{
-		TaskID: taskID, TenantID: principal.TenantID,
+	invocations, err := api.queries.ListStageInvocationsForRun(r.Context(), sqlc.ListStageInvocationsForRunParams{
+		RunID: runID, TenantID: principal.TenantID,
 	})
 	if err != nil {
-		logUnexpected(api.log, err, "ListStageInvocationsForTask")
+		logUnexpected(api.log, err, "ListStageInvocationsForRun")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
@@ -65,7 +65,7 @@ func (api *API) handleListInvocations(w http.ResponseWriter, r *http.Request) {
 // handleGetInvocation GET /api/v1/runs/{id}/invocations/{iid}
 // Returns a single stage invocation by id.
 func (api *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
-	principal, taskID, ok := requireTaskRead(w, r)
+	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
 		return
 	}
@@ -81,10 +81,10 @@ func (api *API) handleGetInvocation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
-	// Belt-and-suspenders: the invocation must belong to the path's task id.
-	// The query is tenant-scoped but not task-scoped, so a cross-task id in the
-	// path would otherwise surface another task's invocation.
-	if invocation.TaskID != taskID {
+	// Belt-and-suspenders: the invocation must belong to the path's run id.
+	// The query is tenant-scoped but not run-scoped, so a cross-run id in the
+	// path would otherwise surface another run's invocation.
+	if invocation.RunID != runID {
 		writeError(w, http.StatusNotFound, codeNotFound, "invocation not found")
 		return
 	}

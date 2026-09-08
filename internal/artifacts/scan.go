@@ -34,7 +34,7 @@ func NewDefaultScanner(policy ScanPolicy) *DefaultScanner {
 	return &DefaultScanner{Policy: policy}
 }
 
-// NewProseScanner returns a scanner for human-authored text — a task title or
+// NewProseScanner returns a scanner for human-authored text — a run title or
 // description, not a config file an agent produced. It runs only the
 // credentialShape rules.
 //
@@ -43,7 +43,7 @@ func NewDefaultScanner(policy ScanPolicy) *DefaultScanner {
 // that merely *discusses* credentials: "Add Bearer authentication to
 // /settings" matches bearer-token, and "secret: AGENTUM_WEBHOOK_SECRET_ENV
 // should be read from env" matches labeled-secret. Under PolicyReject that
-// makes an ordinary auth-related backend task impossible to create, with no
+// makes an ordinary auth-related backend run impossible to create, with no
 // override path for the author — a false positive that costs more than the
 // false negative it prevents, which is the trade this package already declares
 // it makes.

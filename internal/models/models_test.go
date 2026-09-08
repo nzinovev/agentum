@@ -234,7 +234,7 @@ func TestOptions_SupportedBy(t *testing.T) {
 
 func TestOptions_SupportedBy_SupersetRejectedAndNamed(t *testing.T) {
 	t.Parallel()
-	// Simulate an option this build cannot carry (task 6's variant) against a
+	// Simulate an option this build cannot carry (a future variant option) against a
 	// descriptor that declares only {model}.
 	err := (Options{Model: "x"}).SupportedBy([]OptionName{OptionModel, "variant"})
 	if err != nil {

@@ -15,7 +15,7 @@ import (
 // runner fills it BEFORE calling Evaluate, so the gate logic and the branch
 // logic remain one pure function (D3). Every field is value-derived from
 // committed state (the verdict artifact, the result, the cycle counter, the
-// budget) so two workers computing it for the same task agree.
+// budget) so two workers computing it for the same run agree.
 type TransitionContext struct {
 	// Verdict is the parsed verdict.json verdict of the transitioning stage.
 	// Empty when no verdict artifact exists or it failed to parse — the
@@ -122,7 +122,7 @@ type stageTransition struct {
 }
 
 // buildTransitionContext assembles the durable-state bundle for stageID from
-// committed rows and the artifact store. Signature takes (task, taskPack,
+// committed rows and the artifact store. Signature takes (run, runPack,
 // stageID, result) rather than stageRun because stageRun is built after
 // entryPoint runs (the advance path resolves a transition before the loop
 // starts).
@@ -134,19 +134,19 @@ type stageTransition struct {
 // Unreadable with an empty reason.
 func (runner *Runner) buildTransitionContext(
 	ctx context.Context,
-	task sqlc.Task,
-	taskPack *pack.Pack,
+	record sqlc.Run,
+	runPack *pack.Pack,
 	stageID string,
 	result *agent.ResultJSON,
 ) (TransitionContext, error) {
-	stage, ok := taskPack.Stages[stageID]
+	stage, ok := runPack.Stages[stageID]
 	if !ok {
 		return TransitionContext{}, fmt.Errorf("build transition context: stage %q not in pack", stageID)
 	}
 
 	transitionContext := TransitionContext{
-		Budget:      taskPack.Budgets.FixCycles,
-		FixerStages: taskPack.FixerStages(),
+		Budget:      runPack.Budgets.FixCycles,
+		FixerStages: runPack.FixerStages(),
 	}
 
 	if result != nil {
@@ -154,7 +154,7 @@ func (runner *Runner) buildTransitionContext(
 	}
 
 	fixerCycles, err := runner.store.MaxCycleForStages(ctx, sqlc.MaxCycleForStagesParams{
-		TaskID: task.ID, TenantID: task.TenantID, Column3: transitionContext.FixerStages,
+		RunID: record.ID, TenantID: record.TenantID, Column3: transitionContext.FixerStages,
 	})
 	if err != nil {
 		return TransitionContext{}, fmt.Errorf("load fixer cycles: %w", err)
@@ -171,7 +171,7 @@ func (runner *Runner) buildTransitionContext(
 	// read; treating its absence as unreadable would pause every non-review
 	// stage.
 	if stage.SourcesVerdict() {
-		verdict, unreadable, reason := runner.readVerdict(ctx, task, stageID)
+		verdict, unreadable, reason := runner.readVerdict(ctx, record, stageID)
 		transitionContext.Verdict = string(verdict.Verdict)
 		transitionContext.Unreadable = unreadable
 		transitionContext.VerdictReason = reason
@@ -187,26 +187,26 @@ func (runner *Runner) buildTransitionContext(
 //     empty reason — the retryable shape, no log spam;
 //   - unparseable: empty verdict, unreadable=true, reason=the parse error text
 //     — logged so the cause is visible, and threaded into the stop record.
-func (runner *Runner) readVerdict(ctx context.Context, task sqlc.Task, stageID string) (agent.VerdictJSON, bool, string) {
+func (runner *Runner) readVerdict(ctx context.Context, record sqlc.Run, stageID string) (agent.VerdictJSON, bool, string) {
 	if runner.art == nil {
 		return agent.VerdictJSON{}, true, ""
 	}
-	revision, err := runner.art.Current(ctx, task.TenantID, task.ID, stageID+"/"+agent.VerdictFileName)
+	revision, err := runner.art.Current(ctx, record.TenantID, record.ID, stageID+"/"+agent.VerdictFileName)
 	if err != nil {
 		if errors.Is(err, artifacts.ErrNoCurrentRevision) {
 			return agent.VerdictJSON{}, true, ""
 		}
-		runner.log.Warn("read verdict artifact: current", "task", task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("read verdict artifact: current", "run", record.ID, "stage", stageID, "error", err)
 		return agent.VerdictJSON{}, true, ""
 	}
-	bytes, err := runner.art.GetBytes(ctx, task.TenantID, revision.ID)
+	bytes, err := runner.art.GetBytes(ctx, record.TenantID, revision.ID)
 	if err != nil {
-		runner.log.Warn("read verdict artifact: bytes", "task", task.ID, "stage", stageID, "error", err)
+		runner.log.Warn("read verdict artifact: bytes", "run", record.ID, "stage", stageID, "error", err)
 		return agent.VerdictJSON{}, true, ""
 	}
 	verdict, parseErr := agent.ParseVerdictJSON(bytes)
 	if parseErr != nil {
-		runner.log.Warn("parse verdict artifact", "task", task.ID, "stage", stageID, "error", parseErr)
+		runner.log.Warn("parse verdict artifact", "run", record.ID, "stage", stageID, "error", parseErr)
 		return agent.VerdictJSON{}, true, parseErr.Error()
 	}
 	return verdict, false, ""
@@ -293,6 +293,6 @@ type verdictPayload struct {
 	Verdict   string `json:"verdict,omitempty"`
 }
 
-func (runner *Runner) emitStageTransition(ctx context.Context, task sqlc.Task, payload verdictPayload) {
-	runner.emit(ctx, task, EvStageTransition, payload)
+func (runner *Runner) emitStageTransition(ctx context.Context, record sqlc.Run, payload verdictPayload) {
+	runner.emit(ctx, record, EvStageTransition, payload)
 }

@@ -16,7 +16,7 @@ import (
 )
 
 // nullStr builds a sql.NullString; empty → invalid (NULL). Used for nullable
-// columns surfaced as NullString by sqlc (e.g. the per-task event filter).
+// columns surfaced as NullString by sqlc (e.g. the per-run event filter).
 func nullStr(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
@@ -44,7 +44,7 @@ type errorInfo struct {
 // Stable error codes. Add as the surface grows.
 const (
 	codeNotFound            = "not_found"
-	codeIllegalTransition   = "illegal_transition" // a task-FSM violation
+	codeIllegalTransition   = "illegal_transition" // a run-FSM violation
 	codeBadInput            = "bad_input"
 	codeUnauthorized        = "unauthorized"
 	codeForbidden           = "forbidden"

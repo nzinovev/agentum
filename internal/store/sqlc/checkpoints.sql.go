@@ -10,41 +10,41 @@ import (
 )
 
 const createCheckpoint = `-- name: CreateCheckpoint :one
-INSERT INTO task_checkpoints (tenant_id, user_id, task_id, label, commit_sha)
+INSERT INTO run_checkpoints (tenant_id, user_id, run_id, label, commit_sha)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (task_id, label) DO UPDATE SET
+ON CONFLICT (run_id, label) DO UPDATE SET
     commit_sha = EXCLUDED.commit_sha,
     created_at = now()
-RETURNING id, tenant_id, user_id, task_id, label, commit_sha, created_at
+RETURNING id, tenant_id, user_id, run_id, label, commit_sha, created_at
 `
 
 type CreateCheckpointParams struct {
 	TenantID  string `json:"tenant_id"`
 	UserID    string `json:"user_id"`
-	TaskID    string `json:"task_id"`
+	RunID     string `json:"run_id"`
 	Label     string `json:"label"`
 	CommitSha string `json:"commit_sha"`
 }
 
 // Upsert a boundary checkpoint (F.6.1 AC #1, #2). The orchestrator owns these;
-// agents cannot. (task_id, label) is unique, so a retry after a crash that
+// agents cannot. (run_id, label) is unique, so a retry after a crash that
 // re-hits the same boundary replaces the SHA rather than duplicating. commit_sha
 // is the immutable full SHA the worktree HEAD pointed at when the boundary was
 // crossed.
-func (q *Queries) CreateCheckpoint(ctx context.Context, arg CreateCheckpointParams) (TaskCheckpoint, error) {
+func (q *Queries) CreateCheckpoint(ctx context.Context, arg CreateCheckpointParams) (RunCheckpoint, error) {
 	row := q.db.QueryRowContext(ctx, createCheckpoint,
 		arg.TenantID,
 		arg.UserID,
-		arg.TaskID,
+		arg.RunID,
 		arg.Label,
 		arg.CommitSha,
 	)
-	var i TaskCheckpoint
+	var i RunCheckpoint
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Label,
 		&i.CommitSha,
 		&i.CreatedAt,
@@ -52,30 +52,30 @@ func (q *Queries) CreateCheckpoint(ctx context.Context, arg CreateCheckpointPara
 	return i, err
 }
 
-const latestCheckpointForTask = `-- name: LatestCheckpointForTask :one
-SELECT id, tenant_id, user_id, task_id, label, commit_sha, created_at FROM task_checkpoints
-WHERE task_id = $1 AND tenant_id = $2
+const latestCheckpointForRun = `-- name: LatestCheckpointForRun :one
+SELECT id, tenant_id, user_id, run_id, label, commit_sha, created_at FROM run_checkpoints
+WHERE run_id = $1 AND tenant_id = $2
 ORDER BY created_at DESC
 LIMIT 1
 `
 
-type LatestCheckpointForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type LatestCheckpointForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
-// The most recent checkpoint for a task — the restore target when the reconciler
-// classifies a crashed worktree as restorable. Returns no rows if the task has
+// The most recent checkpoint for a run — the restore target when the reconciler
+// classifies a crashed worktree as restorable. Returns no rows if the run has
 // no checkpoints yet (the reconciler then falls back to base_commit or surfaces
 // for human attention).
-func (q *Queries) LatestCheckpointForTask(ctx context.Context, arg LatestCheckpointForTaskParams) (TaskCheckpoint, error) {
-	row := q.db.QueryRowContext(ctx, latestCheckpointForTask, arg.TaskID, arg.TenantID)
-	var i TaskCheckpoint
+func (q *Queries) LatestCheckpointForRun(ctx context.Context, arg LatestCheckpointForRunParams) (RunCheckpoint, error) {
+	row := q.db.QueryRowContext(ctx, latestCheckpointForRun, arg.RunID, arg.TenantID)
+	var i RunCheckpoint
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
 		&i.UserID,
-		&i.TaskID,
+		&i.RunID,
 		&i.Label,
 		&i.CommitSha,
 		&i.CreatedAt,
@@ -83,32 +83,32 @@ func (q *Queries) LatestCheckpointForTask(ctx context.Context, arg LatestCheckpo
 	return i, err
 }
 
-const listCheckpointsForTask = `-- name: ListCheckpointsForTask :many
-SELECT id, tenant_id, user_id, task_id, label, commit_sha, created_at FROM task_checkpoints
-WHERE task_id = $1 AND tenant_id = $2
+const listCheckpointsForRun = `-- name: ListCheckpointsForRun :many
+SELECT id, tenant_id, user_id, run_id, label, commit_sha, created_at FROM run_checkpoints
+WHERE run_id = $1 AND tenant_id = $2
 ORDER BY created_at
 `
 
-type ListCheckpointsForTaskParams struct {
-	TaskID   string `json:"task_id"`
+type ListCheckpointsForRunParams struct {
+	RunID    string `json:"run_id"`
 	TenantID string `json:"tenant_id"`
 }
 
 // Ordered oldest-first so the audit trail reads in execution order.
-func (q *Queries) ListCheckpointsForTask(ctx context.Context, arg ListCheckpointsForTaskParams) ([]TaskCheckpoint, error) {
-	rows, err := q.db.QueryContext(ctx, listCheckpointsForTask, arg.TaskID, arg.TenantID)
+func (q *Queries) ListCheckpointsForRun(ctx context.Context, arg ListCheckpointsForRunParams) ([]RunCheckpoint, error) {
+	rows, err := q.db.QueryContext(ctx, listCheckpointsForRun, arg.RunID, arg.TenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []TaskCheckpoint
+	var items []RunCheckpoint
 	for rows.Next() {
-		var i TaskCheckpoint
+		var i RunCheckpoint
 		if err := rows.Scan(
 			&i.ID,
 			&i.TenantID,
 			&i.UserID,
-			&i.TaskID,
+			&i.RunID,
 			&i.Label,
 			&i.CommitSha,
 			&i.CreatedAt,

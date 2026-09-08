@@ -23,9 +23,9 @@ func TestEvaluate(t *testing.T) {
 		name       string
 		input      StageInput
 		wantAction Action
-		wantEvent  engine.TaskEvent // empty for ActionAdvance
-		wantStop   string           // stop_reason
-		wantNext   string           // next stage (ActionAdvance)
+		wantEvent  engine.RunEvent // empty for ActionAdvance
+		wantStop   string          // stop_reason
+		wantNext   string          // next stage (ActionAdvance)
 		wantErr    bool
 	}{
 		{
@@ -186,7 +186,7 @@ func TestEvaluate(t *testing.T) {
 // assertEvalCase runs one Evaluate case and checks every field of the decision.
 // Lifted out of TestEvaluate so the table driver stays a flat loop and the
 // per-case checks live in a function with no nesting-driven complexity.
-func assertEvalCase(t *testing.T, input StageInput, wantAction Action, wantEvent engine.TaskEvent, wantStop, wantNext string, wantErr bool) {
+func assertEvalCase(t *testing.T, input StageInput, wantAction Action, wantEvent engine.RunEvent, wantStop, wantNext string, wantErr bool) {
 	t.Helper()
 	got, err := Evaluate(input)
 	if (err != nil) != wantErr {

@@ -25,7 +25,7 @@ import (
 
 // Server wires the full execution model: the HTTP boundary (api), the runner
 // (the stage loop), the job worker that drives it, and the periodic reconciler
-// that repairs stale leases and orphaned tasks between restarts. One process
+// that repairs stale leases and orphaned runs between restarts. One process
 // runs one worker pool over a shared Postgres-backed queue.
 type Server struct {
 	cfg        config.Config
@@ -66,7 +66,7 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	queries := sqlc.New(dataStore.DB)
 
 	// The execution model: pack source over a configured root, the resolved
-	// execution adapter, per-task worktrees, the artifact revisions store,
+	// execution adapter, per-run worktrees, the artifact revisions store,
 	// the evidence manifest service, and the runner that composes them.
 	packs := pack.NewDirSource(cfg.PacksDir)
 	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
@@ -106,14 +106,14 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		Log:         log,
 	})
 
-	// The reconciler repairs stale job leases AND orphaned running tasks (a
+	// The reconciler repairs stale job leases AND orphaned running runs (a
 	// crash between the FSM transition and EnqueueJob). *sqlc.Queries satisfies
-	// TaskStore directly; QueueStore adapts the queue side. The tenant seam is
+	// RunStore directly; QueueStore adapts the queue side. The tenant seam is
 	// the single-tenant id from config until SSO/RBAC arrive.
 	reconciler := jobs.NewReconciler(jobs.ReconcilerDeps{
 		TenantID:    cfg.TenantID,
 		Queue:       jobs.QueueStore{Q: queries},
-		Tasks:       queries,
+		Runs:        queries,
 		MaxAttempts: cfg.JobMaxAttempts,
 		Log:         log,
 	})
@@ -180,9 +180,9 @@ func (server *Server) Handler() http.Handler {
 // Run serves HTTP, the job worker, and the periodic reconciler until ctx is
 // cancelled, then shuts down gracefully. The reconciler runs its first pass
 // before the worker starts, so a crashed worker's stale jobs and any orphaned
-// tasks are repaired before any new job is claimed.
+// runs are repaired before any new job is claimed.
 func (server *Server) Run(ctx context.Context) error {
-	// Warm the runtime probe before the worker starts: the first task never pays
+	// Warm the runtime probe before the worker starts: the first run never pays
 	// the subprocess, and the boot log records the runtime version — or the
 	// failure, which is a probe result, not a boot failure; the run that needs
 	// the runtime surfaces it.

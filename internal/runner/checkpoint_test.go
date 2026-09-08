@@ -30,20 +30,20 @@ func TestRunner_DeliveryChecksCommitBoundToCheckpoint(t *testing.T) {
 	t.Parallel()
 	repo := seedRepoWithChecks(t,
 		"api: agentum/v1\nchecks:\n  - name: build\n    command: [\"true\"]\n    required: true\n")
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "Tcb", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "Tcb", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// writingAdapter writes a file to the worktree — agent work the orchestrator
 	// must commit as a checkpoint before checks bind to it.
 	adapter := &writingAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}, writeName: "feature.txt", writeBody: "agent work"}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tcb", "tn", "us")); err != nil {
@@ -61,7 +61,7 @@ func TestRunner_DeliveryChecksCommitBoundToCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve branch tip: %v", err)
 	}
-	diff := mustGitRaw(t, repo, "diff", "--name-only", task.BaseCommit.String+".."+tip)
+	diff := mustGitRaw(t, repo, "diff", "--name-only", record.BaseCommit.String+".."+tip)
 	if !strings.Contains(diff, "feature.txt") {
 		t.Fatalf("base..result diff = %q, want feature.txt (the agent's work must be delivered, not discarded)", diff)
 	}
@@ -82,7 +82,7 @@ func TestRunner_DeliveryChecksFailOnDirtyTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve base: %v", err)
 	}
-	wt, err := manager.Create(context.Background(), repo, "task-dirty", baseCommit)
+	wt, err := manager.Create(context.Background(), repo, "run-dirty", baseCommit)
 	if err != nil {
 		t.Fatalf("create worktree: %v", err)
 	}
@@ -91,20 +91,20 @@ func TestRunner_DeliveryChecksFailOnDirtyTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Td", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", BaseCommit: nullStr(baseCommit),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: &scriptAdapter{}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
-	run := stageRun{task: task, project: proj, worktree: wt}
+	run := stageRun{record: record, project: proj, worktree: wt}
 
 	_, _, enforceErr := runner.enforceProjectChecks(context.Background(), run)
 	if !errors.Is(enforceErr, ErrDirtyTreeAtDeliveryBoundary) {
@@ -113,7 +113,7 @@ func TestRunner_DeliveryChecksFailOnDirtyTree(t *testing.T) {
 }
 
 // TestRunner_DeliveryChecksFailOnMissingBaseCommit is the E4 fail-closed test:
-// reaching the delivery boundary without a resolved base_commit fails the task
+// reaching the delivery boundary without a resolved base_commit fails the run
 // rather than routing to an empty set and MandatoryPassed()=true vacuously. This
 // is the mirror image of the fail-open defects PR C and PR D fixed — fail-closed
 // at the one boundary whose entire purpose is to be fail-closed.
@@ -126,18 +126,18 @@ func TestRunner_DeliveryChecksFailOnMissingBaseCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve base: %v", err)
 	}
-	wt, err := manager.Create(context.Background(), repo, "task-nobase", baseCommit)
+	wt, err := manager.Create(context.Background(), repo, "run-nobase", baseCommit)
 	if err != nil {
 		t.Fatalf("create worktree: %v", err)
 	}
-	// Task with NO base_commit — the broken state loadRegistryAtBaseCommit must
+	// Run with NO base_commit — the broken state loadRegistryAtBaseCommit must
 	// reject rather than treat as "no registry."
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tn", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", // BaseCommit deliberately unset
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	nobasePack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
@@ -145,7 +145,7 @@ func TestRunner_DeliveryChecksFailOnMissingBaseCommit(t *testing.T) {
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: nobasePack}, Adapter: &scriptAdapter{}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
-	run := stageRun{task: task, project: proj, worktree: wt}
+	run := stageRun{record: record, project: proj, worktree: wt}
 
 	_, _, enforceErr := runner.enforceProjectChecks(context.Background(), run)
 	if enforceErr == nil {
@@ -214,7 +214,7 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 // must not silently seal a manifest that asserts "checks passed at X" alongside
 // "delivered Y". The divergence is recorded as an evidence gap (so the sealed
 // manifest reads incomplete) and emitted as a distinct event (so it is visible
-// on the stream). The task is not failed — the human already approved, and
+// on the stream). The run is not failed — the human already approved, and
 // failing at teardown would be a confusing terminal state.
 //
 // The verified commit is read directly from body.checks.commit, not proxied
@@ -225,7 +225,7 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 // checkpoint.
 func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Td", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
 		PipelinePack: "test@0.1.0",
 		// result_commit recorded at teardown, AFTER a human approved and something
@@ -233,7 +233,7 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 		ResultCommit: nullStr("sha-result-tip"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 	})
@@ -242,7 +242,7 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 	// comparison reads body.checks.commit, not a checkpoint proxy.
 	runner.mfst = &fakeManifestService{checksCommitValue: "sha-verified"}
 
-	runner.verifyDeliveryCommitBinding(context.Background(), task)
+	runner.verifyDeliveryCommitBinding(context.Background(), record)
 
 	// A distinct event names both SHAs so the divergence is visible on the stream.
 	found := false
@@ -266,18 +266,18 @@ func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testin
 // reviewer is not surfaced noise for the normal case.
 func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
 		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-same"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 	})
 	runner.mfst = &fakeManifestService{checksCommitValue: "sha-same"}
 
-	runner.verifyDeliveryCommitBinding(context.Background(), task)
+	runner.verifyDeliveryCommitBinding(context.Background(), record)
 
 	for _, event := range store.events {
 		if event.Type == EvDeliveryCommitDiverged {
@@ -298,19 +298,19 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 // divergence would be a claim we cannot support either.
 func TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tu", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
 		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-delivered"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 	})
 	manifestFake := &fakeManifestService{checksCommitErr: errors.New("connection reset by peer")}
 	runner.mfst = manifestFake
 
-	runner.verifyDeliveryCommitBinding(context.Background(), task)
+	runner.verifyDeliveryCommitBinding(context.Background(), record)
 
 	manifestFake.mu.Lock()
 	gaps := append([]manifest.EvidenceGap(nil), manifestFake.gaps...)
@@ -332,24 +332,24 @@ func TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap(t *testin
 }
 
 // TestRunner_VerifyDeliveryCommitBinding_NoRecordedCommitIsQuiet separates the
-// two empty cases the previous test depends on: a task with no recorded checks
+// two empty cases the previous test depends on: a run with no recorded checks
 // commit (never reached delivery, or the project defines no checks) is an
 // absence, not a read failure, and must record nothing.
 func TestRunner_VerifyDeliveryCommitBinding_NoRecordedCommitIsQuiet(t *testing.T) {
 	t.Parallel()
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tn", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "done",
 		PipelinePack: "test@0.1.0", ResultCommit: nullStr("sha-delivered"),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: t.TempDir(), Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: scriptPack("spec", nil)}, Adapter: &scriptAdapter{},
 	})
 	manifestFake := &fakeManifestService{} // no checks commit, no error
 	runner.mfst = manifestFake
 
-	runner.verifyDeliveryCommitBinding(context.Background(), task)
+	runner.verifyDeliveryCommitBinding(context.Background(), record)
 
 	manifestFake.mu.Lock()
 	gapCount := len(manifestFake.gaps)
@@ -381,18 +381,18 @@ func TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite(t *testing.T) {
 	}
 	// auto_if_clean stage → terminal. The writingAdapter writes an undeclared
 	// file, so the gate must pause rather than auto-advance.
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "Tg", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "Tg", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &writingAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}, writeName: "undeclared.txt", writeBody: "the agent touched this"}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter,
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter,
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tg", "tn", "us")); err != nil {
@@ -412,19 +412,19 @@ func TestRunner_AutoIfCleanGateAdvancesOnCleanTree(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAutoIfClean, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// scriptAdapter writes nothing — the tree stays clean.
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tc", "tn", "us")); err != nil {

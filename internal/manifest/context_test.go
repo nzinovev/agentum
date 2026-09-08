@@ -130,7 +130,7 @@ func TestEvidenceComplete_FailedContextProbeSealsFalse(t *testing.T) {
 }
 
 // TestDiffManifests_ContextSkillChange: two runs differing only in one skill
-// hash surface a context-skills delta, even with identical task/commit/config.
+// hash surface a context-skills delta, even with identical request/commit/config.
 func TestDiffManifests_ContextSkillChange(t *testing.T) {
 	t.Parallel()
 	left := Body{Context: &ContextEvidence{Skills: []SkillRef{{Name: "user-skill", Hash: "old"}}}}

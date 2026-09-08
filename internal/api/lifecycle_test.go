@@ -87,7 +87,7 @@ func TestHumanDecisionPatch_OnlyCarriesGateDecisions(t *testing.T) {
 }
 
 // TestCurrentStageOr_FallsBackWhenUnset keeps the Stage field's fallback honest:
-// a task that has not entered a stage yet must not record an empty stage that a
+// a run that has not entered a stage yet must not record an empty stage that a
 // reviewer cannot place, and a set stage must pass through verbatim.
 func TestCurrentStageOr_FallsBackWhenUnset(t *testing.T) {
 	t.Parallel()
@@ -130,7 +130,7 @@ func TestRecordHumanDecisionTx_NilManifestServiceIsNoOp(t *testing.T) {
 	patch := humanDecisionPatch("impl", gateCancel, decisionRejected, "alice", time.Now().UTC())
 	apiInst := newEditAPI(nil) // mfst is nil
 	for _, policy := range []recordPolicy{recordLenient, recordStrict} {
-		if err := apiInst.recordHumanDecisionTx(context.Background(), nil, authzPrincipal(), "task-1", patch, policy); err != nil {
+		if err := apiInst.recordHumanDecisionTx(context.Background(), nil, authzPrincipal(), "run-1", patch, policy); err != nil {
 			t.Errorf("nil manifest service under policy %v returned %v; it must be a no-op", policy, err)
 		}
 	}

@@ -4,7 +4,7 @@
 // records the outcome. A heartbeat lets the boot recovery pass detect a worker
 // that died mid-run and re-queue its job, bounded by a poison-attempts limit.
 //
-// The queue lives in Postgres (no Redis): it is transactional with task state,
+// The queue lives in Postgres (no Redis): it is transactional with run state,
 // needs no new infrastructure, and survives a single-host restart.
 package jobs
 
@@ -22,7 +22,7 @@ import (
 
 // Handler executes one job. The worker calls it after claiming; nil = success,
 // error = the job is failed (last_error recorded). A handler that reaches a
-// pause point returns nil (the task is already paused in the DB).
+// pause point returns nil (the run is already paused in the DB).
 type Handler interface {
 	Handle(ctx context.Context, job sqlc.Job) error
 }
@@ -169,7 +169,7 @@ func (worker *Worker) run(ctx context.Context, job sqlc.Job) {
 		}
 		return
 	}
-	worker.log.Warn("job failed", "job", job.ID, "task", job.TaskID, "kind", job.Kind, "error", err)
+	worker.log.Warn("job failed", "job", job.ID, "run", job.RunID, "kind", job.Kind, "error", err)
 	if failErr := worker.store.FailJob(ctx, job.ID, err.Error()); failErr != nil {
 		worker.log.Error("fail job", "job", job.ID, "error", failErr)
 	}
@@ -203,15 +203,15 @@ func (worker *Worker) Recover(ctx context.Context) error {
 	}
 	for _, job := range stale {
 		if int(job.Attempts) >= worker.maxAttempts {
-			// Over the bound: fail it rather than re-queueing forever. The task
+			// Over the bound: fail it rather than re-queueing forever. The run
 			// is left in its current state; the operator inspects and resumes.
 			if failErr := worker.store.FailJob(ctx, job.ID, fmt.Sprintf("exceeded max attempts (%d)", worker.maxAttempts)); failErr != nil {
 				worker.log.Error("recover: fail poison job", "job", job.ID, "error", failErr)
 			}
-			worker.log.Warn("recover: poison job failed", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+			worker.log.Warn("recover: poison job failed", "job", job.ID, "run", job.RunID, "attempts", job.Attempts)
 			continue
 		}
-		worker.log.Info("recover: requeued stale job", "job", job.ID, "task", job.TaskID, "attempts", job.Attempts)
+		worker.log.Info("recover: requeued stale job", "job", job.ID, "run", job.RunID, "attempts", job.Attempts)
 	}
 	return nil
 }

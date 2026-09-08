@@ -63,24 +63,24 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 
 // runDeliveryChecksCase seeds a repo with the case's registry (if any), drives a
 // single auto stage to the terminal boundary where delivery checks are enforced,
-// and asserts the resulting task state and Handle error. The check commands use
+// and asserts the resulting run state and Handle error. The check commands use
 // `true`/`false`, real binaries on the linux host these runner tests target.
 func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
 	t.Helper()
 	repo := seedRepoWithChecks(t, tc.checksYAML)
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	task := sqlc.Task{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	record := sqlc.Run{ID: "Tc", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
@@ -133,7 +133,7 @@ type deliveryCheckCase struct {
 }
 
 // TestRunner_DeliveryChecksUnknownPackCheckFails proves a pack referencing an
-// unregistered check name fails the task rather than running an arbitrary
+// unregistered check name fails the run rather than running an arbitrary
 // command — the registry is the only source of commands.
 func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 	t.Parallel()
@@ -150,20 +150,20 @@ func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 		t.Fatalf("commit checks: %v", err)
 	}
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
-	taskPack.Checks = pack.CheckPolicy{Required: []string{"nope"}}
-	task := sqlc.Task{ID: "Tu", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack.Checks = pack.CheckPolicy{Required: []string{"nope"}}
+	record := sqlc.Run{ID: "Tu", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
 	executor := checks.NewExecutor(checks.ExecutorDeps{})
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: executor,
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: executor,
 	})
 
 	if err := runner.Handle(context.Background(), job("run", "Tu", "tn", "us")); err == nil {
@@ -175,7 +175,7 @@ func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 }
 
 // TestPackAndTaskCheckRequests covers the pure mapping helpers that turn the
-// pack policy and the task input JSON into checks.Request lists.
+// pack policy and the run input JSON into checks.Request lists.
 func TestPackAndTaskCheckRequests(t *testing.T) {
 	t.Run("pack policy", func(t *testing.T) {
 		requests := packCheckRequests(&pack.Pack{Checks: pack.CheckPolicy{
@@ -190,7 +190,7 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 			t.Error("nil pack must yield nil requests")
 		}
 	})
-	t.Run("task overrides", func(t *testing.T) {
+	t.Run("run overrides", func(t *testing.T) {
 		// The typed mapping must produce exactly the requests the old lenient
 		// JSON parse did for a well-formed input — same names, same flags.
 		overrides, parseErr := taskinput.ParseOverrides(
@@ -198,14 +198,14 @@ func TestPackAndTaskCheckRequests(t *testing.T) {
 		if parseErr != nil {
 			t.Fatalf("parse: %v", parseErr)
 		}
-		requests := taskCheckRequests(overrides)
+		requests := runCheckRequests(overrides)
 		if len(requests) != 2 {
 			t.Fatalf("expected 2 requests, got %d", len(requests))
 		}
 		assertRequest(t, requests[0], "t1", true)
 		assertRequest(t, requests[1], "t2", false)
-		// The zero value (a task with no overrides) yields no requests.
-		if taskCheckRequests(taskinput.Overrides{}) != nil {
+		// The zero value (a run with no overrides) yields no requests.
+		if runCheckRequests(taskinput.Overrides{}) != nil {
 			t.Error("zero overrides must yield nil")
 		}
 	})
@@ -224,7 +224,7 @@ func assertRequest(t *testing.T, req checks.Request, name string, required bool)
 }
 
 // TestRunner_MalformedStoredOverridesFailRun is the regression test: a corrupt
-// tasks.overrides column must fail the run loudly, not silently resolve a
+// runs.overrides column must fail the run loudly, not silently resolve a
 // smaller check set than the operator asked for. The old lenient parse
 // swallowed the unmarshal error and returned nil — the run continued gated on
 // less than the operator believed. The assertion is on the FAILURE (state
@@ -236,23 +236,23 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		t.Fatalf("setup repo: %v", err)
 	}
 
-	taskPack := scriptPack("spec", map[string]pack.Stage{
+	runPack := scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})
 	// A column only writable by something that bypassed the API (the boundary
 	// rejects this shape with a 400) — the invariant break this guards.
-	task := sqlc.Task{
+	record := sqlc.Run{
 		ID: "Tm", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running",
 		PipelinePack: "test@0.1.0", Overrides: json.RawMessage(`{not json`),
 	}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
 		"spec": {SchemaVersion: "1", Status: agent.StatusComplete},
 	}}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
 	handleErr := runner.Handle(context.Background(), job("run", "Tm", "tn", "us"))

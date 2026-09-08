@@ -330,7 +330,7 @@ func TestEnsureInside_CaseFoldingOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("case folding only applies on Windows")
 	}
-	root := `D:\repos\agentum\.agentum\worktrees\task-1`
+	root := `D:\repos\agentum\.agentum\worktrees\run-1`
 	if err := ensureInside(root, strings.ToUpper(root)+`\SPEC.MD`); err != nil {
 		t.Errorf("ensureInside rejected a case variant of the same path: %v", err)
 	}

@@ -43,7 +43,7 @@ project per tenant; registration is idempotent on `(tenant_id, repo_identity)`
   keeps the same project (and its run history); the stored `repo_path` just
   points at the new location. See `docs/domain-model.md` for the level
   vocabulary (workspace / project / repository / checkout).
-- `tasks.project_id` is a real FK; a run cannot exist without a project.
+- `runs.project_id` is a real FK; a run cannot exist without a project.
 - `related_projects` is an **inert seam**: stored now, grants nothing.
   Cross-project / sibling-folder access lands in Epic 6 as a path-scoped
   `fs.read` capability derived from this set — the configured relation is the
@@ -55,7 +55,7 @@ See `docs/api.md#projects` for the endpoint surface.
 
 Each run executes in its own git worktree off the run's pinned working copy
 (C5 — isolated workspace per run). A run pins its copy once at first start
-(`tasks.checkout_path`, resolve-once like `base_commit`) and executes there
+(`runs.checkout_path`, resolve-once like `base_commit`) and executes there
 for its whole life — worktree creation, checks, evidence, teardown — even if
 the project is later re-registered from another clone. A pinned copy that is
 gone or holds a different repository pauses the run
@@ -86,7 +86,7 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | `continue` | resume after `open_questions` / `user_stop` | `POST .../continue` |
 | `advance` | next stage, fresh session | `POST .../advance` |
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
-| `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failTask` |
+| `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failRun` |
 
 `run` / `continue` / `advance` enter the shared **stage loop** (`04 §7.2`):
 
@@ -303,8 +303,8 @@ Branch deletion is a separate, explicit `cleanup` action (below). It is
 enqueued by:
 
 - `handleInvocationApprove` — after the run moves to `done`.
-- `handleCancelTask` — after the run moves to `cancelled`.
-- `failTask` (best-effort) — when a run moves to `failed`.
+- `handleCancelRun` — after the run moves to `cancelled`.
+- `failRun` (best-effort) — when a run moves to `failed`.
 
 Before removing the worktree, the teardown job captures the tip of
 `agentum/<run-id>` as `result_commit` on the run's row — the immutable record of
@@ -383,10 +383,10 @@ for safe local egress.
 
 ### Checkpoints
 
-The orchestrator owns boundary checkpoints (`task_checkpoints` table): immutable
+The orchestrator owns boundary checkpoints (`run_checkpoints` table): immutable
 SHAs recorded at stage boundaries. The runner captures `base` (the lineage
 anchor, a commit that already exists) plus a `post-<stage>` checkpoint after
-each successful stage invocation. `(task_id, label)` is unique, so a retry that
+each successful stage invocation. `(run_id, label)` is unique, so a retry that
 re-crosses a boundary upserts rather than duplicates.
 
 The orchestrator authors the post-stage checkpoint commit itself
@@ -706,7 +706,7 @@ the same content share one blob.
 
 ```sql
 artifact_revisions(
-  id, tenant_id, user_id, task_id,
+  id, tenant_id, user_id, run_id,
   name, kind,                          -- identity within the run
   content_hash, content_size,          -- content addressing
   action_type,                         -- create | edit
@@ -834,7 +834,7 @@ race whatever the bytes say.
 |---|---|---|
 | Init | `POST /runs` creates a manifest row (empty body) | API |
 | Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage / human-gate decisions. The merge base is the body read under the row lock inside the write transaction, so two concurrent writes cannot lose each other's contribution. | runner / API |
-| Seal | At terminal state, `Seal(reason)` derives `body.missing` and `body.evidence_complete` from the body under the row lock and freezes it. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failTask`) |
+| Seal | At terminal state, `Seal(reason)` derives `body.missing` and `body.evidence_complete` from the body under the row lock and freezes it. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failRun`) |
 | Correct | `POST /runs/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot. Corrections chain: correction N's body is correction N-1's body with the patch merged in, so the newest correction is the authoritative state by construction. | API |
 
 **Concurrency.** `AddEvidence` computes its merge from the body read under the

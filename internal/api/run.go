@@ -19,7 +19,7 @@ import (
 	"github.com/nzinovev/agentum/internal/worktree"
 )
 
-// taskResponse is the public task shape. tenant_id and user_id are
+// runResponse is the public run shape. tenant_id and user_id are
 // intentionally absent: identity is implicit in the Principal, not echoed
 // back. description is the request; overrides is how this run differs from the
 // project defaults — orchestrator-facing, echoed for the author but never
@@ -28,7 +28,7 @@ import (
 // base_commit the once-resolved immutable lineage anchor, result_commit the
 // recorded tip at terminal teardown, and branch the resolvable delivery ref
 // that survives worktree teardown.
-type taskResponse struct {
+type runResponse struct {
 	ID           string          `json:"id"`
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
@@ -44,25 +44,25 @@ type taskResponse struct {
 	UpdatedAt    string          `json:"updated_at"`
 }
 
-func toTaskResponse(task sqlc.Task) taskResponse {
-	overrides := task.Overrides
+func toRunResponse(run sqlc.Run) runResponse {
+	overrides := run.Overrides
 	if len(overrides) == 0 {
 		overrides = json.RawMessage("{}")
 	}
-	return taskResponse{
-		ID:           task.ID,
-		ProjectID:    task.ProjectID,
-		PipelinePack: task.PipelinePack,
-		Title:        task.Title,
-		Description:  task.Description,
+	return runResponse{
+		ID:           run.ID,
+		ProjectID:    run.ProjectID,
+		PipelinePack: run.PipelinePack,
+		Title:        run.Title,
+		Description:  run.Description,
 		Overrides:    overrides,
-		State:        task.State,
-		BaseRef:      task.BaseRef,
-		BaseCommit:   nullStringOr(task.BaseCommit),
-		ResultCommit: nullStringOr(task.ResultCommit),
-		Branch:       worktree.BranchFor(task.ID),
-		CreatedAt:    task.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:    task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		State:        run.State,
+		BaseRef:      run.BaseRef,
+		BaseCommit:   nullStringOr(run.BaseCommit),
+		ResultCommit: nullStringOr(run.ResultCommit),
+		Branch:       worktree.BranchFor(run.ID),
+		CreatedAt:    run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:    run.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
@@ -75,11 +75,11 @@ func nullStringOr(value sql.NullString) string {
 	return ""
 }
 
-// taskCreateRequest is the POST /runs body. The request half — title +
+// runCreateRequest is the POST /runs body. The request half — title +
 // description — reaches the model; the overrides half configures the run and
 // is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
 // `input` blob is a loud 400, not a silently dropped key that weakens the run.
-type taskCreateRequest struct {
+type runCreateRequest struct {
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
 	Title        string          `json:"title"`
@@ -88,35 +88,35 @@ type taskCreateRequest struct {
 	BaseRef      string          `json:"base_ref"`
 }
 
-// maxTaskCreateBytes caps the create body on the transport. It must be sized
+// maxRunCreateBytes caps the create body on the transport. It must be sized
 // for the ENCODED body while the field budgets are measured on the DECODED
 // string, and those differ by more than a rounding error: a client that
 // ASCII-escapes non-ASCII (the default for Python's json.dumps and Jackson)
 // sends a Cyrillic description at ~2.5x its UTF-8 size, and a per-character
 // worst case (an escaped control char, 1 byte -> 6) is 6x. Sizing the cap at
 // the budget plus a few KiB would reject an in-budget Russian description as
-// malformed JSON — and the repo's own example task is Russian.
+// malformed JSON — and the repo's own example run is Russian.
 //
 // The cap is memory hygiene, not the contract: taskinput.Validate owns the
 // real limit, on the decoded string, where the author can be told which field
 // is too long.
-const maxTaskCreateBytes = 6*taskinput.MaxDescriptionBytes + (16 << 10)
+const maxRunCreateBytes = 6*taskinput.MaxDescriptionBytes + (16 << 10)
 
-// parseTaskCreate turns the raw body into the typed, validated request. Pure
+// parseRunCreate turns the raw body into the typed, validated request. Pure
 // (no DB, no HTTP): every validation rule of the boundary is exercisable
 // without a database. The secret scan runs here so a credential-shaped
 // description is refused before any row exists; ErrSecretDetected flows out
 // for the handler to map.
-func parseTaskCreate(body []byte) (taskCreateRequest, taskinput.Request, error) {
-	var req taskCreateRequest
+func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
+	var req runCreateRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
-		return taskCreateRequest{}, taskinput.Request{}, err
+		return runCreateRequest{}, taskinput.Request{}, err
 	}
 	overrides, err := taskinput.ParseOverrides(req.Overrides)
 	if err != nil {
-		return taskCreateRequest{}, taskinput.Request{}, err
+		return runCreateRequest{}, taskinput.Request{}, err
 	}
 	typed := taskinput.Request{
 		Title:       req.Title,
@@ -124,27 +124,27 @@ func parseTaskCreate(body []byte) (taskCreateRequest, taskinput.Request, error) 
 		Overrides:   overrides,
 	}
 	if err := typed.Validate(); err != nil {
-		return taskCreateRequest{}, taskinput.Request{}, err
+		return runCreateRequest{}, taskinput.Request{}, err
 	}
 	if scanErr := scanRequestForCredentials(typed); scanErr != nil {
-		return taskCreateRequest{}, taskinput.Request{}, scanErr
+		return runCreateRequest{}, taskinput.Request{}, scanErr
 	}
 	return req, typed, nil
 }
 
 // scanRequestForCredentials is the containment guard for the request fields.
 // BOTH title and description are scanned: each is delivered verbatim to a
-// model through the routing block's Task section and recorded verbatim in the
-// evidence manifest, which is the whole justification for scanning either.
-// Scanning only the description would leave the same leak one field to the
-// left.
+// model through the routing block's requested-work section and recorded
+// verbatim in the evidence manifest, which is the whole justification for
+// scanning either. Scanning only the description would leave the same leak
+// one field to the left.
 //
 // NewProseScanner, not NewDefaultScanner: these are sentences a human wrote,
 // so only the credential-shape rules apply. The label-context rules reject
-// ordinary task descriptions ("Add Bearer authentication to /settings"), and
-// an author who cannot create the task has no way to override the refusal.
+// ordinary run descriptions ("Add Bearer authentication to /settings"), and
+// an author who cannot create the run has no way to override the refusal.
 //
-// PolicyReject, not redact: a redacted task request is a corrupted task
+// PolicyReject, not redact: a redacted run request is a corrupted run
 // request, and the author is present to fix it.
 func scanRequestForCredentials(request taskinput.Request) error {
 	scanner := artifacts.NewProseScanner(artifacts.PolicyReject)
@@ -155,18 +155,18 @@ func scanRequestForCredentials(request taskinput.Request) error {
 		{name: "title", text: request.Title},
 		{name: "description", text: request.Description},
 	} {
-		if _, scanErr := scanner.Scan(field.name, "task_request", []byte(field.text)); scanErr != nil {
+		if _, scanErr := scanner.Scan(field.name, "run_request", []byte(field.text)); scanErr != nil {
 			return scanErr
 		}
 	}
 	return nil
 }
 
-// writeTaskCreateError maps parseTaskCreate failures onto the boundary's HTTP
+// writeRunCreateError maps parseRunCreate failures onto the boundary's HTTP
 // contract: everything malformed or over-budget is a 400; a detected
 // credential is a 422 bad_input, the same mapping artifact_edit.go uses for
 // ErrSecretDetected (do not invent a new code).
-func writeTaskCreateError(w http.ResponseWriter, err error) {
+func writeRunCreateError(w http.ResponseWriter, err error) {
 	if errors.Is(err, artifacts.ErrSecretDetected) {
 		writeError(w, http.StatusUnprocessableEntity, codeBadInput, err.Error())
 		return
@@ -174,13 +174,13 @@ func writeTaskCreateError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 }
 
-// handleCreateTask POST /api/v1/runs
+// handleCreateRun POST /api/v1/runs
 // Body: {project_id, pipeline_pack, title, description, overrides?, base_ref?}.
 // tenant/user come from the Principal, never the body. The stored overrides
 // are the canonical serialization, so two identically-valued requests produce
 // identical rows and identical revisions.
-func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requireAccess(w, r, authz.ActionTaskCreate, "")
+func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requireAccess(w, r, authz.ActionRunCreate, "")
 	if !ok {
 		return
 	}
@@ -196,7 +196,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// own, so the leak inspection is suppressed rather than answered with a
 	// Close that would imply an ownership this handler does not have.
 	//noinspection GoResourceLeak
-	bodyBytes, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTaskCreateBytes))
+	bodyBytes, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRunCreateBytes))
 	if readErr != nil {
 		var toolarge *http.MaxBytesError
 		if errors.As(readErr, &toolarge) {
@@ -207,12 +207,12 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "could not read request body: "+readErr.Error())
 		return
 	}
-	req, typed, parseErr := parseTaskCreate(bodyBytes)
+	req, typed, parseErr := parseRunCreate(bodyBytes)
 	if parseErr != nil {
-		writeTaskCreateError(w, parseErr)
+		writeRunCreateError(w, parseErr)
 		return
 	}
-	// title is deliberately absent here: parseTaskCreate already rejected a
+	// title is deliberately absent here: parseRunCreate already rejected a
 	// blank one through taskinput.Validate, with a message naming the field.
 	if req.ProjectID == "" || req.PipelinePack == "" {
 		writeError(w, http.StatusBadRequest, codeBadInput, "project_id and pipeline_pack are required")
@@ -233,7 +233,7 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := api.queries.CreateTask(r.Context(), sqlc.CreateTaskParams{
+	run, err := api.queries.CreateRun(r.Context(), sqlc.CreateRunParams{
 		TenantID:     principal.TenantID,
 		UserID:       principal.UserID,
 		ProjectID:    req.ProjectID,
@@ -244,34 +244,34 @@ func (api *API) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		BaseRef:      req.BaseRef,
 	})
 	if err != nil {
-		logUnexpected(api.log, err, "CreateTask")
+		logUnexpected(api.log, err, "CreateRun")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
-	// Initialize the evidence manifest for the task. Best-effort: a failure
-	// here is logged but does not fail the task creation — the runner's
+	// Initialize the evidence manifest for the run. Best-effort: a failure
+	// here is logged but does not fail the run creation — the runner's
 	// recordInitialEvidence is a backstop, and the read handlers return a
 	// clear "not initialized" 404 rather than crashing.
 	if api.mfst != nil {
-		if initErr := api.mfst.Init(r.Context(), principal.TenantID, principal.UserID, task.ID); initErr != nil {
-			api.log.Warn("init manifest at task creation", "task", task.ID, "error", initErr)
+		if initErr := api.mfst.Init(r.Context(), principal.TenantID, principal.UserID, run.ID); initErr != nil {
+			api.log.Warn("init manifest at run creation", "run", run.ID, "error", initErr)
 		}
 	}
-	writeJSON(w, http.StatusCreated, toTaskResponse(task))
+	writeJSON(w, http.StatusCreated, toRunResponse(run))
 }
 
-// handleGetTask GET /api/v1/runs/{id}
-func (api *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	_, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskRead, "GetTask")
+// handleGetRun GET /api/v1/runs/{id}
+func (api *API) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	_, run, ok := api.requireRunForAction(w, r, authz.ActionRunRead, "GetRun")
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, toTaskResponse(task))
+	writeJSON(w, http.StatusOK, toRunResponse(run))
 }
 
-// handleListTasks GET /api/v1/runs?project_id=...&limit=...&offset=...
-func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requireAccess(w, r, authz.ActionTaskList, "")
+// handleListRuns GET /api/v1/runs?project_id=...&limit=...&offset=...
+func (api *API) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requireAccess(w, r, authz.ActionRunList, "")
 	if !ok {
 		return
 	}
@@ -284,35 +284,35 @@ func (api *API) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	limit := clampInt(queryInt(r, "limit", 50), 1, 200)
 	offset := clampInt(queryInt(r, "offset", 0), 0, 10000)
 
-	tasks, err := api.queries.ListTasksByProject(r.Context(), sqlc.ListTasksByProjectParams{
+	runs, err := api.queries.ListRunsByProject(r.Context(), sqlc.ListRunsByProjectParams{
 		TenantID:  principal.TenantID,
 		ProjectID: projectID,
 		Limit:     int32(limit),
 		Offset:    int32(offset),
 	})
 	if err != nil {
-		logUnexpected(api.log, err, "ListTasksByProject")
+		logUnexpected(api.log, err, "ListRunsByProject")
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 		return
 	}
-	resp := make([]taskResponse, 0, len(tasks))
-	for _, task := range tasks {
-		resp = append(resp, toTaskResponse(task))
+	resp := make([]runResponse, 0, len(runs))
+	for _, run := range runs {
+		resp = append(resp, toRunResponse(run))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleStartTask POST /api/v1/runs/{id}/start
+// handleStartRun POST /api/v1/runs/{id}/start
 // Transitions created -> running through engine.Next and enqueues a run job.
 // The worker (not this request) drives the stages; the handler returns as soon
 // as the job is queued. An illegal transition is a 409, never a silent write.
-func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
-	principal, task, ok := api.requireTaskForAction(w, r, authz.ActionTaskStart, "GetTask")
+func (api *API) handleStartRun(w http.ResponseWriter, r *http.Request) {
+	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunStart, "GetRun")
 	if !ok {
 		return
 	}
 
-	next, err := engine.Next(engine.TaskState(task.State), engine.EventStart)
+	next, err := engine.Next(engine.RunState(run.State), engine.EventStart)
 	if err != nil {
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
 		return
@@ -320,11 +320,11 @@ func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 
 	// Transactional outbox (F.6.1 AC #6): the FSM transition and the run-job
 	// enqueue commit in one tx. A failed enqueue rolls back the transition, so
-	// the task can never be left running with no driver intent.
-	var updated sqlc.Task
+	// the run can never be left running with no driver intent.
+	var updated sqlc.Run
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
-		transitioned, transitionErr := qtx.UpdateTaskState(r.Context(), sqlc.UpdateTaskStateParams{
-			ID:       task.ID,
+		transitioned, transitionErr := qtx.UpdateRunState(r.Context(), sqlc.UpdateRunStateParams{
+			ID:       run.ID,
 			TenantID: principal.TenantID,
 			State:    string(next),
 		})
@@ -332,7 +332,7 @@ func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 			return transitionErr
 		}
 		if _, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, TaskID: task.ID, Kind: "run",
+			TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID, Kind: "run",
 			Payload: []byte("{}"),
 		}); enqueueErr != nil {
 			return enqueueErr
@@ -340,11 +340,11 @@ func (api *API) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		updated = transitioned
 		return nil
 	}); err != nil {
-		logUnexpected(api.log, err, "StartTask tx")
+		logUnexpected(api.log, err, "StartRun tx")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, toTaskResponse(updated))
+	writeJSON(w, http.StatusOK, toRunResponse(updated))
 }
 
 func queryInt(r *http.Request, key string, def int) int {

@@ -2,7 +2,7 @@
 //
 // The permission DECISION lives in internal/authz — this file is only the
 // HTTP adaptation of it: turn "no principal" into a 401, turn a denied
-// decision into a 403, and (for the handlers that act on a task) load the row
+// decision into a 403, and (for the handlers that act on a run) load the row
 // behind the {id} path value. That adaptation needs this package's unexported
 // response helpers and the *API dependencies, so it stays in package api
 // rather than becoming a package of its own; what it must NOT do is live
@@ -58,7 +58,7 @@ func requireAccess(w http.ResponseWriter, r *http.Request, action, resource stri
 
 // authorize is requireAccess's second half, for the handlers that already
 // hold a principal and must authorize a SECOND resource (the manifest diff's
-// ?other= task). Writes the 403 itself.
+// ?other= run). Writes the 403 itself.
 func authorize(w http.ResponseWriter, r *http.Request, principal authz.Principal, action, resource string) bool {
 	if decision := authz.Can(r.Context(), principal, action, resource); !decision.Allowed {
 		writeError(w, http.StatusForbidden, codeForbidden, decision.Reason)
@@ -67,46 +67,46 @@ func authorize(w http.ResponseWriter, r *http.Request, principal authz.Principal
 	return true
 }
 
-// requireTaskRead is requireAccess for the commonest case: task:read on the
+// requireRunRead is requireAccess for the commonest case: run:read on the
 // {id} path value, whose id the caller then needs. Used by the read-side
-// handlers that address a task's sub-resources (artifacts, manifest,
+// handlers that address a run's sub-resources (artifacts, manifest,
 // invocations).
-func requireTaskRead(w http.ResponseWriter, r *http.Request) (authz.Principal, string, bool) {
-	taskID := r.PathValue("id")
-	principal, ok := requireAccess(w, r, authz.ActionTaskRead, taskID)
+func requireRunRead(w http.ResponseWriter, r *http.Request) (authz.Principal, string, bool) {
+	runID := r.PathValue("id")
+	principal, ok := requireAccess(w, r, authz.ActionRunRead, runID)
 	if !ok {
 		return authz.Principal{}, "", false
 	}
-	return principal, taskID, true
+	return principal, runID, true
 }
 
-// requireTaskForAction is requireTaskRead's write-side sibling: requireAccess
-// for an arbitrary action on the {id} path value, plus the task row itself,
-// which every handler that acts ON a task needs before it can decide anything.
+// requireRunForAction is requireRunRead's write-side sibling: requireAccess
+// for an arbitrary action on the {id} path value, plus the run row itself,
+// which every handler that acts ON a run needs before it can decide anything.
 // It writes the 401 / 403 / 404 / 400 itself, so ok=false means the response
 // is already written and the handler must return.
 //
 // A store error that is not a missing row is logged under where before the 400,
 // because nothing downstream reports it: the caller sees only the status.
 // handleInvocationContinue deliberately keeps its own preamble — it checks no
-// action and answers a missing task with a different code.
-func (api *API) requireTaskForAction(w http.ResponseWriter, r *http.Request, action, where string) (authz.Principal, sqlc.Task, bool) {
-	taskID := r.PathValue("id")
-	principal, ok := requireAccess(w, r, action, taskID)
+// action and answers a missing run with a different code.
+func (api *API) requireRunForAction(w http.ResponseWriter, r *http.Request, action, where string) (authz.Principal, sqlc.Run, bool) {
+	runID := r.PathValue("id")
+	principal, ok := requireAccess(w, r, action, runID)
 	if !ok {
-		return authz.Principal{}, sqlc.Task{}, false
+		return authz.Principal{}, sqlc.Run{}, false
 	}
-	task, err := api.queries.GetTask(r.Context(), sqlc.GetTaskParams{ID: taskID, TenantID: principal.TenantID})
+	run, err := api.queries.GetRun(r.Context(), sqlc.GetRunParams{ID: runID, TenantID: principal.TenantID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, codeNotFound, msgRunNotFound)
-			return authz.Principal{}, sqlc.Task{}, false
+			return authz.Principal{}, sqlc.Run{}, false
 		}
 		logUnexpected(api.log, err, where)
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
-		return authz.Principal{}, sqlc.Task{}, false
+		return authz.Principal{}, sqlc.Run{}, false
 	}
-	return principal, task, true
+	return principal, run, true
 }
 
 // principalTenant returns the tenant id from the request's principal. For the

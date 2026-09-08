@@ -1,16 +1,16 @@
-// Package worktree manages the per-task git worktrees off a project's repo
-// (C5). The runner creates one worktree per task at <repo>/.agentum/worktrees/
-// <task-id>/ on branch agentum/<task-id>, reuses it across stages and resumes,
-// and tears it down when the task reaches a terminal state.
+// Package worktree manages the per-run git worktrees off a project's repo
+// (C5). The runner creates one worktree per run at <repo>/.agentum/worktrees/
+// <run-id>/ on branch agentum/<run-id>, reuses it across stages and resumes,
+// and tears it down when the run reaches a terminal state.
 //
 // F.6.1 splits teardown into two distinct actions:
-//   - RemoveWorktree disposes of the per-task working tree at terminal state.
-//     The branch agentum/<task-id> and its commits survive — they are the
+//   - RemoveWorktree disposes of the per-run working tree at terminal state.
+//     The branch agentum/<run-id> and its commits survive — they are the
 //     durable delivery output a human reviews and Epic 8 hands off.
 //   - DeleteBranch is the explicit, audited cleanup that removes the branch once
 //     the delivery is no longer needed. It is never auto-run at teardown.
 //
-// Per-stage artifacts live under the worktree at <root>/.agentum/<task-id>/
+// Per-stage artifacts live under the worktree at <root>/.agentum/<run-id>/
 // .ag-artifacts/<stage>/ (the §6.4 path convention; filesystem-as-bus, C1/C4).
 // The runner computes these paths via ArtifactDir and creates the directories
 // before invoking the adapter.
@@ -30,10 +30,10 @@ import (
 	"strings"
 )
 
-// Worktree is a created per-task working tree.
+// Worktree is a created per-run working tree.
 type Worktree struct {
 	Root     string // absolute path to the worktree's working directory
-	Branch   string // agentum/<task-id>
+	Branch   string // agentum/<run-id>
 	RepoPath string // absolute path to the project repo it was created from
 }
 
@@ -41,41 +41,41 @@ type Worktree struct {
 // HEAD to a commit SHA. A const so the calls share one source of truth.
 const revParseCmd = "rev-parse"
 
-// BranchFor returns the canonical branch name for a task.
-func BranchFor(taskID string) string {
-	return "agentum/" + taskID
+// BranchFor returns the canonical branch name for a run.
+func BranchFor(runID string) string {
+	return "agentum/" + runID
 }
 
 // PathFor returns the canonical worktree path under a project repo:
-// <repo>/.agentum/worktrees/<task-id>.
-func PathFor(repoPath, taskID string) string {
-	return filepath.Join(repoPath, ".agentum", "worktrees", taskID)
+// <repo>/.agentum/worktrees/<run-id>.
+func PathFor(repoPath, runID string) string {
+	return filepath.Join(repoPath, ".agentum", "worktrees", runID)
 }
 
 // ArtifactDir returns the per-stage artifact directory inside a worktree. The
 // caller (runner) is responsible for creating it; the adapter writes
 // result.json there.
-func ArtifactDir(wtRoot, taskID, stage string) string {
-	return filepath.Join(wtRoot, ".agentum", taskID, ".ag-artifacts", stage)
+func ArtifactDir(wtRoot, runID, stage string) string {
+	return filepath.Join(wtRoot, ".agentum", runID, ".ag-artifacts", stage)
 }
 
-// Manager creates, inspects, reconciles, and removes per-task worktrees. It
+// Manager creates, inspects, reconciles, and removes per-run worktrees. It
 // carries no mutable state; methods are safe to call concurrently for different
-// task ids (git serializes worktree operations internally).
+// run ids (git serializes worktree operations internally).
 type Manager struct{}
 
 // New returns a Manager.
 func New() *Manager { return &Manager{} }
 
-// Create makes (or, if it already exists, returns) the worktree for taskID off
-// repoPath on branch agentum/<task-id>, rooted at baseCommit. A non-empty
+// Create makes (or, if it already exists, returns) the worktree for runID off
+// repoPath on branch agentum/<run-id>, rooted at baseCommit. A non-empty
 // baseCommit (a resolved full SHA) is used as the branch start-point so the
-// task's lineage is pinned to exactly what base_ref pointed at when the runner
+// run's lineage is pinned to exactly what base_ref pointed at when the runner
 // resolved it; an empty baseCommit falls back to the repo's current HEAD (used
 // by tests and the pre-F.6.1 path). It ensures the repo ignores its own
 // .agentum/ dir so worktrees and artifacts do not pollute the user's working
 // tree as untracked files.
-func (manager *Manager) Create(ctx context.Context, repoPath, taskID, baseCommit string) (*Worktree, error) {
+func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit string) (*Worktree, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -83,12 +83,12 @@ func (manager *Manager) Create(ctx context.Context, repoPath, taskID, baseCommit
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo path: %w", err)
 	}
-	wtPath := PathFor(repoAbs, taskID)
-	branch := BranchFor(taskID)
+	wtPath := PathFor(repoAbs, runID)
+	branch := BranchFor(runID)
 
 	// Idempotent: a worktree already at this path is returned as-is. This keeps
 	// resume/retry (which re-enters Create) from failing on the second pass —
-	// and preserves the lineage of an in-flight task (we never rebuild it from
+	// and preserves the lineage of an in-flight run (we never rebuild it from
 	// a different base mid-run). The check requires the worktree to be LIVE
 	// (git can enter it): a directory left over from a repository move holds a
 	// .git file with stale absolute pointers and is not a worktree until
@@ -124,7 +124,7 @@ func (manager *Manager) Create(ctx context.Context, repoPath, taskID, baseCommit
 }
 
 // ResolveRef resolves a ref (branch / tag / SHA / "HEAD") to its full commit SHA
-// in the project repo. Used once per task, before the worktree is created, so
+// in the project repo. Used once per run, before the worktree is created, so
 // base_commit is an immutable anchor. Returns ErrUnknownRef when the ref cannot
 // be resolved — the caller surfaces this as a bad-input error before any work
 // starts.
@@ -163,7 +163,7 @@ const (
 	orchestratorIdentityEmail = "agentum@orchestrator"
 )
 
-// Commit stages everything in the worktree and commits it on the task branch,
+// Commit stages everything in the worktree and commits it on the run branch,
 // returning the new commit SHA. Returns (head, false, nil) when the tree is
 // already clean — a boundary that produced no change is a real outcome, not an
 // error, and an empty commit would pollute the lineage a reviewer reads.
@@ -234,7 +234,7 @@ func (manager *Manager) HeadCommit(ctx context.Context, wtRoot string) (string, 
 
 // FileAtCommit reads path exactly as it existed at commit in repoPath, returning
 // the raw bytes. Used to load agent-immutable project config — the checks
-// registry — from the task's lineage anchor (base_commit), so an agent that
+// registry — from the run's lineage anchor (base_commit), so an agent that
 // edits the file inside its worktree cannot weaken the checks that gate its own
 // delivery. A path that does not exist at the commit is reported as
 // os.ErrNotExist; callers treat that as "the project defines no registry."
@@ -386,14 +386,14 @@ type ReconcileState struct {
 	CheckpointCommit string // restore target for ClassRestorable (last checkpoint or base)
 }
 
-// Reconcile classifies the worktree for taskID after a crash, before a retry or
-// resume. baseCommit is the task's resolved base_commit (the lineage anchor);
+// Reconcile classifies the worktree for runID after a crash, before a retry or
+// resume. baseCommit is the run's resolved base_commit (the lineage anchor);
 // lastCheckpoint is the most recent orchestrator-recorded checkpoint SHA, or ""
 // if none exists yet (the reconciler then falls back to baseCommit).
 //
 // The classification is conservative by design: when in doubt, surface for
 // human attention rather than risk replaying a side-effectful stage.
-func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCommit, lastCheckpoint string) (ReconcileState, error) {
+func (manager *Manager) Reconcile(ctx context.Context, repoPath, runID, baseCommit, lastCheckpoint string) (ReconcileState, error) {
 	if err := ctx.Err(); err != nil {
 		return ReconcileState{}, err
 	}
@@ -401,9 +401,9 @@ func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCom
 	if err != nil {
 		return ReconcileState{}, fmt.Errorf("resolve repo path: %w", err)
 	}
-	wtPath := PathFor(repoAbs, taskID)
+	wtPath := PathFor(repoAbs, runID)
 	if !isWorktree(ctx, wtPath) {
-		// Worktree gone but task wants to run: a human removed it (or teardown
+		// Worktree gone but run wants to run: a human removed it (or teardown
 		// ran early). Re-creating would silently rebuild from base and replay
 		// side effects — surface instead.
 		return ReconcileState{Class: ClassNeedsAttention}, nil
@@ -431,7 +431,7 @@ func (manager *Manager) Reconcile(ctx context.Context, repoPath, taskID, baseCom
 }
 
 // restoreTarget picks the commit a restorable worktree resets to: the last
-// checkpoint when one was recorded, else the task's base_commit.
+// checkpoint when one was recorded, else the run's base_commit.
 func restoreTarget(lastCheckpoint, baseCommit string) string {
 	if strings.TrimSpace(lastCheckpoint) != "" {
 		return lastCheckpoint
@@ -470,11 +470,11 @@ func lineageDiverged(ctx context.Context, repoAbs, baseCommit, head string) bool
 	return err != nil && strings.TrimSpace(string(out)) == ""
 }
 
-// RemoveWorktree removes only the per-task working tree. The agentum/<task-id>
+// RemoveWorktree removes only the per-run working tree. The agentum/<run-id>
 // branch and its commits remain resolvable — they are the durable delivery
 // output that survives teardown (F.6.1 AC #3). Idempotent: a missing worktree
 // is a no-op. Used at terminal state (done/cancelled/failed).
-func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, taskID string) error {
+func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -482,7 +482,7 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, taskID str
 	if err != nil {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
-	wtPath := PathFor(repoAbs, taskID)
+	wtPath := PathFor(repoAbs, runID)
 	if !isWorktree(ctx, wtPath) {
 		return nil
 	}
@@ -496,12 +496,12 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, taskID str
 	return nil
 }
 
-// DeleteBranch removes the agentum/<task-id> branch. This is the explicit,
+// DeleteBranch removes the agentum/<run-id> branch. This is the explicit,
 // audited cleanup action — distinct from terminal teardown. Idempotent: a
 // missing branch is a no-op. -D forces removal even if not merged: a delivered
-// task's commits are reviewed via result_commit / the branch ref; deletion is
+// run's commits are reviewed via result_commit / the branch ref; deletion is
 // the operator saying "I am done with this delivery."
-func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, taskID string) error {
+func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -509,7 +509,7 @@ func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, taskID strin
 	if err != nil {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
-	branch := BranchFor(taskID)
+	branch := BranchFor(runID)
 	out, err := git(ctx, repoAbs, "branch", "-D", branch)
 	if err != nil {
 		// A missing branch is a successful no-op; anything else is real.
@@ -593,7 +593,7 @@ func DirPresent(path string) bool {
 	return true
 }
 
-// Repair rewires a per-task worktree whose absolute pointers went stale after
+// Repair rewires a per-run worktree whose absolute pointers went stale after
 // the repository moved on disk. `git worktree repair <path>` rewrites both
 // sides of the linkage (.git/worktrees/<id>/gitdir and the worktree's .git
 // file); the bare form without a path does not recover a moved repository, so
@@ -601,7 +601,7 @@ func DirPresent(path string) bool {
 // a healthy worktree is a no-op — which is why the runner calls it whenever
 // the worktree directory is present before creating and reconciling, instead
 // of trying to detect staleness itself.
-func (manager *Manager) Repair(ctx context.Context, repoPath, taskID string) error {
+func (manager *Manager) Repair(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -609,7 +609,7 @@ func (manager *Manager) Repair(ctx context.Context, repoPath, taskID string) err
 	if err != nil {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
-	out, err := git(ctx, repoAbs, "worktree", "repair", PathFor(repoAbs, taskID))
+	out, err := git(ctx, repoAbs, "worktree", "repair", PathFor(repoAbs, runID))
 	if err != nil {
 		return fmt.Errorf("git worktree repair: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

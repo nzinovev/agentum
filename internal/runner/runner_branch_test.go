@@ -74,10 +74,10 @@ func TestLoop_ChangesRequestedThenApproved(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(2)
-	task := sqlc.Task{ID: "T-loop1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(2)
+	record := sqlc.Run{ID: "T-loop1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 
 	// review is called twice: first changes_requested, then approved. The
 	// adapter keys verdicts by stage id, so both review calls return the same
@@ -91,7 +91,7 @@ func TestLoop_ChangesRequestedThenApproved(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("first pass"), approvedVerdict("second pass")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	// Derive the syncer the same way production does (from an artifacts.SQLStore
 	// is not available here; the recording store is not an SQLStore, so the
@@ -120,10 +120,10 @@ func TestLoop_ApprovedOnFirstPass(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(2)
-	task := sqlc.Task{ID: "T-loop2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(2)
+	record := sqlc.Run{ID: "T-loop2", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &countingVerdictAdapter{
 		results: map[string]agent.ResultJSON{
 			"spec":   {SchemaVersion: "1", Status: agent.StatusComplete},
@@ -132,7 +132,7 @@ func TestLoop_ApprovedOnFirstPass(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{approvedVerdict("clean")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -156,10 +156,10 @@ func TestLoop_BudgetExhaustedStopsAndPreserves(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(1) // budget 1: one fixer entry, then refuse.
-	task := sqlc.Task{ID: "T-loop3", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(1) // budget 1: one fixer entry, then refuse.
+	record := sqlc.Run{ID: "T-loop3", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	artStore := newRecordingStore()
 	adapter := &countingVerdictAdapter{
 		results: map[string]agent.ResultJSON{
@@ -171,7 +171,7 @@ func TestLoop_BudgetExhaustedStopsAndPreserves(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("p1"), changesRequested("p2"), changesRequested("p3")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: artStore,
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: artStore,
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop3", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -216,24 +216,24 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(1) // budget 1: one fixer entry allowed.
-	task := sqlc.Task{ID: "T-loop4", TenantID: "tn", UserID: "us", ProjectID: "P1",
+	runPack := branchPack(1) // budget 1: one fixer entry allowed.
+	record := sqlc.Run{ID: "T-loop4", TenantID: "tn", UserID: "us", ProjectID: "P1",
 		// The advance API handler applies the gate->running FSM transition
-		// before enqueuing the advance job, so the runner sees the task already
+		// before enqueuing the advance job, so the runner sees the run already
 		// in running — paused_gate is the pre-advance state, not the job's.
 		State: "running", CurrentStage: sql.NullString{String: "review", Valid: true},
 		PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// Seed the history a crashed worker would leave: spec, review (changes
 	// requested), fix (cycle 0 — the one allowed fixer entry), review. The
 	// fixer has run once (cycle 0), so fix_cycles_used = 1; budget = 1; the
 	// next fixer entry must be refused on restart.
 	store.invocations = []sqlc.StageInvocation{
-		{ID: "inv-1", TaskID: "T-loop4", TenantID: "tn", Stage: "spec", Sequence: 1, Cycle: 0},
-		{ID: "inv-2", TaskID: "T-loop4", TenantID: "tn", Stage: "review", Sequence: 2, Cycle: 0},
-		{ID: "inv-3", TaskID: "T-loop4", TenantID: "tn", Stage: "fix", Sequence: 3, Cycle: 0},
-		{ID: "inv-4", TaskID: "T-loop4", TenantID: "tn", Stage: "review", Sequence: 4, Cycle: 1},
+		{ID: "inv-1", RunID: "T-loop4", TenantID: "tn", Stage: "spec", Sequence: 1, Cycle: 0},
+		{ID: "inv-2", RunID: "T-loop4", TenantID: "tn", Stage: "review", Sequence: 2, Cycle: 0},
+		{ID: "inv-3", RunID: "T-loop4", TenantID: "tn", Stage: "fix", Sequence: 3, Cycle: 0},
+		{ID: "inv-4", RunID: "T-loop4", TenantID: "tn", Stage: "review", Sequence: 4, Cycle: 1},
 	}
 
 	// Fresh runner — no in-memory state from the prior process.
@@ -252,7 +252,7 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 		"review/verdict.json": mustMarshalVerdict(changesRequested("restart")),
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: artStore,
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: artStore,
 	})
 	// advance from the gate at review: the verdict says changes_requested, so
 	// the resolver wants to enter fix; but the budget (1) is already spent
@@ -367,10 +367,10 @@ func TestLoop_ResultSummaryCannotOverrideVerdict(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(2)
-	task := sqlc.Task{ID: "T-loop5", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(2)
+	record := sqlc.Run{ID: "T-loop5", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &countingVerdictAdapter{
 		results: map[string]agent.ResultJSON{
 			// The result's summary LIES: it claims approval.
@@ -382,7 +382,7 @@ func TestLoop_ResultSummaryCannotOverrideVerdict(t *testing.T) {
 		reviewSequence: []agent.VerdictJSON{changesRequested("actually broken"), approvedVerdict("now ok")},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop5", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -404,10 +404,10 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	taskPack := branchPack(2)
-	task := sqlc.Task{ID: "T-loop6", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(2)
+	record := sqlc.Run{ID: "T-loop6", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// countingVerdictAdapter with an empty reviewSequence writes no verdict —
 	// the reviewer stage sources a verdict condition but produces no verdict.json.
 	adapter := &countingVerdictAdapter{
@@ -418,7 +418,7 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 		reviewSequence: nil, // no verdict written
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(),
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
 	if err := runner.Handle(t.Context(), job("run", "T-loop6", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -454,10 +454,10 @@ func TestLoop_TransitionRecordsPerLap(t *testing.T) {
 	// budget 3, two changes_requested laps then approved: review → fix → review
 	// → fix → review → done. Three laps, so two fixer entries (cycles 0, 1) and
 	// three review entries (cycles 0, 1, 2).
-	taskPack := branchPack(3)
-	task := sqlc.Task{ID: "T-rec", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	runPack := branchPack(3)
+	record := sqlc.Run{ID: "T-rec", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	manifestFake := &fakeManifestService{}
 	adapter := &countingVerdictAdapter{
 		results: map[string]agent.ResultJSON{
@@ -470,7 +470,7 @@ func TestLoop_TransitionRecordsPerLap(t *testing.T) {
 		},
 	}
 	runner := New(Deps{
-		Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter, Artifacts: newRecordingStore(), Manifest: nil,
+		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(), Manifest: nil,
 	})
 	// Inject the fake manifest service after construction (same pattern as
 	// checkpoint_test.go:246).

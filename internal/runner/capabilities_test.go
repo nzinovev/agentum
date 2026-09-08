@@ -6,7 +6,7 @@
 // the opencode binary; a recording adapter captures the profile the runner
 // computed and asserts the deny-by-default invariants.
 //
-// What this proves (mapped to the task acceptance criteria):
+// What this proves (mapped to the run acceptance criteria):
 //
 //   - An invocation without a permitted+supported profile does not start
 //     (TestInvocation_UnenforceableProfileDoesNotStart).
@@ -113,15 +113,15 @@ func capabilityPack(packCaps []string, entry string, stages map[string]pack.Stag
 
 // runSingleStageOnce drives a one-stage pack through the runner and returns the
 // profile the recording adapter observed (or nil if the run never reached it).
-func runSingleStageOnce(t *testing.T, taskPack *pack.Pack, supported []caps.Category) (*recordingAdapter, *fakeStore, caps.Profile) {
+func runSingleStageOnce(t *testing.T, runPack *pack.Pack, supported []caps.Category) (*recordingAdapter, *fakeStore, caps.Profile) {
 	t.Helper()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "C1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
+	record := sqlc.Run{ID: "C1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "CapProj"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &recordingAdapter{
 		scripts: map[string]agent.ResultJSON{
 			"spec":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "ok"},
@@ -131,7 +131,7 @@ func runSingleStageOnce(t *testing.T, taskPack *pack.Pack, supported []caps.Cate
 		},
 		claimed: supported,
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "C1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -148,7 +148,7 @@ func runSingleStageOnce(t *testing.T, taskPack *pack.Pack, supported []caps.Cate
 // This is the "analytical stages read code and write only their own artifacts"
 // acceptance criterion.
 func TestProfile_AnalystStageCannotWriteSource(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "git.read", "exec.bash"},
 		"spec",
 		map[string]pack.Stage{
@@ -156,7 +156,7 @@ func TestProfile_AnalystStageCannotWriteSource(t *testing.T) {
 			"done": {},
 		},
 	)
-	_, _, observed := runSingleStageOnce(t, taskPack, fullSupport)
+	_, _, observed := runSingleStageOnce(t, runPack, fullSupport)
 
 	if observed.Has(caps.CatFsWrite) {
 		t.Errorf("analyst stage must not receive fs.write, got %v", observed.Grants)
@@ -173,7 +173,7 @@ func TestProfile_AnalystStageCannotWriteSource(t *testing.T) {
 // tracked source or delivery refs. Even a pack that declares git.delivery and
 // fs.write must not surface them to the reviewer.
 func TestProfile_ReviewerCannotTouchDeliveryRefs(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "git.read", "git.write", "git.delivery"},
 		"review",
 		map[string]pack.Stage{
@@ -181,8 +181,8 @@ func TestProfile_ReviewerCannotTouchDeliveryRefs(t *testing.T) {
 			"done":   {},
 		},
 	)
-	taskPack.PromptText["review"] = "review body"
-	_, _, observed := runSingleStageOnce(t, taskPack, fullSupport)
+	runPack.PromptText["review"] = "review body"
+	_, _, observed := runSingleStageOnce(t, runPack, fullSupport)
 
 	if observed.Has(caps.CatGitDelivery) {
 		t.Errorf("reviewer must not receive git.delivery, got %v", observed.Grants)
@@ -196,7 +196,7 @@ func TestProfile_ReviewerCannotTouchDeliveryRefs(t *testing.T) {
 // fs.write and git.write scoped to the worktree. The recorded profile carries
 // the absolute worktree path, not the placeholder.
 func TestProfile_ImplementerScopedToWorktree(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "git.read", "git.write", "exec.bash"},
 		"implement",
 		map[string]pack.Stage{
@@ -204,8 +204,8 @@ func TestProfile_ImplementerScopedToWorktree(t *testing.T) {
 			"done":      {},
 		},
 	)
-	taskPack.PromptText["implement"] = "implement body"
-	_, _, observed := runSingleStageOnce(t, taskPack, fullSupport)
+	runPack.PromptText["implement"] = "implement body"
+	_, _, observed := runSingleStageOnce(t, runPack, fullSupport)
 
 	if !observed.Has(caps.CatFsWrite) {
 		t.Fatalf("implementer lost fs.write: %v", observed.Grants)
@@ -224,7 +224,7 @@ func TestProfile_ImplementerScopedToWorktree(t *testing.T) {
 // role. This is the "agent does not receive undeclared credentials, network,
 // commands, MCP tools, or host paths" criterion.
 func TestProfile_UndeclaredCapabilitiesAreDenied(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read"}, // deliberately minimal — no net, no secret, no mcp
 		"spec",
 		map[string]pack.Stage{
@@ -232,7 +232,7 @@ func TestProfile_UndeclaredCapabilitiesAreDenied(t *testing.T) {
 			"done": {},
 		},
 	)
-	_, _, observed := runSingleStageOnce(t, taskPack, fullSupport)
+	_, _, observed := runSingleStageOnce(t, runPack, fullSupport)
 
 	if observed.Has(caps.CatNetFetch) {
 		t.Errorf("net.fetch granted without declaration: %v", observed.Grants)
@@ -247,7 +247,7 @@ func TestProfile_UndeclaredCapabilitiesAreDenied(t *testing.T) {
 // floor (result.json is a non-negotiable contract). Every other category —
 // source writes, commands, network, secrets — is denied.
 func TestProfile_DenyByDefaultWhenPackDeclaresNothing(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		nil,
 		"spec",
 		map[string]pack.Stage{
@@ -255,7 +255,7 @@ func TestProfile_DenyByDefaultWhenPackDeclaresNothing(t *testing.T) {
 			"done": {},
 		},
 	)
-	_, _, observed := runSingleStageOnce(t, taskPack, fullSupport)
+	_, _, observed := runSingleStageOnce(t, runPack, fullSupport)
 
 	if observed.Has(caps.CatFsWrite) || observed.Has(caps.CatExecBash) || observed.Has(caps.CatNetFetch) {
 		t.Errorf("empty pack must deny source/bash/network, got %v", observed.Grants)
@@ -269,7 +269,7 @@ func TestProfile_DenyByDefaultWhenPackDeclaresNothing(t *testing.T) {
 // coherent set, the run completes (status complete) and the profile is
 // non-empty. This is the "allowed actions continue to work" criterion.
 func TestProfile_AllowedActionsRunToCompletion(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "git.read", "git.write", "exec.bash"},
 		"implement",
 		map[string]pack.Stage{
@@ -277,8 +277,8 @@ func TestProfile_AllowedActionsRunToCompletion(t *testing.T) {
 			"done":      {},
 		},
 	)
-	taskPack.PromptText["implement"] = "implement body"
-	store := newFakeStoreWithPack(t, taskPack)
+	runPack.PromptText["implement"] = "implement body"
+	store := newFakeStoreWithPack(t, runPack)
 
 	if state := store.taskState(); state != "awaiting_final_review" {
 		t.Errorf("expected run to complete to awaiting_final_review, got state %q", state)
@@ -290,7 +290,7 @@ func TestProfile_AllowedActionsRunToCompletion(t *testing.T) {
 // invocation row records stop_reason=capability_unenforceable. The adapter
 // never observes a profile (no subprocess spawned).
 func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "exec.bash"},
 		"implement",
 		map[string]pack.Stage{
@@ -298,14 +298,14 @@ func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
 			"done":      {},
 		},
 	)
-	taskPack.PromptText["implement"] = "implement body"
+	runPack.PromptText["implement"] = "implement body"
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "U1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
+	record := sqlc.Run{ID: "U1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "U"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	// The adapter claims full support (so the runner's computeProfile keeps
 	// fs.write + exec.bash in the effective profile) but its Invoke-time check
 	// only honors fs.read + artifact.write + git.read. The defense-in-depth
@@ -316,7 +316,7 @@ func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
 		claimed: fullSupport,
 		actual:  []caps.Category{caps.CatFsRead, caps.CatArtifactWrite, caps.CatGitRead},
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	if err := runner.Handle(t.Context(), job("run", "U1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
@@ -339,7 +339,7 @@ func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
 // the stage_invocations row and a stage.capability_enforced event is emitted
 // with the profile as audit evidence.
 func TestProfile_SavedOnInvocationAndEmitted(t *testing.T) {
-	taskPack := capabilityPack(
+	runPack := capabilityPack(
 		[]string{"fs.read", "fs.write", "git.read", "git.write", "exec.bash"},
 		"implement",
 		map[string]pack.Stage{
@@ -347,8 +347,8 @@ func TestProfile_SavedOnInvocationAndEmitted(t *testing.T) {
 			"done":      {},
 		},
 	)
-	taskPack.PromptText["implement"] = "implement body"
-	_, store, _ := runSingleStageOnce(t, taskPack, fullSupport)
+	runPack.PromptText["implement"] = "implement body"
+	_, store, _ := runSingleStageOnce(t, runPack, fullSupport)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -389,22 +389,22 @@ func TestProfile_SavedOnInvocationAndEmitted(t *testing.T) {
 // newFakeStoreWithPack is a thin wrapper for tests that only need to confirm
 // the run completes; it returns the store after driving a single-implementer
 // pack through to completion.
-func newFakeStoreWithPack(t *testing.T, taskPack *pack.Pack) *fakeStore {
+func newFakeStoreWithPack(t *testing.T, runPack *pack.Pack) *fakeStore {
 	t.Helper()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
 		t.Fatalf("setup repo: %v", err)
 	}
-	task := sqlc.Task{ID: "A1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
+	record := sqlc.Run{ID: "A1", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "cap-test@0.1.0"}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "Allowed"}
-	store := newFakeStore(task, proj)
+	store := newFakeStore(record, proj)
 	adapter := &recordingAdapter{
 		scripts: map[string]agent.ResultJSON{
 			"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "done"},
 		},
 		claimed: fullSupport,
 	}
-	runner := New(Deps{Store: store, Packs: &staticSource{pk: taskPack}, Adapter: adapter})
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 	if err := runner.Handle(t.Context(), job("run", "A1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}

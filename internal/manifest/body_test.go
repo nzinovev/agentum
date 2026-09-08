@@ -537,7 +537,7 @@ func TestDecodeV1Body_RetainsLegacySectionsVerbatim(t *testing.T) {
 // 1 nor 2 is refused, not silently mis-decoded.
 func TestDecodeUnknownSchemaIsATypedError(t *testing.T) {
 	t.Parallel()
-	raw := []byte(`{"schema_version": "9", "input": {"task_id": "T1"}}`)
+	raw := []byte(`{"schema_version": "9", "input": {"run_id": "T1"}}`)
 	_, err := decodeBody(raw)
 	if err == nil {
 		t.Fatal("unknown schema version must be an error")
