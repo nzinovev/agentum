@@ -41,6 +41,10 @@ type Descriptor struct {
 	// operator has no models.yaml. "These model names work with this runtime" is
 	// runtime knowledge, so it lives here.
 	DefaultTiers models.Config
+	// EnumeratesModels declares that this adapter can list what its runtime can
+	// run. An adapter that cannot say so is never checked against a catalog —
+	// "cannot be asked" and "answered no" are different facts.
+	EnumeratesModels bool
 }
 
 // clone returns a deep copy so a caller cannot mutate the adapter's declared
@@ -66,10 +70,11 @@ func (descriptor Descriptor) clone() Descriptor {
 // tiers use the free models on opencode Zen (the `-free` suffix is explicit)
 // so a fresh install works without a paid provider once Zen is connected.
 var opencodeDescriptor = Descriptor{
-	ID:             AdapterOpencode,
-	AdapterVersion: "1.0.0",
-	Binary:         "opencode",
-	ModelOptions:   []models.OptionName{models.OptionModel},
+	ID:               AdapterOpencode,
+	AdapterVersion:   "1.0.0",
+	Binary:           "opencode",
+	ModelOptions:     []models.OptionName{models.OptionModel},
+	EnumeratesModels: true,
 	DefaultTiers: models.Config{
 		Tiers: map[string]string{
 			"fast":      "opencode/deepseek-v4-flash-free",

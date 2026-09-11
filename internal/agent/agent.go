@@ -58,6 +58,13 @@ type Adapter interface {
 	// recorded fact (Ready=false + Reason), not a start failure — the invocation
 	// that needs the runtime surfaces it.
 	Probe(ctx context.Context) Readiness
+
+	// Catalog reports what the runtime says it can run. Like Probe it returns
+	// a value and never an error: a runtime that cannot be asked is a fact to
+	// record, not a boot failure. Whether the adapter can be asked at all is
+	// declared in the descriptor's EnumeratesModels — "cannot be asked" and
+	// "answered no" are different facts, and only the second grounds a refusal.
+	Catalog(ctx context.Context) models.Catalog
 }
 
 // Invocation is one stage's run. Identity (tenant/user) is NOT here — it lives

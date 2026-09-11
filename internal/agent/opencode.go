@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 // OpencodeAdapter drives the `opencode` CLI as a subprocess: one invocation
@@ -31,6 +32,11 @@ type OpencodeAdapter struct {
 	// process lifetime, shared by every consumer.
 	probeOnce sync.Once
 	readiness Readiness
+
+	// catalogOnce / catalog memoize the runtime model listing the same way:
+	// one subprocess per process, sticky including a failure.
+	catalogOnce sync.Once
+	catalog     models.Catalog
 }
 
 // NewOpencodeAdapter returns an adapter that invokes the named binary. An

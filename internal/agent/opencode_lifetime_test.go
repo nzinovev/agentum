@@ -51,6 +51,9 @@ const (
 // not with test flags. The debug-skill mode serves the ContextProber tests;
 // the version mode serves the readiness-probe tests.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "models" {
+		os.Exit(runFakeModels(os.Getenv(fakeCatalogEnv)))
+	}
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeAgent(mode))
 	}
