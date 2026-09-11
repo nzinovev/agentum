@@ -169,10 +169,14 @@ func (control *runControl) stopIdle() {
 }
 
 // stopReason renders why a cancelled run ended, for the terminal EventError.
-func (control *runControl) stopReason(idleTimeout time.Duration) error {
+// The timeouts name the model: a silence has very different fixes depending
+// on whether the model is misbehaving or the agent is legitimately working,
+// and the model string is the one fact this error can add that the stop
+// reason vocabulary deliberately does not carry.
+func (control *runControl) stopReason(model string, idleTimeout time.Duration) error {
 	switch {
 	case control.idle.Load():
-		return fmt.Errorf("opencode run stopped: no output for %s (idle cap)", idleTimeout)
+		return fmt.Errorf("opencode run stopped: no output for %s (idle cap), model %q", idleTimeout, model)
 	case errors.Is(control.ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("opencode run stopped: hard timeout exceeded: %w", control.ctx.Err())
 	default:
@@ -233,7 +237,7 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	<-cancelWatcher
 
 	if control.ctx.Err() != nil {
-		ch <- Event{Kind: EventError, Err: control.stopReason(plan.timeout.hard.IdleTimeout)}
+		ch <- Event{Kind: EventError, Err: control.stopReason(inv.Model.Options.Model, plan.timeout.hard.IdleTimeout)}
 		return
 	}
 	if err := state.scannerErr(scanner); err != nil {

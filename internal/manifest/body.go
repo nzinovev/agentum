@@ -266,6 +266,13 @@ type AdapterEvidence struct {
 	// RuntimeProbe is the readiness probe outcome label: "ok" or
 	// "failed: <reason>". Empty when never probed.
 	RuntimeProbe string `json:"runtime_probe,omitempty"`
+	// ModelCatalog is the model-catalog probe outcome: "ok (N models)",
+	// "failed: <reason>", or "unsupported" for an adapter that cannot list
+	// its runtime's models. A run whose models were never checked must stay
+	// distinguishable from one whose models were checked and passed —
+	// otherwise the unchecked mode is invisible after the fact. Run-level
+	// fact like RuntimeProbe, deliberately not duplicated per invocation.
+	ModelCatalog string `json:"model_catalog,omitempty"`
 
 	// Name / Version are the schema-1 field names for ID / AdapterVersion,
 	// retained READ-ONLY so a sealed v1 manifest round-trips with nothing
@@ -850,6 +857,7 @@ func mergeAdapterEvidence(existing *AdapterEvidence, patch *AdapterEvidence) *Ad
 		AdapterVersion:       existing.AdapterVersion,
 		DeclaredCapabilities: existing.DeclaredCapabilities,
 		RuntimeProbe:         existing.RuntimeProbe,
+		ModelCatalog:         existing.ModelCatalog,
 	}
 	if patch.ID != "" {
 		merged.ID = patch.ID
@@ -862,6 +870,9 @@ func mergeAdapterEvidence(existing *AdapterEvidence, patch *AdapterEvidence) *Ad
 	}
 	if patch.RuntimeProbe != "" {
 		merged.RuntimeProbe = patch.RuntimeProbe
+	}
+	if patch.ModelCatalog != "" {
+		merged.ModelCatalog = patch.ModelCatalog
 	}
 	return merged
 }

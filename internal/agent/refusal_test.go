@@ -74,3 +74,34 @@ func TestInvoke_CatalogListModelArrivesFromTheAdapter(t *testing.T) {
 		t.Errorf("Source = %q; want the configured binary name plus the subcommand", catalog.Source)
 	}
 }
+
+// TestInvoke_IdleStopNamesTheModel: the idle-cap terminal error carries the
+// model string. A silence has very different fixes depending on whether the
+// model is misbehaving or the agent is legitimately working, and the stop
+// reason vocabulary deliberately stays generic — the model is the one fact
+// this error can add.
+func TestInvoke_IdleStopNamesTheModel(t *testing.T) {
+	shrinkKillGrace(t)
+	adapter, invocation := fakeInvocation(t, fakeSilent, 10*time.Second,
+		caps.Profile{IdleTimeout: 300 * time.Millisecond})
+	// A model the fixture catalog lists, so the run starts.
+	invocation.Model = models.Selection{
+		Tier: "strong", Provider: "zai-coding-plan",
+		Options: models.Options{Model: "zai-coding-plan/glm-5.3"},
+	}
+
+	events, invokeErr := adapter.Invoke(context.Background(), invocation)
+	if invokeErr != nil {
+		t.Fatalf("Invoke: %v", invokeErr)
+	}
+	result, failed := drain(t, events)
+	if result != nil || failed == nil {
+		t.Fatalf("result=%v failed=%v; want the idle cap to stop the run", result, failed)
+	}
+	if !strings.Contains(failed.Error(), "idle cap") {
+		t.Errorf("error = %q; want it to name the idle cap", failed)
+	}
+	if !strings.Contains(failed.Error(), `"zai-coding-plan/glm-5.3"`) {
+		t.Errorf("error = %q; want it to name the model", failed)
+	}
+}
