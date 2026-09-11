@@ -28,11 +28,15 @@ Agentum ships per-agent defaults so the common case needs no `models.yaml`:
 
 | Agent | `fast` | `strong` | `reasoning` | default |
 |---|---|---|---|---|
-| `opencode` | `opencode/deepseek-v4-flash-free` | `opencode/north-mini-code-free` | `opencode/nemotron-3-ultra-free` | `strong` |
+| `opencode` | `opencode/nemotron-3.5-lightning-free` | `opencode/muse-spark-1.3-contributor-free` | `opencode/nemotron-3-ultra-free` | `strong` |
 
 The `opencode` defaults use the **free models on opencode Zen** (the `-free`
 suffix is explicit), so a fresh install works without a paid provider once you
 connect Zen (`/connect opencode` in the TUI, or `opencode auth login`).
+Default names are a build-time claim about the runtime's catalog — upstream
+renames and removals have retired defaults before — which is why the boot-time
+catalog check covers the effective tiers (your `models.yaml`, or these
+defaults when you have none), not only the operator's file.
 
 Defaults belong to the execution adapter that runs them: opencode is the only
 adapter Agentum ships, so it is the only set of defaults there is. A second
@@ -113,7 +117,7 @@ they catch the mistake:
 
 | Point | What is checked | How it fails |
 |---|---|---|
-| Process start | every tier of `models.yaml` | `Run` returns an error; HTTP never comes up, no job is claimed |
+| Process start | every effective tier — `models.yaml` when present, otherwise the adapter's defaults | `Run` returns an error; HTTP never comes up, no job is claimed |
 | Run start | the model of every pack stage | the run fails before the first invocation — no `stage_invocations` rows |
 | `Invoke` | the same selection, assembled by any path | the adapter refuses; no subprocess is spawned |
 

@@ -25,6 +25,10 @@ func run() error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// The process logger is also the default: package-level slog calls (the
+	// adapters' probe warnings) must land in the structured stream, not in
+	// the stdlib's text fallback on stderr.
+	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -70,6 +70,10 @@ func (descriptor Descriptor) clone() Descriptor {
 // opencodeDescriptor is the opencode adapter's self-description. The default
 // tiers use the free models on opencode Zen (the `-free` suffix is explicit)
 // so a fresh install works without a paid provider once Zen is connected.
+// The names are a build-time claim about the runtime's catalog and are
+// checked against it at boot — upstream renames and removals have retired
+// defaults before, and the boot check is what turns that drift into a named
+// error instead of every run failing on start.
 var opencodeDescriptor = Descriptor{
 	ID:               AdapterOpencode,
 	AdapterVersion:   "1.0.0",
@@ -78,8 +82,8 @@ var opencodeDescriptor = Descriptor{
 	EnumeratesModels: true,
 	DefaultTiers: models.Config{
 		Tiers: map[string]string{
-			"fast":      "opencode/deepseek-v4-flash-free",
-			"strong":    "opencode/north-mini-code-free",
+			"fast":      "opencode/nemotron-3.5-lightning-free",
+			"strong":    "opencode/muse-spark-1.3-contributor-free",
 			"reasoning": "opencode/nemotron-3-ultra-free",
 		},
 		Default: "strong",

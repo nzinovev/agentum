@@ -111,3 +111,52 @@ func TestValidateModelTiers_NonEnumeratingAdapterIsNeverAsked(t *testing.T) {
 		t.Fatalf("a non-enumerating adapter must not be checked: %v", err)
 	}
 }
+
+// TestValidateModelTiers_DefaultTierDriftStopsTheProcess: the boot check
+// covers the EFFECTIVE tiers — the adapter's baked-in defaults when there is
+// no models.yaml. Defaults are a build-time claim about the runtime's
+// catalog, upstream renames retire them, and without this check a clean
+// install would boot silently and then refuse every run at start.
+func TestValidateModelTiers_DefaultTierDriftStopsTheProcess(t *testing.T) {
+	instance := &Server{
+		log: quietLogger(),
+		adapter: &catalogStubAdapter{
+			descriptor: catalogStubDescriptor(),
+			// The catalog lists one unrelated model; every default tier
+			// model is unknown to it.
+			catalog: models.Catalog{Available: true, Models: []models.CatalogModel{{ID: "stub/somewhere-else"}}},
+		},
+		models: nil, // no models.yaml: effective tiers are the descriptor's defaults
+	}
+	err := instance.validateModelTiers(context.Background())
+	if err == nil {
+		t.Fatal("drifted default tiers must stop the process at boot")
+	}
+	message := err.Error()
+	if !strings.Contains(message, `unknown model "stub/fast-model"`) {
+		t.Errorf("error %q does not name the drifted default model", message)
+	}
+	if !strings.Contains(message, `tier "fast"`) {
+		t.Errorf("error %q does not name the tier", message)
+	}
+}
+
+// TestValidateModelTiers_DefaultsPresentBoots: with the defaults present in
+// the catalog and no models.yaml, boot proceeds — the "no configuration
+// needed" promise holds.
+func TestValidateModelTiers_DefaultsPresentBoots(t *testing.T) {
+	descriptor := catalogStubDescriptor()
+	instance := &Server{
+		log: quietLogger(),
+		adapter: &catalogStubAdapter{
+			descriptor: descriptor,
+			catalog: models.Catalog{Available: true, Models: []models.CatalogModel{
+				{ID: "stub/fast-model"},
+			}},
+		},
+		models: nil,
+	}
+	if err := instance.validateModelTiers(context.Background()); err != nil {
+		t.Fatalf("valid default tiers must boot: %v", err)
+	}
+}

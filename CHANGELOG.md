@@ -9,6 +9,46 @@ Once tagged releases begin, this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- **The model-check registry is tenant-scoped.** Idempotency keys were keyed
+  by the bare header and check reads by the bare id, so a second tenant
+  could hit a foreign key's `409`, receive a foreign check on a same-body
+  replay, and read a foreign check's results — the diagnostics' one piece of
+  process state was the multi-tenant seam's first exception. Keys are now
+  `(tenant, key)`, checks carry their tenant, and a foreign id reads as the
+  same `404` as an unknown one. (The events were always written with the
+  caller's tenant; only the in-process memory leaked.)
+- **The boot-time catalog check covers the effective tiers, and the shipped
+  defaults were refreshed against the live catalog.** Two of the three
+  baked-in tier models no longer existed upstream, and the check skipped
+  them (`models.yaml == nil` meant "nothing to validate") — a clean install
+  booted silently and then refused every run at start on `strong`. The
+  check now validates what the process will actually run on (override or
+  defaults), so default drift is a named boot error instead of a per-run
+  failure; the defaults themselves move to models present in the current
+  catalog (`fast` → `opencode/nemotron-3.5-lightning-free`, `strong` →
+  `opencode/muse-spark-1.3-contributor-free`; `reasoning` was still listed
+  and stays).
+- **A `variant` in a model-check request is refused, not echoed-and-dropped.**
+  The response and events carried the requested variant while the check ran
+  without it — the silently-dropped-parameter move the model rules forbid
+  everywhere else. Until the adapter has a variant parameter it is a `400`
+  naming the field.
+- **The accepted-check queue is bounded.** Every `202` spawned a goroutine
+  waiting its turn behind up-to-120s checks, with no backpressure: a hundred
+  keys were a hundred paid calls queued. Past 8 unfinished checks per tenant
+  the answer is `429 too_many_requests` naming the cap (replays of accepted
+  checks still answer); the cap lifts as checks finish.
+- **The catalog's unreadable-records warning reaches the structured log.**
+  `main` never called `slog.SetDefault`, so the one warning line meant to
+  make a broken listing fixable went to the stdlib text handler on stderr.
+  The process logger is now the default.
+- **Registry TTL counts from completion, not acceptance** — a long queue no
+  longer makes a still-running check vanish into a `404` — **and pending
+  checks stop with the process**: they derive from the server's run context,
+  so a shutdown cancels them and kills their subprocesses instead of
+  orphaning them.
+
 ### Added
 - **Model strings are checked against the runtime's own catalog before they
   can hang a run.** The adapter probes the runtime's model listing once per

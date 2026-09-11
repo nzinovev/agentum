@@ -57,6 +57,12 @@ type API struct {
 	modelTest modelTestLimits
 	// modelChecks is the in-process registry of accepted model checks.
 	modelChecks *modelCheckRegistry
+	// runContext is the server run's context, attached when Run starts: the
+	// model check's background goroutine derives from it, so a shutdown
+	// cancels pending checks and kills their subprocesses instead of
+	// orphaning them. Nil until then (unit tests): handlers fall back to a
+	// cancellation-detached request context.
+	runContext context.Context
 }
 
 // Option configures an API at construction. Used for the artifact store +
@@ -104,6 +110,13 @@ func WithModelTestLimits(maxSeconds, retentionMinutes int) Option {
 	return func(apiInst *API) {
 		apiInst.modelTest = modelTestLimits{maxSeconds: maxSeconds, retentionMinutes: retentionMinutes}
 	}
+}
+
+// AttachRunContext hands the API the server run's context. Called when Run
+// starts, not at construction — the context does not exist yet — so
+// background work the API spawns derives from it and shutdown reaches it.
+func (api *API) AttachRunContext(ctx context.Context) {
+	api.runContext = ctx
 }
 
 // New builds the API. db backs the transactional outbox; cancels lets the cancel

@@ -197,9 +197,10 @@ func (server *Server) Handler() http.Handler {
 // cancelled, then shuts down gracefully. The reconciler runs its first pass
 // before the worker starts, so a crashed worker's stale jobs and any orphaned
 // runs are repaired before any new job is claimed. Before any of that, every
-// operator-declared tier is checked against the runtime's model catalog: a
-// typo'd model stops the process here, where the fix is a file edit — not
-// four stages into the first run.
+// effective tier is checked against the runtime's model catalog: a typo'd
+// model — the operator's or the adapter's own drifted default — stops the
+// process here, where the fix is a file edit, not four stages into the first
+// run.
 func (server *Server) Run(ctx context.Context) error {
 	// Warm the runtime probe before the worker starts: the first run never pays
 	// the subprocess, and the boot log records the runtime version — or the
@@ -209,6 +210,9 @@ func (server *Server) Run(ctx context.Context) error {
 	if err := server.validateModelTiers(ctx); err != nil {
 		return err
 	}
+	// Background work the API spawns (the on-demand model check) must stop
+	// with the process, not be orphaned by it.
+	server.api.AttachRunContext(ctx)
 
 	reconcilerCtx, cancelReconciler := context.WithCancel(ctx)
 	defer cancelReconciler()
@@ -260,24 +264,28 @@ func (server *Server) warmRuntimeProbe(ctx context.Context) {
 		"adapter", string(descriptor.ID), "reason", readiness.Reason)
 }
 
-// validateModelTiers checks every operator-declared tier of models.yaml
-// against the runtime's model catalog, before any worker starts or HTTP
-// comes up: a tier naming a model the runtime does not know is a broken
-// configuration, and stopping here names the tier, the model, and the adapter
-// in one place instead of failing the first run mid-flight. An unavailable
-// catalog is a recorded fact, not a boot failure — the process starts and the
-// runs proceed with models unchecked (the run's evidence says so). An adapter
-// that cannot enumerate is never asked.
+// validateModelTiers checks every EFFECTIVE tier — the operator's
+// models.yaml when present, otherwise the adapter descriptor's baked-in
+// defaults — against the runtime's model catalog, before any worker starts
+// or HTTP comes up. The defaults are included on purpose: they are a claim
+// about the runtime made at build time, and it drifts (models are renamed
+// and removed upstream); a claim nobody tests is how a clean install ends up
+// refusing every run. Stopping here names the tier, the model, and the
+// adapter in one place instead of failing the first run mid-flight. An
+// unavailable catalog is a recorded fact, not a boot failure — the process
+// starts and the runs proceed with models unchecked (the run's evidence says
+// so). An adapter that cannot enumerate is never asked.
 func (server *Server) validateModelTiers(ctx context.Context) error {
 	descriptor := server.adapter.Describe()
-	if !descriptor.EnumeratesModels || server.models == nil {
+	if !descriptor.EnumeratesModels {
 		return nil
 	}
+	effective := effectiveTierConfig(server.models, descriptor)
 	catalog := server.adapter.Catalog(ctx)
 	// Sorted, not map order: with two broken tiers the operator would otherwise
 	// get a different one named on each boot.
-	tierNames := make([]string, 0, len(server.models.Tiers))
-	for tierName := range server.models.Tiers {
+	tierNames := make([]string, 0, len(effective.Tiers))
+	for tierName := range effective.Tiers {
 		tierNames = append(tierNames, tierName)
 	}
 	sort.Strings(tierNames)
@@ -292,7 +300,7 @@ func (server *Server) validateModelTiers(ctx context.Context) error {
 		}
 	}
 	if !catalog.Available {
-		server.log.Warn("model catalog unavailable; configured tiers are not checked against the runtime",
+		server.log.Warn("model catalog unavailable; effective tiers are not checked against the runtime",
 			"adapter", string(descriptor.ID), "reason", catalog.Reason)
 	}
 	return nil

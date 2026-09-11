@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -108,11 +109,18 @@ func newModelSurfaceAPI(t *testing.T, gate chan struct{}) (*API, *modelSurfaceAd
 // principal in the context, and returns the recorder.
 func modelSurfaceRequest(t *testing.T, apiInst *API, method, target, idempotencyKey, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return modelSurfaceRequestAs(t, apiInst, authzPrincipal(), method, target, idempotencyKey, body)
+}
+
+// modelSurfaceRequestAs is modelSurfaceRequest for an explicit principal —
+// the multi-tenant probes need a second caller.
+func modelSurfaceRequestAs(t *testing.T, apiInst *API, principal authz.Principal, method, target, idempotencyKey, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
-	request = request.WithContext(authz.WithPrincipal(request.Context(), authzPrincipal()))
+	request = request.WithContext(authz.WithPrincipal(request.Context(), principal))
 	recorder := httptest.NewRecorder()
 	switch {
 	case method == "GET" && target == "/api/v1/models":
@@ -295,6 +303,10 @@ func TestModelsSurface_BadRequests(t *testing.T) {
 		{"timeout above ceiling", `{"tier":"fast","timeout_seconds":9999}`, "between 1 and 120"},
 		{"unknown body field", `{"tiers":"fast"}`, "parse body"},
 		{"tier and model together", `{"tier":"fast","model":"prov/one-model"}`, "mutually exclusive"},
+		// The adapter has no variant parameter yet; a check that echoed the
+		// field while running without it would answer a question nobody
+		// asked. Refused, not dropped.
+		{"variant not supported yet", `{"model":"prov/one-model","variant":"high"}`, "variant is not supported"},
 	}
 	for _, testCase := range cases {
 		recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-"+testCase.name, testCase.body)
@@ -446,28 +458,146 @@ func waitForModelCheckState(t *testing.T, apiInst *API, checkID string) struct {
 	}{}
 }
 
-// TestModelCheckRegistry_RetentionForgets: entries past the TTL are gone from
-// both maps — an idempotency key forgotten by age behaves like a key never
-// seen (a new check), and a check id forgotten by age reads as 404 upstream.
+// TestModelCheckRegistry_RetentionForgets: FINISHED entries past the TTL are
+// gone from both maps — an idempotency key forgotten by age behaves like a key
+// never seen (a new check), and a check id forgotten by age reads as 404
+// upstream. A RUNNING check is never swept, however long the queue in front
+// of it: a client watching it must not see it vanish into a 404.
 func TestModelCheckRegistry_RetentionForgets(t *testing.T) {
 	t.Parallel()
 	registry := newModelCheckRegistry(10 * time.Millisecond)
-	check, replay, conflict := registry.accept("key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
-	if replay || conflict {
-		t.Fatalf("accept = replay:%v conflict:%v; want a fresh registration", replay, conflict)
+	check, replay, conflict, queued := registry.accept("tenant-a", "key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
+	if replay || conflict || queued {
+		t.Fatalf("accept = replay:%v conflict:%v queued:%v; want a fresh registration", replay, conflict, queued)
 	}
-	if registry.lookup(check.checkID) == nil {
+	if registry.lookup("tenant-a", check.checkID) == nil {
 		t.Fatal("fresh check not readable")
 	}
+	// A running check outlives its would-be TTL.
 	time.Sleep(20 * time.Millisecond)
-	if registry.lookup(check.checkID) != nil {
-		t.Error("check survived its TTL; the registry must forget")
+	if registry.lookup("tenant-a", check.checkID) == nil {
+		t.Fatal("running check swept before finishing; the TTL counts from completion")
 	}
-	again, replay, conflict := registry.accept("key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
-	if replay || conflict {
-		t.Errorf("expired key: replay=%v conflict=%v; an expired key must behave like a never-seen key", replay, conflict)
+	registry.finish(check)
+	time.Sleep(20 * time.Millisecond)
+	if registry.lookup("tenant-a", check.checkID) != nil {
+		t.Error("finished check survived its TTL; the registry must forget")
+	}
+	again, replay, conflict, queued := registry.accept("tenant-a", "key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
+	if replay || conflict || queued {
+		t.Errorf("expired key: replay=%v conflict=%v queued=%v; an expired key must behave like a never-seen key", replay, conflict, queued)
 	}
 	if again.checkID == check.checkID {
 		t.Error("re-accept after TTL returned the dead check's id")
 	}
+}
+
+// TestModelsSurface_RegistryIsTenantScoped: the check registry is the one
+// place a diagnostic carries state, and the multi-tenant seam must not grow
+// its first exception there. The probe drives two principals through the
+// exact sequence that used to leak: a foreign key must not 409, a foreign
+// key with the same body must mint the tenant's OWN check, and a foreign
+// check id must read as 404 — indistinguishable from an absent one.
+func TestModelsSurface_RegistryIsTenantScoped(t *testing.T) {
+	apiInst, _ := newModelSurfaceAPI(t, nil)
+	otherTenant := authz.Principal{TenantID: "tenant-2", UserID: "user-2"}
+
+	first := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "shared-key", `{"tier":"fast"}`)
+	if first.Code != 202 {
+		t.Fatalf("tenant-1 accept status = %d; body %s", first.Code, first.Body)
+	}
+	var firstBody struct {
+		CheckID string `json:"check_id"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode tenant-1 accept: %v", err)
+	}
+
+	// Same key, different body, different tenant: NOT a conflict — the key
+	// namespace is per tenant, so this is a fresh intent.
+	foreignConflict := modelSurfaceRequestAs(t, apiInst, otherTenant, "POST", "/api/v1/models/test", "shared-key", `{"tier":"deep"}`)
+	if foreignConflict.Code == 409 {
+		t.Fatal("a foreign tenant's idempotency key produced a 409; keys must be scoped per tenant")
+	}
+	if foreignConflict.Code != 202 {
+		t.Fatalf("tenant-2 accept (other body) status = %d; body %s", foreignConflict.Code, foreignConflict.Body)
+	}
+
+	// Same key, same body, different tenant: the tenant's own check, not a
+	// replay of the foreign one.
+	foreignReplay := modelSurfaceRequestAs(t, apiInst, otherTenant, "POST", "/api/v1/models/test", "shared-key", `{"tier":"deep"}`)
+	if foreignReplay.Code != 202 {
+		t.Fatalf("tenant-2 replay status = %d; body %s", foreignReplay.Code, foreignReplay.Body)
+	}
+	var replayBody struct {
+		CheckID string `json:"check_id"`
+	}
+	if err := json.Unmarshal(foreignReplay.Body.Bytes(), &replayBody); err != nil {
+		t.Fatalf("decode tenant-2 replay: %v", err)
+	}
+	if replayBody.CheckID == "" {
+		t.Fatal("tenant-2 replay carries no check_id")
+	}
+
+	// A foreign check id reads as 404, never as another tenant's results.
+	foreignRead := modelSurfaceRequestAs(t, apiInst, otherTenant, "GET", "/api/v1/models/test/"+firstBody.CheckID, "", "")
+	if foreignRead.Code != 404 {
+		t.Errorf("tenant-2 read of tenant-1's check = %d; want 404 (a foreign id is indistinguishable from an absent one)", foreignRead.Code)
+	}
+	// And the owner still sees their own check.
+	ownerRead := modelSurfaceRequest(t, apiInst, "GET", "/api/v1/models/test/"+firstBody.CheckID, "", "")
+	if ownerRead.Code != 200 {
+		t.Errorf("owner read of own check = %d; want 200", ownerRead.Code)
+	}
+}
+
+// TestModelsSurface_QueueDepthIsBounded: acceptance without backpressure is a
+// bill — each 202 is a paid call queued behind the others. Past the depth
+// cap the answer is 429 naming the cap, replays of already-accepted checks
+// still work, and the cap lifts as checks finish.
+func TestModelsSurface_QueueDepthIsBounded(t *testing.T) {
+	gate := make(chan struct{})
+	apiInst, fake := newModelSurfaceAPI(t, gate)
+
+	accepted := make([]string, 0, modelTestMaxQueueDepth)
+	for depth := 0; depth < modelTestMaxQueueDepth; depth++ {
+		recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test",
+			fmt.Sprintf("key-depth-%d", depth), `{"tier":"fast"}`)
+		if recorder.Code != 202 {
+			t.Fatalf("depth %d: status = %d; body %s", depth, recorder.Code, recorder.Body)
+		}
+		var acceptedBody struct {
+			CheckID string `json:"check_id"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &acceptedBody); err != nil {
+			t.Fatalf("decode depth %d: %v", depth, err)
+		}
+		accepted = append(accepted, acceptedBody.CheckID)
+	}
+
+	// The queue is full: a NEW key is refused with 429 naming the cap…
+	refused := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-over-depth", `{"tier":"fast"}`)
+	if refused.Code != 429 {
+		t.Fatalf("over-depth status = %d; body %s", refused.Code, refused.Body)
+	}
+	if !strings.Contains(refused.Body.String(), fmt.Sprintf("limit %d", modelTestMaxQueueDepth)) {
+		t.Errorf("body = %s; want the cap named", refused.Body)
+	}
+	// …while a replay of an accepted check is still answered.
+	replay := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-depth-0", `{"tier":"fast"}`)
+	if replay.Code != 202 {
+		t.Fatalf("replay under a full queue status = %d; body %s", replay.Code, replay.Body)
+	}
+
+	// Drain: the gated checks finish, and acceptance works again.
+	close(gate)
+	waitForModelCheckCalls(t, fake, modelTestMaxQueueDepth)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-after-drain", `{"tier":"fast"}`); recorder.Code == 202 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("acceptance did not recover after the queue drained")
 }

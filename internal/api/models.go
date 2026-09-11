@@ -92,28 +92,42 @@ type modelCheckResult struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// modelCheck is one accepted check: identity, targets, and the results
-// gathered so far. Owned by the registry; mutated under its mutex.
+// modelCheck is one accepted check: identity, tenant, targets, and the
+// results gathered so far. Owned by the registry; mutated under its mutex.
 type modelCheck struct {
+	tenantID   string
 	checkID    string
 	targets    []modelCheckTarget
 	state      string
 	results    []modelCheckResult
 	acceptedAt time.Time
+	// finishedAt is set when the check completes; the registry's TTL counts
+	// from HERE, not from acceptance — a long queue must not make a
+	// still-running check 404 while a client watches it.
+	finishedAt time.Time
 }
 
-// keyedCheck pairs an idempotency key with the fingerprint of the request it
+// keyedCheck pairs an idempotency key with the request fingerprint it
 // served, so a replay can be told apart from a key reused for another body.
 type keyedCheck struct {
 	fingerprint string
 	check       *modelCheck
 }
 
+// modelTestMaxQueueDepth bounds how many checks one tenant may have accepted
+// but not finished. Accepting is free of backpressure no more: each accepted
+// check is a paid runtime call queued behind the others, and an unbounded
+// queue of them is a bill, not a feature.
+const modelTestMaxQueueDepth = 8
+
 // modelCheckRegistry is the in-process memory of accepted checks: by
-// idempotency key (dedupe) and by check id (state reads). Diagnostics carry
-// no durable state — no table, no migration — and the TTL is the honest
-// consequence: a restart forgets keys and unfinished checks, the finished
-// results stay in the event stream, and a client retries.
+// (tenant, idempotency key) for dedupe and by check id for state reads — the
+// key namespace and the id reads are tenant-scoped, because this map is the
+// one place a diagnostic carries state and the multi-tenant seam must not
+// grow its first exception here. Diagnostics carry no durable state — no
+// table, no migration — and the TTL is the honest consequence: a restart
+// forgets keys and unfinished checks, the finished results stay in the event
+// stream, and a client retries.
 type modelCheckRegistry struct {
 	mu        sync.Mutex
 	byKey     map[string]keyedCheck
@@ -134,47 +148,73 @@ func newModelCheckRegistry(retention time.Duration) *modelCheckRegistry {
 	}
 }
 
-// sweepLocked drops entries past their TTL. Caller holds mu.
+// tenantScopeKey namespaces an idempotency key by tenant.
+func tenantScopeKey(tenantID, key string) string {
+	return tenantID + "\x00" + key
+}
+
+// sweepLocked drops FINISHED entries past their TTL. A running check is
+// never swept: it is bounded by its own deadline, and the queue in front of
+// it is bounded by modelTestMaxQueueDepth, so there is no runaway to guard
+// against — only a client watching a check that must not vanish under it.
+// Caller holds mu.
 func (registry *modelCheckRegistry) sweepLocked(now time.Time) {
 	for key, entry := range registry.byKey {
-		if now.Sub(entry.check.acceptedAt) > registry.retention {
+		if entry.check.state == modelCheckFinished && now.Sub(entry.check.finishedAt) > registry.retention {
 			delete(registry.byKey, key)
 			delete(registry.byID, entry.check.checkID)
 		}
 	}
 }
 
-// accept registers a check under an idempotency key, or recognizes a replay:
-// the same key with the same request fingerprint returns the existing check;
-// the same key with a different fingerprint is a conflict — silently
-// substituting what a key means is how a client pays twice for one intent.
-func (registry *modelCheckRegistry) accept(key, fingerprint string, targets []modelCheckTarget) (check *modelCheck, replay bool, conflict bool) {
+// accept registers a check under a tenant-scoped idempotency key, or
+// recognizes a replay: the same key with the same request fingerprint
+// returns the existing check; the same key with a different fingerprint is a
+// conflict — silently substituting what a key means is how a client pays
+// twice for one intent. A tenant already holding modelTestMaxQueueDepth
+// unfinished checks gets queueExceeded instead of an acceptance.
+func (registry *modelCheckRegistry) accept(tenantID, key, fingerprint string, targets []modelCheckTarget) (check *modelCheck, replay bool, conflict bool, queueExceeded bool) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.sweepLocked(time.Now())
-	if existing, found := registry.byKey[key]; found {
+	if existing, found := registry.byKey[tenantScopeKey(tenantID, key)]; found {
 		if existing.fingerprint != fingerprint {
-			return nil, false, true
+			return nil, false, true, false
 		}
-		return existing.check, true, false
+		return existing.check, true, false, false
+	}
+	queued := 0
+	for _, entry := range registry.byID {
+		if entry.tenantID == tenantID && entry.state != modelCheckFinished {
+			queued++
+		}
+	}
+	if queued >= modelTestMaxQueueDepth {
+		return nil, false, false, true
 	}
 	check = &modelCheck{
+		tenantID:   tenantID,
 		checkID:    newCheckID(),
 		targets:    targets,
 		state:      modelCheckRunning,
 		acceptedAt: time.Now(),
 	}
-	registry.byKey[key] = keyedCheck{fingerprint: fingerprint, check: check}
+	registry.byKey[tenantScopeKey(tenantID, key)] = keyedCheck{fingerprint: fingerprint, check: check}
 	registry.byID[check.checkID] = check
-	return check, false, false
+	return check, false, false, false
 }
 
-// lookup returns the check by id, or nil when unknown or past its TTL.
-func (registry *modelCheckRegistry) lookup(checkID string) *modelCheck {
+// lookup returns the tenant's check by id, or nil when unknown, belonging to
+// another tenant, or past its TTL.
+func (registry *modelCheckRegistry) lookup(tenantID, checkID string) *modelCheck {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.sweepLocked(time.Now())
-	return registry.byID[checkID]
+	check := registry.byID[checkID]
+	if check == nil || check.tenantID != tenantID {
+		return nil
+	}
+	return check
 }
 
 // recordResult appends one target's outcome.
@@ -184,11 +224,12 @@ func (registry *modelCheckRegistry) recordResult(check *modelCheck, result model
 	check.results = append(check.results, result)
 }
 
-// finish marks the check complete.
+// finish marks the check complete and starts its TTL clock.
 func (registry *modelCheckRegistry) finish(check *modelCheck) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	check.state = modelCheckFinished
+	check.finishedAt = time.Now()
 }
 
 // newCheckID mints an unguessable check id.
@@ -299,9 +340,18 @@ type modelTestRequest struct {
 // tiers and deduplicates (model, variant) pairs — three tiers naming one
 // model are one paid call, attributed to the first tier (sorted) that named
 // it.
+//
+// A variant is REFUSED, not echoed-then-dropped: the execution adapter has no
+// variant parameter yet (it arrives with tier variants later), and a check
+// that silently ran without the requested variant would answer a question
+// nobody asked — the same drop-the-undeclared-option move the model rules
+// forbid everywhere else.
 func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Config, ceilingSeconds int) (modelTestRequest, error) {
 	if request.Tier != "" && request.Model != "" {
 		return modelTestRequest{}, fmt.Errorf("tier and model are mutually exclusive: name one")
+	}
+	if request.Variant != "" {
+		return modelTestRequest{}, fmt.Errorf("variant is not supported by this build yet; check the model without it")
 	}
 	timeoutSecs := request.TimeoutSecs
 	if timeoutSecs == 0 {
@@ -313,13 +363,12 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 
 	var targets []modelCheckTarget
 	seen := make(map[string]bool)
-	addTarget := func(tier, modelName, variant string) {
-		key := modelName + "\x00" + variant
-		if seen[key] {
+	addTarget := func(tier, modelName string) {
+		if seen[modelName] {
 			return
 		}
-		seen[key] = true
-		targets = append(targets, modelCheckTarget{Tier: tier, Model: modelName, Variant: variant})
+		seen[modelName] = true
+		targets = append(targets, modelCheckTarget{Tier: tier, Model: modelName})
 	}
 	switch {
 	case request.Tier != "":
@@ -332,9 +381,9 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 			sort.Strings(known)
 			return modelTestRequest{}, fmt.Errorf("unknown tier %q (known: %s)", request.Tier, strings.Join(known, ", "))
 		}
-		addTarget(request.Tier, modelName, "")
+		addTarget(request.Tier, modelName)
 	case request.Model != "":
-		addTarget("", request.Model, request.Variant)
+		addTarget("", request.Model)
 	default:
 		// Empty body: every configured tier, deduplicated by pair.
 		tierNames := make([]string, 0, len(resolvedTiers.Tiers))
@@ -343,7 +392,7 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 		}
 		sort.Strings(tierNames)
 		for _, tierName := range tierNames {
-			addTarget(tierName, resolvedTiers.Tiers[tierName], "")
+			addTarget(tierName, resolvedTiers.Tiers[tierName])
 		}
 	}
 	if len(targets) == 0 {
@@ -416,17 +465,28 @@ func (api *API) handleStartModelTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	check, replay, conflict := api.modelChecks.accept(idempotencyKey, fingerprintRequest(request), request.targets)
+	check, replay, conflict, queueExceeded := api.modelChecks.accept(
+		principal.TenantID, idempotencyKey, fingerprintRequest(request), request.targets)
 	if conflict {
 		writeError(w, http.StatusConflict, codeConflict,
 			"this Idempotency-Key was used for a different request; a key names one intent")
 		return
 	}
+	if queueExceeded {
+		writeError(w, http.StatusTooManyRequests, codeTooManyRequests,
+			fmt.Sprintf("too many model checks are already queued (limit %d); wait for one to finish", modelTestMaxQueueDepth))
+		return
+	}
 	if !replay {
-		// The accepted context keeps the principal's values (tenant, user)
-		// but not the request's cancellation: the check outlives the POST
-		// response by design.
+		// The accepted context outlives the POST response by design — but not
+		// the process: the server's run context is preferred when attached, so
+		// a shutdown cancels pending checks and kills their subprocesses
+		// instead of orphaning them. The WithoutCancel fallback serves direct
+		// handler use without a server (unit tests).
 		acceptedCtx := context.WithoutCancel(r.Context())
+		if api.runContext != nil {
+			acceptedCtx = api.runContext
+		}
 		api.emitModelTestEvent(acceptedCtx, principal, EvModelsTestStarted, map[string]any{
 			"check_id": check.checkID,
 			"targets":  check.targets,
@@ -441,14 +501,17 @@ func (api *API) handleStartModelTest(w http.ResponseWriter, r *http.Request) {
 
 // handleGetModelTest GET /api/v1/models/test/{id} — the state and results of
 // one check, for a reconnecting client or one that does not listen to the
-// event stream. Unknown and TTL-expired ids are 404; a finished result
-// survives in the event stream regardless.
+// event stream. Unknown, TTL-expired, and ANOTHER TENANT'S ids are all the
+// same 404 (a foreign id is not distinguishable from an absent one, and must
+// not be); a finished result survives in the tenant's event stream
+// regardless.
 func (api *API) handleGetModelTest(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAccess(w, r, authz.ActionModelRead, ""); !ok {
+	principal, ok := requireAccess(w, r, authz.ActionModelRead, "")
+	if !ok {
 		return
 	}
 	checkID := r.PathValue("id")
-	check := api.modelChecks.lookup(checkID)
+	check := api.modelChecks.lookup(principal.TenantID, checkID)
 	if check == nil {
 		writeError(w, http.StatusNotFound, codeNotFound,
 			"model check not found (unknown, or past its retention; finished results remain in the event stream)")

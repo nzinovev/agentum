@@ -21,7 +21,7 @@ and land with the epic named in the table.
 
   Codes are stable machine identifiers; the UI branches on them. Current codes:
   `not_found`, `illegal_transition`, `bad_input`, `unauthorized`, `forbidden`,
-  `not_implemented`, `internal`.
+  `not_implemented`, `internal`, `conflict`, `too_many_requests`.
 - **Identity is implicit.** Every write carries `tenant_id` and `user_id` from
   the resolved Principal, never the request body.
 - **State transitions** route through `engine.Next`. An illegal transition is
@@ -402,7 +402,7 @@ tenant-scoped, like `run:create`.
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
 | `GET` | `/models` | ✅ | → `200` with the adapter id, the default tier, the catalog status, and the resolved tiers |
-| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model, variant?}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}` |
+| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. `variant` is refused (`400`) until the adapter has a variant parameter — a check that echoed the field while running without it would answer a question nobody asked |
 | `GET` | `/models/test/{id}` | ✅ | → `200 {check_id, state, results}` / `404 not_found` |
 
 ### `GET /models`
@@ -430,13 +430,16 @@ never a re-read of the file.
 The check invokes the model, which can take up to the timeout, so the request
 is **accepted** (`202`) and executed in the background; results arrive as
 events on the tenant stream and `GET /models/test/{id}` serves state for a
-reconnecting client. Targets are deduplicated by `(model, variant)` — three
-tiers naming one model are one paid call — and execution is serialized, so
-accepted checks queue rather than fan out.
+reconnecting client. Targets are deduplicated by model — three tiers naming
+one model are one paid call — and execution is serialized, so accepted checks
+queue rather than fan out.
 
 **`Idempotency-Key` is mandatory.** An optional guard against a double click
 is no guard: the client that omits it pays for the call twice and learns it
-from the bill. Absent header → `400 bad_input` naming it.
+from the bill. Absent header → `400 bad_input` naming it. Keys and check ids
+are **tenant-scoped**: a key another tenant used is invisible (same key,
+same body from another tenant mints that tenant's own check), and a foreign
+`check_id` reads as the same `404` as an unknown one.
 
 | Situation | Response |
 |---|---|
@@ -444,8 +447,9 @@ from the bill. Absent header → `400 bad_input` naming it.
 | same `Idempotency-Key`, same body | `202` + the **same** `check_id`; no second check runs |
 | same key, different body | `409 conflict` — a key names one intent |
 | header absent | `400 bad_input` (header named) |
-| unknown tier / broken body / `timeout_seconds` above the ceiling | `400 bad_input` (ceiling named) |
-| unknown or TTL-expired `check_id` on GET | `404 not_found` (finished results remain in the event stream) |
+| unknown tier / broken body / `timeout_seconds` above the ceiling / `variant` | `400 bad_input` (ceiling named; variant is not supported yet) |
+| already `8` unfinished checks queued for the tenant | `429 too_many_requests` (cap named; replays of accepted checks still answer) |
+| unknown, TTL-expired, or foreign `check_id` on GET | `404 not_found` (finished results remain in the tenant's event stream) |
 
 A non-`ok` outcome is a **result**, not an error of the request: the handle
 answered `202`, and the outcome (`ok` | `unknown_model` | `timeout` |
@@ -453,10 +457,13 @@ answered `202`, and the outcome (`ok` | `unknown_model` | `timeout` |
 catalog answered and no call was made.
 
 The check registry is in-process with a TTL (default 60 min,
-`AGENTUM_MODEL_TEST_RETENTION_MINUTES`): diagnostics carry no durable state,
-a restart forgets keys and unfinished checks, and a client retries. The
-ceiling for `timeout_seconds` is `AGENTUM_MODEL_TEST_MAX_SECONDS` (default
-120).
+`AGENTUM_MODEL_TEST_RETENTION_MINUTES`, counted from a check's completion —
+a long queue does not make a running check vanish): diagnostics carry no
+durable state, a restart forgets keys and unfinished checks, and a client
+retries. The ceiling for `timeout_seconds` is
+`AGENTUM_MODEL_TEST_MAX_SECONDS` (default 120). Pending checks stop with the
+process: they derive from the server's run context, so a shutdown cancels
+them and kills their subprocesses instead of orphaning them.
 
 ### Model-check events
 
