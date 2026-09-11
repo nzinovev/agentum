@@ -142,8 +142,9 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 // function works from ids.
 func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapter, error) {
 	registry := agent.NewRegistry(agent.RegistryOptions{
-		DefaultAdapter: agent.AdapterID(cfg.ExecutionAdapter),
-		RuntimeBinary:  cfg.RuntimeBinary,
+		DefaultAdapter:    agent.AdapterID(cfg.ExecutionAdapter),
+		RuntimeBinary:     cfg.RuntimeBinary,
+		FirstEventTimeout: time.Duration(cfg.FirstEventTimeoutSeconds) * time.Second,
 	})
 	resolved, err := registry.Resolve("")
 	if err != nil {

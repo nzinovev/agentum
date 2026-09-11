@@ -35,6 +35,15 @@ type Config struct {
 	HardTimeoutSeconds int
 	IdleTimeoutSeconds int
 
+	// FirstEventTimeoutSeconds bounds how long an invocation may produce no
+	// output AT ALL (AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS, default 120, zero
+	// disables). A different question from the idle cap: "the runtime said
+	// nothing since it started" vs "went quiet mid-work" — a working model
+	// emits its first event in fractions of a second, and one that never
+	// emits hangs the invocation silently. The watchdog retires forever on
+	// the first line, so no legitimate long work ever falls under it.
+	FirstEventTimeoutSeconds int
+
 	// Project-check executor defaults (orchestrator-owned checks). Applied when
 	// a check in the project registry (.agentum.yaml) declares no value of its
 	// own. CheckTimeoutSeconds bounds a single check; CheckMaxOutputBytes caps
@@ -89,6 +98,8 @@ func Load() (Config, error) {
 
 		HardTimeoutSeconds: getenvInt("AGENTUM_HARD_TIMEOUT_SECONDS", 0),
 		IdleTimeoutSeconds: getenvInt("AGENTUM_IDLE_TIMEOUT_SECONDS", 0),
+
+		FirstEventTimeoutSeconds: getenvInt("AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS", 120),
 
 		CheckTimeoutSeconds: getenvInt("AGENTUM_CHECK_TIMEOUT_SECONDS", 0),
 		CheckMaxOutputBytes: getenvInt("AGENTUM_CHECK_MAX_OUTPUT_BYTES", 0),

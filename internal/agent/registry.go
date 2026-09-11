@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/nzinovev/agentum/internal/models"
 )
@@ -85,9 +86,10 @@ var opencodeDescriptor = Descriptor{
 	},
 }
 
-// RegistryOptions configures registry construction. Both fields come from
-// adapter-neutral configuration: an id (empty selects the default entry) and a
-// runtime binary override (empty selects each descriptor's Binary).
+// RegistryOptions configures registry construction. The fields come from
+// adapter-neutral configuration: an id (empty selects the default entry), a
+// runtime binary override (empty selects each descriptor's Binary), and the
+// host-level first-event bound handed to adapters that enforce one.
 type RegistryOptions struct {
 	// DefaultAdapter is the entry an empty id resolves to. Empty means the
 	// first registered entry.
@@ -95,6 +97,11 @@ type RegistryOptions struct {
 	// RuntimeBinary overrides every descriptor's default binary. Empty keeps
 	// the descriptor's Binary.
 	RuntimeBinary string
+	// FirstEventTimeout bounds how long an invocation may stay totally
+	// silent from start (zero disables the bound). Host-level operator
+	// configuration, deliberately not a capability-profile input: it answers
+	// "is the runtime alive at all", which no pack or role should dilute.
+	FirstEventTimeout time.Duration
 }
 
 // Registry is the set of execution adapters this build can run. Data, not a
@@ -121,8 +128,10 @@ type Registry struct {
 // its own descriptor default. Asking a throwaway construction for that default
 // worked, but it made the caller responsible for a fact the adapter owns.
 func NewRegistry(options RegistryOptions) *Registry {
+	opencodeAdapter := NewOpencodeAdapter(options.RuntimeBinary)
+	opencodeAdapter.firstEventTimeout = options.FirstEventTimeout
 	adapters := map[AdapterID]Adapter{
-		AdapterOpencode: NewOpencodeAdapter(options.RuntimeBinary),
+		AdapterOpencode: opencodeAdapter,
 	}
 	orderedIDs := []AdapterID{AdapterOpencode}
 	defaultID := options.DefaultAdapter

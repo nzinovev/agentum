@@ -50,6 +50,9 @@ const (
 	// fakeMute emits nothing at all and outlives any test deadline — the
 	// shape the model check's timeout and the first-event watchdog exist for.
 	fakeMute = "mute"
+	// fakeQuiet emits nothing for the configured delay, then a first line and
+	// a normal completion — a late but live runtime.
+	fakeQuiet = "quiet"
 	// fakeDie exits non-zero before writing anything — the model check's
 	// error outcome.
 	fakeDie = "die"
@@ -132,6 +135,12 @@ func runFakeAgent(mode string) int {
 		}
 		_ = os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600)
 	}
+	delay := 100 * time.Millisecond
+	if raw := os.Getenv(fakeDelayEnv); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			delay = time.Duration(parsed) * time.Millisecond
+		}
+	}
 	switch mode {
 	case fakeDie:
 		fmt.Fprintln(os.Stderr, "fake model failure")
@@ -141,14 +150,13 @@ func runFakeAgent(mode string) int {
 		// caller's kill is what ends this process.
 		time.Sleep(30 * time.Second)
 		return 0
+	case fakeQuiet:
+		// Totally silent for the delay, then a late first line and a normal
+		// completion — the shape that proves a disabled or retired
+		// first-event watchdog leaves the run alone.
+		time.Sleep(delay)
 	}
 	fmt.Println(`{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"starting"}}`)
-	delay := 100 * time.Millisecond
-	if raw := os.Getenv(fakeDelayEnv); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			delay = time.Duration(parsed) * time.Millisecond
-		}
-	}
 	time.Sleep(delay)
 
 	if mode == fakeWorks {
