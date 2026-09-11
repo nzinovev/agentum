@@ -47,6 +47,12 @@ const (
 	// fakeSilent emits one line and then produces nothing for the configured
 	// delay — the shape the idle cap exists for.
 	fakeSilent = "silent"
+	// fakeMute emits nothing at all and outlives any test deadline — the
+	// shape the model check's timeout and the first-event watchdog exist for.
+	fakeMute = "mute"
+	// fakeDie exits non-zero before writing anything — the model check's
+	// error outcome.
+	fakeDie = "die"
 )
 
 // TestMain doubles as the fake agent's entry point. It must intercept before
@@ -125,6 +131,16 @@ func runFakeAgent(mode string) int {
 			}
 		}
 		_ = os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600)
+	}
+	switch mode {
+	case fakeDie:
+		fmt.Fprintln(os.Stderr, "fake model failure")
+		return 2
+	case fakeMute:
+		// Block long enough that every bounded waiter gives up first; the
+		// caller's kill is what ends this process.
+		time.Sleep(30 * time.Second)
+		return 0
 	}
 	fmt.Println(`{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"starting"}}`)
 	delay := 100 * time.Millisecond
