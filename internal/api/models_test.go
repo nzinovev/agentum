@@ -445,3 +445,29 @@ func waitForModelCheckState(t *testing.T, apiInst *API, checkID string) struct {
 		} `json:"results"`
 	}{}
 }
+
+// TestModelCheckRegistry_RetentionForgets: entries past the TTL are gone from
+// both maps — an idempotency key forgotten by age behaves like a key never
+// seen (a new check), and a check id forgotten by age reads as 404 upstream.
+func TestModelCheckRegistry_RetentionForgets(t *testing.T) {
+	t.Parallel()
+	registry := newModelCheckRegistry(10 * time.Millisecond)
+	check, replay, conflict := registry.accept("key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
+	if replay || conflict {
+		t.Fatalf("accept = replay:%v conflict:%v; want a fresh registration", replay, conflict)
+	}
+	if registry.lookup(check.checkID) == nil {
+		t.Fatal("fresh check not readable")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if registry.lookup(check.checkID) != nil {
+		t.Error("check survived its TTL; the registry must forget")
+	}
+	again, replay, conflict := registry.accept("key-ttl", "print", []modelCheckTarget{{Model: "prov/one-model"}})
+	if replay || conflict {
+		t.Errorf("expired key: replay=%v conflict=%v; an expired key must behave like a never-seen key", replay, conflict)
+	}
+	if again.checkID == check.checkID {
+		t.Error("re-accept after TTL returned the dead check's id")
+	}
+}

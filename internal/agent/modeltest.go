@@ -148,6 +148,9 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 	}()
 
 	stopped := false
+	// terminateDone joins the ok-path terminator before the check returns, so
+	// no goroutine of this call outlives it.
+	var terminateDone chan struct{}
 	select {
 	case <-firstLine:
 		stopped = true
@@ -156,7 +159,11 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 		// Success is the first line; everything after it is an answer nobody
 		// asked to pay for. Terminate in its own goroutine: the escalation
 		// path waits for the reap that only the epilogue below performs.
-		go terminateProcessGroup(cmd, reaped)
+		terminateDone = make(chan struct{})
+		go func() {
+			defer close(terminateDone)
+			terminateProcessGroup(cmd, reaped)
+		}()
 	case <-testCtx.Done():
 		check.Outcome = ModelCheckTimeout
 		check.Reason = fmt.Sprintf("no output within %s", deadline)
@@ -170,6 +177,9 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 	waitErr := cmd.Wait()
 	close(reaped)
 	<-watcherDone
+	if terminateDone != nil {
+		<-terminateDone
+	}
 
 	if !stopped && check.Outcome != ModelCheckTimeout {
 		check.Outcome = ModelCheckError
