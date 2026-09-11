@@ -33,6 +33,10 @@ const (
 	fakeModeEnv     = "AGENTUM_FAKE_OPENCODE"
 	fakeArtifactEnv = "AGENTUM_FAKE_ARTIFACT_DIR"
 	fakeDelayEnv    = "AGENTUM_FAKE_DELAY_MS"
+	// fakeRunCounterEnv names a file runFakeAgent increments once per
+	// execution, so tests can assert how many times a runtime invocation was
+	// actually spawned (a refused start must leave it at zero).
+	fakeRunCounterEnv = "AGENTUM_FAKE_RUN_COUNTER"
 )
 
 // Fake agent behaviours.
@@ -113,6 +117,15 @@ const fakeDebugSkillOutput = `[
 
 // runFakeAgent plays the agent side of the adapter contract.
 func runFakeAgent(mode string) int {
+	if counterPath := os.Getenv(fakeRunCounterEnv); counterPath != "" {
+		count := 0
+		if raw, err := os.ReadFile(counterPath); err == nil {
+			if parsed, parseErr := strconv.Atoi(strings.TrimSpace(string(raw))); parseErr == nil {
+				count = parsed
+			}
+		}
+		_ = os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600)
+	}
 	fmt.Println(`{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"starting"}}`)
 	delay := 100 * time.Millisecond
 	if raw := os.Getenv(fakeDelayEnv); raw != "" {

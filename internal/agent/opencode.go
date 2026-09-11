@@ -80,6 +80,14 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}
+	// The model string is the one input that reaches the runtime verbatim, so
+	// it is checked against the catalog here too — a selection assembled by any
+	// path, not only run-start resolution. The check costs one memoized probe
+	// per process, and an unavailable catalog validates as nil: "could not
+	// check" never becomes "does not exist".
+	if err := adapter.Catalog(ctx).Validate(inv.Model); err != nil {
+		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
+	}
 	if err := adapter.validateInvocation(inv); err != nil {
 		return nil, err
 	}

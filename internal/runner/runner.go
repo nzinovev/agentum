@@ -520,11 +520,12 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 
 	// Resolve the execution target for EVERY stage up front: a tier no
-	// configuration defines, or an option the selected adapter does not declare,
-	// must fail the run before the first invocation — not four stages in, after
-	// source has been written. This is also the seam MVP run 13's RunSpec pins:
-	// one value, computed at run start.
-	executionPlan, planErr := runner.resolveExecutionPlan(runPack)
+	// configuration defines, an option the selected adapter does not declare,
+	// or a model the runtime's catalog does not contain must fail the run
+	// before the first invocation — not four stages in, after source has been
+	// written. This is also the seam MVP run 13's RunSpec pins: one value,
+	// computed at run start.
+	executionPlan, planErr := runner.resolveExecutionPlan(ctx, runPack)
 	if planErr != nil {
 		return runner.failRun(ctx, record, planErr)
 	}
@@ -644,11 +645,21 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 // resolveExecutionPlan resolves the model selection for every stage the pack
 // declares, before the stage loop runs. A tier is chosen per stage, so
 // validation must cover every stage — a models.yaml whose reasoning tier
-// declares an option the adapter cannot take must not fail four stages into a
-// run that has already written source. The fallback tiers come from the
-// adapter's descriptor; the runner names no executor itself.
-func (runner *Runner) resolveExecutionPlan(runPack *pack.Pack) (map[string]models.Selection, error) {
+// declares an option the adapter cannot take, or names a model the runtime's
+// catalog does not contain, must not fail four stages into a run that has
+// already written source. The fallback tiers come from the adapter's
+// descriptor; the runner names no executor itself.
+//
+// The catalog check runs only for an adapter that declared EnumeratesModels,
+// and an unavailable catalog validates as nil — the run proceeds unverified
+// and the fact lands in evidence. ctx reaches the catalog probe, which is
+// memoized: after the first caller the check costs nothing.
+func (runner *Runner) resolveExecutionPlan(ctx context.Context, runPack *pack.Pack) (map[string]models.Selection, error) {
 	descriptor := runner.adapter.Describe()
+	var catalog models.Catalog
+	if descriptor.EnumeratesModels {
+		catalog = runner.adapter.Catalog(ctx)
+	}
 	plan := make(map[string]models.Selection, len(runPack.Stages))
 	// Sorted, not map order: when more than one stage is misconfigured the
 	// run must fail naming the same one every time, or the operator fixes a
@@ -674,6 +685,10 @@ func (runner *Runner) resolveExecutionPlan(runPack *pack.Pack) (map[string]model
 		}
 		if optionErr := selection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
 			return nil, fmt.Errorf("resolve execution plan, stage %q: execution adapter %q: %w", stageID, descriptor.ID, optionErr)
+		}
+		if catalogErr := catalog.Validate(selection); catalogErr != nil {
+			return nil, fmt.Errorf("resolve execution plan, stage %q (tier %q): execution adapter %q: %w",
+				stageID, selection.Tier, descriptor.ID, catalogErr)
 		}
 		plan[stageID] = selection
 	}
