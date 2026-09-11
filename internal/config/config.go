@@ -42,6 +42,15 @@ type Config struct {
 	CheckTimeoutSeconds int
 	CheckMaxOutputBytes int
 
+	// ModelTestMaxSeconds is the ceiling the on-demand model check accepts in
+	// its request's timeout_seconds. The check is a paid runtime call, so its
+	// patience is bounded process-wide, not per caller.
+	ModelTestMaxSeconds int
+	// ModelTestRetentionMinutes is the TTL of the in-process model-check
+	// registry and its idempotency keys. Diagnostics carry no durable state;
+	// a restart forgets them by design and a client retries.
+	ModelTestRetentionMinutes int
+
 	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
 	// Defaults to .agentum/artifacts under the process CWD; the worktree's own
 	// per-stage artifact dir is separate and disposable — this root survives
@@ -83,6 +92,9 @@ func Load() (Config, error) {
 
 		CheckTimeoutSeconds: getenvInt("AGENTUM_CHECK_TIMEOUT_SECONDS", 0),
 		CheckMaxOutputBytes: getenvInt("AGENTUM_CHECK_MAX_OUTPUT_BYTES", 0),
+
+		ModelTestMaxSeconds:       getenvInt("AGENTUM_MODEL_TEST_MAX_SECONDS", 120),
+		ModelTestRetentionMinutes: getenvInt("AGENTUM_MODEL_TEST_RETENTION_MINUTES", 60),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")

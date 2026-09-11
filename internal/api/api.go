@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -40,6 +42,21 @@ type API struct {
 	// same tx as the advance transition (ADR 0003 D4). Nil when the server did
 	// not wire one; the approval write is skipped then.
 	packs pack.Source
+
+	// execAdapter is the execution adapter behind the model surface: catalog
+	// status for GET /models, the on-demand check for POST /models/test. Nil
+	// when the server did not wire one (unit tests); the model handles report
+	// an unavailable surface then.
+	execAdapter agent.Adapter
+	// resolvedTiers is the process's effective tier configuration, resolved
+	// once at boot — the same values runs resolve against. The model surface
+	// serves these, never a re-read of the file: a fourth source of truth
+	// would be free to disagree with the runs.
+	resolvedTiers models.Config
+	// modelTest bounds the on-demand check surface.
+	modelTest modelTestLimits
+	// modelChecks is the in-process registry of accepted model checks.
+	modelChecks *modelCheckRegistry
 }
 
 // Option configures an API at construction. Used for the artifact store +
@@ -65,6 +82,30 @@ func WithPackSource(source pack.Source) Option {
 	return func(apiInst *API) { apiInst.packs = source }
 }
 
+// WithExecutionAdapter attaches the execution adapter the model surface
+// reads: catalog status and the on-demand model check. Required for the
+// /api/v1/models* handles to do anything useful.
+func WithExecutionAdapter(adapter agent.Adapter) Option {
+	return func(apiInst *API) { apiInst.execAdapter = adapter }
+}
+
+// WithResolvedTiers attaches the process's effective tier configuration —
+// what the server resolved at boot (models.yaml override or the adapter
+// descriptor's defaults). The model surface serves these values; it never
+// re-reads the file.
+func WithResolvedTiers(tiers models.Config) Option {
+	return func(apiInst *API) { apiInst.resolvedTiers = tiers }
+}
+
+// WithModelTestLimits bounds the on-demand model check: the ceiling a
+// request's timeout_seconds may name, and how long checks and idempotency
+// keys stay remembered. Zero values fall back to the defaults.
+func WithModelTestLimits(maxSeconds, retentionMinutes int) Option {
+	return func(apiInst *API) {
+		apiInst.modelTest = modelTestLimits{maxSeconds: maxSeconds, retentionMinutes: retentionMinutes}
+	}
+}
+
 // New builds the API. db backs the transactional outbox; cancels lets the cancel
 // handler abort an in-flight run (nil leaves cancel as a no-op — the FSM
 // transition still applies). Options wire the artifact store + manifest service.
@@ -73,6 +114,7 @@ func New(db *sql.DB, queries *sqlc.Queries, log *slog.Logger, cancels RunCancele
 	for _, option := range options {
 		option(apiInst)
 	}
+	apiInst.modelChecks = newModelCheckRegistry(apiInst.modelTest.retention())
 	return apiInst
 }
 
@@ -164,4 +206,11 @@ func (api *API) Register(mux interface {
 	// SSE event streams.
 	mux.HandleFunc("GET /api/v1/events", api.handleEventStream)
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", api.handleRunEventStream)
+
+	// Model surface: the resolved tier configuration + catalog status, and
+	// the on-demand model check (accepted, run in the background, delivered
+	// as events on the tenant stream).
+	mux.HandleFunc("GET /api/v1/models", api.handleListModels)
+	mux.HandleFunc("POST /api/v1/models/test", api.handleStartModelTest)
+	mux.HandleFunc("GET /api/v1/models/test/{id}", api.handleGetModelTest)
 }

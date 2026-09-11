@@ -121,7 +121,10 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 
 	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels(),
 		api.WithArtifactStore(artifactStore), api.WithManifestService(manifestService),
-		api.WithPackSource(packs))
+		api.WithPackSource(packs),
+		api.WithExecutionAdapter(adapter),
+		api.WithResolvedTiers(effectiveTierConfig(modelsCfg, adapter.Describe())),
+		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes))
 
 	return &Server{
 		cfg: cfg, log: log, store: dataStore, adapter: adapter, models: modelsCfg,
@@ -167,6 +170,17 @@ func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapte
 		}
 	}
 	return resolved, nil
+}
+
+// effectiveTierConfig returns the tier set the process runs on: the
+// operator's models.yaml when present, otherwise the adapter descriptor's
+// baked-in defaults. One resolution, at boot — the model surface and the runs
+// read the same values.
+func effectiveTierConfig(modelsCfg *models.Config, descriptor agent.Descriptor) models.Config {
+	if modelsCfg != nil {
+		return *modelsCfg
+	}
+	return descriptor.DefaultTiers
 }
 
 // Handler returns the HTTP handler with the full middleware boundary applied.
