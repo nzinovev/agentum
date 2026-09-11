@@ -10,6 +10,39 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Model strings are checked against the runtime's own catalog before they
+  can hang a run.** The adapter probes the runtime's model listing once per
+  process (memoized and sticky, like the version probe) and every resolved
+  selection is validated against it at three points: process start (every
+  `models.yaml` tier, before HTTP comes up), run start (every pack stage,
+  before the first invocation), and `Invoke` (any path, no subprocess
+  spawned). The refusal names the tier, the model, and the adapter, suggests
+  near spellings, and names the listing command. The load-bearing rule:
+  **a catalog that could not be obtained validates as nil** — a missing
+  binary, a timeout, or one unreadable record invalidating the listing means
+  "not checked" (recorded in evidence as the `adapter.model_catalog` label:
+  `ok (N models)` / `failed: <reason>` / `unsupported`), never a lie that
+  existing models do not exist.
+- **New setting `AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS`** (default 120, zero
+  disables): bounds how long an invocation may produce no output at all. A
+  broken model's failure mode is total silence — no error, no exit code, a
+  worker slot held forever — and this watchdog retires permanently on the
+  first output line, so legitimate long work never falls under it. The idle
+  cap keeps its own default and its own question; the stop error names the
+  model.
+- **New handles `GET /api/v1/models`, `POST /api/v1/models/test`, and
+  `GET /api/v1/models/test/{id}`** (actions `model:read` / `model:test`).
+  The list serves the resolved tiers and the catalog status; the check
+  invokes a model on demand — accepted with `202`, executed in the
+  background, delivered as `models.test_started` / `models.test_model_checked`
+  / `models.test_finished` events on the tenant stream, success being the
+  first output line so the check costs a few tokens. `Idempotency-Key` is
+  mandatory (a repeat with the same body returns the same check and never
+  double-bills; with a different body it is a `409`), targets are
+  deduplicated by `(model, variant)`, execution is serialized, and the
+  in-process registry carries a TTL (`AGENTUM_MODEL_TEST_RETENTION_MINUTES`,
+  default 60; the per-request `timeout_seconds` is capped by
+  `AGENTUM_MODEL_TEST_MAX_SECONDS`, default 120).
 - **Repository identity replaces the local path as the project's key, and a
   run pins its working copy.** Moving a directory on disk no longer forges a
   second project: identity is a fingerprint of the repository's own history,
