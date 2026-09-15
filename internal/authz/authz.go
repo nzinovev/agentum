@@ -112,6 +112,16 @@ const (
 	ActionProjectRead   = "project:read"
 	ActionProjectList   = "project:list"
 
+	// ActionModelRead is the right to read the model configuration and the
+	// runtime catalog status, and to watch the state of a model check.
+	// Tenant-scoped: the tier set is process-wide, not per-resource.
+	ActionModelRead = "model:read"
+
+	// ActionModelTest launches the on-demand model check — a paid runtime
+	// call, kept separate from read for the same reason run:advance is kept
+	// separate from run:read.
+	ActionModelTest = "model:test"
+
 	// ActionEventStream is the right to tail the event stream: tenant-global
 	// when the resource is empty, run-scoped otherwise.
 	ActionEventStream = "event:stream"

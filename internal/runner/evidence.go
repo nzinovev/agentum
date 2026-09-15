@@ -436,12 +436,19 @@ func (runner *Runner) completeStageEvidence(
 
 // adapterEvidence returns the run-level adapter section: the wiring of the
 // process that drove the run — id, OUR adapter implementation's version, the
-// capability categories it declares, and the readiness probe outcome. The
-// runtime VERSION is per invocation, not here: a run resumed in a new process
-// after an upgrade genuinely has two.
+// capability categories it declares, the readiness probe outcome, and the
+// model-catalog probe outcome. The runtime VERSION is per invocation, not
+// here: a run resumed in a new process after an upgrade genuinely has two.
 func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvidence {
 	descriptor := runner.adapter.Describe()
 	readiness := runner.adapter.Probe(ctx)
+	// The catalog label keeps "never checked" (an adapter that cannot list
+	// its models) distinct from "checked and passed" — the same distinction
+	// the refusal rule makes, recorded so it survives the run.
+	catalogLabel := models.CatalogUnsupported
+	if descriptor.EnumeratesModels {
+		catalogLabel = runner.adapter.Catalog(ctx).Label()
+	}
 	declared := runner.adapter.Supported()
 	declaredNames := make([]string, 0, len(declared))
 	for _, category := range declared {
@@ -452,6 +459,7 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 		AdapterVersion:       descriptor.AdapterVersion,
 		DeclaredCapabilities: declaredNames,
 		RuntimeProbe:         readiness.Label(),
+		ModelCatalog:         catalogLabel,
 	}
 }
 

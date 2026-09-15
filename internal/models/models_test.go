@@ -24,8 +24,8 @@ func writeConfig(t *testing.T, body string) {
 func adapterDefaults() Config {
 	return Config{
 		Tiers: map[string]string{
-			"fast":      "opencode/deepseek-v4-flash-free",
-			"strong":    "opencode/north-mini-code-free",
+			"fast":      "opencode/nemotron-3.5-lightning-free",
+			"strong":    "opencode/muse-spark-1.3-contributor-free",
 			"reasoning": "opencode/nemotron-3-ultra-free",
 		},
 		Default: "strong",
@@ -155,7 +155,7 @@ func TestResolve_FallbackTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if selection.Options.Model != "opencode/deepseek-v4-flash-free" {
+	if selection.Options.Model != "opencode/nemotron-3.5-lightning-free" {
 		t.Errorf("Resolve(fast) = %+v; want the fallback tier's model", selection)
 	}
 	if selection.Tier != "fast" {
@@ -171,7 +171,7 @@ func TestResolve_EmptyTierFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if selection.Tier != "strong" || selection.Options.Model != "opencode/north-mini-code-free" {
+	if selection.Tier != "strong" || selection.Options.Model != "opencode/muse-spark-1.3-contributor-free" {
 		t.Errorf("Resolve('') = %+v; want the fallback default tier", selection)
 	}
 }

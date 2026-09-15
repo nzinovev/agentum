@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/nzinovev/agentum/internal/models"
 )
@@ -41,6 +42,18 @@ type Descriptor struct {
 	// operator has no models.yaml. "These model names work with this runtime" is
 	// runtime knowledge, so it lives here.
 	DefaultTiers models.Config
+	// EnumeratesModels declares that this adapter can list what its runtime can
+	// run. An adapter that cannot say so is never checked against a catalog —
+	// "cannot be asked" and "answered no" are different facts.
+	EnumeratesModels bool
+	// AutoInstructions are the repo-relative instruction files this runtime
+	// loads by itself, with no configuration from us. Which file that is
+	// differs per runtime, so it is declared here rather than assumed by a
+	// caller: a caller that names one is naming another runtime's file the
+	// moment a second adapter exists. The context probe returns the same set;
+	// this is the copy available without running anything, which is what a
+	// caller needs when the probe could not answer.
+	AutoInstructions []string
 }
 
 // clone returns a deep copy so a caller cannot mutate the adapter's declared
@@ -52,6 +65,9 @@ func (descriptor Descriptor) clone() Descriptor {
 	out := descriptor
 	if descriptor.ModelOptions != nil {
 		out.ModelOptions = append([]models.OptionName(nil), descriptor.ModelOptions...)
+	}
+	if descriptor.AutoInstructions != nil {
+		out.AutoInstructions = append([]string(nil), descriptor.AutoInstructions...)
 	}
 	if descriptor.DefaultTiers.Tiers != nil {
 		out.DefaultTiers.Tiers = make(map[string]string, len(descriptor.DefaultTiers.Tiers))
@@ -65,24 +81,31 @@ func (descriptor Descriptor) clone() Descriptor {
 // opencodeDescriptor is the opencode adapter's self-description. The default
 // tiers use the free models on opencode Zen (the `-free` suffix is explicit)
 // so a fresh install works without a paid provider once Zen is connected.
+// The names are a build-time claim about the runtime's catalog and are
+// checked against it at boot — upstream renames and removals have retired
+// defaults before, and the boot check is what turns that drift into a named
+// error instead of every run failing on start.
 var opencodeDescriptor = Descriptor{
-	ID:             AdapterOpencode,
-	AdapterVersion: "1.0.0",
-	Binary:         "opencode",
-	ModelOptions:   []models.OptionName{models.OptionModel},
+	ID:               AdapterOpencode,
+	AdapterVersion:   "1.0.0",
+	Binary:           "opencode",
+	ModelOptions:     []models.OptionName{models.OptionModel},
+	EnumeratesModels: true,
+	AutoInstructions: autoInstructionBaseline,
 	DefaultTiers: models.Config{
 		Tiers: map[string]string{
-			"fast":      "opencode/deepseek-v4-flash-free",
-			"strong":    "opencode/north-mini-code-free",
+			"fast":      "opencode/nemotron-3.5-lightning-free",
+			"strong":    "opencode/muse-spark-1.3-contributor-free",
 			"reasoning": "opencode/nemotron-3-ultra-free",
 		},
 		Default: "strong",
 	},
 }
 
-// RegistryOptions configures registry construction. Both fields come from
-// adapter-neutral configuration: an id (empty selects the default entry) and a
-// runtime binary override (empty selects each descriptor's Binary).
+// RegistryOptions configures registry construction. The fields come from
+// adapter-neutral configuration: an id (empty selects the default entry), a
+// runtime binary override (empty selects each descriptor's Binary), and the
+// host-level first-event bound handed to adapters that enforce one.
 type RegistryOptions struct {
 	// DefaultAdapter is the entry an empty id resolves to. Empty means the
 	// first registered entry.
@@ -90,6 +113,11 @@ type RegistryOptions struct {
 	// RuntimeBinary overrides every descriptor's default binary. Empty keeps
 	// the descriptor's Binary.
 	RuntimeBinary string
+	// FirstEventTimeout bounds how long an invocation may stay totally
+	// silent from start (zero disables the bound). Host-level operator
+	// configuration, deliberately not a capability-profile input: it answers
+	// "is the runtime alive at all", which no pack or role should dilute.
+	FirstEventTimeout time.Duration
 }
 
 // Registry is the set of execution adapters this build can run. Data, not a
@@ -116,8 +144,10 @@ type Registry struct {
 // its own descriptor default. Asking a throwaway construction for that default
 // worked, but it made the caller responsible for a fact the adapter owns.
 func NewRegistry(options RegistryOptions) *Registry {
+	opencodeAdapter := NewOpencodeAdapter(options.RuntimeBinary)
+	opencodeAdapter.firstEventTimeout = options.FirstEventTimeout
 	adapters := map[AdapterID]Adapter{
-		AdapterOpencode: NewOpencodeAdapter(options.RuntimeBinary),
+		AdapterOpencode: opencodeAdapter,
 	}
 	orderedIDs := []AdapterID{AdapterOpencode}
 	defaultID := options.DefaultAdapter

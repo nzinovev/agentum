@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 // OpencodeAdapter drives the `opencode` CLI as a subprocess: one invocation
@@ -27,10 +28,21 @@ import (
 type OpencodeAdapter struct {
 	binary string // path to the opencode executable
 
+	// firstEventTimeout bounds how long an invocation may stay totally
+	// silent from start (zero disables the watchdog). Host-level operator
+	// configuration, applied by the registry at construction; deliberately
+	// not part of the capability profile, which answers a different question.
+	firstEventTimeout time.Duration
+
 	// probeOnce / readiness memoize the runtime version probe: one subprocess per
 	// process lifetime, shared by every consumer.
 	probeOnce sync.Once
 	readiness Readiness
+
+	// catalogOnce / catalog memoize the runtime model listing the same way:
+	// one subprocess per process, sticky including a failure.
+	catalogOnce sync.Once
+	catalog     models.Catalog
 }
 
 // NewOpencodeAdapter returns an adapter that invokes the named binary. An
@@ -72,6 +84,14 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	// caller believed. An option outside the descriptor's set is refused and no
 	// subprocess starts.
 	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
+		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
+	}
+	// The model string is the one input that reaches the runtime verbatim, so
+	// it is checked against the catalog here too — a selection assembled by any
+	// path, not only run-start resolution. The check costs one memoized probe
+	// per process, and an unavailable catalog validates as nil: "could not
+	// check" never becomes "does not exist".
+	if err := adapter.Catalog(ctx).Validate(inv.Model); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}
 	if err := adapter.validateInvocation(inv); err != nil {
@@ -134,6 +154,10 @@ type runControl struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	idle   atomic.Bool
+	// firstEvent records that the run was stopped by the first-event
+	// watchdog — a distinct stop cause from the idle cap, so the terminal
+	// error can say which silence it was.
+	firstEvent atomic.Bool
 }
 
 // newRunControl wraps the parent context with the profile's hard cap.
@@ -154,11 +178,24 @@ func (control *runControl) stopIdle() {
 	control.cancel()
 }
 
+// stopFirstEvent cancels the run because nothing at all was emitted within the
+// first-event bound. Same flag pattern as stopIdle, for the same reason.
+func (control *runControl) stopFirstEvent() {
+	control.firstEvent.Store(true)
+	control.cancel()
+}
+
 // stopReason renders why a cancelled run ended, for the terminal EventError.
-func (control *runControl) stopReason(idleTimeout time.Duration) error {
+// The timeouts name the model: a silence has very different fixes depending
+// on whether the model is misbehaving or the agent is legitimately working,
+// and the model string is the one fact this error can add that the stop
+// reason vocabulary deliberately does not carry.
+func (control *runControl) stopReason(model string, idleTimeout, firstEventTimeout time.Duration) error {
 	switch {
+	case control.firstEvent.Load():
+		return fmt.Errorf("opencode run stopped: no output for %s before the first stream event, model %q", firstEventTimeout, model)
 	case control.idle.Load():
-		return fmt.Errorf("opencode run stopped: no output for %s (idle cap)", idleTimeout)
+		return fmt.Errorf("opencode run stopped: no output for %s (idle cap), model %q", idleTimeout, model)
 	case errors.Is(control.ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("opencode run stopped: hard timeout exceeded: %w", control.ctx.Err())
 	default:
@@ -190,6 +227,13 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	reaped := make(chan struct{})
 
 	cancelWatcher := watchCancellation(control.ctx, cmd, reaped)
+	// First-event watchdog: a runtime that has said NOTHING since it started
+	// is not working, it is hung — a working one emits its first event in
+	// fractions of a second. The watchdog retires forever on the first line,
+	// so legitimate long work (which begins with an event) never falls under
+	// it; silence mid-work belongs to the idle cap below. No-op when the
+	// bound is zero.
+	retireFirstEvent := startFirstEventWatcher(control, adapter.firstEventTimeout, reaped)
 	// Idle timeout: a watcher resets a timer on every observed stream chunk; if
 	// no chunk arrives within the profile's IdleTimeout the run is cancelled,
 	// which the cancellation watcher turns into a process-group termination.
@@ -199,10 +243,17 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	scanner := bufio.NewScanner(stdout)
 	// opencode tool input can be large; raise the per-line limit.
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	sawFirstLine := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+		if !sawFirstLine {
+			sawFirstLine = true
+			if retireFirstEvent != nil {
+				retireFirstEvent()
+			}
 		}
 		if idleReset != nil {
 			idleReset()
@@ -219,7 +270,7 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	<-cancelWatcher
 
 	if control.ctx.Err() != nil {
-		ch <- Event{Kind: EventError, Err: control.stopReason(plan.timeout.hard.IdleTimeout)}
+		ch <- Event{Kind: EventError, Err: control.stopReason(inv.Model.Options.Model, plan.timeout.hard.IdleTimeout, adapter.firstEventTimeout)}
 		return
 	}
 	if err := state.scannerErr(scanner); err != nil {
@@ -436,6 +487,31 @@ func applyTimeouts(ctx context.Context, profile caps.Profile) (context.Context, 
 		return context.WithTimeout(ctx, profile.HardTimeout)
 	}
 	return context.WithCancel(ctx)
+}
+
+// startFirstEventWatcher launches a goroutine that cancels the run when no
+// output at all arrives within firstEventTimeout of start. It returns a retire
+// function the scanner loop calls on the first non-empty line — the watchdog's
+// job ends there, and everything after is the idle cap's territory. Calling
+// retire after the run ends is harmless (the goroutine has retired on reaped).
+// Returns nil when firstEventTimeout is zero (watchdog disabled).
+func startFirstEventWatcher(control *runControl, firstEventTimeout time.Duration, reaped <-chan struct{}) func() {
+	if firstEventTimeout <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(firstEventTimeout)
+	retired := make(chan struct{})
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			control.stopFirstEvent()
+		case <-retired:
+		case <-reaped:
+		case <-control.ctx.Done():
+		}
+	}()
+	return func() { close(retired) }
 }
 
 // startIdleWatcher launches a goroutine that cancels the run when no stream

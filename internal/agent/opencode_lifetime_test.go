@@ -33,6 +33,14 @@ const (
 	fakeModeEnv     = "AGENTUM_FAKE_OPENCODE"
 	fakeArtifactEnv = "AGENTUM_FAKE_ARTIFACT_DIR"
 	fakeDelayEnv    = "AGENTUM_FAKE_DELAY_MS"
+	// fakeRunCounterEnv names a file runFakeAgent increments once per
+	// execution, so tests can assert how many times a runtime invocation was
+	// actually spawned (a refused start must leave it at zero).
+	fakeRunCounterEnv = "AGENTUM_FAKE_RUN_COUNTER"
+	// fakeConfigDumpEnv names a file the fake writes its OPENCODE_CONFIG_CONTENT
+	// into, so a test can assert what boundary the child was actually started
+	// under rather than what the caller believed it passed.
+	fakeConfigDumpEnv = "AGENTUM_FAKE_CONFIG_DUMP"
 )
 
 // Fake agent behaviours.
@@ -43,6 +51,15 @@ const (
 	// fakeSilent emits one line and then produces nothing for the configured
 	// delay — the shape the idle cap exists for.
 	fakeSilent = "silent"
+	// fakeMute emits nothing at all and outlives any test deadline — the
+	// shape the model check's timeout and the first-event watchdog exist for.
+	fakeMute = "mute"
+	// fakeQuiet emits nothing for the configured delay, then a first line and
+	// a normal completion — a late but live runtime.
+	fakeQuiet = "quiet"
+	// fakeDie exits non-zero before writing anything — the model check's
+	// error outcome.
+	fakeDie = "die"
 )
 
 // TestMain doubles as the fake agent's entry point. It must intercept before
@@ -51,6 +68,9 @@ const (
 // not with test flags. The debug-skill mode serves the ContextProber tests;
 // the version mode serves the readiness-probe tests.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "models" {
+		os.Exit(runFakeModels(os.Getenv(fakeCatalogEnv)))
+	}
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeAgent(mode))
 	}
@@ -110,13 +130,40 @@ const fakeDebugSkillOutput = `[
 
 // runFakeAgent plays the agent side of the adapter contract.
 func runFakeAgent(mode string) int {
-	fmt.Println(`{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"starting"}}`)
+	if counterPath := os.Getenv(fakeRunCounterEnv); counterPath != "" {
+		count := 0
+		if raw, err := os.ReadFile(counterPath); err == nil {
+			if parsed, parseErr := strconv.Atoi(strings.TrimSpace(string(raw))); parseErr == nil {
+				count = parsed
+			}
+		}
+		_ = os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600)
+	}
+	if dumpPath := os.Getenv(fakeConfigDumpEnv); dumpPath != "" {
+		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
+	}
 	delay := 100 * time.Millisecond
 	if raw := os.Getenv(fakeDelayEnv); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil {
 			delay = time.Duration(parsed) * time.Millisecond
 		}
 	}
+	switch mode {
+	case fakeDie:
+		fmt.Fprintln(os.Stderr, "fake model failure")
+		return 2
+	case fakeMute:
+		// Block long enough that every bounded waiter gives up first; the
+		// caller's kill is what ends this process.
+		time.Sleep(30 * time.Second)
+		return 0
+	case fakeQuiet:
+		// Totally silent for the delay, then a late first line and a normal
+		// completion — the shape that proves a disabled or retired
+		// first-event watchdog leaves the run alone.
+		time.Sleep(delay)
+	}
+	fmt.Println(`{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"starting"}}`)
 	time.Sleep(delay)
 
 	if mode == fakeWorks {

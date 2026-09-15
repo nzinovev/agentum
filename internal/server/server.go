@@ -32,6 +32,7 @@ type Server struct {
 	log        *slog.Logger
 	store      *store.Store
 	adapter    agent.Adapter
+	models     *models.Config // operator override (models.yaml); nil → the adapter descriptor's tiers
 	artifacts  *artifacts.SQLStore
 	manifest   *manifest.Service
 	api        *api.API
@@ -120,10 +121,13 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 
 	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels(),
 		api.WithArtifactStore(artifactStore), api.WithManifestService(manifestService),
-		api.WithPackSource(packs))
+		api.WithPackSource(packs),
+		api.WithExecutionAdapter(adapter),
+		api.WithResolvedTiers(effectiveTierConfig(modelsCfg, adapter.Describe())),
+		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes))
 
 	return &Server{
-		cfg: cfg, log: log, store: dataStore, adapter: adapter,
+		cfg: cfg, log: log, store: dataStore, adapter: adapter, models: modelsCfg,
 		artifacts: artifactStore, manifest: manifestService,
 		api: apiInst, runner: runnerInst, worker: worker, reconciler: reconciler,
 		pool: cfg.WorkerPoolSize,
@@ -138,8 +142,9 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 // function works from ids.
 func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapter, error) {
 	registry := agent.NewRegistry(agent.RegistryOptions{
-		DefaultAdapter: agent.AdapterID(cfg.ExecutionAdapter),
-		RuntimeBinary:  cfg.RuntimeBinary,
+		DefaultAdapter:    agent.AdapterID(cfg.ExecutionAdapter),
+		RuntimeBinary:     cfg.RuntimeBinary,
+		FirstEventTimeout: time.Duration(cfg.FirstEventTimeoutSeconds) * time.Second,
 	})
 	resolved, err := registry.Resolve("")
 	if err != nil {
@@ -168,6 +173,17 @@ func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapte
 	return resolved, nil
 }
 
+// effectiveTierConfig returns the tier set the process runs on: the
+// operator's models.yaml when present, otherwise the adapter descriptor's
+// baked-in defaults. One resolution, at boot — the model surface and the runs
+// read the same values.
+func effectiveTierConfig(modelsCfg *models.Config, descriptor agent.Descriptor) models.Config {
+	if modelsCfg != nil {
+		return *modelsCfg
+	}
+	return descriptor.DefaultTiers
+}
+
 // Handler returns the HTTP handler with the full middleware boundary applied.
 // This is the single front door: the UI and every external caller use the same
 // handler; nothing internal bypasses authz.
@@ -180,13 +196,23 @@ func (server *Server) Handler() http.Handler {
 // Run serves HTTP, the job worker, and the periodic reconciler until ctx is
 // cancelled, then shuts down gracefully. The reconciler runs its first pass
 // before the worker starts, so a crashed worker's stale jobs and any orphaned
-// runs are repaired before any new job is claimed.
+// runs are repaired before any new job is claimed. Before any of that, every
+// effective tier is checked against the runtime's model catalog: a typo'd
+// model — the operator's or the adapter's own drifted default — stops the
+// process here, where the fix is a file edit, not four stages into the first
+// run.
 func (server *Server) Run(ctx context.Context) error {
 	// Warm the runtime probe before the worker starts: the first run never pays
 	// the subprocess, and the boot log records the runtime version — or the
 	// failure, which is a probe result, not a boot failure; the run that needs
 	// the runtime surfaces it.
 	server.warmRuntimeProbe(ctx)
+	if err := server.validateModelTiers(ctx); err != nil {
+		return err
+	}
+	// Background work the API spawns (the on-demand model check) must stop
+	// with the process, not be orphaned by it.
+	server.api.AttachRunContext(ctx)
 
 	reconcilerCtx, cancelReconciler := context.WithCancel(ctx)
 	defer cancelReconciler()
@@ -236,6 +262,48 @@ func (server *Server) warmRuntimeProbe(ctx context.Context) {
 	}
 	server.log.Warn("execution runtime not ready",
 		"adapter", string(descriptor.ID), "reason", readiness.Reason)
+}
+
+// validateModelTiers checks every EFFECTIVE tier — the operator's
+// models.yaml when present, otherwise the adapter descriptor's baked-in
+// defaults — against the runtime's model catalog, before any worker starts
+// or HTTP comes up. The defaults are included on purpose: they are a claim
+// about the runtime made at build time, and it drifts (models are renamed
+// and removed upstream); a claim nobody tests is how a clean install ends up
+// refusing every run. Stopping here names the tier, the model, and the
+// adapter in one place instead of failing the first run mid-flight. An
+// unavailable catalog is a recorded fact, not a boot failure — the process
+// starts and the runs proceed with models unchecked (the run's evidence says
+// so). An adapter that cannot enumerate is never asked.
+func (server *Server) validateModelTiers(ctx context.Context) error {
+	descriptor := server.adapter.Describe()
+	if !descriptor.EnumeratesModels {
+		return nil
+	}
+	effective := effectiveTierConfig(server.models, descriptor)
+	catalog := server.adapter.Catalog(ctx)
+	// Sorted, not map order: with two broken tiers the operator would otherwise
+	// get a different one named on each boot.
+	tierNames := make([]string, 0, len(effective.Tiers))
+	for tierName := range effective.Tiers {
+		tierNames = append(tierNames, tierName)
+	}
+	sort.Strings(tierNames)
+	for _, tierName := range tierNames {
+		selection, resolveErr := models.Resolve(server.models, descriptor.DefaultTiers, tierName)
+		if resolveErr != nil {
+			return fmt.Errorf("validate models config, tier %q: %w", tierName, resolveErr)
+		}
+		if catalogErr := catalog.Validate(selection); catalogErr != nil {
+			return fmt.Errorf("validate models config, tier %q: execution adapter %q: %w",
+				tierName, descriptor.ID, catalogErr)
+		}
+	}
+	if !catalog.Available {
+		server.log.Warn("model catalog unavailable; effective tiers are not checked against the runtime",
+			"adapter", string(descriptor.ID), "reason", catalog.Reason)
+	}
+	return nil
 }
 
 // runnerStore adapts *sqlc.Queries to the runner's Store interface (a typed

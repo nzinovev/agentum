@@ -2,6 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,5 +150,77 @@ func TestAutoInstructionBaselineIsAGENTS(t *testing.T) {
 	t.Parallel()
 	if len(autoInstructionBaseline) != 1 || autoInstructionBaseline[0] != "AGENTS.md" {
 		t.Errorf("autoInstructionBaseline = %v, want [AGENTS.md]", autoInstructionBaseline)
+	}
+}
+
+// TestNoRuntimeInstructionFilenameOutsideThisPackage: which file a runtime
+// loads by itself is a fact about that runtime, and the executor guard does not
+// catch it — "AGENTS.md" does not contain the executor's name. A caller that
+// hardcodes it (a fallback for a failed probe is how it gets in) pins the wrong
+// file for every other runtime, silently, and only on the path where the probe
+// could not answer. Callers take the baseline from the descriptor instead.
+func TestNoRuntimeInstructionFilenameOutsideThisPackage(t *testing.T) {
+	t.Parallel()
+	repoRoot := filepath.Join("..", "..")
+	thisPackage := filepath.Join(repoRoot, "internal", "agent")
+
+	walkErr := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "tmp", "packs", "docs", "node_modules":
+				return fs.SkipDir
+			}
+			if path == thisPackage {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fileSet := token.NewFileSet()
+		// Mode 0: comments are not attached, so prose naming the file as an
+		// example stays legal — only real string literals are examined.
+		parsed, parseErr := parser.ParseFile(fileSet, path, nil, 0)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			literal, isLiteral := node.(*ast.BasicLit)
+			if !isLiteral || literal.Kind != token.STRING {
+				return true
+			}
+			for _, baseline := range autoInstructionBaseline {
+				if strings.Contains(literal.Value, baseline) {
+					t.Errorf("%s:%d: string literal %s names a runtime-injected instruction file; "+
+						"take it from Describe().AutoInstructions instead",
+						path, fileSet.Position(literal.Pos()).Line, literal.Value)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk: %v", walkErr)
+	}
+}
+
+// TestDescribe_AutoInstructionsAreDeclaredAndCopied: the descriptor publishes
+// the runtime-injected baseline for callers that cannot run a probe, and hands
+// out a copy — a caller mutating the slice must not rewrite what every later
+// run pins.
+func TestDescribe_AutoInstructionsAreDeclaredAndCopied(t *testing.T) {
+	t.Parallel()
+	descriptor := NewOpencodeAdapter("opencode").Describe()
+	if len(descriptor.AutoInstructions) == 0 {
+		t.Fatal("descriptor declares no auto-instruction baseline; callers have nothing to fall back to")
+	}
+	descriptor.AutoInstructions[0] = "MUTATED.md"
+	if again := NewOpencodeAdapter("opencode").Describe(); again.AutoInstructions[0] == "MUTATED.md" {
+		t.Error("Describe must return a fresh baseline slice; the mutation leaked into the descriptor")
 	}
 }

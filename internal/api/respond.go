@@ -52,6 +52,7 @@ const (
 	codeInternal            = "internal"
 	codeConflict            = "conflict"             // an optimistic-concurrency / state collision
 	codePreconditionMissing = "precondition_missing" // a required If-Match-style precondition was absent
+	codeTooManyRequests     = "too_many_requests"    // a bounded queue / rate surface is full
 )
 
 // writeError emits a structured error response.

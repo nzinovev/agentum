@@ -113,6 +113,28 @@ The loop honors `ctx` cancellation throughout: a cancel job or shutdown
 cancels the active stage's ctx, the adapter kills the subprocess, the loop
 transitions to a paused/cancelled state.
 
+### Invocation bounds: hard cap, idle cap, first-event watchdog
+
+Three separate bounds, each answering its own question:
+
+| Bound | Knob (default) | Question it answers | Scope |
+|---|---|---|---|
+| Hard cap | `AGENTUM_HARD_TIMEOUT_SECONDS` (0 = off) | how long may one invocation run in total | whole invocation |
+| Idle cap | `AGENTUM_IDLE_TIMEOUT_SECONDS` (0 = off) | how long may the agent go quiet mid-work | resets on every output line |
+| First event | `AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS` (120) | has the runtime said anything at all since it started | until the first output line, then retires forever |
+
+The first-event watchdog exists because a broken model's failure mode is not
+an error — it is total silence: no event, no exit code, no diagnostic, an
+invocation that hangs while holding a worker slot. A working model emits its
+first event in fractions of a second, so 120 s is generous; zero disables the
+bound. It is deliberately not the idle cap wearing a smaller number: a value
+large enough for a full test run inside the agent is useless as a detector,
+and a value small enough to detect a hung model kills legitimate work. The
+idle cap keeps its own default and its own question; the two must not be
+merged into one number, or both get answered badly. Terminal stop errors from
+either bound name the model (`adapter_error` vocabulary unchanged — the text
+gains the fact, the stop reason stays generic).
+
 ### Stop conditions → FSM
 
 Driven by the parsed `result.json` (or its absence). The FSM table is unchanged
@@ -599,8 +621,15 @@ skills, declared, pinned from `base_commit`, and recorded in the manifest.
 
 **What is pinned.** The instruction set is the project declaration
 (`instructions:` in `.agentum.yaml`, repo-relative, validated) ∪ the
-runtime-injected baseline (`AGENTS.md`, which opencode loads itself with no
-configuration). Bytes are read from `base_commit` through the worktree manager
+runtime-injected baseline — the files the execution runtime loads by itself,
+with no configuration from us. Which files those are is a fact about the
+runtime, so the adapter declares them (`Describe().AutoInstructions`) and its
+context probe returns that same declaration; for opencode the baseline is
+`AGENTS.md` at the repository root. The runner never names the file, not even
+as a fallback for a failed probe: another executor injects another file, and a
+literal in calling code would silently pin the wrong one on exactly the path
+where the probe could not answer. A build-time test fails on any such literal
+outside the adapter package. Bytes are read from `base_commit` through the worktree manager
 (the same agent-immutability seam as the checks registry), capped at 64 KiB/file
 and 192 KiB/set with a recorded truncation marker, and delivered to the adapter
 through the same config channel as the permission map. A path absent at
@@ -887,11 +916,14 @@ artifact refs carry the `invocation_id` that produced them.
 probed once per process (`adapter.Probe`, memoized — sticky, including a
 failure) and recorded on every invocation record. The run-level `adapter`
 section carries the wiring instead: id, the adapter implementation's version,
-declared capabilities, and the probe outcome label (`runtime_probe`: `ok` or
+declared capabilities, the probe outcome label (`runtime_probe`: `ok` or
 `failed: <reason>`; a failed probe additionally records an `adapter.runtime`
-evidence gap). A run resumed in a new process after a runtime upgrade
-genuinely has two runtime versions, which is exactly why the version is not
-a run-level scalar.
+evidence gap), and the model-catalog probe outcome (`model_catalog`: `ok (N
+models)`, `failed: <reason>`, or `unsupported` for an adapter that cannot
+list its runtime — keeping "models were never checked" distinguishable from
+"checked and passed"; see `docs/models.md`). A run resumed in a new process
+after a runtime upgrade genuinely has two runtime versions, which is exactly
+why the version is not a run-level scalar.
 
 ### Comparing two runs
 

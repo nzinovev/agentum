@@ -21,7 +21,7 @@ and land with the epic named in the table.
 
   Codes are stable machine identifiers; the UI branches on them. Current codes:
   `not_found`, `illegal_transition`, `bad_input`, `unauthorized`, `forbidden`,
-  `not_implemented`, `internal`.
+  `not_implemented`, `internal`, `conflict`, `too_many_requests`.
 - **Identity is implicit.** Every write carries `tenant_id` and `user_id` from
   the resolved Principal, never the request body.
 - **State transitions** route through `engine.Next`. An illegal transition is
@@ -390,6 +390,95 @@ One run recorded the section and the other did not, so the two are not
 comparable on that axis — this is a different statement from "the values
 differ", and a client should say so rather than rendering a value delta.
 
+## Models
+
+The model surface: what the process is configured to run on, what the runtime
+says it can run, and the on-demand check of whether a model actually answers.
+A remote client cannot read the server's `models.yaml` off its disk — the
+list handle is what it has to render a tier table or compose a test request.
+Actions: `model:read` (both GET handles), `model:test` (the check) —
+tenant-scoped, like `run:create`.
+
+| Method | Path | Status | Body / Query → Response |
+|---|---|---|---|
+| `GET` | `/models` | ✅ | → `200` with the adapter id, the default tier, the catalog status, and the resolved tiers |
+| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. `variant` is refused (`400`) until the adapter has a variant parameter — a check that echoed the field while running without it would answer a question nobody asked |
+| `GET` | `/models/test/{id}` | ✅ | → `200 {check_id, state, results}` / `404 not_found` |
+
+### `GET /models`
+
+```json
+{
+  "adapter": "opencode",
+  "default_tier": "strong",
+  "catalog": {"status": "ok", "models": 30, "checked_at": "2026-09-09T12:00:00Z"},
+  "tiers": [
+    {"tier": "fast",   "model": "zai-coding-plan/glm-5.2-highspeed", "variant": "", "in_catalog": true},
+    {"tier": "strong", "model": "zai-coding-plan/glm-5.3",           "variant": "", "in_catalog": true}
+  ]
+}
+```
+
+`catalog.status` uses the probe label vocabulary: `ok`, `failed: <reason>`,
+or `unsupported` (the adapter cannot list its runtime). `in_catalog` is
+false whenever that question could not be answered — the status field says
+which of the two it was. The tiers are the boot-resolved values runs use,
+never a re-read of the file.
+
+### `POST /models/test` — accept, don't hold the session
+
+The check invokes the model, which can take up to the timeout, so the request
+is **accepted** (`202`) and executed in the background; results arrive as
+events on the tenant stream and `GET /models/test/{id}` serves state for a
+reconnecting client. Targets are deduplicated by model — three tiers naming
+one model are one paid call — and execution is serialized, so accepted checks
+queue rather than fan out.
+
+**`Idempotency-Key` is mandatory.** An optional guard against a double click
+is no guard: the client that omits it pays for the call twice and learns it
+from the bill. Absent header → `400 bad_input` naming it. Keys and check ids
+are **tenant-scoped**: a key another tenant used is invisible (same key,
+same body from another tenant mints that tenant's own check), and a foreign
+`check_id` reads as the same `404` as an unknown one.
+
+| Situation | Response |
+|---|---|
+| accepted | `202` + `check_id` |
+| same `Idempotency-Key`, same body | `202` + the **same** `check_id`; no second check runs |
+| same key, different body | `409 conflict` — a key names one intent |
+| header absent | `400 bad_input` (header named) |
+| unknown tier / broken body / `timeout_seconds` above the ceiling / `variant` | `400 bad_input` (ceiling named; variant is not supported yet) |
+| already `8` unfinished checks queued for the tenant | `429 too_many_requests` (cap named; replays of accepted checks still answer) |
+| unknown, TTL-expired, or foreign `check_id` on GET | `404 not_found` (finished results remain in the tenant's event stream) |
+
+A non-`ok` outcome is a **result**, not an error of the request: the handle
+answered `202`, and the outcome (`ok` | `unknown_model` | `timeout` |
+`error`) arrives in the events and in the GET. `unknown_model` means the
+catalog answered and no call was made.
+
+The check registry is in-process with a TTL (default 60 min,
+`AGENTUM_MODEL_TEST_RETENTION_MINUTES`, counted from a check's completion —
+a long queue does not make a running check vanish): diagnostics carry no
+durable state, a restart forgets keys and unfinished checks, and a client
+retries. The ceiling for `timeout_seconds` is
+`AGENTUM_MODEL_TEST_MAX_SECONDS` (default 120). Pending checks stop with the
+process: they derive from the server's run context, so a shutdown cancels
+them and kills their subprocesses instead of orphaning them.
+
+### Model-check events
+
+Delivered on the tenant stream (`GET /api/v1/events`, `Last-Event-ID`
+replay), one event per model so a live consumer sees progress:
+
+| `event` | When | Payload |
+|---|---|---|
+| `models.test_started` | request accepted | `{check_id, targets}` |
+| `models.test_model_checked` | after each model | `{check_id, tier, model, variant, outcome, latency_ms, reason}` |
+| `models.test_finished` | all targets checked | `{check_id, results, duration_ms}` |
+
+The events carry no `run_id` (a check is not a run) and the actor is `human`:
+the check exists because a person asked for it through this API.
+
 ## Memory
 
 | Method | Path | Status | Notes |
@@ -450,6 +539,9 @@ data: {"run_id":"...","stage":"implement","stop_reason":"gate"}
 | `run.delivery_commit_diverged` | `{run_id, result_commit, checks_commit, checkpoint_label}` | runner at teardown when `result_commit` differs from the commit the delivery checks verified; the run is not failed, but the sealed manifest reads `evidence_complete: false` |
 | `memory.committed` | `{run_id, entries:[...]}` | memory layer at final approval |
 | `run.log` | `{run_id, level, message}` | runner / adapter diagnostics |
+| `models.test_started` | `{check_id, targets}` | API when an on-demand model check is accepted (no `run_id`; see "Models") |
+| `models.test_model_checked` | `{check_id, tier, model, variant, outcome, latency_ms, reason}` | API after each checked model |
+| `models.test_finished` | `{check_id, results, duration_ms}` | API when the check completes |
 
 Pre-release: the `payload` shapes are stable in shape but may gain fields; the
 UI must ignore unknown payload fields.

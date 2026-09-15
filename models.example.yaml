@@ -8,8 +8,8 @@
 # This file is OPTIONAL. Without it, Agentum uses the built-in defaults that
 # ship with the active execution adapter (opencode, free via opencode Zen once
 # connected):
-#   fast      → opencode/deepseek-v4-flash-free
-#   strong    → opencode/north-mini-code-free
+#   fast      → opencode/nemotron-3.5-lightning-free
+#   strong    → opencode/muse-spark-1.3-contributor-free
 #   reasoning → opencode/nemotron-3-ultra-free
 #
 # Decoding is STRICT: an unknown key or an empty model string fails boot with

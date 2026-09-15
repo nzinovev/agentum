@@ -9,7 +9,84 @@ Once tagged releases begin, this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- **The model-check registry is tenant-scoped.** Idempotency keys were keyed
+  by the bare header and check reads by the bare id, so a second tenant
+  could hit a foreign key's `409`, receive a foreign check on a same-body
+  replay, and read a foreign check's results — the diagnostics' one piece of
+  process state was the multi-tenant seam's first exception. Keys are now
+  `(tenant, key)`, checks carry their tenant, and a foreign id reads as the
+  same `404` as an unknown one. (The events were always written with the
+  caller's tenant; only the in-process memory leaked.)
+- **The boot-time catalog check covers the effective tiers, and the shipped
+  defaults were refreshed against the live catalog.** Two of the three
+  baked-in tier models no longer existed upstream, and the check skipped
+  them (`models.yaml == nil` meant "nothing to validate") — a clean install
+  booted silently and then refused every run at start on `strong`. The
+  check now validates what the process will actually run on (override or
+  defaults), so default drift is a named boot error instead of a per-run
+  failure; the defaults themselves move to models present in the current
+  catalog (`fast` → `opencode/nemotron-3.5-lightning-free`, `strong` →
+  `opencode/muse-spark-1.3-contributor-free`; `reasoning` was still listed
+  and stays).
+- **A `variant` in a model-check request is refused, not echoed-and-dropped.**
+  The response and events carried the requested variant while the check ran
+  without it — the silently-dropped-parameter move the model rules forbid
+  everywhere else. Until the adapter has a variant parameter it is a `400`
+  naming the field.
+- **The accepted-check queue is bounded.** Every `202` spawned a goroutine
+  waiting its turn behind up-to-120s checks, with no backpressure: a hundred
+  keys were a hundred paid calls queued. Past 8 unfinished checks per tenant
+  the answer is `429 too_many_requests` naming the cap (replays of accepted
+  checks still answer); the cap lifts as checks finish.
+- **The catalog's unreadable-records warning reaches the structured log.**
+  `main` never called `slog.SetDefault`, so the one warning line meant to
+  make a broken listing fixable went to the stdlib text handler on stderr.
+  The process logger is now the default.
+- **Registry TTL counts from completion, not acceptance** — a long queue no
+  longer makes a still-running check vanish into a `404` — **and pending
+  checks stop with the process**: they derive from the server's run context,
+  so a shutdown cancels them and kills their subprocesses instead of
+  orphaning them.
+
 ### Added
+- **Model strings are checked against the runtime's own catalog before they
+  can hang a run.** The adapter probes the runtime's model listing once per
+  process (memoized and sticky, like the version probe) and every resolved
+  selection is validated against it at three points: process start (every
+  `models.yaml` tier, before HTTP comes up), run start (every pack stage,
+  before the first invocation), and `Invoke` (any path, no subprocess
+  spawned). The refusal names the tier, the model, and the adapter, suggests
+  near spellings, and names the listing command. The load-bearing rule:
+  **a catalog that could not be obtained validates as nil** — a missing
+  binary, a timeout, or one unreadable record invalidating the listing means
+  "not checked" (recorded in evidence as the `adapter.model_catalog` label:
+  `ok (N models)` / `failed: <reason>` / `unsupported`), never a lie that
+  existing models do not exist.
+- **New setting `AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS`** (default 120, zero
+  disables): bounds how long an invocation may produce no output at all. A
+  broken model's failure mode is total silence — no error, no exit code, a
+  worker slot held forever — and this watchdog retires permanently on the
+  first output line, so legitimate long work never falls under it. The idle
+  cap keeps its own default and its own question; the stop error names the
+  model.
+- **New handles `GET /api/v1/models`, `POST /api/v1/models/test`, and
+  `GET /api/v1/models/test/{id}`** (actions `model:read` / `model:test`).
+  The list serves the resolved tiers and the catalog status; the check
+  invokes a model on demand — accepted with `202`, executed in the
+  background, delivered as `models.test_started` / `models.test_model_checked`
+  / `models.test_finished` events on the tenant stream, success being the
+  first output line so the check costs a few tokens. The check starts the
+  runtime under the same boundary an invocation gets — a permission config
+  rendered from a profile that grants nothing — so the auto-approve flag it
+  needs (a non-interactive check has nobody to answer a permission prompt)
+  approves nothing. `Idempotency-Key` is
+  mandatory (a repeat with the same body returns the same check and never
+  double-bills; with a different body it is a `409`), targets are
+  deduplicated by `(model, variant)`, execution is serialized, and the
+  in-process registry carries a TTL (`AGENTUM_MODEL_TEST_RETENTION_MINUTES`,
+  default 60; the per-request `timeout_seconds` is capped by
+  `AGENTUM_MODEL_TEST_MAX_SECONDS`, default 120).
 - **Repository identity replaces the local path as the project's key, and a
   run pins its working copy.** Moving a directory on disk no longer forges a
   second project: identity is a fingerprint of the repository's own history,

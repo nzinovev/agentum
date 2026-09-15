@@ -1007,3 +1007,42 @@ func TestMergeBodies_InputRefsDedupeUnchanged(t *testing.T) {
 		t.Errorf("inputs = %d, want 1 (unchanged de-duplication for refs with no invocation)", got)
 	}
 }
+
+// TestAdapterEvidence_ModelCatalogRoundTripsAndMerges: the catalog probe's
+// label is an optional field of the existing adapter section — it survives a
+// sealed-manifest round-trip with the schema untouched, and a later patch
+// updates it the same way RuntimeProbe updates.
+func TestAdapterEvidence_ModelCatalogRoundTripsAndMerges(t *testing.T) {
+	t.Parallel()
+	body := Body{
+		Schema: schemaVersion,
+		Adapter: &AdapterEvidence{
+			ID:           "an-adapter",
+			RuntimeProbe: "ok",
+			ModelCatalog: "ok (30 models)",
+		},
+	}
+	encoded, err := encodeBody(body)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := decodeBody(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Schema != schemaVersion {
+		t.Errorf("Schema = %q; adding a field must not move the schema version", decoded.Schema)
+	}
+	if decoded.Adapter == nil || decoded.Adapter.ModelCatalog != "ok (30 models)" {
+		t.Errorf("ModelCatalog not preserved: %+v", decoded.Adapter)
+	}
+
+	merged := mergeBodies(decoded, Body{Adapter: &AdapterEvidence{ModelCatalog: "failed: timeout"}})
+	if merged.Adapter.ModelCatalog != "failed: timeout" {
+		t.Errorf("ModelCatalog = %q; a set patch value must overwrite", merged.Adapter.ModelCatalog)
+	}
+	untouched := mergeBodies(decoded, Body{Adapter: &AdapterEvidence{ID: "other"}})
+	if untouched.Adapter.ModelCatalog != "ok (30 models)" {
+		t.Errorf("ModelCatalog = %q; an unset patch value must leave the recorded label alone", untouched.Adapter.ModelCatalog)
+	}
+}

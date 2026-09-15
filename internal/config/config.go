@@ -35,12 +35,30 @@ type Config struct {
 	HardTimeoutSeconds int
 	IdleTimeoutSeconds int
 
+	// FirstEventTimeoutSeconds bounds how long an invocation may produce no
+	// output AT ALL (AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS, default 120, zero
+	// disables). A different question from the idle cap: "the runtime said
+	// nothing since it started" vs "went quiet mid-work" — a working model
+	// emits its first event in fractions of a second, and one that never
+	// emits hangs the invocation silently. The watchdog retires forever on
+	// the first line, so no legitimate long work ever falls under it.
+	FirstEventTimeoutSeconds int
+
 	// Project-check executor defaults (orchestrator-owned checks). Applied when
 	// a check in the project registry (.agentum.yaml) declares no value of its
 	// own. CheckTimeoutSeconds bounds a single check; CheckMaxOutputBytes caps
 	// each stream (stdout / stderr) stored in the manifest.
 	CheckTimeoutSeconds int
 	CheckMaxOutputBytes int
+
+	// ModelTestMaxSeconds is the ceiling the on-demand model check accepts in
+	// its request's timeout_seconds. The check is a paid runtime call, so its
+	// patience is bounded process-wide, not per caller.
+	ModelTestMaxSeconds int
+	// ModelTestRetentionMinutes is the TTL of the in-process model-check
+	// registry and its idempotency keys. Diagnostics carry no durable state;
+	// a restart forgets them by design and a client retries.
+	ModelTestRetentionMinutes int
 
 	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
 	// Defaults to .agentum/artifacts under the process CWD; the worktree's own
@@ -81,8 +99,13 @@ func Load() (Config, error) {
 		HardTimeoutSeconds: getenvInt("AGENTUM_HARD_TIMEOUT_SECONDS", 0),
 		IdleTimeoutSeconds: getenvInt("AGENTUM_IDLE_TIMEOUT_SECONDS", 0),
 
+		FirstEventTimeoutSeconds: getenvInt("AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS", 120),
+
 		CheckTimeoutSeconds: getenvInt("AGENTUM_CHECK_TIMEOUT_SECONDS", 0),
 		CheckMaxOutputBytes: getenvInt("AGENTUM_CHECK_MAX_OUTPUT_BYTES", 0),
+
+		ModelTestMaxSeconds:       getenvInt("AGENTUM_MODEL_TEST_MAX_SECONDS", 120),
+		ModelTestRetentionMinutes: getenvInt("AGENTUM_MODEL_TEST_RETENTION_MINUTES", 60),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
