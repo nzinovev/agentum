@@ -16,7 +16,7 @@ AGENTUM_BIN := bin/agentum
 PID_FILE    := /tmp/agentum.pid
 LOG_FILE    := /tmp/agentum.log
 
-.PHONY: help tidy build run run-bg stop logs test test-db vet fmt sqlc-gen migrate-up migrate-down docker-up docker-down
+.PHONY: help tidy build run run-bg stop logs test test-db vet fmt skills-check sqlc-gen migrate-up migrate-down docker-up docker-down
 
 help: ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*##"}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -76,6 +76,28 @@ vet: ## go vet
 
 fmt: ## gofmt -s
 	gofmt -s -w .
+
+SKILLS      := docs-writing go-comments
+SKILL_PROSE := .agents/skills/docs-writing/SKILL.md
+SKILL_GO    := .agents/skills/go-comments/SKILL.md
+
+skills-check: ## pointers resolve, and the shared rule block is identical in both bodies
+	@for n in $(SKILLS); do \
+		link=.claude/skills/$$n; \
+		if [ ! -L "$$link" ]; then echo "$$link must be a symlink to ../../.agents/skills/$$n"; exit 1; fi; \
+		if [ "$$(readlink $$link)" != "../../.agents/skills/$$n" ]; then \
+			echo "$$link points at $$(readlink $$link)"; exit 1; fi; \
+	done
+	@tmp=$$(mktemp -d); \
+	awk '/shared-rules:begin/,/shared-rules:end/' $(SKILL_PROSE) > $$tmp/prose; \
+	awk '/shared-rules:begin/,/shared-rules:end/' $(SKILL_GO)    > $$tmp/go; \
+	if [ "$$(wc -l < $$tmp/prose)" -lt 5 ] || [ "$$(wc -l < $$tmp/go)" -lt 5 ]; then \
+		echo "shared-rules block missing or truncated in one of the skills"; rm -rf $$tmp; exit 1; \
+	fi; \
+	if ! diff -u $$tmp/prose $$tmp/go; then \
+		echo "shared rule block differs between the two skills"; rm -rf $$tmp; exit 1; \
+	fi; \
+	rm -rf $$tmp; echo "skills ok: pointers resolve, shared rule block matches"
 
 sqlc-gen: ## generate sqlc code (needs sqlc: go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest)
 	sqlc generate

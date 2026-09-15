@@ -99,11 +99,12 @@ In `cmd.exe` the second line is
 
 Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for every PR that changes
 behavior a user or operator would notice — a new endpoint, a schema change, a
-format, a fix. Pure refactors and CI-only changes can skip it. Keep the bullet
-to one line and reference the PR number (`(#42)`); group under `Added`,
-`Changed`, `Fixed`, or `Removed` per [Keep a Changelog]. The bullet is the input
-to release notes when a version is cut, so write what changed and why it
-matters, not the implementation detail.
+format, a fix. Pure refactors and CI-only changes can skip it. Group it under
+`Added`, `Changed`, `Fixed`, or `Removed` per [Keep a Changelog] and reference
+the PR number (`(#42)`). What the entry must say, and in what order, is in the
+`docs-writing` skill (`.agents/skills/docs-writing/SKILL.md`); this file does
+not repeat it. The bullet is the input to release notes when a version is cut,
+so write what changed and why it matters, not the implementation detail.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
@@ -114,7 +115,11 @@ packages do not need `docs/` pages.
 ## Code conventions
 
 - Follow the existing style in the package you're editing.
-- Comments capture *why*; don't restate what the code does.
+- Comments capture *why*; don't restate what the code does. How a comment is
+  written is in the `go-comments` skill
+  (`.agents/skills/go-comments/SKILL.md`); a comment in generated code
+  (`internal/store/sqlc/*.sql.go`) is edited in
+  `internal/store/queries/*.sql` and regenerated with `make sqlc-gen`.
 - Errors wrap with `%w`. The entrypoint logs and exits; handlers speak HTTP.
 - IDs are `uuid` in Postgres, strings in Go (see `sqlc.yaml`).
 - Every new DB query and table carries `tenant_id` and `user_id`. No exceptions,

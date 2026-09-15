@@ -83,6 +83,9 @@ jobs:
             exit 1
           fi
 
+      - name: Skill rule block
+        run: make skills-check
+
   enforcement-contract:
     name: opencode enforcement contract (opt-in)
     # Manual only: it needs a real opencode binary and a real credential store,
