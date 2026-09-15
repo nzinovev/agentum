@@ -49,6 +49,296 @@ Once tagged releases begin, this project adheres to
   so a shutdown cancels them and kills their subprocesses instead of
   orphaning them.
 
+- **The orchestrator never created a commit, so agent work was silently destroyed
+  at teardown.** Every post-stage checkpoint was whatever the worktree's HEAD
+  happened to be, and since no agent role carries `git.delivery` and nothing in
+  the orchestrator committed, that was always the base SHA. `post-spec`,
+  `post-implement` and `base` collapsed to one commit; `result_commit` resolved
+  a branch tip that was still the base, reading as "delivered nothing"; and then
+  the work was destroyed, because teardown is `git worktree remove --force` and
+  the reconciler's restorable path is `git reset --hard` + `git clean -fd`. A
+  task could complete, pass its gates, and deliver an empty diff while discarding
+  everything the agent produced. The orchestrator now exercises the `git.delivery`
+  privilege the capability model already reserves for it: `worktree.Commit`
+  stages the working tree and commits it on `agentum/<task-id>` under an
+  orchestrator identity passed inline via `git -c` (so it does not depend on
+  ambient config), and `recordStageCheckpoint` calls it at each boundary. A stage
+  that produced no change records the unchanged HEAD with no empty commit.
+  - Committing the tree destroys the signal the `auto_if_clean` gate reads, so
+    worktree cleanliness is sampled **before** the checkpoint commit and that
+    sample is what the gate evaluates. Sampling after would make the tree clean
+    by construction and the gate unreachable — the mirror image of the earlier
+    defect where a config file written into the worktree made `isClean()`
+    permanently false. Pinned by a stage-loop test; the pure evaluator tests
+    cannot catch it, because they feed `Clean` directly to `Evaluate`.
+- **The delivery checks ran against the working tree but the evidence claimed
+  they verified a commit.** `enforceProjectChecks` read HEAD separately, ran the
+  executor in the working directory (uncommitted and untracked files included),
+  then stamped that SHA onto the report. A reviewer checking out the recorded
+  `checks.commit` would reproduce a different tree than the one that passed, with
+  no signal. The verification commit is now established before the checks run and
+  the tree is asserted clean first: after the checkpoint fix the worktree HEAD is
+  a real commit, a dirty tree at the boundary fails the task rather than claiming
+  a verification it cannot stand behind, and `checks.commit` is the checkpoint
+  SHA by construction.
+- **A missing base commit silently disabled the delivery gate.**
+  `loadRegistryAtBaseCommit` returned a nil registry for an absent or empty
+  `base_commit`, routing to an empty set where `MandatoryPassed()` is vacuously
+  true — fail-open at the one boundary whose purpose is to be fail-closed, and
+  the mirror image of the defects the prior PRs fixed. Reaching the delivery
+  boundary without a resolved base commit now fails the task. A project that
+  defines no `.agentum.yaml` is still a legitimate empty run, now recorded with
+  `ran: false` so it is not misread as a gate that ran and cleared.
+- **`result_commit` could diverge from the commit the delivery checks verified
+  with no signal.** The checks run before `awaiting_final_review`; teardown
+  captures `result_commit` after human approval, and in between a continue job, a
+  human artifact edit, or a filesystem change can move the branch tip. Nothing
+  compared the two, so the sealed manifest could assert "checks passed at X"
+  alongside "delivered Y". Teardown now reads the verified commit directly from
+  `body.checks.commit` and compares it against `result_commit`. On a mismatch it
+  records an evidence gap (so `evidence_complete` reads false) and emits a
+  `task.delivery_commit_diverged` event naming both SHAs. The task is not failed
+  — the human already approved — and the manifest's incompleteness is the signal
+  a reviewer acts on. Reading the recorded value (rather than proxying through
+  the latest checkpoint) avoids a hidden dependency on an FSM property a future
+  ask-to-edit feature would break silently. A comparison that cannot run — the
+  verified commit could not be read back — is itself recorded as a gap, since
+  "checked, no divergence" and "never checked" are different claims and a
+  manifest silent about both would reintroduce the fail-open shape.
+- **`evidence_complete` overcounted a checks section that ran nothing.**
+  `IsEvidenceComplete` and `MissingSections` encoded the section list in
+  parallel and would drift; both now derive from one `expectedSections` table,
+  and the checks predicate requires `ran: true`, so a checks section that
+  recorded no run does not satisfy completeness even when `mandatory_passed` is
+  vacuously true.
+- **Cancelling a task whose manifest was sealed or missing returned 500**: the
+  cancel handler recorded the human decision under the same strict policy as
+  advance/approve, so a sealed manifest (crash mid-flight) or a missing one (Init
+  is best-effort at task creation) rolled the whole transaction back, leaving the
+  task un-cancellable and forever non-terminal. Cancel is an emergency exit and
+  is now the most tolerant handler: a sealed/missing manifest is absorbed
+  (`recordLenient`) so the transition commits without the decision, while a real
+  write error still fails. `isHumanDecisionRecordFailure` now actually
+  distinguishes a recording failure from a plain store error rather than
+  returning true unconditionally.
+- **`evidence_complete` could never become true**: `memory` is never written
+  (the subsystem is not wired), and completeness counted it as a missing section,
+  so the flag was permanently false and conflated "subsystem not built in this
+  release" with "this run's evidence degraded." Completeness is now derived from
+  the sections the run is expected to produce (`IsEvidenceComplete`, excluding
+  `memory`); the `missing` list still honestly reports `memory` for a reviewer.
+- **A transient `Current()` store error disabled the artifact-edit precondition**:
+  `hasCurrent := currentErr == nil` collapsed any store error into "no current
+  revision," so a PUT with no `expected_revision_id` would chain onto a revision
+  the handler never confirmed was absent — a blind overwrite, exactly the failure
+  the precondition exists to prevent. Any `Current` error other than
+  `ErrNoCurrentRevision` now fails the request (500) before the precondition
+  branches.
+- **`ListManifestCorrections` lacked the tiebreak its latest-correction sibling
+  had**: `LatestManifestCorrection` orders by `created_at DESC, id DESC`, but
+  `ListManifestCorrections` ordered by `created_at ASC` alone, so at equal
+  timestamps the two queries could disagree and `Get` would take a body that was
+  not the chain head. The list now mirrors the tiebreak (`ASC, id ASC`).
+- **A human artifact edit recorded a gate decision even when no gate was active**:
+  every successful PUT wrote `human_gates: [{decision: edited}]`, so a PUT while
+  the task was `running` (far from any gate) produced a record a reader would
+  interpret as "a human passed a gate." The decision is now recorded only when
+  the task is `paused_gate`; the artifact revision row remains the durable record
+  of the edit itself regardless of state.
+- **Concurrent manifest evidence writes silently lost each other**: `AddEvidence`
+  computed its merge from a pre-transaction read and then took the row lock only
+  to re-check the seal, discarding the locked body. Two stages finishing close
+  together each merged onto the same stale base, and the SQL `||` (a
+  top-level-key-only JSONB merge) let the second writer's body replace the
+  first's at every top-level key — a spec stage's prompt hash could be erased by
+  a review stage finishing behind it, with nothing recording the loss. The merge
+  base is now the body read under the row lock inside the write transaction, and
+  the SQL is a full body replacement so the deep merge happens once, in Go.
+- **The second correction to a sealed manifest erased the first**: each
+  correction merged onto the sealed body rather than the latest correction, so
+  correction 2's snapshot dropped correction 1's changes, and the loss was
+  invisible because both correction rows still existed. Corrections now chain —
+  correction N's body is correction N-1's body with patch N merged in — under
+  the parent manifest row's lock, with an id DESC tiebreak on the
+  latest-correction lookup so the ordering is stable at transaction-clock
+  resolution.
+- **The manifest never recorded which artifact revisions a run produced or
+  consumed**: `captureStageOutputs` wrote each artifact into the revisions store
+  and threw away the `Revision` the Put returned, so the manifest's
+  `artifacts.outputs` was always empty and `GET /tasks/{id}/manifest/diff`
+  compared input artifacts between two runs by reading two nils. The revisions a
+  stage actually stored now accumulate as `ArtifactRef`s (revision id, content
+  hash, name, kind, stage) folded into the per-stage evidence write, and the
+  revisions materialized into the worktree on resume are recorded as
+  `artifacts.inputs`.
+- **Human gate decisions were never recorded**: every gate action transitioned
+  the FSM and enqueued a job but wrote no `HumanDecision`, so the manifest
+  section answering "who approved this, and when" was always empty — a pipeline
+  whose whole justification is human gates before delivery could not show that
+  any human passed any gate. The decision now commits atomically with the
+  transition it describes (via `AddEvidenceTx` in the handler's `runInTx`);
+  advance/approve/continue fail the request if the decision cannot be recorded,
+  while cancel tolerates a sealed/missing manifest.
+- **Evidence write failures were swallowed and the manifest still sealed as
+  complete**: every failed evidence write was `log.Warn`'d and the run
+  continued, so a task could reach `done` with a sealed manifest missing the
+  evidence for the stage that produced the delivered result, and the manifest
+  asserted nothing about the gap. A failed write is now itself recorded as an
+  `EvidenceGap`, and seal time derives a `missing` list and an
+  `evidence_complete` flag from the body as it actually is. The initial evidence
+  (input, project, pack, base commit) is the exception: a failure there now
+  fails the run, because it is the provenance root every later piece chains off.
+- **The manifest's `missing` list went stale**: it was written once at run start
+  and never revisited, so `capabilities` was listed missing on bodies that
+  carried a populated capabilities section (Epic 6 landed and the list never
+  moved), and `human_gates` would have gone stale the same way. `missing` is now
+  derived from the body at seal time via `Body.MissingSections()`.
+- **The manifest recorded only the last stage's model**: `Model` was a single
+  pointer each stage overwrote, so a pipeline running different tiers per stage
+  (cheap for analysis, expensive for implementation) recorded only whichever
+  stage ran last. `ModelEvidence.PerStage` now accumulates the model that served
+  each stage, replacing a stage's prior entry on a resume re-run; the scalar
+  remains the run-level summary the cross-run diff compares.
+- **The human artifact edit endpoint was a 501 stub**: `GET`/`PUT`
+  `/tasks/{id}/invocations/{iid}/artifacts/{name}` did not exist, so the
+  `human_edit` gate had no edit path, and PR C's optimistic-concurrency
+  preconditions (`ErrRevisionConflict`, `ErrSecretDetected`) had no HTTP mapping
+  and would have surfaced as 500s. The handlers now create a human-actor
+  revision with no source invocation, map the store errors to 409/422/404,
+  require `expected_revision_id` when a current revision exists (428 otherwise),
+  and record a `HumanDecision{decision: "edited"}` because the edit is the
+  approval.
+- **An agent could exfiltrate host files into the evidence store**: artifact
+  paths in `result.json` are declared by the agent, and the runner resolved them
+  by joining or — for an absolute path — using them verbatim, with no
+  containment check. `{"path": "/etc/passwd"}` or `{"path": "../../.ssh/id_rsa"}`
+  made the orchestrator read the file with its own privileges and store it as a
+  durable, API-readable artifact revision attributed to the task. All worktree
+  file access now goes through `artifacts.Container`, an `os.Root`-backed handle
+  that confines reads and writes to one tree.
+  - **A link the agent planted is an escape a path comparison cannot see**, and
+    resolving the path by hand does not close it either: `filepath.EvalSymlinks`
+    follows POSIX symlinks but returns Windows junctions unresolved, so a
+    junction inside a worktree reads as contained. Delegating to `os.Root` makes
+    the containment check the OS's, performed as part of the open — which also
+    removes the window between validating a path and using it.
+  - **The write side had the same hole.** `artifacts.Syncer` materializes
+    revisions back into a worktree the agent had write access to, guarded only
+    by a lexical check, so a planted link turned a sync into an overwrite of a
+    host file. It writes through the same container now.
+  - **Fail-closed, not skip-and-continue.** A declared path that escapes fails
+    the stage: the capture is all-or-nothing, the invocation is finalized with
+    `stop_reason = artifact_rejected`, a `stage.artifact_rejected` event records
+    the path and reason, and the task pauses for review. Recording the stage as
+    complete would have meant accepting output the orchestrator refused to read.
+    A declared-but-unwritten file remains an ordinary contract gap.
+- **Concurrent artifact writes could fork the revision chain**: the current
+  revision was read *before* the transaction that demoted it, so two writers for
+  the same `(task, name)` could both read revision N and chain two siblings off
+  it — the partial unique index then rejected one at random, after both had
+  written blobs. The read now happens inside the transaction under a row lock,
+  and the demotion targets that exact revision id so a zero-row update is a
+  conflict rather than a silent no-op. Two racing first-creates have no row to
+  lock; the index still serializes them, and the loser's constraint violation
+  now surfaces as `ErrRevisionConflict` instead of an opaque driver error.
+  - A related swallow is gone: `lookupCurrent` returned "no current revision" for
+    *any* store error, so a transient DB failure turned an edit into a create
+    that silently orphaned the existing chain.
+  - `PutParams.ExpectedCurrentRevision` adds an optimistic-concurrency
+    precondition for callers that composed an edit against a revision they were
+    looking at — the seam the human-edit API needs to answer 409 rather than
+    losing an update. Checked before the identical-content shortcut: a caller
+    whose pinned revision is gone has lost the race whatever the bytes say.
+- **Secret scanning had three gaps** (`artifacts.Scanner`, formerly `Redactor`):
+  - **Binary artifacts were not scanned at all**, so a credential inside one
+    entered the store unnoticed. They are now matched against the context-free
+    rules (AKIA, `ghp_`, PEM headers) but never rewritten — substituting a
+    placeholder would change the blob's length and corrupt it — so detection is
+    reported and `reject` is what actually stops the write.
+  - **There was no policy knob**: findings were always redacted, which is the
+    wrong default for a deployment where a credential in an artifact is an
+    incident. `AGENTUM_ARTIFACT_SCAN_POLICY` selects `redact` (default) or
+    `reject`; an unrecognized value fails at startup rather than falling back, so
+    an operator who asked for rejection never silently gets redaction.
+  - **A credential-shaped *name* was accepted.** `.ssh/id_rsa`,
+    `.aws/credentials`, `.env`, `.netrc`, `*.pem` and similar are now refused
+    under every policy — a path has nothing to redact. `.env.example` and its
+    siblings stay allowed.
+- **Capability profiles are now enforced by opencode, not merely rendered for
+  it**: the generated permission config was a boundary in name only. Five
+  independent defects, each confirmed against a real opencode 1.18.10 rather
+  than inferred from its documentation.
+  - **Path scopes were absolute, and absolute patterns never match.** opencode
+    normalises a tool's target path to a project-root-relative form before
+    matching, so every scoped rule was dead. The failure was silent: the deny
+    baseline refused the write while the config still read correctly, which
+    meant an analyst or reviewer could not produce `result.json` at all —
+    analytical stages of any pipeline could not complete. Scopes are now emitted
+    relative to the worktree (`${worktree}/**` → `**`, an artifact scope →
+    `.agentum/<task>/.ag-artifacts/<stage>/**`), and a scope that cannot be
+    expressed relative to the worktree is an error rather than a silently
+    dropped grant. The audit profile keeps absolute paths — it is evidence, not
+    configuration.
+  - **`write` is not an opencode permission key** (write and patch are governed
+    by `edit`), and eleven documented keys were never set at all. Since opencode
+    merges config sources and overrides only conflicting keys, every omitted key
+    fell through to the operator's global config or the repository's own
+    `opencode.json` — and `--auto` approves whatever is not explicitly denied.
+    The config now opens with a `"*": "deny"` catch-all and sets every
+    documented key, including `external_directory`, `task`, `skill`, `websearch`
+    and `lsp`.
+  - **The config could be overridden by the repository under test.** It was
+    written to `<worktree>/.opencode/opencode.json`: editable by the very agent
+    it constrains, and below a project's own `opencode.json` in precedence. It
+    now renders to a per-invocation directory outside the worktree (as
+    `OPENCODE_CONFIG`, for the audit trail) and is inlined into
+    `OPENCODE_CONFIG_CONTENT`, which loads above every project source; ambient
+    `OPENCODE_CONFIG*` variables are dropped from the child environment. As a
+    side effect the worktree is no longer dirtied on every run — which had made
+    `isClean()` permanently false and the `auto_if_clean` gate unreachable.
+  - **Every bash deny pattern was inert.** opencode matches bash rules as
+    wildcard patterns against the parsed command, not as substrings, so
+    `"git push"` matched only the argument-less command and `git push origin
+    HEAD` passed. All patterns now end in `*`; the common network clients are
+    additionally denied when `net.fetch` is not granted.
+  - **Rule order was correct by coincidence.** opencode resolves rules with the
+    last match winning, and the rendering used a Go map, which `encoding/json`
+    sorts. Rules are now an ordered list with an explicit deny-first invariant.
+  - `mcp` is removed from `adapter.Supported()`: opencode addresses MCP tools by
+    per-tool permission names this adapter cannot enumerate for an arbitrary
+    server, so "this server and nothing else" is not expressible. An `mcp.*`
+    grant now refuses the invocation instead of shipping a config that looks
+    like an allowlist and is not.
+  - Verified at two levels: `TestPermissionScope_*` pins the relative-scope rule
+    against a port of opencode's matcher (deterministic, no model in the loop),
+    and the opt-in `TestOpencodeLive_*` suite drives the real binary — an
+    analyst writes its own artifact, an analyst is refused a source edit, an
+    implementer is permitted one — asserting on the bytes on disk rather than on
+    the agent's account of what it did. `docs/capabilities.md` records the
+    version that passed.
+- **Agent invocations could not complete** (#19): the adapter created the run
+  context in `Invoke` and released it with a deferred cancel in the same
+  function. `Invoke` returns as soon as the subprocess starts, so the cancel
+  fired milliseconds into the agent's work and `exec.CommandContext` killed it —
+  every real run ended in "cancelled" regardless of the configured timeout.
+  Ownership now transfers to the goroutine draining the stream. Two adjacent
+  defects went with it: `cmd.Wait` was called twice (unsafe, and the async call
+  raced the stdout reads it must follow), and the idle watcher killed the
+  process without cancelling the context, surfacing an idle stop as a confusing
+  parse failure. Termination now escalates SIGTERM → SIGKILL after a grace
+  period. Pinned by subprocess tests that re-exec the test binary as a fake
+  agent, so they run in ordinary CI with no opencode binary.
+- **The repository did not build on Windows** (#19): the adapter's process-group
+  calls used POSIX-only `syscall` members, and CI runs on Linux, so nothing
+  caught it. They now sit behind per-GOOS implementations, and CI cross-builds
+  windows and darwin. This also exposed a Windows-only test failure that had
+  never been runnable there (a rendered-config assertion compared against a raw
+  path, while the path is backslash-escaped inside JSON).
+- **Contract failures now report what the agent did**: a missing `result.json`
+  used to say only that the file was absent. "The write was refused" and "the
+  agent never attempted it" need opposite fixes, and the agent's prose is not
+  evidence for either, so the error now carries the observed tool calls.
+- `store.Close` and SSE write errors are no longer silently dropped (#1).
 ### Added
 - **Model strings are checked against the runtime's own catalog before they
   can hang a run.** The adapter probes the runtime's model listing once per
@@ -688,295 +978,3 @@ Once tagged releases begin, this project adheres to
   replaces the previous flat `{"error":"..."}` (#7). Codes are stable machine
   identifiers the UI branches on (`not_found`, `illegal_transition`, `bad_input`,
   `unauthorized`, `forbidden`, `not_implemented`, `internal`). Pre-0.1 break.
-
-### Fixed
-- **The orchestrator never created a commit, so agent work was silently destroyed
-  at teardown.** Every post-stage checkpoint was whatever the worktree's HEAD
-  happened to be, and since no agent role carries `git.delivery` and nothing in
-  the orchestrator committed, that was always the base SHA. `post-spec`,
-  `post-implement` and `base` collapsed to one commit; `result_commit` resolved
-  a branch tip that was still the base, reading as "delivered nothing"; and then
-  the work was destroyed, because teardown is `git worktree remove --force` and
-  the reconciler's restorable path is `git reset --hard` + `git clean -fd`. A
-  task could complete, pass its gates, and deliver an empty diff while discarding
-  everything the agent produced. The orchestrator now exercises the `git.delivery`
-  privilege the capability model already reserves for it: `worktree.Commit`
-  stages the working tree and commits it on `agentum/<task-id>` under an
-  orchestrator identity passed inline via `git -c` (so it does not depend on
-  ambient config), and `recordStageCheckpoint` calls it at each boundary. A stage
-  that produced no change records the unchanged HEAD with no empty commit.
-  - Committing the tree destroys the signal the `auto_if_clean` gate reads, so
-    worktree cleanliness is sampled **before** the checkpoint commit and that
-    sample is what the gate evaluates. Sampling after would make the tree clean
-    by construction and the gate unreachable — the mirror image of the earlier
-    defect where a config file written into the worktree made `isClean()`
-    permanently false. Pinned by a stage-loop test; the pure evaluator tests
-    cannot catch it, because they feed `Clean` directly to `Evaluate`.
-- **The delivery checks ran against the working tree but the evidence claimed
-  they verified a commit.** `enforceProjectChecks` read HEAD separately, ran the
-  executor in the working directory (uncommitted and untracked files included),
-  then stamped that SHA onto the report. A reviewer checking out the recorded
-  `checks.commit` would reproduce a different tree than the one that passed, with
-  no signal. The verification commit is now established before the checks run and
-  the tree is asserted clean first: after the checkpoint fix the worktree HEAD is
-  a real commit, a dirty tree at the boundary fails the task rather than claiming
-  a verification it cannot stand behind, and `checks.commit` is the checkpoint
-  SHA by construction.
-- **A missing base commit silently disabled the delivery gate.**
-  `loadRegistryAtBaseCommit` returned a nil registry for an absent or empty
-  `base_commit`, routing to an empty set where `MandatoryPassed()` is vacuously
-  true — fail-open at the one boundary whose purpose is to be fail-closed, and
-  the mirror image of the defects the prior PRs fixed. Reaching the delivery
-  boundary without a resolved base commit now fails the task. A project that
-  defines no `.agentum.yaml` is still a legitimate empty run, now recorded with
-  `ran: false` so it is not misread as a gate that ran and cleared.
-- **`result_commit` could diverge from the commit the delivery checks verified
-  with no signal.** The checks run before `awaiting_final_review`; teardown
-  captures `result_commit` after human approval, and in between a continue job, a
-  human artifact edit, or a filesystem change can move the branch tip. Nothing
-  compared the two, so the sealed manifest could assert "checks passed at X"
-  alongside "delivered Y". Teardown now reads the verified commit directly from
-  `body.checks.commit` and compares it against `result_commit`. On a mismatch it
-  records an evidence gap (so `evidence_complete` reads false) and emits a
-  `task.delivery_commit_diverged` event naming both SHAs. The task is not failed
-  — the human already approved — and the manifest's incompleteness is the signal
-  a reviewer acts on. Reading the recorded value (rather than proxying through
-  the latest checkpoint) avoids a hidden dependency on an FSM property a future
-  ask-to-edit feature would break silently. A comparison that cannot run — the
-  verified commit could not be read back — is itself recorded as a gap, since
-  "checked, no divergence" and "never checked" are different claims and a
-  manifest silent about both would reintroduce the fail-open shape.
-- **`evidence_complete` overcounted a checks section that ran nothing.**
-  `IsEvidenceComplete` and `MissingSections` encoded the section list in
-  parallel and would drift; both now derive from one `expectedSections` table,
-  and the checks predicate requires `ran: true`, so a checks section that
-  recorded no run does not satisfy completeness even when `mandatory_passed` is
-  vacuously true.
-- **Cancelling a task whose manifest was sealed or missing returned 500**: the
-  cancel handler recorded the human decision under the same strict policy as
-  advance/approve, so a sealed manifest (crash mid-flight) or a missing one (Init
-  is best-effort at task creation) rolled the whole transaction back, leaving the
-  task un-cancellable and forever non-terminal. Cancel is an emergency exit and
-  is now the most tolerant handler: a sealed/missing manifest is absorbed
-  (`recordLenient`) so the transition commits without the decision, while a real
-  write error still fails. `isHumanDecisionRecordFailure` now actually
-  distinguishes a recording failure from a plain store error rather than
-  returning true unconditionally.
-- **`evidence_complete` could never become true**: `memory` is never written
-  (the subsystem is not wired), and completeness counted it as a missing section,
-  so the flag was permanently false and conflated "subsystem not built in this
-  release" with "this run's evidence degraded." Completeness is now derived from
-  the sections the run is expected to produce (`IsEvidenceComplete`, excluding
-  `memory`); the `missing` list still honestly reports `memory` for a reviewer.
-- **A transient `Current()` store error disabled the artifact-edit precondition**:
-  `hasCurrent := currentErr == nil` collapsed any store error into "no current
-  revision," so a PUT with no `expected_revision_id` would chain onto a revision
-  the handler never confirmed was absent — a blind overwrite, exactly the failure
-  the precondition exists to prevent. Any `Current` error other than
-  `ErrNoCurrentRevision` now fails the request (500) before the precondition
-  branches.
-- **`ListManifestCorrections` lacked the tiebreak its latest-correction sibling
-  had**: `LatestManifestCorrection` orders by `created_at DESC, id DESC`, but
-  `ListManifestCorrections` ordered by `created_at ASC` alone, so at equal
-  timestamps the two queries could disagree and `Get` would take a body that was
-  not the chain head. The list now mirrors the tiebreak (`ASC, id ASC`).
-- **A human artifact edit recorded a gate decision even when no gate was active**:
-  every successful PUT wrote `human_gates: [{decision: edited}]`, so a PUT while
-  the task was `running` (far from any gate) produced a record a reader would
-  interpret as "a human passed a gate." The decision is now recorded only when
-  the task is `paused_gate`; the artifact revision row remains the durable record
-  of the edit itself regardless of state.
-- **Concurrent manifest evidence writes silently lost each other**: `AddEvidence`
-  computed its merge from a pre-transaction read and then took the row lock only
-  to re-check the seal, discarding the locked body. Two stages finishing close
-  together each merged onto the same stale base, and the SQL `||` (a
-  top-level-key-only JSONB merge) let the second writer's body replace the
-  first's at every top-level key — a spec stage's prompt hash could be erased by
-  a review stage finishing behind it, with nothing recording the loss. The merge
-  base is now the body read under the row lock inside the write transaction, and
-  the SQL is a full body replacement so the deep merge happens once, in Go.
-- **The second correction to a sealed manifest erased the first**: each
-  correction merged onto the sealed body rather than the latest correction, so
-  correction 2's snapshot dropped correction 1's changes, and the loss was
-  invisible because both correction rows still existed. Corrections now chain —
-  correction N's body is correction N-1's body with patch N merged in — under
-  the parent manifest row's lock, with an id DESC tiebreak on the
-  latest-correction lookup so the ordering is stable at transaction-clock
-  resolution.
-- **The manifest never recorded which artifact revisions a run produced or
-  consumed**: `captureStageOutputs` wrote each artifact into the revisions store
-  and threw away the `Revision` the Put returned, so the manifest's
-  `artifacts.outputs` was always empty and `GET /tasks/{id}/manifest/diff`
-  compared input artifacts between two runs by reading two nils. The revisions a
-  stage actually stored now accumulate as `ArtifactRef`s (revision id, content
-  hash, name, kind, stage) folded into the per-stage evidence write, and the
-  revisions materialized into the worktree on resume are recorded as
-  `artifacts.inputs`.
-- **Human gate decisions were never recorded**: every gate action transitioned
-  the FSM and enqueued a job but wrote no `HumanDecision`, so the manifest
-  section answering "who approved this, and when" was always empty — a pipeline
-  whose whole justification is human gates before delivery could not show that
-  any human passed any gate. The decision now commits atomically with the
-  transition it describes (via `AddEvidenceTx` in the handler's `runInTx`);
-  advance/approve/continue fail the request if the decision cannot be recorded,
-  while cancel tolerates a sealed/missing manifest.
-- **Evidence write failures were swallowed and the manifest still sealed as
-  complete**: every failed evidence write was `log.Warn`'d and the run
-  continued, so a task could reach `done` with a sealed manifest missing the
-  evidence for the stage that produced the delivered result, and the manifest
-  asserted nothing about the gap. A failed write is now itself recorded as an
-  `EvidenceGap`, and seal time derives a `missing` list and an
-  `evidence_complete` flag from the body as it actually is. The initial evidence
-  (input, project, pack, base commit) is the exception: a failure there now
-  fails the run, because it is the provenance root every later piece chains off.
-- **The manifest's `missing` list went stale**: it was written once at run start
-  and never revisited, so `capabilities` was listed missing on bodies that
-  carried a populated capabilities section (Epic 6 landed and the list never
-  moved), and `human_gates` would have gone stale the same way. `missing` is now
-  derived from the body at seal time via `Body.MissingSections()`.
-- **The manifest recorded only the last stage's model**: `Model` was a single
-  pointer each stage overwrote, so a pipeline running different tiers per stage
-  (cheap for analysis, expensive for implementation) recorded only whichever
-  stage ran last. `ModelEvidence.PerStage` now accumulates the model that served
-  each stage, replacing a stage's prior entry on a resume re-run; the scalar
-  remains the run-level summary the cross-run diff compares.
-- **The human artifact edit endpoint was a 501 stub**: `GET`/`PUT`
-  `/tasks/{id}/invocations/{iid}/artifacts/{name}` did not exist, so the
-  `human_edit` gate had no edit path, and PR C's optimistic-concurrency
-  preconditions (`ErrRevisionConflict`, `ErrSecretDetected`) had no HTTP mapping
-  and would have surfaced as 500s. The handlers now create a human-actor
-  revision with no source invocation, map the store errors to 409/422/404,
-  require `expected_revision_id` when a current revision exists (428 otherwise),
-  and record a `HumanDecision{decision: "edited"}` because the edit is the
-  approval.
-- **An agent could exfiltrate host files into the evidence store**: artifact
-  paths in `result.json` are declared by the agent, and the runner resolved them
-  by joining or — for an absolute path — using them verbatim, with no
-  containment check. `{"path": "/etc/passwd"}` or `{"path": "../../.ssh/id_rsa"}`
-  made the orchestrator read the file with its own privileges and store it as a
-  durable, API-readable artifact revision attributed to the task. All worktree
-  file access now goes through `artifacts.Container`, an `os.Root`-backed handle
-  that confines reads and writes to one tree.
-  - **A link the agent planted is an escape a path comparison cannot see**, and
-    resolving the path by hand does not close it either: `filepath.EvalSymlinks`
-    follows POSIX symlinks but returns Windows junctions unresolved, so a
-    junction inside a worktree reads as contained. Delegating to `os.Root` makes
-    the containment check the OS's, performed as part of the open — which also
-    removes the window between validating a path and using it.
-  - **The write side had the same hole.** `artifacts.Syncer` materializes
-    revisions back into a worktree the agent had write access to, guarded only
-    by a lexical check, so a planted link turned a sync into an overwrite of a
-    host file. It writes through the same container now.
-  - **Fail-closed, not skip-and-continue.** A declared path that escapes fails
-    the stage: the capture is all-or-nothing, the invocation is finalized with
-    `stop_reason = artifact_rejected`, a `stage.artifact_rejected` event records
-    the path and reason, and the task pauses for review. Recording the stage as
-    complete would have meant accepting output the orchestrator refused to read.
-    A declared-but-unwritten file remains an ordinary contract gap.
-- **Concurrent artifact writes could fork the revision chain**: the current
-  revision was read *before* the transaction that demoted it, so two writers for
-  the same `(task, name)` could both read revision N and chain two siblings off
-  it — the partial unique index then rejected one at random, after both had
-  written blobs. The read now happens inside the transaction under a row lock,
-  and the demotion targets that exact revision id so a zero-row update is a
-  conflict rather than a silent no-op. Two racing first-creates have no row to
-  lock; the index still serializes them, and the loser's constraint violation
-  now surfaces as `ErrRevisionConflict` instead of an opaque driver error.
-  - A related swallow is gone: `lookupCurrent` returned "no current revision" for
-    *any* store error, so a transient DB failure turned an edit into a create
-    that silently orphaned the existing chain.
-  - `PutParams.ExpectedCurrentRevision` adds an optimistic-concurrency
-    precondition for callers that composed an edit against a revision they were
-    looking at — the seam the human-edit API needs to answer 409 rather than
-    losing an update. Checked before the identical-content shortcut: a caller
-    whose pinned revision is gone has lost the race whatever the bytes say.
-- **Secret scanning had three gaps** (`artifacts.Scanner`, formerly `Redactor`):
-  - **Binary artifacts were not scanned at all**, so a credential inside one
-    entered the store unnoticed. They are now matched against the context-free
-    rules (AKIA, `ghp_`, PEM headers) but never rewritten — substituting a
-    placeholder would change the blob's length and corrupt it — so detection is
-    reported and `reject` is what actually stops the write.
-  - **There was no policy knob**: findings were always redacted, which is the
-    wrong default for a deployment where a credential in an artifact is an
-    incident. `AGENTUM_ARTIFACT_SCAN_POLICY` selects `redact` (default) or
-    `reject`; an unrecognized value fails at startup rather than falling back, so
-    an operator who asked for rejection never silently gets redaction.
-  - **A credential-shaped *name* was accepted.** `.ssh/id_rsa`,
-    `.aws/credentials`, `.env`, `.netrc`, `*.pem` and similar are now refused
-    under every policy — a path has nothing to redact. `.env.example` and its
-    siblings stay allowed.
-- **Capability profiles are now enforced by opencode, not merely rendered for
-  it**: the generated permission config was a boundary in name only. Five
-  independent defects, each confirmed against a real opencode 1.18.10 rather
-  than inferred from its documentation.
-  - **Path scopes were absolute, and absolute patterns never match.** opencode
-    normalises a tool's target path to a project-root-relative form before
-    matching, so every scoped rule was dead. The failure was silent: the deny
-    baseline refused the write while the config still read correctly, which
-    meant an analyst or reviewer could not produce `result.json` at all —
-    analytical stages of any pipeline could not complete. Scopes are now emitted
-    relative to the worktree (`${worktree}/**` → `**`, an artifact scope →
-    `.agentum/<task>/.ag-artifacts/<stage>/**`), and a scope that cannot be
-    expressed relative to the worktree is an error rather than a silently
-    dropped grant. The audit profile keeps absolute paths — it is evidence, not
-    configuration.
-  - **`write` is not an opencode permission key** (write and patch are governed
-    by `edit`), and eleven documented keys were never set at all. Since opencode
-    merges config sources and overrides only conflicting keys, every omitted key
-    fell through to the operator's global config or the repository's own
-    `opencode.json` — and `--auto` approves whatever is not explicitly denied.
-    The config now opens with a `"*": "deny"` catch-all and sets every
-    documented key, including `external_directory`, `task`, `skill`, `websearch`
-    and `lsp`.
-  - **The config could be overridden by the repository under test.** It was
-    written to `<worktree>/.opencode/opencode.json`: editable by the very agent
-    it constrains, and below a project's own `opencode.json` in precedence. It
-    now renders to a per-invocation directory outside the worktree (as
-    `OPENCODE_CONFIG`, for the audit trail) and is inlined into
-    `OPENCODE_CONFIG_CONTENT`, which loads above every project source; ambient
-    `OPENCODE_CONFIG*` variables are dropped from the child environment. As a
-    side effect the worktree is no longer dirtied on every run — which had made
-    `isClean()` permanently false and the `auto_if_clean` gate unreachable.
-  - **Every bash deny pattern was inert.** opencode matches bash rules as
-    wildcard patterns against the parsed command, not as substrings, so
-    `"git push"` matched only the argument-less command and `git push origin
-    HEAD` passed. All patterns now end in `*`; the common network clients are
-    additionally denied when `net.fetch` is not granted.
-  - **Rule order was correct by coincidence.** opencode resolves rules with the
-    last match winning, and the rendering used a Go map, which `encoding/json`
-    sorts. Rules are now an ordered list with an explicit deny-first invariant.
-  - `mcp` is removed from `adapter.Supported()`: opencode addresses MCP tools by
-    per-tool permission names this adapter cannot enumerate for an arbitrary
-    server, so "this server and nothing else" is not expressible. An `mcp.*`
-    grant now refuses the invocation instead of shipping a config that looks
-    like an allowlist and is not.
-  - Verified at two levels: `TestPermissionScope_*` pins the relative-scope rule
-    against a port of opencode's matcher (deterministic, no model in the loop),
-    and the opt-in `TestOpencodeLive_*` suite drives the real binary — an
-    analyst writes its own artifact, an analyst is refused a source edit, an
-    implementer is permitted one — asserting on the bytes on disk rather than on
-    the agent's account of what it did. `docs/capabilities.md` records the
-    version that passed.
-- **Agent invocations could not complete** (#19): the adapter created the run
-  context in `Invoke` and released it with a deferred cancel in the same
-  function. `Invoke` returns as soon as the subprocess starts, so the cancel
-  fired milliseconds into the agent's work and `exec.CommandContext` killed it —
-  every real run ended in "cancelled" regardless of the configured timeout.
-  Ownership now transfers to the goroutine draining the stream. Two adjacent
-  defects went with it: `cmd.Wait` was called twice (unsafe, and the async call
-  raced the stdout reads it must follow), and the idle watcher killed the
-  process without cancelling the context, surfacing an idle stop as a confusing
-  parse failure. Termination now escalates SIGTERM → SIGKILL after a grace
-  period. Pinned by subprocess tests that re-exec the test binary as a fake
-  agent, so they run in ordinary CI with no opencode binary.
-- **The repository did not build on Windows** (#19): the adapter's process-group
-  calls used POSIX-only `syscall` members, and CI runs on Linux, so nothing
-  caught it. They now sit behind per-GOOS implementations, and CI cross-builds
-  windows and darwin. This also exposed a Windows-only test failure that had
-  never been runnable there (a rendered-config assertion compared against a raw
-  path, while the path is backslash-escaped inside JSON).
-- **Contract failures now report what the agent did**: a missing `result.json`
-  used to say only that the file was absent. "The write was refused" and "the
-  agent never attempted it" need opposite fixes, and the agent's prose is not
-  evidence for either, so the error now carries the observed tool calls.
-- `store.Close` and SSE write errors are no longer silently dropped (#1).
