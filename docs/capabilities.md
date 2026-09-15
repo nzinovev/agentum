@@ -13,11 +13,13 @@ wanders outside its worktree, an agent that reads a credential it was never
 granted. It is **not** a security sandbox. It does not defend against:
 
 - A **malicious** agent process that actively tries to escape (a bash tool can
-  still read files and open sockets; see [Escape paths](#escape-paths)).
+  still read files and open sockets; see
+  [Escape paths](#escape-paths-acknowledged-not-addressed-in-v1)).
 - **Kernel or container escape.** Agentum runs as the operator's own user; it
   does not drop privileges or sandbox syscalls.
 - A **compromised adapter** or **hostile pack**. The adapter enforces the
-  profile; a tampered adapter can be made to lie. Packs declare capabilities
+  profile; a tampered adapter can be made to misreport what it enforced. Packs
+  declare capabilities
   the operator already trusts (same trust as the prompts they carry).
 - **Prompt injection.** A profile limits what the runtime lets the agent do, not
   what the agent is tricked into *wanting* to do.
@@ -46,7 +48,7 @@ A **capability** is one of:
 `mcp.<server>` is **not enforceable in v1.** opencode addresses MCP tools by
 per-tool permission names this adapter cannot enumerate for an arbitrary
 server, so it cannot express "this server and nothing else". Rather than emit a
-config that looks like enforcement and is not, `mcp` is absent from
+config that appears to enforce and does not, `mcp` is absent from
 `adapter.Supported()`: a profile carrying an `mcp.*` grant is unenforceable and
 the invocation refuses to start.
 
@@ -97,10 +99,10 @@ even if every other input granted it.
 pending, the runner passes this set as `Input.Withheld` for every stage, so the
 runtime refuses source writes until a human approves the named artifact.
 
-- `exec.bash` is in the set **on purpose.** Withholding only `fs.write` would
-  be theatre: the bash tool allows shell redirects (`printf ... > file`), so an
-  agent with `bash: allow` and no `fs.write` can still write source. Including
-  `exec.bash` closes that hole.
+- `exec.bash` is in the set **on purpose.** The bash tool allows shell
+  redirects (`printf ... > file`), so withholding only `fs.write` would leave
+  an agent with `bash: allow` able to write source. Including `exec.bash`
+  closes that gap.
 - `artifact.write` is **never** withheld. Every stage must still write
   `result.json`; `withArtifactFloor` guarantees the artifact-dir `edit` rule
   survives the cut.
@@ -146,9 +148,9 @@ profile into four concrete controls:
 
    - **Path scopes are relative to the project root.** opencode normalises a
      tool's target path to a project-root-relative form *before* matching, so an
-     absolute pattern never matches anything. The failure mode is silent: the
-     deny baseline refuses every write while the config still reads correctly,
-     and an analyst simply cannot produce `result.json`. An implementer's
+     absolute pattern never matches anything. The failure mode raises no error:
+     the deny baseline refuses every write while the config remains valid, and
+     an analyst cannot produce `result.json`. An implementer's
      `fs.write:${worktree}/**` becomes `**`; an analyst's artifact scope becomes
      `.agentum/<run-id>/.ag-artifacts/<stage>/**`. A scope that cannot be
      expressed relative to the worktree is an error, not a dropped grant — the
@@ -166,10 +168,11 @@ profile into four concrete controls:
      `OPENCODE_CONFIG` for the audit trail) *and* inlined into
      `OPENCODE_CONFIG_CONTENT`. The inline copy is what enforces: opencode loads
      `OPENCODE_CONFIG` **below** a project's own `opencode.json`, so a repo
-     shipping its own permissions would otherwise win. Keeping the file out of
+     shipping its own permissions would otherwise take precedence. Keeping the
+     file out of
      the worktree also means the agent it constrains cannot edit it, and that it
-     never shows up in `git status` — which drives the `auto_if_clean` gate and
-     would otherwise leak into the delivery diff.
+     never appears in `git status` (which drives the `auto_if_clean` gate; the
+     file would otherwise enter the delivery diff).
    - **Rule order is explicit.** opencode resolves permission rules with the
      **last match winning**, so every scoped rule list emits its `deny` baseline
      first and the granted scopes after. The rendering uses an ordered list, not
@@ -181,8 +184,8 @@ profile into four concrete controls:
      `git config credential*`, `git config --global*`). A bare `git push` would
      match only the argument-less command and let `git push origin HEAD`
      through. Without `net.fetch`, the common network clients (`curl*`, `wget*`,
-     `ssh*`, `scp*`, `nc*`) are denied too, so `bash: allow` does not hand back
-     the network the `webfetch` deny just took away.
+     `ssh*`, `scp*`, `nc*`) are denied too, so `bash: allow` does not restore
+     the network access the `webfetch` deny removed.
 2. **Credential-scrubbed environment.** The child process receives an
    environment built from the parent minus a deny list of credential-bearing
    variables (`AWS_*`, `GITHUB_*`, `ANTHROPIC_*`, `*_TOKEN`, `*_API_KEY`,
@@ -209,18 +212,19 @@ deliberate, and it has an operating consequence:
 > (`opencode auth login`), not through provider environment variables.**
 
 An install relying on `ANTHROPIC_API_KEY` in the shell will see every
-invocation fail to reach a model — and it fails *silently*: an unauthenticated
+invocation fail to reach a model — and it fails without a message: an
+unauthenticated
 `opencode run` blocks indefinitely without writing a byte to stdout or stderr.
-The profile's idle cap is what turns that into a named failure instead of a
+The profile's idle cap turns that into a named failure instead of a
 hung stage.
 
-Widening this is a deliberate decision, not an oversight to patch quietly: the
+Widening this is a deliberate decision, not an oversight: the
 same process runs the model client and the agent's bash tool, so a key the
 runtime can read is a key the agent can `echo`.
 
 ### Proving it
 
-Two test layers keep the claims above honest:
+Two test layers verify the claims above:
 
 - **Subprocess contract tests** (`internal/agent/opencode_lifetime_test.go`) run
   in normal CI. They re-exec the test binary as a fake agent and pin the
@@ -233,8 +237,9 @@ Two test layers keep the claims above honest:
   runs against a real, pinned opencode: config discovery, an analyst writing its
   own artifact, an analyst refused a source edit, and an implementer permitted
   one — each asserted on the bytes on disk, not on what the agent reports. It is
-  the opt-in `enforcement-contract` CI job, and it is the only evidence that the
-  config this adapter writes is actually obeyed. **Run it whenever the config
+  the opt-in `enforcement-contract` CI job, and it is the only evidence that
+  the runtime applies the config this adapter writes. **Run it whenever the
+  config
   rendering or the profile model changes, and record the version that passed.**
 
 | Verified against opencode | Date | Result |
@@ -288,7 +293,7 @@ profile, and why v1 accepts them:
   egress proxy) is the real answer and is a later concern.
 - **Managed / MDM config.** opencode loads system-managed configuration *above*
   `OPENCODE_CONFIG_CONTENT`. On a machine with managed opencode settings the
-  operator's policy outranks the profile. That is the correct precedence for a
+  operator's policy takes precedence over the profile. That is the correct precedence for a
   managed fleet and it is the operator's own decision — but it is not a boundary
   Agentum controls.
 - **Contract adherence is not enforced.** A capability profile controls what the
@@ -301,8 +306,8 @@ profile, and why v1 accepts them:
   classification, not to the permission config.
 - **Intermittent silent stalls.** `opencode run` occasionally produces nothing
   on either stream and never exits — reproduced with an unauthenticated install,
-  and again on a prompt combining a denied action with an allowed one. The
-  profile's idle cap is the only thing that ends such a run.
+  and again on a prompt combining a denied action with an allowed one. Only
+  the profile's idle cap ends such a run.
 - **Subprocesses spawned by the agent.** A bash command can spawn a long-lived
   helper that outlives the profile's timeouts. The process-group kill on cancel
   covers the common case; a privileged orphan is the residual gap.
@@ -310,13 +315,12 @@ profile, and why v1 accepts them:
   (ADR 0002) pins `AGENTS.md` and the `instructions:` list declared in
   `.agentum.yaml`. A file at a declared path that is ABSENT at `base_commit` but
   present in the worktree (the agent authored an instruction file the project
-  never declared at the anchor) is REMOVED by the pre-stage restore — that is
-  the original substitution attack wearing a different hat, and leaving it would
+  never declared at the anchor) is REMOVED by the pre-stage restore — it is
+  the original substitution attack in a different location, and leaving it would
   let an implementer author the rules its reviewer judges by. A NESTED
   `sub/AGENTS.md` the project never declared, or the operator's global
   `~/.config/opencode/AGENTS.md`, can still reach the model through opencode's
-  own injection; these are unpinned and are named here rather than silently
-  ignored. The `edit` deny rule guards the declared paths plus `**/AGENTS.md`
+  own injection; these are unpinned and are named here rather than ignored. The `edit` deny rule guards the declared paths plus `**/AGENTS.md`
   (the runtime-injected filename at any depth); a nested file under a different
   name is out of scope.
 - **Bash writes between the pre-stage hash check and the run.** The instruction

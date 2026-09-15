@@ -24,8 +24,8 @@ and land with the epic named in the table.
   `not_implemented`, `internal`, `conflict`, `too_many_requests`.
 - **Identity is implicit.** Every write carries `tenant_id` and `user_id` from
   the resolved Principal, never the request body.
-- **State transitions** route through `engine.Next`. An illegal transition is
-  `409 illegal_transition`, never a silent write.
+- **State transitions** route through `engine.Next`. An illegal transition
+  returns `409 illegal_transition`; the write does not happen.
 
 ## Projects
 
@@ -46,8 +46,8 @@ git and refuses, each with a `400 bad_input` naming the fix:
 - the repository has no commits (make at least one commit first — a run needs
   a base to branch from);
 - the repository is a shallow clone (run `git fetch --unshallow` first: a
-  shallow history would fingerprint at the cut boundary and silently change
-  identity on unshallow);
+  shallow history would fingerprint at the cut boundary, and unshallowing
+  would change the identity with no failure);
 - the path is a linked work tree (the message names the main work tree —
   register that instead).
 
@@ -104,7 +104,7 @@ one of the two counters is non-zero on any given registration.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Run`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not a silently dropped field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Run`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]` |
 | `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found` |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
@@ -242,7 +242,7 @@ addressable. Purely additive: single-segment names keep resolving identically.
 create). `expected_revision_id` is the optimistic-concurrency precondition:
 **required when the artifact already has a current revision** (the value from a
 prior GET's `X-Revision-Id`), so two editors racing produce a 409 for the loser
-rather than a silent lost update. A first create (no current revision) omits it.
+rather than a lost update. A first create (no current revision) omits it.
 
 | Store outcome | Status | Code |
 |---|---|---|
@@ -297,7 +297,7 @@ actor and user_id), branch + checkpoints + result commits).
 The manifest body is filled append-only while the run is in flight and sealed
 at terminal state (`done | failed | cancelled | interrupted`). Corrections
 after sealing are linked rows with a `reason` and a fresh body snapshot; the
-sealed row is never edited. The write path speaks schema `"2"` only; a
+sealed row is never edited. The write path accepts schema `"2"` only; a
 correction carrying the schema-1 sections (`prompts`, `model`,
 `capabilities.effective`, `adapter.name`/`version`) is rejected with a `400`.
 
@@ -392,8 +392,8 @@ differ", and a client should say so rather than rendering a value delta.
 
 ## Models
 
-The model surface: what the process is configured to run on, what the runtime
-says it can run, and the on-demand check of whether a model actually answers.
+The model surface: what the process is configured to run on, what the runtime's
+catalog lists, and the on-demand check of whether a model responds.
 A remote client cannot read the server's `models.yaml` off its disk — the
 list handle is what it has to render a tier table or compose a test request.
 Actions: `model:read` (both GET handles), `model:test` (the check) —
@@ -402,7 +402,7 @@ tenant-scoped, like `run:create`.
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
 | `GET` | `/models` | ✅ | → `200` with the adapter id, the default tier, the catalog status, and the resolved tiers |
-| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. `variant` is refused (`400`) until the adapter has a variant parameter — a check that echoed the field while running without it would answer a question nobody asked |
+| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. `variant` is refused (`400`) until the adapter has a variant parameter — the response would otherwise carry a field the check did not use |
 | `GET` | `/models/test/{id}` | ✅ | → `200 {check_id, state, results}` / `404 not_found` |
 
 ### `GET /models`
@@ -421,7 +421,7 @@ tenant-scoped, like `run:create`.
 
 `catalog.status` uses the probe label vocabulary: `ok`, `failed: <reason>`,
 or `unsupported` (the adapter cannot list its runtime). `in_catalog` is
-false whenever that question could not be answered — the status field says
+false whenever that question could not be answered — the status field records
 which of the two it was. The tiers are the boot-resolved values runs use,
 never a re-read of the file.
 
@@ -434,36 +434,36 @@ reconnecting client. Targets are deduplicated by model — three tiers naming
 one model are one paid call — and execution is serialized, so accepted checks
 queue rather than fan out.
 
-**`Idempotency-Key` is mandatory.** An optional guard against a double click
-is no guard: the client that omits it pays for the call twice and learns it
-from the bill. Absent header → `400 bad_input` naming it. Keys and check ids
-are **tenant-scoped**: a key another tenant used is invisible (same key,
-same body from another tenant mints that tenant's own check), and a foreign
-`check_id` reads as the same `404` as an unknown one.
+**`Idempotency-Key` is required.** Without it, a retried request runs a second
+check and pays for it. A request without the header returns `400 bad_input`
+naming the header. Keys and check ids are **tenant-scoped**: a key another
+tenant used is invisible (same key, same body from another tenant mints that
+tenant's own check), and a foreign `check_id` reads as the same `404` as an
+unknown one.
 
 | Situation | Response |
 |---|---|
 | accepted | `202` + `check_id` |
 | same `Idempotency-Key`, same body | `202` + the **same** `check_id`; no second check runs |
-| same key, different body | `409 conflict` — a key names one intent |
+| same key, different body | `409 conflict` — a key matches one body |
 | header absent | `400 bad_input` (header named) |
 | unknown tier / broken body / `timeout_seconds` above the ceiling / `variant` | `400 bad_input` (ceiling named; variant is not supported yet) |
-| already `8` unfinished checks queued for the tenant | `429 too_many_requests` (cap named; replays of accepted checks still answer) |
+| already `8` unfinished checks queued for the tenant | `429 too_many_requests` (cap named; replays of accepted checks still return `202`) |
 | unknown, TTL-expired, or foreign `check_id` on GET | `404 not_found` (finished results remain in the tenant's event stream) |
 
-A non-`ok` outcome is a **result**, not an error of the request: the handle
-answered `202`, and the outcome (`ok` | `unknown_model` | `timeout` |
+A non-`ok` outcome is a **result**, not an error of the request: the endpoint
+returned `202`, and the outcome (`ok` | `unknown_model` | `timeout` |
 `error`) arrives in the events and in the GET. `unknown_model` means the
-catalog answered and no call was made.
+catalog was obtained and no call was made.
 
 The check registry is in-process with a TTL (default 60 min,
-`AGENTUM_MODEL_TEST_RETENTION_MINUTES`, counted from a check's completion —
-a long queue does not make a running check vanish): diagnostics carry no
-durable state, a restart forgets keys and unfinished checks, and a client
-retries. The ceiling for `timeout_seconds` is
+`AGENTUM_MODEL_TEST_RETENTION_MINUTES`, counted from a check's completion, so
+a long queue does not expire a running check). Diagnostics carry no durable
+state: a restart discards keys and unfinished checks, and a client retries.
+The ceiling for `timeout_seconds` is
 `AGENTUM_MODEL_TEST_MAX_SECONDS` (default 120). Pending checks stop with the
 process: they derive from the server's run context, so a shutdown cancels
-them and kills their subprocesses instead of orphaning them.
+them and kills their subprocesses rather than leaving them running.
 
 ### Model-check events
 
@@ -518,7 +518,7 @@ data: {"run_id":"...","stage":"implement","stop_reason":"gate"}
 - The `data` object carries two facts from the event row on every frame:
   `run_id` (present only when the event belongs to a run) and `actor`
   (`human | agent | system` — who produced the event). A payload's own key
-  always wins over the mixed-in value.
+  takes precedence over the mixed-in value.
 - After replay completes, the connection live-tails new rows and emits a
   comment-frame keepalive (`: ping <unix>`) every 15s.
 - The same durable log backs the audit trail, so reconnect semantics and audit

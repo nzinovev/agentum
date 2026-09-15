@@ -69,7 +69,7 @@ stage of a run; reused across stages and resumes; torn down at terminal state.
 - **Artifacts:** `<worktree>/.agentum/<run-id>/.ag-artifacts/<stage>/result.json`
   (the per-stage path convention from `04 §6.4`; filesystem-as-bus, C1/C4)
 - **`.agentum/` is gitignored** locally (`.git/info/exclude`, never a tracked
-  `.gitignore`) so worktrees and artifacts don't pollute the user's working tree.
+  `.gitignore`) so worktrees and artifacts stay out of the user's `git status`.
 
 All git operations shell out to the `git` binary on PATH; there is no libgit2
 dependency. The project repo must be a real work tree (validated at project
@@ -121,15 +121,15 @@ Three separate bounds, each answering its own question:
 |---|---|---|---|
 | Hard cap | `AGENTUM_HARD_TIMEOUT_SECONDS` (0 = off) | how long may one invocation run in total | whole invocation |
 | Idle cap | `AGENTUM_IDLE_TIMEOUT_SECONDS` (0 = off) | how long may the agent go quiet mid-work | resets on every output line |
-| First event | `AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS` (120) | has the runtime said anything at all since it started | until the first output line, then retires forever |
+| First event | `AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS` (120) | has the runtime produced any output since it started | until the first output line, then disabled forever |
 
 The first-event watchdog exists because a broken model's failure mode is not
-an error — it is total silence: no event, no exit code, no diagnostic, an
+an error — it produces nothing at all: no event, no exit code, no diagnostic, an
 invocation that hangs while holding a worker slot. A working model emits its
 first event in fractions of a second, so 120 s is generous; zero disables the
-bound. It is deliberately not the idle cap wearing a smaller number: a value
+bound. It is deliberately not the idle cap with a smaller number: a value
 large enough for a full test run inside the agent is useless as a detector,
-and a value small enough to detect a hung model kills legitimate work. The
+and a value small enough to detect a hung model terminates legitimate work. The
 idle cap keeps its own default and its own question; the two must not be
 merged into one number, or both get answered badly. Terminal stop errors from
 either bound name the model (`adapter_error` vocabulary unchanged — the text
@@ -196,8 +196,8 @@ layers, in order of authority:
    analyst gains nothing. See [docs/capabilities.md](capabilities.md).
 2. **Entry refusal + drift detection.** The runner refuses to *enter* a
    source-writing stage (effective role implementer or fixer) while the unlock
-   is absent, as `plan_not_approved` — running a crippled implementer that
-   writes nothing and reports `complete` would burn a cycle and mislead. When
+   is absent, as `plan_not_approved` — an implementer that cannot write would
+   consume a cycle and report a misleading `complete`. When
    the unlock *is* granted, it checks the approval artifact's current revision
    against the one the human approved; a mismatch (the plan was edited after
    approval) is `plan_revision_drift`. This layer protects against a misleading
@@ -207,14 +207,14 @@ layers, in order of authority:
    approval stage. Advisory — it cannot see runtime state; layer 1 holds even
    if this check is wrong.
 
-The guarantee is layer 1. Layers 2 and 3 turn a silent refusal into a named,
+The guarantee is layer 1. Layers 2 and 3 turn the refusal into a named,
 human-actionable stop and catch authoring mistakes early.
 
 **Where the layer-2 stop pauses matters.** Both stops pin `current_stage` to
 the **approval stage**, not the refused stage. The advance job resolves the
 *current stage's* transition, so a `paused_gate` stop must sit at a stage that
 already ran; pinning the never-invoked implementer would make advance resolve
-the implementer's transition and silently skip it — reaching review against an
+the implementer's transition and skip the stage — reaching review against an
 empty diff with no plan approval ever recorded. Pinned to the approval stage,
 recovery is exactly the ordinary plan-gate advance:
 
@@ -230,8 +230,8 @@ recovery is exactly the ordinary plan-gate advance:
   (the shipped pack's shape); with intermediate stages between them —
   well-formed under the validator's pass-through rule — each advance re-runs
   those stages before re-hitting the refusal, so each retry costs real
-  invocations. A pack author adding a stage between plan and implement is
-  buying that.
+  invocations. A pack author adding a stage between plan and implement
+  accepts that cost.
 
 ### Orchestrator-produced delivery diff (ADR 0003)
 
@@ -311,8 +311,8 @@ On boot, before the worker starts (`04 §7.6`):
    which could re-run a half-completed stage. Session-id resume makes the
    re-run cheap if a session was captured.
 
-Recovery is best-effort and conservative: it prefers a human-visible pause over
-silent re-execution.
+Recovery is best-effort and conservative: it pauses for a human rather than
+re-running a stage with no record.
 
 ## Worktree teardown
 
@@ -369,7 +369,8 @@ Every run records its git lineage explicitly:
 - **`base_commit`** (anchor): the full SHA `base_ref` resolved to, captured
   **once** before the worktree is created (`SetBaseCommit` is a `WHERE
   base_commit IS NULL` no-op after the first capture). The worktree branches
-  from this SHA, so a later move of `base_ref` cannot retcon the run's lineage.
+  from this SHA, so a later move of `base_ref` cannot change the run's lineage
+  after the fact.
 - **`result_commit`** (delivery): the tip of `agentum/<run-id>` captured at
   the final gate (`awaiting_final_review`), naming the commit the human reviews.
   Immutable; the branch survives teardown so this is always resolvable.
@@ -379,8 +380,8 @@ Every run records its git lineage explicitly:
 review) and re-confirmed at teardown, while the delivery checks run earlier
 (verifying the commit recorded as `body.checks.commit`). If the two diverge — a
 continue job, a human artifact edit, or a filesystem change moved the branch tip
-in between — teardown does not silently seal a manifest asserting "checks passed
-at X" alongside "delivered Y". The verified commit is read back from
+in between — teardown does not seal a manifest asserting "checks passed
+at X" alongside "delivered Y" as though they matched. The verified commit is read back from
 `body.checks.commit` (not proxied through the latest checkpoint, whose
 correctness would depend on an FSM property a future ask-to-edit feature could
 break) and compared against `result_commit`. The divergence is recorded as an
@@ -390,9 +391,10 @@ not failed: the human already approved, and the manifest's incompleteness is the
 signal a reviewer acts on.
 
 A comparison that *cannot* run is recorded too. If the verified commit cannot be
-read back, teardown records an evidence gap rather than returning quietly —
+read back, teardown records an evidence gap rather than returning without a
+record —
 "checked, no divergence" and "never checked" are different claims about a
-delivery, and a manifest silent about both would be the fail-open shape this
+delivery, and a manifest that states neither would be the fail-open shape this
 comparison exists to remove. No divergence event is emitted in that case:
 nothing was compared, so asserting a divergence would be equally unsupported.
 An *absent* checks commit (a run that never reached delivery, or a project that
@@ -419,8 +421,9 @@ audit trail shows Agentum authored the boundary). This is the `git.delivery`
 privilege the capability model reserves for the orchestrator and no agent role
 carries; before this the orchestrator only *read* HEAD, so every checkpoint was
 the base SHA and the agent's uncommitted work was discarded at teardown. A stage
-that produced no change records the unchanged HEAD honestly with no empty commit
-— an empty commit per stage would pollute the lineage a reviewer reads.
+that produced no change records the unchanged HEAD as its checkpoint, with no
+empty commit — an empty commit per stage would clutter the lineage a reviewer
+reads.
 
 Agents may edit and inspect git but cannot create, delete, reset, or rebase
 delivery refs — `agentum/<run-id>` and checkpoint SHAs are orchestrator-owned.
@@ -441,7 +444,7 @@ auto-advancing exactly the runs it was meant to hold for review. The undeclared
 files are committed into the delivery at the same time, so the signal is lost on
 both sides.
 
-This is a two-sided trap, and both sides have been hit:
+Both sides of the ordering have failed in practice:
 
 | Sampled | `isClean` | Effect on the gate |
 |---|---|---|
@@ -495,7 +498,7 @@ Only **meaningful** events are persisted to the durable `events` log (`04 §7.1.
 Live stream text/tool chunks are forwarded to SSE subscribers but never written
 to the DB; `Last-Event-ID` replay reconstructs state changes, stage boundaries,
 stop reasons, telemetry, and errors — not the full transcript. This keeps write
-volume sane and matches the audit-trail intent.
+volume bounded and matches the audit-trail intent.
 
 F.6 emits: `run.state_changed`, `stage.started`, `stage.stopped`,
 `stage.telemetry`, `run.worktree_created`, `run.worktree_removed`.
@@ -521,8 +524,8 @@ that the loop works with a live agent, not just fakes.
 
 ## Project checks (orchestrator-owned)
 
-An agent must not get to declare its own work "done" by claiming tests passed.
-For honest dogfooding, Agentum runs the project's checks itself and reads the
+An agent must not get to declare its own work "done" by claiming tests passed:
+Agentum runs the project's checks itself and reads the
 result from its own executor. The commands are project-owned (they depend on the
 stack), so they live in a versioned project file, not in a pack or an architect's
 plan.
@@ -576,13 +579,14 @@ The runner runs the resolved set once, at the **final delivery boundary**: after
 the last stage's checkpoint is recorded and before the run reaches the review
 gate (`awaiting_final_review`).
 
-**Commit binding.** The checks must verify exactly the commit they claim to. The
+**Commit binding.** The checks must verify exactly the commit the record
+names. The
 runner resolves the worktree HEAD (the post-stage checkpoint commit the
 orchestrator authored) *before* the executor runs and asserts the tree is clean
 first: a dirty tree means something wrote after the checkpoint, and running the
 checks against it would test content that exists in no commit while the manifest
 asserts a specific SHA was verified. A dirty tree at this boundary fails the run
-rather than claiming a verification it cannot stand behind. Only then does the
+rather than recording a verification it did not perform. Only then does the
 executor run, and the recorded `checks.commit` is that checkpoint SHA by
 construction — not a pre-run HEAD read that could drift. The outcome is recorded
 as manifest evidence:
@@ -627,7 +631,7 @@ runtime, so the adapter declares them (`Describe().AutoInstructions`) and its
 context probe returns that same declaration; for opencode the baseline is
 `AGENTS.md` at the repository root. The runner never names the file, not even
 as a fallback for a failed probe: another executor injects another file, and a
-literal in calling code would silently pin the wrong one on exactly the path
+literal in calling code would pin the wrong one on exactly the path
 where the probe could not answer. A build-time test fails on any such literal
 outside the adapter package. Bytes are read from `base_commit` through the worktree manager
 (the same agent-immutability seam as the checks registry), capped at 64 KiB/file
@@ -673,7 +677,7 @@ checks (name, command, required) so the agent knows the build/test commands and
 can run them to check its own work — hiding them is unenforceable
 (`.agentum.yaml` is `fs.read`-able) and harmful (an implementer that knows them
 saves a review/fix cycle). The agent learns *what* the checks are; it still
-cannot change *which* gate delivery. This cached set is rendering-only;
+cannot change *which* checks gate delivery. This cached set is rendering-only;
 `enforceProjectChecks` keeps its own independent load+resolve at the boundary,
 bound to the verified commit (PR #23).
 
@@ -826,8 +830,8 @@ templates are ordinary stage output.
 
 `reject` is the fail-closed choice and the only one that stops a credential
 inside a binary artifact. An unrecognized value fails at startup rather than
-falling back, so an operator who asked for rejection never silently gets
-redaction. A refused write does not fail the stage — nothing was read that
+falling back, so an operator who asked for rejection never receives
+redaction instead. A refused write does not fail the stage — nothing was read that
 should not have been — but it does emit `stage.artifact_rejected`, since an
 absent revision alone is indistinguishable from an artifact the agent never
 wrote.
@@ -843,7 +847,7 @@ three steps run in one transaction. The read takes a row lock
 `(run, name)` blocks until the first commits and then observes the new
 current revision rather than chaining a sibling off the one it already read.
 The demotion targets that exact revision id, so an affected-row count of zero
-is a conflict rather than a silent no-op. Two racing *first* creates have no
+is a conflict, not a quiet success. Two racing *first* creates have no
 row to lock; the partial unique index `idx_artifact_rev_current` serializes
 them and the loser's constraint violation surfaces as a conflict too.
 
@@ -871,7 +875,7 @@ row lock (`GetManifestForUpdate`) inside the write transaction itself — not a
 pre-transaction snapshot. The SQL is a full body replacement, not a JSONB
 merge, because the deep merge happens once in Go against the locked bytes; a
 SQL-level `||` would be a second, shallow merge whose top-level-key-only
-semantics silently drop nested evidence a concurrent writer just committed.
+semantics drop nested evidence a concurrent writer just committed.
 `AddEvidenceTx` exposes the tx-scoped write so a human-gate decision can commit
 atomically with the FSM transition it describes.
 
@@ -883,17 +887,17 @@ first one.
 
 **Evidence gaps and completeness.** A failed evidence write is itself recorded
 as an `EvidenceGap` (section, stage, reason, time) on the body — a sealed
-manifest that degraded silently is worse than one that is absent, because a
-reviewer cannot tell the two apart. At seal time the manifest carries an
+manifest that degraded without a record is worse than one that is absent: the
+degraded one reads as complete. At seal time the manifest carries an
 `evidence_complete` flag: false when any section is absent or degraded. The one
 exception is the initial evidence (input, project, pack, base commit): a failure
 there fails the run, because it is the provenance root every later piece of
 evidence chains off.
 
 **Derived missing.** `body.missing` is derived from the body at seal time
-(`Body.MissingSections()`), not asserted once at init. A stale claim (e.g.
+(`Body.MissingSections()`), not asserted once at init. A stale entry (e.g.
 `capabilities` listed missing on a body that carries a populated capabilities
-section) therefore cannot survive to seal time. `memory` stays reported as
+section) therefore cannot reach seal time. `memory` stays reported as
 missing because the memory subsystem is genuinely not wired yet.
 
 **Per-invocation evidence.** The unit of evidence is the
