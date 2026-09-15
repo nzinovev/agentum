@@ -46,6 +46,14 @@ type Descriptor struct {
 	// run. An adapter that cannot say so is never checked against a catalog —
 	// "cannot be asked" and "answered no" are different facts.
 	EnumeratesModels bool
+	// AutoInstructions are the repo-relative instruction files this runtime
+	// loads by itself, with no configuration from us. Which file that is
+	// differs per runtime, so it is declared here rather than assumed by a
+	// caller: a caller that names one is naming another runtime's file the
+	// moment a second adapter exists. The context probe returns the same set;
+	// this is the copy available without running anything, which is what a
+	// caller needs when the probe could not answer.
+	AutoInstructions []string
 }
 
 // clone returns a deep copy so a caller cannot mutate the adapter's declared
@@ -57,6 +65,9 @@ func (descriptor Descriptor) clone() Descriptor {
 	out := descriptor
 	if descriptor.ModelOptions != nil {
 		out.ModelOptions = append([]models.OptionName(nil), descriptor.ModelOptions...)
+	}
+	if descriptor.AutoInstructions != nil {
+		out.AutoInstructions = append([]string(nil), descriptor.AutoInstructions...)
 	}
 	if descriptor.DefaultTiers.Tiers != nil {
 		out.DefaultTiers.Tiers = make(map[string]string, len(descriptor.DefaultTiers.Tiers))
@@ -80,6 +91,7 @@ var opencodeDescriptor = Descriptor{
 	Binary:           "opencode",
 	ModelOptions:     []models.OptionName{models.OptionModel},
 	EnumeratesModels: true,
+	AutoInstructions: autoInstructionBaseline,
 	DefaultTiers: models.Config{
 		Tiers: map[string]string{
 			"fast":      "opencode/nemotron-3.5-lightning-free",

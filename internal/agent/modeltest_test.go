@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,5 +154,39 @@ func TestTestModel_MissingBinaryIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(check.Reason, "not found") {
 		t.Errorf("Reason = %q; want the missing-binary reason", check.Reason)
+	}
+}
+
+// TestTestModel_RunsUnderADenyBaselineConfig: the check is a diagnostic, not a
+// licence. It starts the runtime under the same permission config an
+// invocation with an empty profile would get — everything denied — so the
+// --auto flag it needs (nobody can answer a permission prompt in a
+// non-interactive check) auto-approves nothing. Asserted from the child's own
+// environment, not from the caller's intent.
+func TestTestModel_RunsUnderADenyBaselineConfig(t *testing.T) {
+	adapter, _ := modelTestAdapter(t, fakeWorks)
+	dumpPath := filepath.Join(t.TempDir(), "handed-config.json")
+	t.Setenv(fakeConfigDumpEnv, dumpPath)
+
+	if check := adapter.TestModel(context.Background(), modelTestSelection(), 10*time.Second); check.Outcome != ModelCheckOK {
+		t.Fatalf("Outcome = %q (%s); want ok", check.Outcome, check.Reason)
+	}
+
+	raw, readErr := os.ReadFile(dumpPath)
+	if readErr != nil {
+		t.Fatalf("the check must hand the runtime a permission config: %v", readErr)
+	}
+	var handed struct {
+		Permission map[string]any `json:"permission"`
+	}
+	if err := json.Unmarshal(raw, &handed); err != nil {
+		t.Fatalf("decode handed config %q: %v", raw, err)
+	}
+	// The reach a hijacked check would need: commands, edits, the network, and
+	// anything outside the throwaway directory.
+	for _, key := range []string{"*", "bash", "edit", "webfetch", "external_directory"} {
+		if handed.Permission[key] != "deny" {
+			t.Errorf("permission[%q] = %v; a model check must be granted nothing", key, handed.Permission[key])
+		}
 	}
 }

@@ -100,7 +100,10 @@ var autoInstructionBaseline = []string{"AGENTS.md"}
 // because the no-output hang is a known opencode defect, not a hypothetical.
 func (adapter *OpencodeAdapter) ProbeContext(ctx context.Context, inv Invocation) (ContextReport, error) {
 	report := ContextReport{
-		AutoInstructions: append([]string(nil), autoInstructionBaseline...),
+		// One declaration: the descriptor publishes the baseline for callers
+		// that cannot run a probe, and the probe returns that same set rather
+		// than a second copy free to drift from it.
+		AutoInstructions: adapter.Describe().AutoInstructions,
 		SkillsProbe:      ContextProbeOK,
 	}
 	// A deny-baseline profile with skill allowed: the probe wants to enumerate

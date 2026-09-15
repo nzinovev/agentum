@@ -37,6 +37,10 @@ const (
 	// execution, so tests can assert how many times a runtime invocation was
 	// actually spawned (a refused start must leave it at zero).
 	fakeRunCounterEnv = "AGENTUM_FAKE_RUN_COUNTER"
+	// fakeConfigDumpEnv names a file the fake writes its OPENCODE_CONFIG_CONTENT
+	// into, so a test can assert what boundary the child was actually started
+	// under rather than what the caller believed it passed.
+	fakeConfigDumpEnv = "AGENTUM_FAKE_CONFIG_DUMP"
 )
 
 // Fake agent behaviours.
@@ -134,6 +138,9 @@ func runFakeAgent(mode string) int {
 			}
 		}
 		_ = os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600)
+	}
+	if dumpPath := os.Getenv(fakeConfigDumpEnv); dumpPath != "" {
+		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
 	}
 	delay := 100 * time.Millisecond
 	if raw := os.Getenv(fakeDelayEnv); raw != "" {

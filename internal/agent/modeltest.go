@@ -32,18 +32,24 @@ const modelTestDefaultDeadline = 60 * time.Second
 const modelTestPrompt = "Say hi"
 
 // ModelCheck is the outcome of one on-demand model check: a structure, not
-// text, because an API surface and a future screen consume it. Latency is the
-// time to the FIRST stream line (zero when there was none) — a working model
-// produces its first event in fractions of a second, and a model that emits
-// one line and goes quiet passes this check by design; catching that
-// mid-stream silence is the idle cap's job on real runs, not the check's.
+// text, because an API surface and a future screen consume it.
 type ModelCheck struct {
-	Model     string        // "provider/model"
-	Variant   string        // from the checked tier, empty when it declares none
-	Tier      string        // when the check ran against a configured tier
-	Outcome   string        // ok | unknown_model | timeout | error
-	Latency   time.Duration // to the first line; zero when there was none
-	Reason    string        // text for any non-ok outcome
+	// Model is the id exactly as configured — "provider/model" for a runtime
+	// that shapes its names that way, a bare name for one that does not.
+	Model string
+	// Variant is the reasoning variant of the checked tier, empty when the
+	// tier declares none.
+	Variant string
+	// Tier is set when the check ran against a configured tier.
+	Tier string
+	// Outcome is one of the ModelCheck* constants.
+	Outcome string
+	// Latency is the time to the first observable output from the runtime,
+	// zero when there was none. What counts as output is the adapter's
+	// knowledge — a stream line for a subprocess runtime, a first token or
+	// response for one reached another way.
+	Latency   time.Duration
+	Reason    string // text for any non-ok outcome
 	CheckedAt time.Time
 }
 
@@ -53,22 +59,40 @@ type ModelCheck struct {
 // every run that uses it. Discovered by comma-ok type assertion, like
 // ContextProber, so the Adapter interface grows no method most runtimes
 // cannot honor.
+//
+// Three rules bind every implementation, because the outcomes are compared
+// and rendered side by side and must mean the same thing whichever runtime
+// produced them:
+//
+//  1. SUCCESS IS THE FIRST OBSERVABLE OUTPUT, not a complete answer. A model
+//     that answers is distinguishable from one that hangs by the very first
+//     thing it emits; waiting for the whole answer buys no new information
+//     and bills for tokens nobody asked for. An implementation stops the
+//     runtime as soon as that first output arrives. The known cost is stated
+//     rather than hidden: a model that emits once and then stalls passes this
+//     check, and catching THAT silence on real runs belongs to the
+//     first-event watchdog and the idle cap.
+//  2. THE CHECK IS NO WIDER THAN A REAL INVOCATION. It starts the runtime
+//     under the same capability boundary an invocation gets — a profile that
+//     grants nothing, and whatever the adapter uses to enforce it. A
+//     diagnostic is not a reason to hand a model a machine that an invocation
+//     would not get.
+//  3. NO MEMOIZATION AND NO SIDE EFFECTS. Each call honestly reaches the
+//     model, or "checked again after a fix" stops working; and it writes no
+//     database rows, emits no events, and touches no manifest — delivery
+//     belongs to the layer that calls it.
 type ModelTester interface {
-	// TestModel invokes the runtime once with the selection and reports
-	// whether it produced output. It is NOT memoized: each call honestly goes
-	// to the model, or "checked again after a fix" stops working. It writes
-	// no database rows, emits no events, and touches no manifest — it is a
-	// diagnostic, not a run; delivery belongs to the layer that calls it.
 	TestModel(ctx context.Context, selection models.Selection, deadline time.Duration) ModelCheck
 }
 
-// TestModel implements ModelTester. The catalog is consulted first and for
-// free: a model the runtime does not even list is unknown_model with no
-// invocation and no bill. Otherwise one `run` with a trivial prompt starts in
-// a temporary directory under the probes' scrubbed environment; the first
-// stdout line is the success signal and the process group is stopped the
-// moment it arrives, so the check costs a few tokens rather than a whole
-// answer. A deadline with no line is a timeout, and the group is killed.
+// TestModel implements ModelTester for opencode. The catalog is consulted
+// first and for free: a model the runtime does not even list is unknown_model
+// with no invocation and no bill. Otherwise one `run` with a trivial prompt
+// starts in a temporary directory under a deny-everything permission config
+// and the scrubbed environment; the first stdout line is this runtime's
+// observable output, so the process group is stopped the moment it arrives and
+// the check costs a few tokens rather than a whole answer. A deadline with no
+// line is a timeout, and the group is killed.
 func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.Selection, deadline time.Duration) ModelCheck {
 	check := ModelCheck{
 		Model:     selection.Options.Model,
@@ -97,6 +121,27 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 	}
 	defer os.RemoveAll(workdir)
 
+	// The check runs under the same boundary an invocation gets: a config
+	// rendered from a profile that grants nothing, handed to the child through
+	// its environment, plus the credential scrub. --auto below auto-approves
+	// what is not explicitly denied, and this config denies everything — it is
+	// there because a permission request in a non-interactive run has nobody
+	// to answer it, and the check would hang instead of reporting.
+	checkProfile := caps.Profile{}
+	permissionConfig, configErr := buildOpencodeConfig(
+		checkProfile, scopeSubst{worktree: workdir, artifact: workdir}, nil)
+	if configErr != nil {
+		check.Outcome = ModelCheckError
+		check.Reason = fmt.Sprintf("render check config: %v", configErr)
+		return check
+	}
+	compactConfig, _, renderErr := renderOpencodeConfigBytes(permissionConfig)
+	if renderErr != nil {
+		check.Outcome = ModelCheckError
+		check.Reason = fmt.Sprintf("render check config: %v", renderErr)
+		return check
+	}
+
 	testCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
@@ -110,7 +155,7 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 	cmd := exec.CommandContext(testCtx, args[0], args[1:]...)
 	setProcessGroup(cmd)
 	cmd.Dir = workdir
-	cmd.Env = buildChildEnv(caps.Profile{}, "", nil)
+	cmd.Env = buildChildEnv(checkProfile, "", compactConfig)
 
 	stdout, pipeErr := cmd.StdoutPipe()
 	if pipeErr != nil {
