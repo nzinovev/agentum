@@ -621,8 +621,15 @@ skills, declared, pinned from `base_commit`, and recorded in the manifest.
 
 **What is pinned.** The instruction set is the project declaration
 (`instructions:` in `.agentum.yaml`, repo-relative, validated) ∪ the
-runtime-injected baseline (`AGENTS.md`, which opencode loads itself with no
-configuration). Bytes are read from `base_commit` through the worktree manager
+runtime-injected baseline — the files the execution runtime loads by itself,
+with no configuration from us. Which files those are is a fact about the
+runtime, so the adapter declares them (`Describe().AutoInstructions`) and its
+context probe returns that same declaration; for opencode the baseline is
+`AGENTS.md` at the repository root. The runner never names the file, not even
+as a fallback for a failed probe: another executor injects another file, and a
+literal in calling code would silently pin the wrong one on exactly the path
+where the probe could not answer. A build-time test fails on any such literal
+outside the adapter package. Bytes are read from `base_commit` through the worktree manager
 (the same agent-immutability seam as the checks registry), capped at 64 KiB/file
 and 192 KiB/set with a recorded truncation marker, and delivered to the adapter
 through the same config channel as the permission map. A path absent at

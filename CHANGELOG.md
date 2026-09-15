@@ -76,7 +76,11 @@ Once tagged releases begin, this project adheres to
   invokes a model on demand — accepted with `202`, executed in the
   background, delivered as `models.test_started` / `models.test_model_checked`
   / `models.test_finished` events on the tenant stream, success being the
-  first output line so the check costs a few tokens. `Idempotency-Key` is
+  first output line so the check costs a few tokens. The check starts the
+  runtime under the same boundary an invocation gets — a permission config
+  rendered from a profile that grants nothing — so the auto-approve flag it
+  needs (a non-interactive check has nobody to answer a permission prompt)
+  approves nothing. `Idempotency-Key` is
   mandatory (a repeat with the same body returns the same check and never
   double-bills; with a different body it is a `409`), targets are
   deduplicated by `(model, variant)`, execution is serialized, and the

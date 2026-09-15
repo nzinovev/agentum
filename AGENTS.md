@@ -109,13 +109,16 @@ instead of skipping — a skipped database test there would be a lost check.
 - **The execution target is a registry entry.** Adapters are selected by id
   through `internal/agent`'s registry and describe themselves (`Describe()`:
   id, implementation version, binary, understood model options, baked-in tier
-  defaults; `Probe()`: the runtime's own version, memoized per process;
+  defaults, and the instruction files the runtime injects by itself; `Probe()`: the runtime's own version, memoized per process;
   `Catalog()`: the runtime's model listing, memoized per process — a model
   outside a fully-read catalog is refused at the same three points as an
   undeclared option, while a catalog that could not be obtained validates as
   nil and lands in evidence as the `model_catalog` label).
-  Adapter id and version are never literals in calling code, an option the
-  descriptor does not declare is refused (boot, run start, Invoke), and
+  No caller names a runtime-injected instruction file either — the baseline
+  comes from the descriptor, because another executor injects another file and
+  a literal would pin the wrong one. Adapter id and version are never literals
+  in calling code, an option the descriptor does not declare is refused (boot,
+  run start, Invoke), and
   manifest evidence is keyed by invocation — one record per stage attempt,
   never merged by stage.
 
