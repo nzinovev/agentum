@@ -3,9 +3,8 @@
 How a run actually works: a project binds a repo, the runner drives a pack's
 stages through an agent adapter, stop conditions route into the FSM, events flow
 into the durable log, and a Postgres-backed queue decouples HTTP handlers from
-multi-minute agent runs. This is **F.6** — the loop Epics 1–4 and 6 wire into
-(the second keystone after the foundation specs). Build design lives in
-`reference/04 §7`; this page is the user-facing companion.
+multi-minute agent runs. This page is the user-facing companion to the build
+design.
 
 Everything here goes through the single HTTP front door (`docs/api.md`); state
 transitions go through `engine.Next` only (`internal/engine/fsm.go`); every row
@@ -45,7 +44,7 @@ project per tenant; registration is idempotent on `(tenant_id, repo_identity)`
   vocabulary (workspace / project / repository / checkout).
 - `runs.project_id` is a real FK; a run cannot exist without a project.
 - `related_projects` is an **inert seam**: stored now, grants nothing.
-  Cross-project / sibling-folder access lands in Epic 6 as a path-scoped
+  Cross-project / sibling-folder access lands later as a path-scoped
   `fs.read` capability derived from this set — the configured relation is the
   security boundary, never auto-discovered.
 
@@ -54,7 +53,7 @@ See `docs/api.md#projects` for the endpoint surface.
 ## Worktrees
 
 Each run executes in its own git worktree off the run's pinned working copy
-(C5 — isolated workspace per run). A run pins its copy once at first start
+(an isolated workspace per run). A run pins its copy once at first start
 (`runs.checkout_path`, resolve-once like `base_commit`) and executes there
 for its whole life — worktree creation, checks, evidence, teardown — even if
 the project is later re-registered from another clone. A pinned copy that is
@@ -67,7 +66,7 @@ stage of a run; reused across stages and resumes; torn down at terminal state.
 - **Location:** `<repo>/.agentum/worktrees/<run-id>/`
 - **Branch:** `agentum/<run-id>` (off the repo's current HEAD)
 - **Artifacts:** `<worktree>/.agentum/<run-id>/.ag-artifacts/<stage>/result.json`
-  (the per-stage path convention from `04 §6.4`; filesystem-as-bus, C1/C4)
+  (the per-stage path convention; the filesystem is the bus)
 - **`.agentum/` is gitignored** locally (`.git/info/exclude`, never a tracked
   `.gitignore`) so worktrees and artifacts stay out of the user's `git status`.
 
@@ -88,14 +87,14 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
 | `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failRun` |
 
-`run` / `continue` / `advance` enter the shared **stage loop** (`04 §7.2`):
+`run` / `continue` / `advance` enter the shared **stage loop**:
 
 1. **Resolve** the pack + current stage (or `pack.Entry` on first run) → stage
    def (gate, prompt, tier).
 2. **Prepare the worktree** — created once per run; reused thereafter.
 3. **Render the routing block** (`internal/routing.Render`) with role/stage/gate
    context, the artifact-dir, the result.json preamble, and memory/capability
-   stubs (inert until Epic 1 / Epic 6).
+   stubs (inert until those subsystems land).
 4. **Resolve the model** via `internal/models.Resolve(cfg, agent, tier)` and
    pass as `Invocation.Model` (`docs/models.md`).
 5. **Invoke the adapter** (`agent.Invoke(ctx, inv)`), forwarding stream chunks
@@ -103,7 +102,7 @@ calls `Runner.Handle`, which dispatches by `kind`:
 6. **Persist the `stage_invocations` row** — `session_id`, telemetry,
    `stop_reason`, parsed `result.json`. Emit `stage.started` / `stage.stopped`
    / `stage.telemetry` events.
-7. **Evaluate the stop condition** (`04 §7.4`) → FSM event → `engine.Next`.
+7. **Evaluate the stop condition** → FSM event → `engine.Next`.
    - On a pause event → loop completes; run stays paused.
    - On advance → read the pack's transition; loop to step 1 with the next stage.
    - On `reach_final_gate` → run moves to `awaiting_final_review`; loop completes.
@@ -137,9 +136,9 @@ gains the fact, the stop reason stays generic).
 
 ### Stop conditions → FSM
 
-Driven by the parsed `result.json` (or its absence). The FSM table is unchanged
-from F.1 — no new states; new `stop_reason` values distinguish *why* a pause
-happened (`04 §7.1.6`).
+Driven by the parsed `result.json` (or its absence). The FSM table gains no
+new states; new `stop_reason` values distinguish *why* a pause
+happened.
 
 | Outcome | FSM event | Resulting state | `stop_reason` |
 |---|---|---|---|
@@ -182,7 +181,7 @@ bounded, not a runaway) or `cancel` (terminal, branch preserved).
 `plan_not_approved` and `plan_revision_drift` are the same controlled shape,
 and belong to the plan-approval lock below.
 
-### Plan-approval lock (ADR 0003)
+### Plan-approval lock
 
 A pack may declare a `source_write` approval (see [docs/pack-format.md](pack-format.md#approvals)).
 While that approval is pending, no stage may write source. The lock is three
@@ -233,7 +232,7 @@ recovery is exactly the ordinary plan-gate advance:
   invocations. A pack author adding a stage between plan and implement
   accepts that cost.
 
-### Orchestrator-produced delivery diff (ADR 0003)
+### Orchestrator-produced delivery diff
 
 Reviewer-role stages and the final gate do not run `git` themselves (the
 reviewer role grants no `exec.bash`). The orchestrator produces the change set
@@ -256,8 +255,8 @@ approved, so the run is not failed.
 
 ## Job queue
 
-The runner is a **Postgres-backed job queue + worker**, not goroutine-per-run
-(`04 §7.5`). No Redis, no new infra; transactional with run state.
+The runner is a **Postgres-backed job queue + worker**, not goroutine-per-run.
+No Redis, no new infra; transactional with run state.
 
 - **Table:** `jobs` (migration `0003_runner.sql`) — `kind`, `status`
   (`pending | running | done | failed`), `worker_id`, `heartbeat_at`,
@@ -273,7 +272,7 @@ The runner is a **Postgres-backed job queue + worker**, not goroutine-per-run
   ```
 - **Worker** (started on boot): a configurable pool, default 1 — the single-host
   MVP rarely benefits from >1 concurrent agent stage. Polls every 500ms for MVP;
-  `LISTEN/NOTIFY` wake is a clean fast-follow, not F.6.
+  `LISTEN/NOTIFY` wake is a clean fast-follow.
 - **Heartbeat:** the worker bumps `heartbeat_at` every 5s during a run. A
   boot-time recovery pass uses this to detect a worker that died mid-run.
 - **Poison bound:** `config.Config.JobMaxAttempts` (default 3) — over the bound
@@ -299,7 +298,7 @@ enqueue `continue` from a non-paused state).
 
 ### Crash recovery
 
-On boot, before the worker starts (`04 §7.6`):
+On boot, before the worker starts:
 
 1. **Re-queue stale jobs** — `status='running' AND heartbeat_at < now() - 60s`.
    Set `status='pending'`, `worker_id=NULL`, increment `attempts`. The poison
@@ -317,10 +316,10 @@ re-running a stage with no record.
 ## Worktree teardown
 
 Worktrees are torn down by Agentum on **terminal state** — `done`, `cancelled`,
-or `failed` — not by a TTL and not manually (`04 §7.1.3`). Teardown is a runner
+or `failed` — not by a TTL and not manually. Teardown is a runner
 job (`kind=teardown`) that runs `git worktree remove --force` **only**. The
 `agentum/<run-id>` branch and its commits are NOT deleted at teardown — they
-are the durable delivery output that survives for review and Epic 8 handoff.
+are the durable delivery output that survives for review and later handoff.
 Branch deletion is a separate, explicit `cleanup` action (below). It is
 enqueued by:
 
@@ -338,14 +337,14 @@ Enqueuing (rather than removing inline) serializes teardown with the
 still-running driving job — it never races the runner. The teardown job is
 idempotent: a missing worktree is a no-op.
 
-**F.7:** artifact *files* are now durable independently of the worktree —
+Artifact *files* are durable independently of the worktree —
 `artifact_revisions` rows + the content-addressed blob store survive teardown.
 The parsed `result.json` is still on `stage_invocations.result`; the revisions
 store adds the bytes and the immutable edit chain.
 
-## Safe lifecycle, checkpoints, and code egress (F.6.1)
+## Safe lifecycle, checkpoints, and code egress
 
-This is the primitive Epic 8 reuses for every execution unit. It separates four
+This is the primitive multi-step delivery reuses for every execution unit. It separates four
 concepts that were previously conflated:
 
 | Concept | Verb | Effect | Branch + commits |
@@ -401,9 +400,9 @@ An *absent* checks commit (a run that never reached delivery, or a project that
 defines no checks) is an absence rather than a failure and records nothing.
 
 The run response exposes all three plus `branch` (the canonical
-`agentum/<run-id>` ref) so a UI or Epic 8 handoff can render and diff delivery
-without touching git. Provider PR creation belongs to Epic P and is not required
-for safe local egress.
+`agentum/<run-id>` ref) so a UI or a later handoff step can render and diff
+delivery without touching git. Provider PR creation is later work and is not
+required for safe local egress.
 
 ### Checkpoints
 
@@ -494,15 +493,15 @@ ticker) repairs what crashes still leave behind, not only at process startup:
 
 ## Events
 
-Only **meaningful** events are persisted to the durable `events` log (`04 §7.1.5`).
+Only **meaningful** events are persisted to the durable `events` log.
 Live stream text/tool chunks are forwarded to SSE subscribers but never written
 to the DB; `Last-Event-ID` replay reconstructs state changes, stage boundaries,
 stop reasons, telemetry, and errors — not the full transcript. This keeps write
 volume bounded and matches the audit-trail intent.
 
-F.6 emits: `run.state_changed`, `stage.started`, `stage.stopped`,
-`stage.telemetry`, `run.worktree_created`, `run.worktree_removed`.
-F.7 adds: `run.revisions_synced` (current revisions materialized into the
+The stage loop emits: `run.state_changed`, `stage.started`, `stage.stopped`,
+`stage.telemetry`, `run.worktree_created`, `run.worktree_removed`, and
+`run.revisions_synced` (current revisions materialized into the
 worktree at stage start).
 
 See `docs/api.md#events-sse` for the SSE contract.
@@ -519,7 +518,7 @@ go test -tags integration ./internal/runner/ -run TestRunnerLive -v -timeout 5m
 
 It proves: `POST /runs/{id}/start` runs `packs/minimal` via the real opencode
 adapter to a stop point (the `spec` stage's `human_approval` gate pauses the
-run at `paused_gate`) and a `session_id` is captured. This is the F.6 proof
+run at `paused_gate`) and a `session_id` is captured. This is the proof
 that the loop works with a live agent, not just fakes.
 
 ## Project checks (orchestrator-owned)
@@ -616,7 +615,7 @@ scrubbed environment (provider credentials like `OPENAI_API_KEY` / `*_TOKEN` are
 stripped), per-check timeouts, and capped output. Its profile label
 (`checks-executor-v1`) is recorded on every report.
 
-## Project context channel (ADR 0002)
+## Project context channel
 
 A pack is portable across projects, so it cannot carry stack knowledge — but a
 stage still needs the project's rules. The project-context channel is the
@@ -638,7 +637,7 @@ outside the adapter package. Bytes are read from `base_commit` through the workt
 and 192 KiB/set with a recorded truncation marker, and delivered to the adapter
 through the same config channel as the permission map. A path absent at
 `base_commit` is recorded in the manifest's `missing` list, not fatal — and the
-pre-stage restore treats a worktree file at such a path as tampering (D4 row 4):
+pre-stage restore treats a worktree file at such a path as tampering:
 the agent authored an instruction file the project never declared at the anchor,
 so the restore removes it rather than judging by agent-authored rules. The set
 is built once in `drive()` (`prepareProjectContext`) and carried on `stageRun`.
@@ -688,25 +687,24 @@ restorations, enumerated skills, the probe label, and the missing list.
 `DiffManifests` gains a `context` axis comparing path→delivered_hash and
 name→hash, so two runs differing only in their skill set are distinguishable.
 
-## What F.6 does not do yet
+## Not done yet
 
-These land with their epics — the seams exist, the behavior does not:
+The seams exist; the behavior does not:
 
-- **Memory push/pull** → **Epic 1** (the routing block's "Project decisions"
-  section is an inert stub until 1.2/1.3 land).
-- **MCP capability pass-through** → **Epic 6** (the routing block's
-  "Capabilities available" section is an inert stub).
-- **Multi-step delivery / handoff** → **F.8** (one run = one step today).
-- **Idle/hard timeout values** — the ctx seam is used, but no idle timer ships
-  (`04 §5.2`).
+- **Memory push/pull** — the routing block's "Project decisions"
+  section is an inert stub.
+- **MCP capability pass-through** — the routing block's
+  "Capabilities available" section is an inert stub.
+- **Multi-step delivery / handoff** — one run = one step today.
+- **Idle/hard timeout values** — the ctx seam is used, but no idle timer ships.
 - **`LISTEN/NOTIFY` low-latency wake** — poll is fine for MVP.
 - **Per-project pack roots** — pack root is server-wide config
   (`config.Config.PacksDir`, default `./packs`).
 
-## Evidence manifest and artifact revisions (F.7)
+## Evidence manifest and artifact revisions
 
 The worktree is disposable; the artifacts an agent produces during a stage and
-the inputs that shaped the run are the durable record. F.7 splits that record
+the inputs that shaped the run are the durable record. That record splits
 into two pieces:
 
 - **Artifact revisions** — every produced or edited artifact variant becomes
@@ -760,8 +758,8 @@ artifact_revisions(
 - On `continue` / `advance`, the runner syncs the current revisions back into
   the worktree before the next stage runs (`artifacts.Syncer`).
 - The execution coordinate (`delivery_step`, `execution_unit`, `phase`) is
-  optional and inert when NULL. Single-unit runs leave it empty; Epic 8
-  populates it.
+  optional and inert when NULL. Single-unit runs leave it empty; multi-step
+  delivery populates it.
 
 ### Artifact containment
 

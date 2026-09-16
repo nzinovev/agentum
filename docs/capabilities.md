@@ -86,7 +86,7 @@ they read the descriptor.
 result. An empty input set yields an empty profile — the agent may only write
 its structured `result.json`.
 
-### Withholding input (ADR 0003)
+### Withholding input
 
 The four inputs above are additive-then-intersecting: each narrows, none
 removes a category the others granted. `Input.Withheld` is the one subtractive
@@ -141,10 +141,10 @@ per-invocation grant that survives the full intersection.
 Before the opencode subprocess starts, the adapter materializes the effective
 profile into four concrete controls:
 
-1. **A per-invocation opencode permission config.** Five properties make it a
-   boundary rather than a suggestion. Each was verified against a real opencode
-   binary, because each was wrong at least once when derived from the docs
-   alone:
+1. **A per-invocation opencode permission config.** The five properties below
+   make the config a boundary rather than a suggestion. Each was verified
+   against a real opencode binary: derived from the documentation alone, every
+   one of them had been wrong at least once.
 
    - **Path scopes are relative to the project root.** opencode normalises a
      tool's target path to a project-root-relative form *before* matching, so an
@@ -153,13 +153,14 @@ profile into four concrete controls:
      an analyst cannot produce `result.json`. An implementer's
      `fs.write:${worktree}/**` becomes `**`; an analyst's artifact scope becomes
      `.agentum/<run-id>/.ag-artifacts/<stage>/**`. A scope that cannot be
-     expressed relative to the worktree is an error, not a dropped grant — the
-     invocation refuses to start. The absolute paths remain in the *audit*
-     profile, which is evidence rather than configuration.
+     expressed relative to the worktree is an error, and the invocation
+     refuses to start — an absolute scope would be a rule that never matches.
+     The absolute paths remain in the *audit*
+     profile, which is evidence, not configuration.
    - **Deny by default.** The config opens with the `"*": "deny"` catch-all,
      which overrides opencode's own built-in `{permission:"*", pattern:"*",
-     action:"allow"}`, so a tool this adapter does not model — a future opencode
-     tool, an MCP tool — is refused rather than inherited. Every documented
+     action:"allow"}`. A tool this adapter does not model — a future opencode
+     tool, an MCP tool — is therefore refused rather than inherited. Every documented
      permission key is then set explicitly: opencode *merges* config sources and
      overrides only conflicting keys, so any key left unset would fall through
      to the operator's global config or the repository's own `opencode.json`.
@@ -312,7 +313,7 @@ profile, and why v1 accepts them:
   helper that outlives the profile's timeouts. The process-group kill on cancel
   covers the common case; a privileged orphan is the residual gap.
 - **Instruction files outside the declared set.** The project-context channel
-  (ADR 0002) pins `AGENTS.md` and the `instructions:` list declared in
+  pins `AGENTS.md` and the `instructions:` list declared in
   `.agentum.yaml`. A file at a declared path that is ABSENT at `base_commit` but
   present in the worktree (the agent authored an instruction file the project
   never declared at the anchor) is REMOVED by the pre-stage restore — it is
@@ -334,7 +335,7 @@ When the single-owner assumption no longer holds (multi-user, public
 deployment), v1's enforcement is insufficient and a real sandbox (container,
 namespace, seccomp) becomes required.
 
-## Project context channel (ADR 0002)
+## Project context channel
 
 The repository's own instruction files and the runtime's available skills form
 a declared input channel, so a pack can be stack-neutral without leaving the
@@ -374,5 +375,5 @@ agent without project rules.
 | Verified against opencode | What was proven |
 |---|---|
 | 1.18.11 (2026-08-05 / 2026-08-06) | `AGENTS.md` is auto-injected with zero tool calls; editing it in the worktree changes the next invocation; absolute `instructions` paths resolve (forward slashes); `opencode debug skill` returns `{name, description, location, content}` with no `--dir` and one `<built-in>` entry on a clean machine; `permission.skill` accepts the flat `"allow"` and a per-pattern map. |
-| 1.18.11 — instruction pinning + skill enumeration | Step 0 addendum discharged (see ADR 0002 addendum). |
-| 1.18.11 (2026-08-07) | **Step 10, the live context contract — all five pass** (`TestOpencodeLiveContext_*`, run together with the four older enforcement contracts: 9/9 green, no retries). Proven against the running binary: the worktree `AGENTS.md` marker reaches the model with the only tool call being the `result.json` write (no read of the file — it arrived as injected context); the pinned copy staged OUTSIDE the worktree also reaches the model, and **both** markers appear, so delivery adds rather than replaces; an implementer is refused an edit of `AGENTS.md` and names both the `AGENTS.md` and `**/AGENTS.md` rules as the reason; a skill dropped into `~/.claude/skills/` with no project configuration is enumerated with its name, absolute location, and content hash; and a skill that instructs a source write does **not** get the write under an analyst profile — the model consulted the skill and the `edit` deny still held. |
+| 1.18.11 — instruction pinning + skill enumeration | The instruction-pinning follow-up is discharged. |
+| 1.18.11 (2026-08-07) | **The live context contract — all five pass** (`TestOpencodeLiveContext_*`, run together with the four older enforcement contracts: 9/9 green, no retries). Proven against the running binary: the worktree `AGENTS.md` marker reaches the model with the only tool call being the `result.json` write (no read of the file — it arrived as injected context); the pinned copy staged OUTSIDE the worktree also reaches the model, and **both** markers appear, so delivery adds rather than replaces; an implementer is refused an edit of `AGENTS.md` and names both the `AGENTS.md` and `**/AGENTS.md` rules as the reason; a skill dropped into `~/.claude/skills/` with no project configuration is enumerated with its name, absolute location, and content hash; and a skill that instructs a source write does **not** get the write under an analyst profile — the model consulted the skill and the `edit` deny still held. |
