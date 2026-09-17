@@ -20,7 +20,7 @@ already configured on your machine.
 
 Agentum never touches credentials. If your agent is configured so that the model
 string `"zai-coding-plan/glm-5.1"` routes to your z.ai coding plan, that's where
-it routes — Agentum just handed it the string.
+it routes — Agentum only passed the string.
 
 ## Defaults (no configuration needed)
 
@@ -33,10 +33,10 @@ Agentum ships per-agent defaults so the common case needs no `models.yaml`:
 The `opencode` defaults use the **free models on opencode Zen** (the `-free`
 suffix is explicit), so a fresh install works without a paid provider once you
 connect Zen (`/connect opencode` in the TUI, or `opencode auth login`).
-Default names are a build-time claim about the runtime's catalog — upstream
-renames and removals have retired defaults before — which is why the boot-time
-catalog check covers the effective tiers (your `models.yaml`, or these
-defaults when you have none), not only the operator's file.
+Default names are fixed at build time while the runtime's catalog changes —
+upstream renames and removals have invalidated defaults before — which is why
+the boot-time catalog check covers the effective tiers (your `models.yaml`,
+or these defaults when you have none), not only the operator's file.
 
 Defaults belong to the execution adapter that runs them: opencode is the only
 adapter Agentum ships, so it is the only set of defaults there is. A second
@@ -64,28 +64,28 @@ your active agent understands.
 
 ## Resolution rules
 
-- Operator override (`models.yaml`) wins when present.
+- Operator override (`models.yaml`) takes precedence when present.
 - Otherwise the active execution adapter's built-in defaults are used — the
   tier table travels with the adapter's descriptor, because "these model
   strings work with this runtime" is runtime knowledge.
 - An empty tier falls back to the configured default.
-- An unknown tier is an **error** — Agentum never silently picks a model, and
-  never substitutes a default for a name it could not resolve. A run whose
+- An unknown tier is an **error**: Agentum does not pick a model or substitute
+  a default on its own. A run whose
   pack names an unresolvable tier fails at run start, before the first
   invocation.
 - The resolved model selection is a typed struct (`tier`, derived `provider`,
   options). A model option the active adapter does not declare is an **error**
   naming the adapter and the option — at boot for configured tiers, at run
-  start for the pack, and again at Invoke as defence in depth. Nothing is
-  silently dropped.
+  start for the pack, and again at Invoke as defence in depth. An undeclared
+  option is refused, not dropped.
 
 ## Strict loading
 
 `models.yaml` is decoded strictly: an unknown key (a `teirs:` typo, a
 misspelled `defualt:`), a tier whose model string is empty, or a nested object
 where a string is expected are load **errors** that stop the process at boot
-with the file named — never a silent fall-back to the defaults while your
-configuration sits unapplied.
+with the file named — the process does not fall back to the defaults and
+leave your configuration unapplied.
 
 Three more refusals follow from the same rule, and each one names its fix:
 
@@ -101,7 +101,7 @@ Three more refusals follow from the same rule, and each one names its fix:
   refused rather than searched past. The other locations are a *search*, so an
   absent one is simply a miss; a path you named is a statement of intent, and
   falling through to `<cwd>/models.yaml` or `~/.config` would run the process
-  on tiers you did not pick — with the wrong model as the only symptom.
+  on tiers you did not pick — the only sign would be the wrong model.
 
 **No `models.yaml` at all is the one non-error**: it means "use the adapter's
 built-in defaults", which is the common case.
@@ -109,9 +109,9 @@ built-in defaults", which is the common case.
 ## Checking the model against the runtime's catalog
 
 The model string is the one input that reaches the runtime verbatim, so it is
-checked against what the runtime itself says it can run: the adapter probes
-the runtime's model listing once per process (memoized, sticky including a
-failure — installing or fixing the runtime is a restart) and every resolved
+checked against the runtime's own model listing: the adapter probes
+the listing once per process (memoized, sticky including a
+failure — installing or fixing the runtime requires a restart) and every resolved
 selection is validated against it. Three points refuse, in order of how early
 they catch the mistake:
 
@@ -124,8 +124,8 @@ they catch the mistake:
 The refusal names the tier, the model, and the adapter, and carries its fix:
 a near spelling (edit distance ≤ 3, at most three candidates, nearest first)
 and the listing command for the provider. An unknown provider enumerates the
-known providers instead — the operator misspelled the prefix, and thirty
-model names would bury that.
+known providers instead — the likely cause is a misspelled prefix, and thirty
+model names would hide it.
 
 ```
 unknown model "zai-coding-plan/glm-5.3-hispeed" (did you mean "zai-coding-plan/glm-5.3-highspeed"?); list them with: opencode models zai-coding-plan
@@ -133,29 +133,30 @@ unknown model "zai-coding-plan/glm-5.3-hispeed" (did you mean "zai-coding-plan/g
 
 **"Could not check" is never "does not exist."** The listing is the runtime's
 own output, read as a schema with optional fields: unknown fields are ignored,
-and one unreadable record invalidates the whole catalog rather than silently
-dropping models the checker would then refuse as non-existent. A catalog that
+and one unreadable record invalidates the whole catalog rather than dropping
+models it would then refuse as non-existent. A catalog that
 could not be obtained — binary missing, timeout, non-zero exit, empty answer,
 unreadable records — validates as *nil*: the process boots and runs proceed
 with models unchecked, and the run's evidence records the fact (the `adapter`
 section's `model_catalog` label: `ok (N models)`, `failed: <reason>`, or
 `unsupported` for an adapter that cannot list its runtime). A transient probe
-failure turning into "no such model" for every configured tier at once would
-be a refusal that lies, with no operator workaround.
+failure reported as "no such model" for every configured tier at once would
+refuse models that exist, with no operator workaround.
 
 ## Checking a model by calling it (on demand)
 
-Sitting in the catalog proves the runtime *knows* a model — not that the model
-*answers*. A model can be listed, declared active, and still hang every run
+Presence in the catalog does not prove a model responds. A model can be
+listed, declared active, and still hang every run
 that uses it, with no error, no exit code, and no diagnostic. That class has
 two answers, and neither is automatic:
 
 - **`AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS`** (default 120, zero disables)
   bounds how long an invocation may produce no output *at all*: a working
   model emits its first event in fractions of a second; a hung one emits
-  nothing forever. The watchdog retires permanently on the first line, so
+  nothing forever. The watchdog is disabled permanently once the first line
+  arrives, so
   legitimate long work — which begins with an event — never falls under it.
-  Silence *mid-work* is a different question, owned by the idle cap
+  Silence *mid-work* is a different question, handled by the idle cap
   (`AGENTUM_IDLE_TIMEOUT_SECONDS`, default and semantics untouched).
 - **The explicit check** — `POST /api/v1/models/test` (see `docs/api.md`)
   invokes the runtime once with a trivial prompt and reports whether the model
@@ -164,9 +165,9 @@ two answers, and neither is automatic:
   rather than a whole answer, and the process group is stopped the moment the
   line arrives.
 
-The explicit check is honest about its boundary: a model that emits one line
-and goes quiet passes it. Catching that mid-run silence is the first-event
-watchdog's and the idle cap's job. It does not check provider quotas or
+The check covers one thing: the model produced a first output line. A model
+that emits one line and then goes quiet passes it; mid-run silence is the
+first-event watchdog's and the idle cap's job. It does not check provider quotas or
 billing — that state changes independently of Agentum and any snapshot would
 be stale before it was useful.
 
@@ -178,5 +179,4 @@ be stale before it was useful.
 - Per-run credential isolation (the agent binary owns its own auth).
 
 If your agent binary needs configuration to reach a provider, configure that
-binary directly. Agentum will pass the tier's model string and get out of the
-way.
+binary directly. Agentum passes the tier's model string and does nothing else.

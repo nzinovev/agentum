@@ -15,8 +15,8 @@ workspace (tenant) → project (product) → repository → local checkout
 
 In the MVP exactly one of each level exists per project line: one project
 holds one repository with one local checkout. No tables were added for the
-levels — an empty `repositories` table with a guaranteed 1:1 row would be a
-promise, not a model. What the MVP changes instead is that the single
+levels — an empty `repositories` table with a guaranteed 1:1 row would carry
+no data of its own. What the MVP changes instead is that the single
 `projects` row stops using one name for three levels:
 
 | Level | What it is | Where it lives in the MVP |
@@ -68,9 +68,10 @@ exist, an object lookup that does not depend on the repository's size.
 Accepted limitations of `git-roots:v1`: two clones of one history share the
 identity (that is what makes a relocation the same project); a repository
 whose reachable root set changes (merging unrelated histories) gets a new
-identity — the same price a relocation used to cost permanently; and shallow
-clones are refused at registration, because their fingerprint would sit at the
-cut boundary and move on `git fetch --unshallow`.
+identity — before identity stopped following the path, a relocation caused
+the same permanent break; and shallow
+clones are refused at registration, because their fingerprint would be
+computed at the cut boundary and change on `git fetch --unshallow`.
 
 ## Registration
 
@@ -99,7 +100,7 @@ pinning, evidence, teardown — goes to the pinned copy, not to whatever the
 project points at now.
 
 Re-registration resolves the project's *previous* path and distinguishes two
-worlds:
+cases:
 
 - the previous path no longer holds this repository (it moved, or something
   else lives there): the working copy is one and it relocated — unfinished
@@ -113,8 +114,8 @@ worlds:
 A run whose pinned copy is unavailable, or turns out to hold a different
 repository, pauses with stop reason `checkout_unavailable` (the event names
 the path). A pause, not a failure: the condition is lifted from outside, and
-the run must never rebuild its worktree in some other copy — that is the
-silent loss of an entire commit line. If the repository moved with its
+the run must never rebuild its worktree in some other copy — that would
+discard an entire commit line without an error. If the repository moved with its
 worktrees, `git worktree repair` rewires the absolute links before the run
 continues.
 
@@ -151,8 +152,8 @@ Every recorded action carries two facts beside it:
 events (`events.actor`) alike. There is no second vocabulary for the same
 thing. `user_id` answers "on whose behalf"; the two name the same person only
 when `actor = human`. When the orchestrator passes an automatic gate or pauses
-a run, the record says `system` with the tenant's `user_id` — it never
-presents a system action as the run author clicking something.
+a run, the record carries `system` with the tenant's `user_id` — a system
+action is never recorded as the run author's.
 
 An actor value is a statement about what happened, not a permission: nothing
 branches on it to allow or deny — that decision lives in `authz.Can`.
@@ -169,7 +170,7 @@ work is decided by the human, and the API handlers record that decision.
 `related_projects uuid[]` stores a value and enables nothing. It is **not** a
 model of relations between projects; a normalized model (an edge table, a
 relation type, direction) is a separate decision, and its absence is not a
-bug. When the seam comes alive it becomes the source of a path-scoped
+bug. When the seam is put to use it becomes the source of a path-scoped
 `fs.read` capability derived from a **user-configured** set — the security
 boundary is the configuration, never auto-discovery of neighboring
 directories. Any change that puts `related_projects` into a join, a
