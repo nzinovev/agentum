@@ -26,7 +26,7 @@ var ErrUnsupportedSchema = errors.New("manifest: unsupported body schema_version
 
 // UnsupportedSchemaError names the version a body carried that this build
 // neither reads nor writes. A body with an unknown version is refused rather
-// than silently mis-decoded.
+// than mis-decoded.
 type UnsupportedSchemaError struct {
 	Version string
 }
@@ -143,7 +143,8 @@ type StopRecord struct {
 // EvidenceGap records one evidence write the orchestrator attempted and failed.
 // A sealed manifest carries the gaps so a reviewer can tell a section that was
 // never produced from one that was attempted and degraded — the two are
-// indistinguishable without this, and a silently degraded manifest is worse
+// indistinguishable without this, and a manifest that degraded without a
+// record is worse
 // than an absent one because the reviewer has no way to know to distrust it.
 type EvidenceGap struct {
 	Section string    `json:"section"`
@@ -162,7 +163,7 @@ func newEmptyBody() Body {
 // description the run exists to satisfy, the run overrides, and a canonical
 // hash over {title, description, overrides} — so two runs with the same
 // request hash equal regardless of how either request body was formatted, and
-// the input-revision diff axis means what it always claimed.
+// the input-revision diff axis compares requests rather than formatting.
 type InputEvidence struct {
 	RunID       string          `json:"run_id"`
 	Title       string          `json:"title"`
@@ -258,7 +259,7 @@ type InvocationTelemetry struct {
 // declares, and the runtime probe outcome. The runtime VERSION is
 // deliberately not duplicated here — a run resumed in a new process after a
 // runtime upgrade genuinely has two runtime versions, and a run-level scalar
-// could only lie about one of them; it lives per invocation.
+// could only be wrong about one of them; it lives per invocation.
 type AdapterEvidence struct {
 	ID                   AdapterID `json:"id,omitempty"`
 	AdapterVersion       string    `json:"adapter_version,omitempty"`
@@ -341,7 +342,7 @@ type ArtifactEvidence struct {
 // carry the InvocationID that produced them: grouping by invocation answers
 // "what did this attempt produce" without a second copy of the ledger. Inputs
 // never do — the worktree sync runs once per job, before any invocation row
-// exists, and attributing it to a "first invocation" would be a guess dressed
+// exists, and attributing it to a "first invocation" would present a guess
 // as a fact.
 type ArtifactRef struct {
 	Name         string `json:"name"`
@@ -439,16 +440,16 @@ type ExecutionCoordinate struct {
 // run is expected to produce, the predicate that detects each section's
 // presence, and whether an absent/degraded section counts toward the
 // completeness flag. MissingSections and IsEvidenceComplete both derive from
-// this list so they cannot drift — a third parallel condition (the D-review
-// hazard this list replaces) would otherwise be the natural next mistake.
+// this list so they cannot drift — a third parallel condition would otherwise
+// be the natural next mistake.
 //
 // countsTowardCompleteness is false only for memory: the memory subsystem is
 // not wired in this build and its absence is a known, permanent gap rather than
 // a degradation of this run's evidence. Counting it would make
 // evidence_complete permanently false and conflate "subsystem not built" with
 // "evidence degraded," which is the confusion the flag exists to dispel.
-// MissingSections still reports memory honestly; only the completeness flag
-// excludes it.
+// MissingSections still lists memory in the gap list; only the completeness
+// flag excludes it.
 //
 // The checks predicate requires Ran: a checks section that recorded no run (the
 // project defines no checks) is a legitimate configuration, but it must not
@@ -530,8 +531,8 @@ func (body Body) InvocationRecords() []InvocationEvidence {
 // that exists to stop evidence being deleted. The per-stage model and
 // capability snapshots attach to the LAST record: schema 1 replaced those by
 // stage on every write, so the surviving snapshot is the most recent attempt's.
-// Earlier records carry the prompt hash alone, which is the honest reading —
-// what those attempts ran under is what schema 1 overwrote.
+// Earlier records carry the prompt hash alone; what those attempts ran under
+// is what schema 1 overwrote.
 func (body Body) legacyInvocationRecords() []InvocationEvidence {
 	promptHashesByStage := make(map[string][]string, len(body.Prompts))
 	for _, prompt := range body.Prompts {
@@ -593,7 +594,7 @@ func (body Body) legacyInvocationRecords() []InvocationEvidence {
 	for _, stage := range stages {
 		hashes := promptHashesByStage[stage]
 		// A stage known only from a model or capability snapshot still gets one
-		// record — with no prompt hash, which is what the body actually says.
+		// record — with no prompt hash, which is what the body actually carries.
 		attempts := len(hashes)
 		if attempts == 0 {
 			attempts = 1
@@ -628,7 +629,7 @@ func (body Body) legacyInvocationRecords() []InvocationEvidence {
 }
 
 // CarriesLegacySections reports whether the body carries any schema-1-only
-// section or field. The write path speaks one schema: the corrections endpoint
+// section or field. The write path writes one schema: the corrections endpoint
 // rejects a patch that carries them rather than re-introducing shapes schema 2
 // replaced.
 func (body Body) CarriesLegacySections() bool {
@@ -684,14 +685,14 @@ func upgradeLegacySections(body Body) Body {
 
 // MissingSections reports the evidence sections that are absent in this body.
 // Derived from the body's actual shape via expectedSections rather than asserted
-// once at init, so a stale claim (e.g. "capabilities missing" on a body that
-// carries a populated capabilities section) cannot survive to seal time. The
+// once at init, so a stale entry (e.g. "capabilities missing" on a body that
+// carries a populated capabilities section) cannot reach seal time. The
 // sections covered are the ones the run is expected to produce; Input / Project
 // / Pack / Adapter / Git are written once at init and their absence is a gap,
 // not a "missing subsystem," so they are not reported here.
 //
-// Note that memory is genuinely absent until Epic 1 wires it; a derived missing
-// list keeps reporting it, correctly, rather than hiding it.
+// Note that memory is genuinely absent until the memory subsystem is wired; a
+// derived missing list keeps reporting it, correctly, rather than omitting it.
 func (body Body) MissingSections() []string {
 	missing := make([]string, 0, len(expectedSections))
 	for _, section := range expectedSections {
@@ -709,7 +710,7 @@ func (body Body) MissingSections() []string {
 // permanent gap — not a degradation of this run's evidence. Counting it would
 // make the flag permanently false and conflate "subsystem not built" with
 // "evidence degraded," which is exactly the confusion the flag exists to
-// dispel. A reviewer reads `missing` for the honest list of gaps (memory
+// dispel. A reviewer reads `missing` for the full list of gaps (memory
 // included) and `evidence_complete` for whether the run's own evidence degraded.
 //
 // True when there are no evidence gaps and every section the run is expected to
@@ -749,7 +750,7 @@ func encodeBody(body Body) ([]byte, error) {
 // decodeBody unmarshals a manifest body. Schema 1 and 2 both decode (a sealed
 // manifest is readable forever, and its legacy sections are retained verbatim
 // on the read-only fields); anything else is a typed error rather than a
-// silent mis-decode. Unknown fields are ignored (forward-compatible).
+// mis-decode. Unknown fields are ignored (forward-compatible).
 func decodeBody(raw []byte) (Body, error) {
 	var body Body
 	if len(raw) == 0 {
