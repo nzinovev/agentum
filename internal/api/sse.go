@@ -139,11 +139,11 @@ func (api *API) drainBatch(ctx context.Context, w http.ResponseWriter, flusher h
 //
 // The data object mixes two facts from the event row into the payload the
 // event's source recorded: the run id and the actor. Both live on the row
-// rather than in every producer's payload, which is why the docs can promise
-// them on every frame while individual payloads never repeat them — and why a
-// system-written event cannot read on the stream as the run author acting.
+// rather than in every producer's payload, which is why the docs can state
+// them for every frame while individual payloads never repeat them — and why a
+// system-written event cannot appear on the stream as the run author acting.
 // The run id is mixed in only when the row carries one (a tenant-global event
-// gets no empty placeholder), a producer's own key always wins over the
+// gets no empty placeholder), a producer's own key takes precedence over the
 // mixed-in value, and a non-object payload is passed through untouched rather
 // than rewritten into one.
 func writeSSEFrame(w http.ResponseWriter, event sqlc.Event) error {

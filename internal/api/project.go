@@ -112,7 +112,7 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// The previous row under this identity must be read before the upsert
 	// overwrites its path — it decides what happens to unfinished runs. A
 	// read failure is not "no previous row": treating it as one would skip
-	// the rebind decision silently, so it fails the request instead.
+	// the rebind decision with no record, so it fails the request instead.
 	existing, err := api.queries.GetProjectByIdentity(r.Context(), sqlc.GetProjectByIdentityParams{
 		TenantID: principal.TenantID, RepoIdentity: identity.Value,
 	})
@@ -158,8 +158,8 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		}
 		// The previous copy is gone (moved, or replaced by another
 		// repository): the one working copy relocated, and unfinished runs
-		// move with it — reported, because a run that silently changes its
-		// working copy is a fact the operator must see. Terminal runs keep
+		// move with it — reported, because a run that changes its working
+		// copy unannounced is a fact the operator must see. Terminal runs keep
 		// their historical checkout_path.
 		rebound, rebindErr := qtx.RebindActiveCheckouts(r.Context(), sqlc.RebindActiveCheckoutsParams{
 			TenantID: principal.TenantID, ProjectID: proj.ID,

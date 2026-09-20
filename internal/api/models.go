@@ -22,8 +22,8 @@ import (
 )
 
 // Model-check event types, framed by the existing tenant stream
-// (GET /api/v1/events, replay by Last-Event-ID). One event per model keeps a
-// live consumer honest about progress — "stuck on the third minute" is visible
+// (GET /api/v1/events, replay by Last-Event-ID). One event per model reports
+// progress as it happens: "stuck on the third minute" is visible
 // immediately, not after the whole check finishes.
 const (
 	EvModelsTestStarted      = "models.test_started"
@@ -115,9 +115,9 @@ type keyedCheck struct {
 }
 
 // modelTestMaxQueueDepth bounds how many checks one tenant may have accepted
-// but not finished. Accepting is free of backpressure no more: each accepted
-// check is a paid runtime call queued behind the others, and an unbounded
-// queue of them is a bill, not a feature.
+// but not finished. Each accepted check is a paid runtime call queued behind
+// the others; without the bound, every retry adds another paid call to the
+// queue.
 const modelTestMaxQueueDepth = 8
 
 // modelCheckRegistry is the in-process memory of accepted checks: by
@@ -125,8 +125,8 @@ const modelTestMaxQueueDepth = 8
 // key namespace and the id reads are tenant-scoped, because this map is the
 // one place a diagnostic carries state and the multi-tenant seam must not
 // grow its first exception here. Diagnostics carry no durable state — no
-// table, no migration — and the TTL is the honest consequence: a restart
-// forgets keys and unfinished checks, the finished results stay in the event
+// table, no migration — and the TTL follows from that: a restart discards
+// keys and unfinished checks, the finished results stay in the event
 // stream, and a client retries.
 type modelCheckRegistry struct {
 	mu        sync.Mutex
@@ -156,7 +156,7 @@ func tenantScopeKey(tenantID, key string) string {
 // sweepLocked drops FINISHED entries past their TTL. A running check is
 // never swept: it is bounded by its own deadline, and the queue in front of
 // it is bounded by modelTestMaxQueueDepth, so there is no runaway to guard
-// against — only a client watching a check that must not vanish under it.
+// against — only a client watching a check that must not disappear under it.
 // Caller holds mu.
 func (registry *modelCheckRegistry) sweepLocked(now time.Time) {
 	for key, entry := range registry.byKey {
@@ -170,8 +170,8 @@ func (registry *modelCheckRegistry) sweepLocked(now time.Time) {
 // accept registers a check under a tenant-scoped idempotency key, or
 // recognizes a replay: the same key with the same request fingerprint
 // returns the existing check; the same key with a different fingerprint is a
-// conflict — silently substituting what a key means is how a client pays
-// twice for one intent. A tenant already holding modelTestMaxQueueDepth
+// conflict — a key names one intent, and reusing it for a different request
+// would run a second paid check. A tenant already holding modelTestMaxQueueDepth
 // unfinished checks gets queueExceeded instead of an acceptance.
 func (registry *modelCheckRegistry) accept(tenantID, key, fingerprint string, targets []modelCheckTarget) (check *modelCheck, replay bool, conflict bool, queueExceeded bool) {
 	registry.mu.Lock()
@@ -254,7 +254,7 @@ type modelsCatalogResponse struct {
 
 // modelsTierResponse is one resolved tier in GET /models. InCatalog is false
 // whenever the question could not be answered (catalog unavailable or
-// unsupported) — the catalog status says which of the two it was.
+// unsupported) — the catalog status records which of the two it was.
 type modelsTierResponse struct {
 	Tier      string `json:"tier"`
 	Model     string `json:"model"`
@@ -263,7 +263,7 @@ type modelsTierResponse struct {
 }
 
 // modelsResponse is GET /models: what the process runs on and what the
-// runtime says it can run. A remote client cannot read models.yaml off the
+// runtime's catalog lists. A remote client cannot read models.yaml off the
 // server's disk — without this handle it has nothing to put in a test request
 // and nothing to show on a screen.
 type modelsResponse struct {
@@ -321,7 +321,7 @@ func (api *API) handleListModels(w http.ResponseWriter, r *http.Request) {
 // modelTestRequestBody is what POST /models/test accepts: a tier name, or an
 // explicit model (+ variant), or neither — an empty body checks every
 // configured tier. Strict decoding: the request is ours, and a typo'd field
-// must not silently select "all tiers".
+// must not fall through to "all tiers".
 type modelTestRequestBody struct {
 	Tier        string `json:"tier"`
 	Model       string `json:"model"`
@@ -343,8 +343,8 @@ type modelTestRequest struct {
 //
 // A variant is REFUSED, not echoed-then-dropped: the execution adapter has no
 // variant parameter yet (it arrives with tier variants later), and a check
-// that silently ran without the requested variant would answer a question
-// nobody asked — the same drop-the-undeclared-option move the model rules
+// that ran without the requested variant would report a setting that had no
+// effect — the same drop-the-undeclared-option move the model rules
 // forbid everywhere else.
 func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Config, ceilingSeconds int) (modelTestRequest, error) {
 	if request.Tier != "" && request.Model != "" {
@@ -414,14 +414,13 @@ func fingerprintRequest(request modelTestRequest) string {
 // handleStartModelTest POST /api/v1/models/test — accepts a check for
 // execution and returns 202 immediately: the check runs in the background and
 // its results arrive as events on the tenant stream, because holding an HTTP
-// session for up to two minutes is a wedged goroutine, a socket through every
-// proxy, and a user glued to a screen for an answer that comes on its own.
+// session for up to two minutes ties up a goroutine and a socket through
+// every proxy while the requester waits for an answer that arrives on its own.
 //
-// Idempotency-Key is required, not advisory: an optional guard against a
-// double click is no guard — the client that omits it pays for the call
-// twice and learns it from the bill. A repeated key with the same body
-// returns the same check; with a different body it is a 409, because silently
-// redefining what a key means is the same theft.
+// Idempotency-Key is required, not advisory: without it, a retried request
+// runs a second paid check. A repeated key with the same body returns the
+// same check; with a different body it is a 409, because a key names one
+// intent.
 func (api *API) handleStartModelTest(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requireAccess(w, r, authz.ActionModelTest, "")
 	if !ok {
@@ -481,7 +480,7 @@ func (api *API) handleStartModelTest(w http.ResponseWriter, r *http.Request) {
 		// The accepted context outlives the POST response by design — but not
 		// the process: the server's run context is preferred when attached, so
 		// a shutdown cancels pending checks and kills their subprocesses
-		// instead of orphaning them. The WithoutCancel fallback serves direct
+		// instead of leaving them running. The WithoutCancel fallback serves direct
 		// handler use without a server (unit tests).
 		acceptedCtx := context.WithoutCancel(r.Context())
 		if api.runContext != nil {

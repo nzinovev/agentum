@@ -26,7 +26,7 @@ const (
 // optional (defaults to the prior revision's kind, or "file" for a create).
 // expected_revision_id is the optimistic-concurrency precondition: when the
 // artifact already has a current revision, it must name that revision, so two
-// editors racing produce a 409 for the loser rather than a silent lost update.
+// editors racing produce a 409 for the loser rather than a lost update.
 // It may be empty only on a first create, when there is no current revision.
 type artifactEditRequest struct {
 	Content            string `json:"content"`
@@ -88,11 +88,11 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // lost, but the loser's failure is a generic conflict rather than a
 // precondition one. Fully closing this would need a store-level "expect no
 // current revision" sentinel on Put, which PR C does not provide. The handler
-// documents this rather than pretending the third outcome cannot happen.
+// documents this rather than leaving the third outcome undescribed.
 //
 // A transient Current() store error fails the request hard (500) rather than
-// being collapsed into "no current revision" — the latter would silently
-// disable the precondition and let a blind overwrite through.
+// being collapsed into "no current revision" — the latter would disable the
+// precondition without a sign and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	principal, runID, ok := requireRunRead(w, r)
 	if !ok {
@@ -126,14 +126,14 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	// check would) would let a PUT with no precondition chain onto a revision the
 	// handler never confirmed was absent: a blind overwrite, which is exactly the
 	// failure the precondition policy exists to prevent. Only ErrNoCurrentRevision
-	// is an honest "no current revision"; anything else is a hard refusal.
+	// means "no current revision"; anything else is a hard refusal.
 	current, currentErr := api.art.Current(r.Context(), principal.TenantID, runID, name)
 	hasCurrent := false
 	switch {
 	case currentErr == nil:
 		hasCurrent = true
 	case errors.Is(currentErr, artifacts.ErrNoCurrentRevision):
-		// Honest absence — proceed as a create.
+		// Confirmed absence — proceed as a create.
 	default:
 		writeError(w, http.StatusInternalServerError, codeInternal, errForCaller(currentErr))
 		return
