@@ -34,8 +34,8 @@ const diffPatchCap = 1 << 20
 // (those run inside invokeStage, which is later).
 //
 // A secret-scanner refusal is recorded as an EvidenceGap plus a
-// stage.artifact_rejected event — never a quiet skip, since losing the diff
-// silently would leave a reviewer with nothing to read.
+// stage.artifact_rejected event — never a skip without a record, since a lost
+// diff would leave a reviewer with nothing to read.
 func (runner *Runner) produceDiff(ctx context.Context, run stageRun, stageID string) *routing.DiffRef {
 	if runner.art == nil {
 		return nil

@@ -127,7 +127,7 @@ type manifestService interface {
 	// (body.checks.commit). Empty when no checks section was recorded. Used by
 	// teardown to compare result_commit against the verified commit directly,
 	// rather than a checkpoint proxy whose correctness depends on an FSM
-	// property a future feature could break silently.
+	// property a future feature could break without detection.
 	ChecksCommit(ctx context.Context, tenantID, runID string) (string, error)
 }
 
@@ -264,8 +264,8 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	// behind forever.
 	checkoutPath := checkoutPathOf(record, project)
 	// Relink first when the repository moved: isWorktree's liveness check
-	// would otherwise turn the removal below into a silent no-op and the
-	// worktree would outlive the run. A repair that itself fails must not
+	// would otherwise turn the removal below into a no-op that logs nothing,
+	// and the worktree would outlive the run. A repair that itself fails must not
 	// wedge the teardown of a terminal run — log it and let RemoveWorktree
 	// decide; its no-op is at least visible in the log then.
 	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
@@ -386,10 +386,10 @@ func (runner *Runner) recordResultCommit(ctx context.Context, record sqlc.Run, r
 // asserted or tested, and a future ask-to-edit / add-context feature (Epic 2
 // stubs in internal/api/stubs.go) would add exactly that path — at which point a
 // post-checks stage would mint a new checkpoint, result_commit would match it,
-// and the proxy comparison would fall silent in the very scenario it exists to
+// and the proxy comparison would miss the very scenario it exists to
 // catch. Reading the recorded value removes the hidden dependency.
 //
-// A comparison that cannot run is itself recorded as a gap. Skipping quietly
+// A comparison that cannot run is itself recorded as a gap. Skipping it
 // would leave the manifest unable to distinguish "checked, no divergence" from
 // "never checked" — the same fail-open shape the comparison was added to close.
 //
@@ -408,9 +408,10 @@ func (runner *Runner) verifyDeliveryCommitBinding(ctx context.Context, record sq
 	verifiedCommit, err := runner.checksVerifiedCommit(ctx, record)
 	if err != nil {
 		// The comparison could not run. Record that as a gap rather than
-		// returning quietly: "the check found no divergence" and "the check
-		// never happened" are different claims, and a manifest silent about
-		// both is the fail-open shape this whole comparison exists to remove.
+		// returning without a record: "the check found no divergence" and "the
+		// check never happened" are different claims, and a manifest that
+		// states neither is the fail-open shape this whole comparison exists
+		// to remove.
 		runner.log.Warn("verify delivery binding: read verified commit", "run", record.ID, "error", err)
 		runner.recordEvidenceGap(ctx, record, "checks", "",
 			fmt.Errorf("could not compare result_commit against the checks-verified commit: %w", err))
@@ -535,7 +536,8 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// an attribute, so it can change under a run that already started (a
 	// re-registration from another clone); without the pin, the continuation
 	// would create a fresh worktree in the foreign copy off the same pinned
-	// base — silently, with the whole commit line left behind in the original.
+	// base — with no error, and the whole commit line left behind in the
+	// original.
 	record, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, record, project, runPack)
 	if checkoutErr != nil {
 		return runner.failRun(ctx, record, checkoutErr)
@@ -548,7 +550,8 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
 	// from and what checkpoints diff against; recording it immutably before any
-	// work means a later move of base_ref cannot retcon the run's lineage.
+	// work means a later move of base_ref cannot change the run's lineage after
+	// the fact.
 	record, err = runner.resolveBaseCommit(ctx, record, checkoutPath)
 	if err != nil {
 		return runner.failRun(ctx, record, err)
@@ -592,8 +595,8 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// Record the initial manifest evidence (input, project, pack, declared
 	// capabilities, adapter) once the lineage anchor is set. This is the run's
 	// provenance root — a failure here fails the run, because every later
-	// piece of evidence chains off it and a silent gap at the root would
-	// orphan everything that follows.
+	// piece of evidence chains off it and an unrecorded gap at the root would
+	// break the chain for everything that follows.
 	if evidenceErr := runner.recordInitialEvidence(ctx, record, project, runPack); evidenceErr != nil {
 		return runner.failRun(ctx, record, evidenceErr)
 	}
@@ -704,8 +707,8 @@ func (runner *Runner) resolveExecutionPlan(ctx context.Context, runPack *pack.Pa
 // every existing fixture behaves exactly as before.
 //
 // This is a Postgres read, not a manifest read: a security precondition must
-// not read from a store whose write path is allowed to fail quietly (manifest
-// AddEvidence failures are logged and turned into evidence gaps).
+// not read from a store whose write path is allowed to fail without a record
+// (manifest AddEvidence failures are logged and turned into evidence gaps).
 func (runner *Runner) readSourceWriteUnlock(ctx context.Context, record sqlc.Run, runPack *pack.Pack) approvalState {
 	approval, hasApproval := runPack.SourceWriteApproval()
 	if !hasApproval {
@@ -777,8 +780,8 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, record sqlc.Run, re
 // project was registered as. An unavailable path or a different repository is
 // a pause, not a failure and never a rebuild: the condition is lifted from
 // outside (restore the directory, re-register the project), and recreating the
-// worktree in some other copy is precisely the silent loss of a commit line
-// this whole sequence exists to prevent.
+// worktree in some other copy would lose a commit line with no error — the
+// loss this whole sequence exists to prevent.
 func (runner *Runner) resolveRunCheckout(ctx context.Context, record sqlc.Run, project sqlc.Project, runPack *pack.Pack) (sqlc.Run, string, bool, error) {
 	candidatePath := record.CheckoutPath
 	if candidatePath == "" {
@@ -955,11 +958,12 @@ func (runner *Runner) recordCheckpoint(ctx context.Context, record sqlc.Run, lab
 // would be whatever the agent happened to leave at HEAD — often still the base,
 // since nothing in the orchestrator committed — and the agent's uncommitted
 // work would be discarded at the next Restore or at teardown. A stage that
-// produced no change records the unchanged HEAD honestly (Commit returns
-// created=false for a clean tree) rather than creating an empty commit. A
+// produced no change records the unchanged HEAD as its checkpoint (Commit
+// returns created=false for a clean tree) rather than creating an empty
+// commit. A
 // commit failure is logged and skipped — the lineage anchor and result_commit
-// do not depend on it, but a checkpoint that cannot be created cannot lie about
-// having captured the boundary.
+// do not depend on it, but a checkpoint that cannot be created cannot claim
+// to have captured the boundary.
 func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) {
 	message := fmt.Sprintf("agentum: checkpoint after stage %s", stageID)
 	head, _, err := runner.wt.Commit(ctx, run.worktree.Root, message)
@@ -1209,7 +1213,7 @@ type stageOutcome struct {
 // This is load-bearing: the advance job resolves the CURRENT stage's
 // transition (entryPoint's advance branch), so a paused_gate stop must sit at a
 // stage that already ran. Pinning the refused (never-invoked) stage made
-// advance resolve that stage's transition — silently skipping the implementer
+// advance resolve that stage's transition — skipping the implementer
 // and reaching review against an empty diff. Pinning the approval stage makes
 // recovery exactly the ordinary plan-gate advance: the handler's
 // planApprovalForStage guard matches (current_stage == approval.Stage), the
@@ -1658,8 +1662,8 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// The run-start execution plan already validated this stage's tier and
 	// options, and it covers every non-terminal stage of the resolved pack — so
 	// this lookup cannot miss today. It is checked anyway, because the failure
-	// mode of a miss is the silent one: a zero Selection carries no model, the
-	// adapter then omits --model, and the runtime silently picks its own. An
+	// mode of a miss produces no error: a zero Selection carries no model, the
+	// adapter then omits --model, and the runtime picks its own. An
 	// invariant held by an argument that spans three functions is worth one
 	// branch at the point of use.
 	selection, planned := run.executionPlan[stageID]
@@ -1735,7 +1739,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 
 	// Next sequence number + resume_of for this record. resume_of is set ONLY when
 	// this invocation resumes a captured session (resumeSession != ""); setting
-	// it for every invocation made the resume chain a lie — it pointed at the
+	// it for every invocation made the resume chain wrong — it pointed at the
 	// previous invocation even for a fresh entry, blocking "was this a retry or
 	// a resume" from being readable off the row. sequence keeps incrementing
 	// unconditionally (every attempt is a distinct row).

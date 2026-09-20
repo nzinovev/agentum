@@ -309,8 +309,8 @@ func contextPinnedPayload(stageID string, run stageRun) map[string]any {
 // loads by itself, as the adapter declares them. The runner names no file of
 // its own: which one a runtime auto-loads is a fact about that runtime, and a
 // literal here would pin the wrong file for every executor but the one it was
-// written for — silently, and only in the paths where the context probe could
-// not answer.
+// written for, with no error and only in the paths where the context probe
+// could not answer.
 func (runner *Runner) autoInstructionBaseline() []string {
 	return runner.adapter.Describe().AutoInstructions
 }

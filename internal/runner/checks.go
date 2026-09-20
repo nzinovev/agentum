@@ -72,9 +72,9 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		return checks.Report{}, false, fmt.Errorf("load registry: %w", err)
 	}
 	// Independent strict parse, for the same reason this function keeps its own
-	// registry load (PR #23): the value cached for rendering never reaches the
+	// registry load: the value cached for rendering never reaches the
 	// delivery gate. After the API boundary guarantees well-formed overrides, a
-	// decode failure here is an invariant break and must be loud.
+	// decode failure here is an invariant break and must fail the run.
 	runOverrides, overridesErr := taskinput.ParseOverrides(run.record.Overrides)
 	if overridesErr != nil {
 		return checks.Report{}, false, fmt.Errorf("parse run overrides: %w", overridesErr)
@@ -113,7 +113,7 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 		// the executor reached the boundary and nothing blocked delivery, with
 		// Ran:false so the manifest distinguishes "no checks defined" from "the
 		// gate ran and cleared it." The commit is still recorded: the clean-tree
-		// precondition held, so the boundary commit is the honest anchor even
+		// precondition held, so the boundary commit is the anchor even
 		// when no check verified it.
 		empty := checks.Report{Set: set, Commit: commit, Profile: checks.ProfileLabel}
 		runner.recordCheckEvidence(ctx, run.record, empty, commit)
@@ -163,8 +163,8 @@ func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun
 // recordCheckEvidence writes the project-check outcome into the manifest. The
 // full per-check results (status, exit code, duration, capped output, reason,
 // definition revision, source) become the evidence a final review reconstructs.
-// Ran reflects whether any check actually executed (!set.Empty()), so an empty
-// set is recorded honestly rather than as a cleared gate. No-op when the
+// Ran reflects whether any check actually executed (!set.Empty()), so an
+// empty set is recorded as "no checks ran" rather than as a passed gate. No-op when the
 // manifest service is nil (unit tests).
 func (runner *Runner) recordCheckEvidence(ctx context.Context, record sqlc.Run, report checks.Report, commit string) {
 	if runner.mfst == nil {
