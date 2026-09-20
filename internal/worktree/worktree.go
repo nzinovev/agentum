@@ -112,7 +112,8 @@ func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit 
 	// Create the worktree on a new branch off baseCommit (or HEAD). -b names the
 	// branch; the branch is created off the start-point and checked out in the
 	// new working tree. Pinning to baseCommit is what makes base_commit an
-	// immutable lineage anchor — a later move of base_ref cannot retcon it.
+	// immutable lineage anchor — a later move of base_ref cannot change it
+	// after the fact.
 	args := []string{"worktree", "add", "-b", branch, wtPath}
 	if baseCommit != "" {
 		args = append(args, baseCommit)
@@ -184,7 +185,7 @@ func (manager *Manager) Commit(ctx context.Context, wtRoot, message string) (com
 		return "", false, err
 	}
 	if clean {
-		// A boundary that produced no change is reported honestly as the
+		// A boundary that produced no change is reported as the
 		// unchanged HEAD, not as a new empty commit. An empty commit per stage
 		// would corrupt the lineage a reviewer reads (a flat line of no-op
 		// checkpoints obscuring where real work landed).
@@ -404,8 +405,8 @@ func (manager *Manager) Reconcile(ctx context.Context, repoPath, runID, baseComm
 	wtPath := PathFor(repoAbs, runID)
 	if !isWorktree(ctx, wtPath) {
 		// Worktree gone but run wants to run: a human removed it (or teardown
-		// ran early). Re-creating would silently rebuild from base and replay
-		// side effects — surface instead.
+		// ran early). Re-creating would rebuild from base and replay
+		// side effects with no record — surface instead.
 		return ReconcileState{Class: ClassNeedsAttention}, nil
 	}
 

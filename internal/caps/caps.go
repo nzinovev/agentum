@@ -103,13 +103,14 @@ const (
 )
 
 // SourceWriteCategories is the closed set of categories a source_write approval
-// unlocks (ADR 0003 D3). While the run's source_write approval is absent, the
+// unlocks. While the run's source_write approval is absent, the
 // runner passes this set as Input.Withheld for every stage, so the runtime
 // refuses source writes regardless of role — a pack that mislabels a
 // source-writing stage as an analyst gains nothing. exec.bash is in the set on
-// purpose: withholding fs.write while leaving bash: allow would be theatre, since
-// bashRules allows `*` with a deny list that does not stop
-// `printf ... > internal/x/y.go`. artifact.write is NOT in the set: every stage
+// purpose: bashRules allows `*` with a deny list that does not stop
+// `printf ... > internal/x/y.go`, so withholding fs.write while leaving
+// bash: allow would still allow writing source. artifact.write is NOT in the
+// set: every stage
 // must still write result.json, and withArtifactFloor guarantees it.
 var SourceWriteCategories = []Category{CatFsWrite, CatGitWrite, CatExecBash}
 
@@ -273,7 +274,7 @@ func (unsupported *Unsupported) Unwrap() error { return ErrUnenforceable }
 // the enforcer can technically enforce. Supported is the enforcer's declared
 // category set (e.g. the opencode adapter's Supported()). A profile that grants
 // a capability whose category is missing from supported is unenforceable: the
-// runtime cannot honor the deny-by-default promise for the unsupported tools, so
+// runtime cannot enforce deny-by-default for the unsupported tools, so
 // the invocation must not start.
 //
 // Returns (nil, true) when the profile is enforceable. Returns an

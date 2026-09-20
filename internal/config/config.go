@@ -37,11 +37,12 @@ type Config struct {
 
 	// FirstEventTimeoutSeconds bounds how long an invocation may produce no
 	// output AT ALL (AGENTUM_FIRST_EVENT_TIMEOUT_SECONDS, default 120, zero
-	// disables). A different question from the idle cap: "the runtime said
-	// nothing since it started" vs "went quiet mid-work" — a working model
+	// disables). A different question from the idle cap: "the runtime produced
+	// nothing since it started" vs "stopped mid-work" — a working model
 	// emits its first event in fractions of a second, and one that never
-	// emits hangs the invocation silently. The watchdog retires forever on
-	// the first line, so no legitimate long work ever falls under it.
+	// emits hangs the invocation with no error. The watchdog is disabled
+	// forever after the first line, so no legitimate long work ever falls
+	// under it.
 	FirstEventTimeoutSeconds int
 
 	// Project-check executor defaults (orchestrator-owned checks). Applied when
@@ -57,7 +58,7 @@ type Config struct {
 	ModelTestMaxSeconds int
 	// ModelTestRetentionMinutes is the TTL of the in-process model-check
 	// registry and its idempotency keys. Diagnostics carry no durable state;
-	// a restart forgets them by design and a client retries.
+	// a restart discards them by design and a client retries.
 	ModelTestRetentionMinutes int
 
 	// ArtifactRoot is the canonical root for content-addressed artifact blobs.
@@ -76,7 +77,7 @@ type Config struct {
 
 // retiredBinaryEnv is the retired name for the runtime binary override. It is
 // still recognised — only to refuse it by name, so an operator who set it
-// learns that it moved rather than losing the override silently.
+// learns that it moved rather than loses the override unannounced.
 const retiredBinaryEnv = "AGENTUM_OPENCODE_BINARY"
 
 func Load() (Config, error) {
@@ -113,7 +114,7 @@ func Load() (Config, error) {
 	// AGENTUM_OPENCODE_BINARY named an executor in configuration and was replaced
 	// by the adapter-neutral AGENTUM_RUNTIME_BINARY. Refused rather than ignored,
 	// for the same reason an unsupported model option is refused: a pinned binary
-	// that silently stops applying does not surface as a configuration change, it
+	// that stops applying does not surface as a configuration change, it
 	// surfaces as the runtime failing in ways that look like agent bugs.
 	if retired, set := os.LookupEnv(retiredBinaryEnv); set {
 		return cfg, fmt.Errorf("%s is no longer read; set AGENTUM_RUNTIME_BINARY=%s instead", retiredBinaryEnv, retired)
@@ -121,7 +122,7 @@ func Load() (Config, error) {
 	switch cfg.ArtifactScanPolicy {
 	case "redact", "reject":
 	default:
-		// Fail at load rather than silently falling back: an operator who set
+		// Fail at load rather than falling back: an operator who set
 		// "fail" expecting rejection must not get redaction instead.
 		return cfg, fmt.Errorf("AGENTUM_ARTIFACT_SCAN_POLICY must be \"redact\" or \"reject\", got %q", cfg.ArtifactScanPolicy)
 	}

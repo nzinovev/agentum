@@ -49,7 +49,7 @@ type Server struct {
 // New returns an error for configuration the process must not start on — the
 // first refusal point: a malformed models.yaml (anything other than "no
 // file"), an unknown execution adapter id, or a model option the selected
-// adapter does not declare. Each error names its cause; none of them silently
+// adapter does not declare. Each error names its cause; none of them
 // falls back to a default.
 func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, error) {
 	// Operator model override. ErrNoConfig is the common case (fall back to
@@ -202,8 +202,8 @@ func (server *Server) Handler() http.Handler {
 // process here, where the fix is a file edit, not four stages into the first
 // run.
 func (server *Server) Run(ctx context.Context) error {
-	// Warm the runtime probe before the worker starts: the first run never pays
-	// the subprocess, and the boot log records the runtime version — or the
+	// Warm the runtime probe before the worker starts: the first run never waits
+	// on the subprocess, and the boot log records the runtime version — or the
 	// failure, which is a probe result, not a boot failure; the run that needs
 	// the runtime surfaces it.
 	server.warmRuntimeProbe(ctx)
