@@ -136,7 +136,7 @@ type PutParams struct {
 	// which is what a stage capture wants (the runner is the only writer for
 	// the duration of an invocation). A human edit that was composed against a
 	// revision the user has seen should set it, so two editors racing on the
-	// same artifact produce a conflict instead of a silent lost update.
+	// same artifact produce a conflict instead of a lost update.
 	ExpectedCurrentRevision string
 }
 

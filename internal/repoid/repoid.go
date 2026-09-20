@@ -61,9 +61,9 @@ var (
 	// ErrNoCommits: HEAD does not resolve — there is no history to fingerprint,
 	// and the runner could not resolve base_ref or create a worktree either.
 	ErrNoCommits = errors.New("repository has no commits — make at least one commit before registering")
-	// ErrShallow: a shallow clone's fingerprint would sit at the cut boundary,
-	// and `git fetch --unshallow` would silently change the identity — the exact
-	// failure this package exists to remove.
+	// ErrShallow: a shallow clone's fingerprint would be computed at the cut
+	// boundary, and `git fetch --unshallow` would change the identity with no
+	// error — the exact failure this package exists to remove.
 	ErrShallow = errors.New("repository is a shallow clone — run `git fetch --unshallow` and register again")
 	// ErrLinkedWorktree: a linked work tree of some main repository. Agentum
 	// creates its own worktrees under the repo it is given, so registering a

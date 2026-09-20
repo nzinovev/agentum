@@ -41,7 +41,7 @@ type DeclaredPath struct {
 //
 // A lexical check closes the first two but cannot see the third, and resolving
 // the path by hand does not close it either: filepath.EvalSymlinks follows
-// POSIX symlinks but silently returns Windows junctions unresolved, so a
+// POSIX symlinks but returns Windows junctions unresolved (no error), so a
 // junction inside the worktree would read as contained. Every operation
 // therefore goes through an os.Root handle, where the containment check is the
 // OS's and is performed as part of the open itself — which also closes the gap

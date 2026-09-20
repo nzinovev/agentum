@@ -211,7 +211,7 @@ func (sqlStore *SQLStore) commitRevision(
 		if affected == 0 {
 			// The row we locked is no longer current. Under the row lock this
 			// should be unreachable; it is checked anyway because the
-			// alternative is silently inserting a second current revision and
+			// alternative is inserting a second current revision and
 			// leaving the unique index to reject it with a driver-level error.
 			return Revision{}, fmt.Errorf("%w: revision %s was superseded during the write", ErrRevisionConflict, plan.current.ID)
 		}
@@ -253,7 +253,7 @@ func (sqlStore *SQLStore) commitRevision(
 // Reports (row, true) when one exists and (zero, false) when none does; a real
 // store error is propagated rather than being flattened into "no current",
 // because chaining a revision as a create when the lookup merely failed would
-// silently fork the chain.
+// fork the chain.
 func lockCurrent(ctx context.Context, qtx *sqlc.Queries, params PutParams) (sqlc.ArtifactRevision, bool, error) {
 	prior, err := qtx.LockCurrentArtifactRevisionForName(ctx, sqlc.LockCurrentArtifactRevisionForNameParams{
 		RunID: params.RunID, TenantID: params.TenantID, Name: params.Name,

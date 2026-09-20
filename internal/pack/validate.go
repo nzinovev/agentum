@@ -281,7 +281,7 @@ func reachableStages(p *Pack) map[string]bool {
 // of size > 1 is always cyclic. A single-node component is cyclic only if the
 // node has a self-edge — already rejected by validateTransitions, so this
 // returns false for singletons. Kept defensive so a future relaxation of the
-// self-loop rule does not silently let a self-loop bypass the budget check.
+// self-loop rule does not let a self-loop bypass the budget check.
 func isCyclicComponent(component []string, p *Pack) bool {
 	if len(component) > 1 {
 		return true
@@ -543,7 +543,7 @@ func (p *Pack) validateApprovals() []string {
 			problems = append(problems, fmt.Sprintf("approvals[%d].unlocks %q is not one of the known unlock names {source_write}", index, approval.Unlocks))
 		} else if Unlock(approval.Unlocks) == UnlockSourceWrite {
 			// SourceWriteApproval() returns the first source_write approval; a
-			// second one would be silently inert (the runner never reads it).
+			// second one would be inert (the runner never reads it).
 			// At most one is allowed so the declaration and the runtime agree.
 			sourceWriteCount++
 			if sourceWriteCount > 1 {

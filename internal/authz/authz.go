@@ -70,7 +70,7 @@ func Deny(r string) Decision { return Decision{false, r} }
 
 // Action vocabulary. These are the `action` arguments callers pass to Can.
 // Centralized here so the permission surface has one source of truth — a typo
-// in a handler cannot silently invent a new permission. A caller that needs a
+// in a handler cannot introduce a new permission. A caller that needs a
 // permission not listed here adds the constant here FIRST; never pass a string
 // literal to Can, or the vocabulary stops being enumerable and RBAC has nothing
 // to attach rules to.

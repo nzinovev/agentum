@@ -198,7 +198,7 @@ func ensureTemplate(ctx context.Context, baseURL string) (string, error) {
 // leaves its template. Age is the only filter safe against a sibling `go test`
 // process working in the same cluster right now.
 //
-// It is best-effort and deliberately silent: clearing someone else's leftovers
+// It is best-effort and deliberately non-fatal: clearing someone else's leftovers
 // must never be the reason a test run fails.
 func dropStaleDatabases(ctx context.Context, admin *sql.DB) {
 	rows, err := admin.QueryContext(ctx,
