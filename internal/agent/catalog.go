@@ -47,8 +47,8 @@ type catalogParse struct {
 //
 // A record that does not decode, or decodes without id/providerID, invalidates
 // the WHOLE catalog: a half-read listing would refuse every model it happened
-// to miss as non-existent, which is exactly the lie an unavailable catalog is
-// forbidden to tell. Zero objects read is the same outcome — an answer with no
+// to miss as non-existent — the exact false refusal an unavailable catalog
+// must not produce. Zero objects read is the same outcome — an answer with no
 // models in it is not an answer.
 func parseCatalogOutput(output string) catalogParse {
 	var (
@@ -150,14 +150,14 @@ func capForLog(text string) string {
 // process for every consumer, and the answer — including a failure — is
 // sticky, so a recorded fact stays reproducible for the runs that share the
 // process. Installing or fixing the runtime is a restart; a probe that
-// silently re-ran would make the memoized evidence unexplainable after the
+// re-ran would make the memoized evidence unexplainable after the
 // fact.
 //
 // The probe reuses the version probe's machinery verbatim (probeTimeout, the
 // scrubbed child environment, the detached cancellation, the process-group
 // kill) because the no-output hang is a property of the binary, not of any
 // one subcommand. The runtime keeps its own catalog cache; --refresh is never
-// passed, so boot never pays a network round trip it does not need.
+// passed, so boot never makes a network round trip it does not need.
 //
 // ctx contributes its values but not its cancellation: the memoized answer
 // outlives whichever caller happened to ask first.

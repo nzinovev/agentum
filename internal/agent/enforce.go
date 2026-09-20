@@ -260,7 +260,7 @@ const (
 //  1. EVERY key is set explicitly. opencode merges config sources and only
 //     overrides conflicting keys, so a key this adapter omits falls through to
 //     the operator's global config or the project's own opencode.json — which
-//     would silently widen the profile we just computed.
+//     would widen the profile we just computed.
 //  2. Field order is the emitted JSON order, and opencode resolves permission
 //     rules with the LAST match winning. The wildcard baseline therefore comes
 //     first; every specific key after it is an override.
@@ -292,12 +292,12 @@ type opencodePermissionRules struct {
 	WebFetch  string `json:"webfetch"`
 	WebSearch string `json:"websearch"`
 
-	// Reach the capability model has no token for, so deny is the only honest
+	// Reach the capability model has no token for, so deny is the only
 	// answer: a subagent runs outside the profile we computed, and
 	// external_directory is the containment boundary for every read-shaped tool
 	// above.
 	//
-	// Skill is the exception (ADR 0002 D5). A skill grants knowledge, not reach:
+	// Skill is the exception. A skill grants knowledge, not reach:
 	// an agent that reads a skill telling it to run a command or write a file
 	// still meets the same bash and edit rules below, so nothing escalates. In
 	// the single-owner threat model this codebase claims (accidental agent
@@ -324,11 +324,11 @@ type opencodePermissionRules struct {
 // "deny"; granted categories resolve to "allow", with the profile's scopes
 // encoded as per-path / per-command refinement. instructionPaths are the
 // absolute, forward-slash paths of the pinned instruction files the adapter has
-// staged into the per-invocation config directory (ADR 0002 D3); they are
+// staged into the per-invocation config directory; they are
 // listed under `instructions` so opencode loads the pinned bytes alongside the
 // runtime's own AGENTS.md injection. Returns an error when a granted path scope
 // cannot be expressed as a rule opencode will match — the invocation must not
-// start on a profile the runtime would silently ignore.
+// start on a profile the runtime would ignore.
 func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPaths []string) (opencodeConfig, error) {
 	edit, editErr := editRules(profile, subst, instructionPaths)
 	if editErr != nil {
@@ -337,12 +337,12 @@ func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPath
 	readable := profile.Has(caps.CatFsRead)
 	network := profile.Has(caps.CatNetFetch)
 	// NOTE: config.Instructions is NOT set here. instructionPaths here are the
-	// repo-relative paths used only to build the edit-deny rules (D4 layer 1);
+	// repo-relative paths used only to build the edit-deny rules;
 	// the `instructions` entries that reach opencode must be ABSOLUTE paths to
 	// the staged pinned copies, which prepareEnforcement sets after staging.
 	// Setting both would leave a dead branch that ships worktree-relative paths
 	// (agent-writable) whenever the staged list is empty — a caller bug that
-	// would silently point opencode at the worktree copy.
+	// would point opencode at the worktree copy.
 	return opencodeConfig{
 		Schema: "https://opencode.ai/config.json",
 		Permission: opencodePermissionRules{
@@ -401,7 +401,7 @@ func actionFor(granted bool) string {
 // It exists because opencode evaluates permission rules in file order with the
 // last match winning, and Go's encoding/json sorts map keys. A map would put
 // the deny baseline wherever the alphabet happened to place it — correct today
-// by luck, silently wrong the first time a pattern starts with a different
+// by luck, wrong the first time a pattern starts with a different
 // character.
 type ruleList struct {
 	patterns []string
@@ -567,13 +567,13 @@ const anyPath = "*"
 // opencode normalises a tool's target path to a form relative to the project
 // root before matching, so an ABSOLUTE pattern never matches anything. This is
 // not a detail of the glob syntax — it is the difference between a working
-// profile and one that silently denies every write while looking correct in the
+// profile and one that denies every write while looking correct in the
 // audit trail. Verified against opencode 1.18.10: with the agent passing an
 // absolute filePath, a relative pattern covering it allowed the write and an
 // absolute pattern covering the same file denied it.
 //
 // A scope that does not resolve under the worktree cannot be expressed at all,
-// and is an error rather than a silently dropped grant: the invocation must not
+// and is an error rather than a dropped grant: the invocation must not
 // start on a profile the runtime would ignore.
 func permissionScope(scope string, worktreeRoot string) (string, error) {
 	if scope == anyPath || scope == "" {
@@ -681,7 +681,7 @@ var deniedBashPatterns = []string{
 //
 // Deliberately coarse: these are prefix patterns, so an unrelated command whose
 // name starts the same way ("ncdu") is denied too. Over-denying a tool the
-// profile never promised is the acceptable side of this trade.
+// profile never granted is the acceptable side of this trade.
 var networkBashPatterns = []string{
 	"curl*",
 	"wget*",
@@ -712,7 +712,7 @@ var credentialEnvDenyList = []string{
 // configEnvVars are the opencode config-selection variables the adapter owns
 // outright. They are dropped from the inherited environment before the
 // adapter's own values go in, so an operator's ambient OPENCODE_CONFIG_CONTENT
-// cannot quietly replace the profile this invocation computed.
+// cannot replace the profile this invocation computed.
 var configEnvVars = []string{
 	"OPENCODE_CONFIG",
 	"OPENCODE_CONFIG_CONTENT",

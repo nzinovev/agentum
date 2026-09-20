@@ -227,12 +227,12 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	reaped := make(chan struct{})
 
 	cancelWatcher := watchCancellation(control.ctx, cmd, reaped)
-	// First-event watchdog: a runtime that has said NOTHING since it started
-	// is not working, it is hung — a working one emits its first event in
-	// fractions of a second. The watchdog retires forever on the first line,
-	// so legitimate long work (which begins with an event) never falls under
-	// it; silence mid-work belongs to the idle cap below. No-op when the
-	// bound is zero.
+	// First-event watchdog: a runtime that has produced NOTHING since it
+	// started is not working, it is hung — a working one emits its first event
+	// in fractions of a second. The watchdog is disabled forever after the
+	// first line, so legitimate long work (which begins with an event) never
+	// falls under it; silence mid-work belongs to the idle cap below. No-op
+	// when the bound is zero.
 	retireFirstEvent := startFirstEventWatcher(control, adapter.firstEventTimeout, reaped)
 	// Idle timeout: a watcher resets a timer on every observed stream chunk; if
 	// no chunk arrives within the profile's IdleTimeout the run is cancelled,
@@ -317,7 +317,7 @@ func (s *invokeState) activitySummary() string {
 }
 
 // ingest parses one NDJSON line, updates state, and returns an event to emit
-// (ok=false means "drop silently", e.g. malformed lines that aren't worth
+// (ok=false means "drop the line", e.g. malformed lines that aren't worth
 // failing on — though we currently fail on the first unparseable line).
 func (s *invokeState) ingest(line []byte) (*Event, bool) {
 	var env struct {

@@ -77,7 +77,7 @@ type ModelCheck struct {
 //     grants nothing, and whatever the adapter uses to enforce it. A
 //     diagnostic is not a reason to hand a model a machine that an invocation
 //     would not get.
-//  3. NO MEMOIZATION AND NO SIDE EFFECTS. Each call honestly reaches the
+//  3. NO MEMOIZATION AND NO SIDE EFFECTS. Each call actually reaches the
 //     model, or "checked again after a fix" stops working; and it writes no
 //     database rows, emits no events, and touches no manifest — delivery
 //     belongs to the layer that calls it.

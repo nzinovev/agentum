@@ -36,7 +36,7 @@ type Descriptor struct {
 	Binary string
 	// ModelOptions is the set of model parameters this adapter understands.
 	// A selection carrying an option outside this set is refused at Invoke —
-	// never silently dropped (models.Options.SupportedBy).
+	// never dropped (models.Options.SupportedBy).
 	ModelOptions []models.OptionName
 	// DefaultTiers is the adapter's baked-in tier→model map, used when the
 	// operator has no models.yaml. "These model names work with this runtime" is
@@ -164,7 +164,7 @@ func NewRegistry(options RegistryOptions) *Registry {
 // Resolve returns the adapter registered under id. An empty id resolves to the
 // registry's default entry, so "no configuration" and "the default
 // configuration" are one code path. An unknown id is an error naming it — the
-// executor is never silently substituted. Repeated calls return the same
+// executor is never substituted. Repeated calls return the same
 // instance, so they share its memoized readiness probe.
 func (registry *Registry) Resolve(id AdapterID) (Adapter, error) {
 	resolvedID := id
