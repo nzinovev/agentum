@@ -430,7 +430,7 @@ func TestMergeBodies_DoesNotCarryEvidenceCompleteFromPatch(t *testing.T) {
 // permanent build-level gap, not a degradation of this run's evidence. Counting
 // it would make evidence_complete permanently false and conflate "subsystem not
 // built" with "evidence degraded," which is the confusion the flag exists to
-// dispel. A reviewer reads `missing` (memory included, honestly) for the gap
+// dispel. A reviewer reads `missing` (memory included) for the gap
 // list and `evidence_complete` for whether this run's evidence degraded.
 func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 	t.Parallel()
@@ -446,7 +446,7 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 	if !body.IsEvidenceComplete() {
 		t.Error("a run with every wired section present should be complete despite memory being absent")
 	}
-	// And `missing` still honestly reports memory.
+	// And `missing` still reports memory.
 	if missing := body.MissingSections(); len(missing) != 1 || missing[0] != "memory" {
 		t.Errorf("MissingSections = %v, want [memory] — the gap list must still report it", missing)
 	}
@@ -534,7 +534,7 @@ func TestDecodeV1Body_RetainsLegacySectionsVerbatim(t *testing.T) {
 }
 
 // TestDecodeUnknownSchemaIsATypedError: a body whose schema_version is neither
-// 1 nor 2 is refused, not silently mis-decoded.
+// 1 nor 2 is refused, not mis-decoded.
 func TestDecodeUnknownSchemaIsATypedError(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{"schema_version": "9", "input": {"run_id": "T1"}}`)
@@ -852,7 +852,7 @@ func TestMergeBodies_CheckEvidenceRanIsMonotonic(t *testing.T) {
 // checks section that recorded no run (Ran=false — the project defines no
 // checks) must not satisfy evidence_complete. The flag reads as "the delivery
 // gate ran," and an empty set is not that. MissingSections still reports checks
-// honestly so a reviewer sees the gap either way.
+// so a reviewer sees the gap either way.
 func TestEvidenceComplete_ChecksWithoutRanBlocks(t *testing.T) {
 	t.Parallel()
 	body := Body{

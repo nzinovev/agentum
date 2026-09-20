@@ -41,7 +41,7 @@ func TestInvoke_UnknownModelRefusesWithoutSubprocess(t *testing.T) {
 	counterPath := filepath.Join(t.TempDir(), "run-count")
 	t.Setenv(fakeCatalogEnv, "ok")
 	t.Setenv(fakeRunCounterEnv, counterPath)
-	// The fixture's catalog knows the three fakeCatalogOutput models; this
+	// The fixture's catalog lists the three fakeCatalogOutput models; this
 	// selection names none of them.
 	invocation.Model = models.Selection{
 		Tier: "fast", Provider: "zai-coding-plan",

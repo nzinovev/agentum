@@ -157,8 +157,8 @@ func TestAutoInstructionBaselineIsAGENTS(t *testing.T) {
 // loads by itself is a fact about that runtime, and the executor guard does not
 // catch it — "AGENTS.md" does not contain the executor's name. A caller that
 // hardcodes it (a fallback for a failed probe is how it gets in) pins the wrong
-// file for every other runtime, silently, and only on the path where the probe
-// could not answer. Callers take the baseline from the descriptor instead.
+// file for every other runtime, with no error and only on the path where the
+// probe could not answer. Callers take the baseline from the descriptor instead.
 func TestNoRuntimeInstructionFilenameOutsideThisPackage(t *testing.T) {
 	t.Parallel()
 	repoRoot := filepath.Join("..", "..")

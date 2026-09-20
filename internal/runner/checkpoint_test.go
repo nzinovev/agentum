@@ -211,8 +211,8 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 // TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent is the E3
 // test: when result_commit (captured at teardown, after human approval) differs
 // from the commit the delivery checks verified (body.checks.commit), teardown
-// must not silently seal a manifest that asserts "checks passed at X" alongside
-// "delivered Y". The divergence is recorded as an evidence gap (so the sealed
+// must not seal a manifest that asserts "checks passed at X" alongside
+// "delivered Y" as though they matched. The divergence is recorded as an evidence gap (so the sealed
 // manifest reads incomplete) and emitted as a distinct event (so it is visible
 // on the stream). The run is not failed — the human already approved, and
 // failing at teardown would be a confusing terminal state.
@@ -220,7 +220,7 @@ func mustGitRaw(t *testing.T, dir string, args ...string) string {
 // The verified commit is read directly from body.checks.commit, not proxied
 // through the latest checkpoint: the proxy's correctness depends on an FSM
 // property (no path back into a stage from the gate) that a future ask-to-edit
-// feature would break silently. This test drives the real path by setting the
+// feature would break without detection. This test drives the real path by setting the
 // manifest's checks commit and asserting the comparison uses it, not a
 // checkpoint.
 func TestRunner_VerifyDeliveryCommitBinding_DivergedRecordsGapAndEvent(t *testing.T) {
@@ -289,10 +289,10 @@ func TestRunner_VerifyDeliveryCommitBinding_MatchingCommitsIsQuiet(t *testing.T)
 // TestRunner_VerifyDeliveryCommitBinding_UnreadableCommitRecordsGap: a
 // comparison that could not run must leave a trace. "The check found no
 // divergence" and "the check never happened" are different claims about the
-// delivery, and a manifest that is silent about both is exactly the fail-open
+// delivery, and a manifest that states neither is exactly the fail-open
 // shape this comparison was added to close — so a failed read of the verified
 // commit records a gap (which drives evidence_complete false) instead of
-// returning quietly.
+// returning without a record.
 //
 // No divergence event is emitted: nothing was compared, so asserting a
 // divergence would be a claim we cannot support either.

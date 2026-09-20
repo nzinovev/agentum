@@ -263,7 +263,7 @@ func TestRequest_Revision_StableAcrossSourceFormatting(t *testing.T) {
 
 // TestRequest_Revision_FieldOrderIsFixed guards the canonical field order
 // structurally: the serialized prefix pins which field comes first, so a
-// reordered struct declaration cannot silently change every stored revision.
+// reordered struct declaration cannot change every stored revision unnoticed.
 func TestRequest_Revision_FieldOrderIsFixed(t *testing.T) {
 	t.Parallel()
 	request := validRequest()

@@ -203,7 +203,7 @@ func TestResolve_TypedRefusals(t *testing.T) {
 // TestResolve_IdentityIgnoresGitWarnings pins reproducibility: git writes
 // warnings to stderr, and an ambiguous ref makes `rev-list HEAD` print one.
 // A reader that glues the streams together folds the warning text into the
-// fingerprint — an identity that silently changes when the stray ref is
+// fingerprint — an identity that changes when the stray ref is
 // deleted and the warning disappears, splitting one repository into two
 // projects at the next registration.
 func TestResolve_IdentityIgnoresGitWarnings(t *testing.T) {

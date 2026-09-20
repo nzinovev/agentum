@@ -212,7 +212,7 @@ func assertEvalCase(t *testing.T, input StageInput, wantAction Action, wantEvent
 func TestAdvance_NoTransition(t *testing.T) {
 	t.Parallel()
 	// A non-terminal stage that somehow has zero transitions is a malformed pack
-	// once the condition evaluator exists; at MVP advance() must fail loudly.
+	// once the condition evaluator exists; at MVP advance() must fail.
 	_, err := advance(StageInput{StageID: "x", Stage: pack.Stage{Gate: pack.GateAuto}})
 	if err == nil {
 		t.Fatal("advance on a stage with no transitions must error")

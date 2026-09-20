@@ -311,10 +311,10 @@ func TestVerify_FourWorktreeStates(t *testing.T) {
 	} else if restoration.FoundHash != "" {
 		t.Errorf("absent: FoundHash should be empty, got %s", restoration.FoundHash)
 	}
-	// D4 row 4: a worktree file at a path absent at base_commit (the agent
+	// A worktree file at a path absent at base_commit (the agent
 	// authored an instruction file the project never declared) is planned for
-	// removal, not skipped — that is the substitution attack wearing a different
-	// hat, and leaving it would let an implementer author the reviewer's rules.
+	// removal, not skipped — that is the substitution attack in a different
+	// location, and leaving it would let an implementer author the reviewer's rules.
 	if restoration, ok := byPath[presentUnpinnedPath]; !ok || restoration.Action != ActionRemove {
 		t.Errorf("present-pinned-absent: got %+v, want ActionRemove (D4 row 4)", restoration)
 	}

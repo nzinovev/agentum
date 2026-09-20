@@ -178,8 +178,8 @@ func TestDiffManifests_ContextSameIsSilent(t *testing.T) {
 }
 
 // TestIndexHelpers round-trips the index functions used by diffContext so a
-// future shape change to InstructionRef/SkillRef does not silently break the
-// diff axis.
+// future shape change to InstructionRef/SkillRef does not break the
+// diff axis unnoticed.
 func TestIndexHelpers(t *testing.T) {
 	t.Parallel()
 	instructions := indexInstructions([]InstructionRef{

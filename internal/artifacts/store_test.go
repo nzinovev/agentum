@@ -11,8 +11,8 @@ import (
 // transaction so it can be pinned without a database. The transaction wiring
 // around it (the row lock, the demote-by-id, the commit) is exercised against a
 // real Postgres in the integration layer; what is testable here is the
-// precedence between the three outcomes, which is where a lost update or a
-// silently-accepted stale write would come from.
+// precedence between the three outcomes, which is where a lost update or an
+// accepted stale write would come from.
 
 func revision(id, hash string) sqlc.ArtifactRevision {
 	return sqlc.ArtifactRevision{ID: id, ContentHash: hash, IsCurrent: true}
@@ -71,7 +71,7 @@ func TestPlanRevision_IdenticalContentIsANoop(t *testing.T) {
 }
 
 // TestPlanRevision_StalePreconditionConflicts is the lost-update guard. A
-// caller that composed an edit against rev-1 must not have it silently applied
+// caller that composed an edit against rev-1 must not have it applied
 // on top of rev-2 that someone else wrote in between.
 func TestPlanRevision_StalePreconditionConflicts(t *testing.T) {
 	t.Parallel()

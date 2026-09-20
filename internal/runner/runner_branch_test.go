@@ -397,7 +397,7 @@ func TestLoop_ResultSummaryCannotOverrideVerdict(t *testing.T) {
 
 // TestLoop_NoVerdictArtifactStops: a verdict-sourcing stage that produces no
 // parseable verdict.json halts with paused_user_stop/verdict_unreadable rather
-// than silently defaulting to approved.
+// than defaulting to approved.
 func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()

@@ -7,8 +7,8 @@ import (
 
 // TestLoad_RetiredOpencodeBinaryRefused: AGENTUM_OPENCODE_BINARY was replaced
 // by the adapter-neutral AGENTUM_RUNTIME_BINARY. An operator who pinned the
-// runtime under the old name must be told, not quietly dropped back to a PATH
-// lookup — a binary override that stops applying does not look like a
+// runtime under the old name must be told, not dropped back to a PATH
+// lookup unannounced — a binary override that stops applying does not look like a
 // configuration change, it looks like the runtime failing.
 func TestLoad_RetiredOpencodeBinaryRefused(t *testing.T) {
 	t.Setenv("AGENTUM_OPENCODE_BINARY", "/opt/opencode/bin/opencode.exe")
@@ -28,7 +28,7 @@ func TestLoad_RetiredOpencodeBinaryRefused(t *testing.T) {
 }
 
 // TestLoad_RuntimeBinaryDefaultsToTheDescriptor: with neither variable set the
-// override is empty, which is how the registry knows to use the adapter
+// override is empty, which is how the registry selects the adapter
 // descriptor's own binary name.
 func TestLoad_RuntimeBinaryDefaultsToTheDescriptor(t *testing.T) {
 	t.Setenv("AGENTUM_HTTP_ADDR", ":0")
@@ -46,8 +46,8 @@ func TestLoad_RuntimeBinaryDefaultsToTheDescriptor(t *testing.T) {
 
 // TestLoad_ArtifactScanPolicy pins the one config value that decides whether a
 // credential-shaped artifact is rewritten or refused. It fails at load rather
-// than falling back, because the failure mode of a silent fallback is the worst
-// one available: an operator who asked for rejection and got redaction believes
+// than falling back, because an unnoticed fallback is the worst failure mode
+// available: an operator who asked for rejection and got redaction believes
 // secrets are being blocked when they are being stored.
 func TestLoad_ArtifactScanPolicy(t *testing.T) {
 	cases := []struct {

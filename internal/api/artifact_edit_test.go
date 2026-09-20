@@ -16,8 +16,8 @@ import (
 // editArtifactStore is an artifacts.Store fake for the edit-endpoint tests.
 // It records Puts, returns a configurable Current revision / error, and a
 // configurable Put error so each status-mapping case is exercisable. The read
-// methods beyond Current are present to satisfy the interface and fail loudly
-// if the edit path ever calls one.
+// methods beyond Current are present to satisfy the interface and fail the
+// test if the edit path ever calls one.
 type editArtifactStore struct {
 	current    artifacts.Revision
 	hasCurrent bool
@@ -236,7 +236,7 @@ func TestArtifactPut_FirstCreateNeedsNoPrecondition(t *testing.T) {
 // mode where a transient Current() store error was collapsed into "no current
 // revision," disabling the precondition and letting a blind PUT through. Any
 // Current error other than ErrNoCurrentRevision must fail the request (500)
-// before the precondition branching, so a store hiccup cannot become a silent
+// before the precondition branching, so a store hiccup cannot become an
 // overwrite. The artifact must not reach Put.
 func TestArtifactPut_TransientCurrentErrorFailsHard(t *testing.T) {
 	t.Parallel()

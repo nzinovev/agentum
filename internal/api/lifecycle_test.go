@@ -86,8 +86,8 @@ func TestHumanDecisionPatch_OnlyCarriesGateDecisions(t *testing.T) {
 	}
 }
 
-// TestCurrentStageOr_FallsBackWhenUnset keeps the Stage field's fallback honest:
-// a run that has not entered a stage yet must not record an empty stage that a
+// TestCurrentStageOr_FallsBackWhenUnset pins the Stage field's fallback: a
+// run that has not entered a stage yet must not record an empty stage that a
 // reviewer cannot place, and a set stage must pass through verbatim.
 func TestCurrentStageOr_FallsBackWhenUnset(t *testing.T) {
 	t.Parallel()
@@ -103,8 +103,8 @@ func TestCurrentStageOr_FallsBackWhenUnset(t *testing.T) {
 	}
 }
 
-// TestIsHumanDecisionRecordFailure_DistinguishesRecordErrors keeps the gate
-// action's fail-closed behaviour honest: a record failure must surface (the
+// TestIsHumanDecisionRecordFailure_DistinguishesRecordErrors pins the gate
+// action's fail-closed behaviour: a record failure must surface (the
 // approval is not on the record), while a plain error must not be mistaken for
 // one. The transactional wiring that produces these errors is review-only.
 func TestIsHumanDecisionRecordFailure_DistinguishesRecordErrors(t *testing.T) {
@@ -118,8 +118,8 @@ func TestIsHumanDecisionRecordFailure_DistinguishesRecordErrors(t *testing.T) {
 	}
 }
 
-// TestRecordHumanDecisionTx_NilManifestServiceIsNoOp keeps the cancel-path
-// tolerance honest at the boundary: a nil manifest service (unit tests, or a
+// TestRecordHumanDecisionTx_NilManifestServiceIsNoOp pins the cancel-path
+// tolerance at the boundary: a nil manifest service (unit tests, or a
 // server that did not wire one) records no decision and returns nil under both
 // policies, so the lifecycle action still proceeds. The sealed/missing-manifest
 // absorption under recordLenient is the same idea applied to a service that

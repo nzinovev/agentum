@@ -10,7 +10,7 @@ import (
 // them before the SQL replacement. A regression that re-introduced a
 // pre-transaction merge base would still pass this, but a regression that
 // skipped the decode (merging onto an empty body) would not — and that is the
-// silent corruption worth guarding, since it would replace the row with the
+// corruption worth guarding, since it would replace the row with the
 // patch alone.
 func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 	t.Parallel()
@@ -38,8 +38,8 @@ func TestMergeIntoLocked_DecodesAndMerges(t *testing.T) {
 }
 
 // TestMergeIntoLocked_UndecodableBodyIsAnError guards against the failure mode
-// where a corrupt body row would be silently treated as empty and the patch
-// written in place of the real evidence. The merge must fail loudly so the row
+// where a corrupt body row would be treated as empty and the patch
+// written in place of the real evidence. The merge must fail so the row
 // is not clobbered with a partial patch.
 func TestMergeIntoLocked_UndecodableBodyIsAnError(t *testing.T) {
 	t.Parallel()

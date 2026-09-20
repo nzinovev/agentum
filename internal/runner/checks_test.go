@@ -224,7 +224,7 @@ func assertRequest(t *testing.T, req checks.Request, name string, required bool)
 }
 
 // TestRunner_MalformedStoredOverridesFailRun is the regression test: a corrupt
-// runs.overrides column must fail the run loudly, not silently resolve a
+// runs.overrides column must fail the run, not resolve a
 // smaller check set than the operator asked for. The old lenient parse
 // swallowed the unmarshal error and returned nil — the run continued gated on
 // less than the operator believed. The assertion is on the FAILURE (state
