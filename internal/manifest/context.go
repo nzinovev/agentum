@@ -2,7 +2,7 @@ package manifest
 
 import "time"
 
-// ContextEvidence is the project-context channel record (ADR 0002): which
+// ContextEvidence is the project-context channel record: which
 // instruction files were pinned and delivered, which skills the runtime had
 // available, whether any instruction copy had to be restored after tampering,
 // and which declared paths were absent at base_commit. It is the "what
@@ -15,7 +15,7 @@ import "time"
 //
 // Instruction and skill BODIES are never stored — only hashes and sizes. This
 // keeps evidence compact and keeps third-party text out of a record that
-// already has a secret-scanning story for artifacts.
+// already runs secret scanning for artifacts.
 type ContextEvidence struct {
 	// Instructions is the set of pinned instruction files, one entry per
 	// distinct (path, delivered_hash) pair. Append-merged across stages so a
@@ -27,17 +27,17 @@ type ContextEvidence struct {
 	Restorations []InstructionRestoration `json:"restorations,omitempty"`
 	// Skills is the set of skills the runtime had available, one entry per
 	// distinct (name, hash) pair. Append-merged so a skill set that changed
-	// between jobs shows up rather than hiding.
+	// between jobs appears in the record.
 	Skills []SkillRef `json:"skills,omitempty"`
 	// SkillsProbe is the outcome label of the skill enumeration: "ok",
 	// "unsupported" (the adapter has no prober), or "failed: <reason>". A failed
 	// probe additionally surfaces as an EvidenceGap on the body, making
-	// evidence_complete false — the honest reading is that we do not know what
+	// evidence_complete false: the run records that it does not know what
 	// knowledge was in play.
 	SkillsProbe string `json:"skills_probe,omitempty"`
 	// Missing lists instruction paths declared in .agentum.yaml but absent at
 	// base_commit. Recorded, not fatal: a project that declares a path that
-	// does not exist yet still runs; the evidence says so.
+	// does not exist yet still runs; the evidence records it.
 	Missing []string `json:"missing,omitempty"`
 }
 

@@ -157,8 +157,9 @@ func TestWorktree_MoveBreaksLinkAndRepairRestores(t *testing.T) {
 
 // TestManager_RemoveWorktreeAfterRepoMove pins the teardown path after a
 // repository moved: the worktree's stale links must be repaired BEFORE
-// removal, or the removal is a silent no-op — the liveness check isWorktree
-// performs says "not a worktree" about a directory that is still on disk,
+// removal, or the removal is a no-op that logs nothing — the liveness check
+// isWorktree performs reports "not a worktree" about a directory that is
+// still on disk,
 // together with its admin metadata. Repair, then remove, and both the
 // working directory and the .git/worktrees record must be gone.
 func TestManager_RemoveWorktreeAfterRepoMove(t *testing.T) {
@@ -375,7 +376,7 @@ func headOf(dir string) (string, error) {
 // test: the orchestrator's Commit must turn a dirty working tree into a real
 // commit on the run branch, authored by the orchestrator, leaving the tree
 // clean. Without this, every post-stage checkpoint is the base SHA and the
-// agent's uncommitted work is silently discarded at teardown — the defect class
+// agent's uncommitted work is discarded at teardown unnoticed — the defect class
 // this whole PR exists to close.
 func TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean(t *testing.T) {
 	t.Parallel()
@@ -411,7 +412,7 @@ func TestManager_Commit_DirtyTreeCreatesCommitAndLeavesClean(t *testing.T) {
 }
 
 // TestManager_Commit_CleanTreeCreatesNothing pins the no-empty-commit contract:
-// a stage that produced no change records the unchanged HEAD honestly, rather
+// a stage that produced no change records the unchanged HEAD, rather
 // than inserting a no-op commit into the lineage. An empty commit per stage
 // would corrupt the lineage a reviewer reads — a flat line of identical
 // checkpoints obscuring where real work landed.

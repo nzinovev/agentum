@@ -42,9 +42,9 @@ func (readiness Readiness) Label() string {
 // Readiness for the process lifetime: one subprocess per process, for every
 // consumer. Evidence writing calls Probe on every invocation; the memoized
 // value means the second call and the ten-thousandth cost nothing. The
-// memoized outcome is sticky, including a failure — a probe that silently
-// re-ran would make the recorded version unreproducible across a run, and
-// installing the runtime after boot is a restart, which is the honest trade.
+// memoized outcome is sticky, including a failure — a probe that re-ran
+// would make the recorded version unreproducible across a run, and
+// installing the runtime after boot requires a restart.
 //
 // The probe reuses the context probe's machinery verbatim — the scrubbed child
 // environment from buildChildEnv, probeTimeout, and the process-group kill —
@@ -141,7 +141,7 @@ func (adapter *OpencodeAdapter) runVersionProbe(ctx context.Context) Readiness {
 // parseVersionOutput extracts the runtime version from `--version` output:
 // trim whitespace, take the first line, require a version-shaped token. Output
 // that is empty, or whose first line does not look like a version, is an
-// unparseable probe result rather than a recorded lie.
+// unparseable probe result rather than a recorded false version.
 func parseVersionOutput(output string) (string, error) {
 	trimmed := strings.TrimSpace(output)
 	if trimmed == "" {

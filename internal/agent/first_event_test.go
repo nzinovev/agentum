@@ -27,7 +27,7 @@ func firstEventInvocation(t *testing.T, mode string, delay time.Duration, firstE
 
 // TestInvoke_FirstEventTimeoutStopsASilentStart: an invocation that emits
 // nothing at all is stopped at the first-event bound, and the terminal error
-// names the model — "the runtime never said anything" is a fact about that
+// names the model — "the runtime never produced anything" is a fact about that
 // model on this configuration, and it is the fact the operator needs.
 func TestInvoke_FirstEventTimeoutStopsASilentStart(t *testing.T) {
 	shrinkKillGrace(t)
@@ -61,8 +61,8 @@ func TestInvoke_FirstEventTimeoutStopsASilentStart(t *testing.T) {
 // line and then stays silent LONGER than the first-event bound must NOT be
 // stopped by it — mid-work silence is the idle cap's question, and this run
 // has no idle cap configured. The two bounds stay separate concepts or the
-// watchdog degenerates into a second, harsher idle cap that kills legitimate
-// work.
+// watchdog degenerates into a second, harsher idle cap that terminates
+// legitimate work.
 func TestInvoke_FirstEventWatchdogRetiresOnTheFirstLine(t *testing.T) {
 	adapter, invocation := firstEventInvocation(t, fakeSilent, 700*time.Millisecond, 300*time.Millisecond)
 

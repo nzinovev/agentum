@@ -176,7 +176,7 @@ func TestOpencodeLive_InvokeStreamResult(t *testing.T) {
 // analyst profile grants `edit` only inside its artifact directory, and the
 // agent must actually be able to produce result.json there.
 //
-// This is where an absolute permission scope fails silently — opencode
+// This is where an absolute permission scope fails without an error — opencode
 // normalises the target path relative to the project root before matching, so
 // an absolute pattern never matches and the write is refused by the deny
 // baseline while the config still reads correctly.
@@ -221,8 +221,8 @@ func TestOpencodeLive_AnalystCannotEditSource(t *testing.T) {
 	assertSourceUnchanged(t, sourcePath)
 }
 
-// TestOpencodeLive_ImplementerEditsSource is the counterpart that keeps the
-// deny test honest: a profile that denies everything would pass the test above
+// TestOpencodeLive_ImplementerEditsSource is the counterpart that makes the
+// deny test meaningful: a profile that denies everything would pass the test above
 // while making the pipeline useless. An implementer must still be able to work.
 func TestOpencodeLive_ImplementerEditsSource(t *testing.T) {
 	requireOpencode(t)

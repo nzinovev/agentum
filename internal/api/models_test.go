@@ -253,7 +253,7 @@ func TestModelsSurface_IdempotentReplayReturnsSameCheck(t *testing.T) {
 }
 
 // TestModelsSurface_ReusedKeyWithDifferentBodyConflicts: a key names one
-// intent; reusing it for another request is a 409, never a silent
+// intent; reusing it for another request is a 409, never a
 // substitution.
 func TestModelsSurface_ReusedKeyWithDifferentBodyConflicts(t *testing.T) {
 	apiInst, _ := newModelSurfaceAPI(t, nil)
@@ -272,8 +272,8 @@ func TestModelsSurface_ReusedKeyWithDifferentBodyConflicts(t *testing.T) {
 }
 
 // TestModelsSurface_MissingHeaderIsRefused: the idempotency key is required,
-// not advisory — the client that omits it pays for the call twice and learns
-// it from the bill. The 400 names the header.
+// not advisory — without it, a retried request runs a second paid check.
+// The 400 names the header.
 func TestModelsSurface_MissingHeaderIsRefused(t *testing.T) {
 	apiInst, fake := newModelSurfaceAPI(t, nil)
 
@@ -459,10 +459,10 @@ func waitForModelCheckState(t *testing.T, apiInst *API, checkID string) struct {
 }
 
 // TestModelCheckRegistry_RetentionForgets: FINISHED entries past the TTL are
-// gone from both maps — an idempotency key forgotten by age behaves like a key
-// never seen (a new check), and a check id forgotten by age reads as 404
+// gone from both maps — an idempotency key dropped by age behaves like a key
+// never seen (a new check), and a check id dropped by age reads as 404
 // upstream. A RUNNING check is never swept, however long the queue in front
-// of it: a client watching it must not see it vanish into a 404.
+// of it: a client watching it must not see it disappear into a 404.
 func TestModelCheckRegistry_RetentionForgets(t *testing.T) {
 	t.Parallel()
 	registry := newModelCheckRegistry(10 * time.Millisecond)

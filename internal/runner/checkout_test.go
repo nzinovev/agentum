@@ -90,8 +90,8 @@ func TestRunner_RunExecutesInPinnedCheckoutNotProjectPath(t *testing.T) {
 // TestRunner_UnavailableCheckoutPausesWithoutWorktree: the pinned copy is gone
 // (moved away, deleted). The run pauses with stop_reason checkout_unavailable
 // naming the path — it does not fail, and above all it does not create a
-// worktree anywhere: recreating one in some other copy is the silent loss of
-// the run's whole commit line.
+// worktree anywhere: recreating one in some other copy would lose the run's
+// whole commit line with no error.
 func TestRunner_UnavailableCheckoutPausesWithoutWorktree(t *testing.T) {
 	t.Parallel()
 
@@ -309,8 +309,8 @@ func repoIdentityOf(repoPath string) (repoid.Identity, error) {
 // TestRunner_TeardownAfterRepoMoveRemovesWorktree: the repository moved after
 // the run paused, and the terminal teardown must still clean up in the moved
 // copy — relink first, then remove. Without the relink the removal is a
-// silent no-op and the worktree outlives the run, potentially holding the
-// agent's uncommitted work.
+// no-op that logs nothing, and the worktree outlives the run, potentially
+// holding the agent's uncommitted work.
 func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	t.Parallel()
 

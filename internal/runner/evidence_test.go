@@ -26,7 +26,7 @@ import (
 // Put is exercised by the capture path; Current/GetBytes return the most
 // recently Put bytes for a name so the verdict-read path (buildTransitionContext)
 // can resolve a verdict.json without a live database. The other read methods
-// remain "not used" stubs that fail loudly if called.
+// remain "not used" stubs that fail the test if called.
 type recordingArtifactStore struct {
 	mu   sync.Mutex
 	puts []artifacts.PutParams
@@ -379,8 +379,9 @@ func TestCaptureStageOutputs_RefusedPutDoesNotFailTheStage(t *testing.T) {
 	}
 }
 
-// TestCaptureStageOutputs_NilStoreIsANoop keeps the unit-test wiring honest:
-// runners built without an artifact store must not fail stages.
+// TestCaptureStageOutputs_NilStoreIsANoop: capture with a nil store writes
+// nothing and returns no error, so a unit test without a store runs the same
+// path as a test with one.
 func TestCaptureStageOutputs_NilStoreIsANoop(t *testing.T) {
 	t.Parallel()
 	fixture := newCaptureFixture(t)
@@ -546,7 +547,8 @@ func (service *fakeManifestService) gapSections() []string {
 // TestCompleteStageEvidence_AddEvidenceFailureRecordsGapAndSurvives: when
 // AddEvidence fails mid-run, the runner must record the failure as an
 // EvidenceGap on the manifest rather than swallow it, and the stage must
-// survive. A sealed manifest that swallows the failure (degrading silently) is
+// survive. A sealed manifest that swallows the failure (degrading without a
+// record) is
 // worse than an absent record because a reviewer cannot tell the two apart.
 //
 // The successful attempt's evidence is one write covering three sections, so a

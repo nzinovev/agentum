@@ -181,7 +181,7 @@ func TestPermissionScope_IsRelativeToTheWorktree(t *testing.T) {
 
 // TestPermissionScope_RefusesScopeOutsideWorktree: a scope that cannot be
 // expressed relative to the project root is an error, not a dropped grant. A
-// silently dropped grant is how a profile ends up meaning something other than
+// dropped grant is how a profile ends up meaning something other than
 // what it says.
 func TestPermissionScope_RefusesScopeOutsideWorktree(t *testing.T) {
 	t.Parallel()
@@ -199,7 +199,7 @@ func TestPermissionScope_RefusesScopeOutsideWorktree(t *testing.T) {
 // permissionKeys is every key the rendered config must carry. opencode merges
 // config sources and overrides only conflicting keys, so a key this adapter
 // omits falls through to the operator's global config or the project's own
-// opencode.json — silently widening the profile.
+// opencode.json — widening the profile.
 var permissionKeys = []string{
 	"*", "read", "glob", "grep", "list", "lsp",
 	"edit", "bash", "webfetch", "websearch",
@@ -904,14 +904,14 @@ func TestStageInstructionFiles_EditDeniesAGENTSForImplementer(t *testing.T) {
 	}
 }
 
-// TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash (ADR 0003 D3/D5,
-// step 5): a withheld implementer profile — the one a stage sees before a human
+// TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash: a withheld
+// implementer profile — the one a stage sees before a human
 // approves the plan — must deny bash outright (exec.bash was withheld, so
 // bashRules returns the bare "deny") and deny every edit except the artifact
 // floor that lets the stage write result.json. Withholding only fs.write would
-// be theatre, since bash allows shell redirects; exec.bash is withheld
-// alongside it. The artifact floor still permits result.json, which is the
-// contract every stage must meet.
+// still allow writing source, since bash allows shell redirects; exec.bash is
+// withheld alongside it. The artifact floor still permits result.json, which
+// is the contract every stage must meet.
 func TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -230,7 +230,7 @@ func TestReconcile_Classifications(t *testing.T) {
 		}
 		manager := New()
 		// Never created a worktree for this run — Reconcile must not re-create
-		// one silently; it surfaces for a human.
+		// one; it surfaces for a human.
 		state, err := manager.Reconcile(t.Context(), repo, "ghost-run", "", "")
 		if err != nil {
 			t.Fatalf("Reconcile: %v", err)

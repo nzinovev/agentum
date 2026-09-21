@@ -122,7 +122,7 @@ func (api *API) recordHumanDecisionTx(
 		// A cancel on a run whose manifest sealed during a crash, or whose
 		// Init failed (best-effort at run creation), is legitimate. Absorb it
 		// so the transition commits; the artifact/revision rows remain the
-		// durable record, and evidence_complete will honestly report the gap.
+		// durable record, and evidence_complete will report the gap.
 		return nil
 	}
 	return humanDecisionRecordError{cause: err}

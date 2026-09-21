@@ -125,7 +125,7 @@ func (condition Condition) Match(input ConditionInput) (bool, error) {
 		}
 	default:
 		// Post-validation this is unreachable; reaching it means the validator
-		// was bypassed. Surface it rather than silently not matching.
+		// was bypassed. Surface it rather than return no match.
 		return false, fmt.Errorf("condition: %q: unknown subject %q", condition.raw, condition.subject)
 	}
 }
@@ -193,7 +193,7 @@ func parseEnumTerm(raw, subject, rest string) (Condition, error) {
 
 // parseCountTerm parses `<comparator> (integer | "budget")` for a fix_cycles
 // term. The integer must be non-negative; a leading sign is rejected so
-// `fix_cycles == -1` is a parse error, not a silently-accepted edge case.
+// `fix_cycles == -1` is a parse error, not an accepted edge case.
 func parseCountTerm(raw, rest string) (Condition, error) {
 	comparator, operand, ok := splitComparator(rest)
 	if !ok {
@@ -276,8 +276,8 @@ const notEqualToken = "!="
 
 // splitComparator separates the leading comparator from its operand. Accepts
 // ==, <=, >=, <, >; recognises != only to reject it with a precise error. A
-// single `=` is rejected (the grammar requires ==) so a typo does not silently
-// parse.
+// single `=` is rejected (the grammar requires ==) so a typo is a parse
+// error.
 func splitComparator(text string) (comparator, operand string, ok bool) {
 	text = strings.TrimLeft(text, " ")
 	if text == "" {
@@ -302,7 +302,7 @@ func splitComparator(text string) (comparator, operand string, ok bool) {
 
 // unquote strips one layer of surrounding double quotes. The grammar requires
 // the literal be quoted so a literal cannot run into the next token; a missing
-// close quote is a parse error rather than a silent accept.
+// close quote is a parse error, not an accepted literal.
 func unquote(text string) (string, bool) {
 	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
 		return "", false

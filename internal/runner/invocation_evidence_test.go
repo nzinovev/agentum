@@ -243,8 +243,8 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 // TestInvokeStage_MissingExecutionPlanEntryRefuses: the run-start plan covers
 // every non-terminal stage, so this cannot happen through the stage loop — the
 // guard exists because of what a miss would DO. A zero Selection carries no
-// model, the adapter would then omit --model, and the runtime would silently
-// pick its own: the exact silent default the execution plan exists to prevent.
+// model, the adapter would then omit --model, and the runtime would pick
+// its own: the exact unintended default the execution plan exists to prevent.
 // The stage is refused before any invocation row is created.
 func TestInvokeStage_MissingExecutionPlanEntryRefuses(t *testing.T) {
 	t.Parallel()
@@ -438,8 +438,8 @@ func (adapter *narrowedOptionAdapter) Describe() agent.Descriptor {
 // run with a configuration error BEFORE the first invocation, naming adapter
 // and option" — the second refusal point. The tier cases above cover an
 // unresolvable tier; this one covers the option, which is the half the
-// criterion is actually about — and it asserts the refusal, never "the option
-// was quietly absent from argv".
+// criterion is actually about — and it asserts the refusal, not merely that
+// "the option was absent from argv".
 func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()

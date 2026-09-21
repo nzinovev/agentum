@@ -114,7 +114,7 @@ func TestValidate_Approvals_NegativeCases(t *testing.T) {
 		{
 			// Two source_write approvals with DIFFERENT names would both pass
 			// the unique-name check, but SourceWriteApproval() returns only the
-			// first — the second is silently inert. The validator rejects this.
+			// first — the second would be inert. The validator rejects this.
 			name: "two source_write approvals with different names",
 			transform: func(manifest string) string {
 				return strings.Replace(manifest,

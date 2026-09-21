@@ -209,10 +209,9 @@ func (service *Service) AddEvidenceTx(
 
 // mergeIntoLocked decodes the locked manifest body, merges the patch into it,
 // and returns the canonical encoded result. Extracted from AddEvidenceTx so the
-// "decode → merge → encode" step is unit-testable without a database: a body
-// that fails to decode is an error rather than a silently-empty merge base,
-// because merging onto an empty body would clobber the existing evidence with a
-// patch-shaped subset of it.
+// "decode → merge → encode" step is unit-testable without a database. A body
+// that fails to decode is an error: merging onto an empty body would clobber
+// the existing evidence with a patch-shaped subset of it.
 func mergeIntoLocked(locked []byte, patch Body) ([]byte, error) {
 	existing, err := decodeBody(locked)
 	if err != nil {
@@ -383,7 +382,7 @@ func correctionBase(sealed Body, latest *Body) Body {
 // result as "nothing to compare against." This is the narrow read the teardown
 // divergence check needs: it compares result_commit against exactly the commit
 // recorded as verified, not a proxy whose correctness depends on an FSM property
-// a future feature (ask-to-edit / add-context) could break silently.
+// a future feature (ask-to-edit / add-context) could break without detection.
 func (service *Service) ChecksCommit(ctx context.Context, tenantID, runID string) (string, error) {
 	body, _, _, err := service.Get(ctx, tenantID, runID)
 	if err != nil {

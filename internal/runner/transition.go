@@ -128,7 +128,7 @@ type stageTransition struct {
 // starts).
 //
 // A nil artifact store (unit tests) yields an empty verdict — which is exactly
-// the verdict_unreadable path, so nothing fails silently. A real artifact that
+// the verdict_unreadable path, so nothing fails unrecorded. A real artifact that
 // fails to parse is logged and the error text threaded into VerdictReason so
 // the stop record names the cause; the absent case (no current revision) sets
 // Unreadable with an empty reason.

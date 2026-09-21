@@ -164,7 +164,7 @@ var blockTemplate = template.Must(template.New("routing").
 // Execute against a strings.Builder cannot fail on the write side (Builder's
 // Writer contract never errors), and a Block-shape mismatch would have been
 // caught at parse time; the panic surfaces any template-walk bug rather than
-// silently emitting a partial block.
+// emitting a partial block.
 func Render(block Block) string {
 	var builder strings.Builder
 	if err := blockTemplate.Execute(&builder, block); err != nil {

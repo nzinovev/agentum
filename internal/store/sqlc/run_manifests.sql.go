@@ -32,7 +32,7 @@ type AddManifestEvidenceParams struct {
 // This is a full replacement, not a JSONB merge, on purpose: the caller holds
 // the row lock (GetManifestForUpdate) and has already merged the patch into the
 // locked body in Go. A SQL-level `||` merge here would be a second, shallow
-// merge whose top-level-key-only semantics silently drop nested evidence a
+// merge whose top-level-key-only semantics drop nested evidence a
 // concurrent writer just committed — the exact lost update the row lock exists
 // to prevent. Replacing the whole body keeps the merge logic in one place (the
 // Go merge functions) and makes it deep by construction.

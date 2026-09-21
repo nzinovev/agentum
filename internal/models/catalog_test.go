@@ -125,8 +125,8 @@ func TestCatalog_ValidateTypoSuggestsNearestSpelling(t *testing.T) {
 }
 
 // TestCatalog_ValidateSourceComesFromTheCatalog: the listing command in the
-// text is whatever Source the adapter recorded — this package renders it, it
-// never knows which executor it names.
+// text is whatever Source the adapter recorded — this package renders it and
+// does not decide which executor it names.
 func TestCatalog_ValidateSourceComesFromTheCatalog(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog()

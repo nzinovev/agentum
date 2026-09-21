@@ -84,8 +84,8 @@ func (request Request) Revision() string {
 	canonicalOverrides, marshalErr := request.Overrides.Marshal()
 	if marshalErr != nil {
 		// Unreachable for this shape (two string slices); if it ever fires,
-		// hashing a degraded form would silently break revision stability, so
-		// panic loudly instead — same stance as routing.Render.
+		// hashing a degraded form would break revision stability without an
+		// error, so panic instead — same stance as routing.Render.
 		panic(fmt.Sprintf("taskinput: canonical marshal of overrides: %v", marshalErr))
 	}
 	// Struct fields marshal in declaration order, so the field order is fixed
@@ -154,7 +154,7 @@ func canonicalNames(names []string) []string {
 }
 
 // ParseOverrides strictly decodes stored or submitted override bytes: an
-// unknown field is an error, never a silently dropped key — the typo that
+// unknown field is an error, never a dropped key — the typo that
 // decodes into a zero value is the failure mode this package exists to close.
 // Absent or empty bytes are the zero Overrides: a task created with no
 // overrides at all is the common case, not an error.

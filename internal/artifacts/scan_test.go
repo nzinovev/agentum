@@ -162,8 +162,8 @@ func TestDefaultScanner_RejectPolicyAllowsCleanContent(t *testing.T) {
 }
 
 // TestDefaultScanner_ZeroValueRedacts: a DefaultScanner{} with no policy set
-// behaves like the pre-policy redactor, so an embedding that forgets the field
-// fails safe-ish rather than silently disabling the scanner.
+// behaves like the pre-policy redactor, so an embedding that omits the field
+// fails safe-ish rather than disabling the scanner.
 func TestDefaultScanner_ZeroValueRedacts(t *testing.T) {
 	t.Parallel()
 	scanner := &DefaultScanner{}

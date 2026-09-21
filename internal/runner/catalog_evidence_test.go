@@ -63,7 +63,7 @@ func workingStubCatalog() models.Catalog {
 
 // TestRunner_CatalogLabelInEvidence_Failed: a run whose catalog could not be
 // obtained records the failure in the adapter section — the unchecked mode
-// must be visible after the fact, not silently absent.
+// must be visible after the fact, not absent.
 func TestRunner_CatalogLabelInEvidence_Failed(t *testing.T) {
 	t.Parallel()
 	runner, fake := newCatalogEvidenceRunner(t, stubExecution{

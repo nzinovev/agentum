@@ -248,8 +248,9 @@ func (runner *Runner) ingest(
 			"run", run.record.ID, "stage", stageID, "name", revisionName, "error", putErr)
 		if errors.Is(putErr, artifacts.ErrSecretDetected) {
 			// The operator configured reject-on-secret and the store enforced
-			// it. Surface it on the event stream: a silently absent artifact is
-			// indistinguishable from one the agent never wrote.
+			// it. Surface it on the event stream: an artifact absent because
+			// of a refusal is otherwise indistinguishable from one the agent
+			// never wrote.
 			runner.emit(ctx, run.record, EvArtifactRejected, map[string]any{
 				"stage": stageID, "path": revisionName, "reason": "secret_detected",
 			})
@@ -470,7 +471,8 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 // failure here is returned: this is the run's provenance root (input, project,
 // pack, base commit), and a run whose provenance was never recorded should
 // fail rather than proceed — every later piece of evidence chains off this, so
-// a silent gap at the root would orphan everything that follows.
+// an unrecorded gap at the root would break the chain for everything that
+// follows.
 func (runner *Runner) recordInitialEvidence(
 	ctx context.Context,
 	record sqlc.Run,
@@ -796,11 +798,11 @@ func (runner *Runner) currentRevisionList(ctx context.Context, tenantID, runID s
 }
 
 // recordEvidenceGap records that an evidence write failed, so the fact is
-// carried on the sealed manifest instead of swallowed. Best-effort: a failure
+// carried on the sealed manifest instead of lost. Best-effort: a failure
 // to record the gap is logged and dropped — it does not recurse. A nil
 // manifest service (unit tests) is a no-op. Sealed manifests refuse the gap,
-// which is expected for the post-seal git-evidence flush and is dropped
-// silently (the seal already froze the body).
+// which is expected for the post-seal git-evidence flush; the seal already
+// froze the body.
 func (runner *Runner) recordEvidenceGap(ctx context.Context, record sqlc.Run, section, stage string, cause error) {
 	if runner.mfst == nil {
 		return

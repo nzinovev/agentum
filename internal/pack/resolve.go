@@ -61,7 +61,7 @@ func loadOverridePrompts(ov *Overrides) error {
 //     change at resolve time — a fork is a detached copy.
 //   - Layer 3 (prompts): each entry replaces the named stage's prompt text.
 //     The stage must exist; overriding a prompt for an unknown stage is an
-//     error (a consumer mistake, not a silent skip).
+//     error (a consumer mistake, not a skip).
 //   - Layer 4 (params): stage gate/tier patches and budget patches apply on
 //     top of the base. Pointers distinguish "set" from "leave unchanged".
 //

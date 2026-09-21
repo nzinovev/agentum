@@ -20,7 +20,7 @@ func quietLogger() *slog.Logger {
 
 // TestNew_MalformedModelsConfigFailsBoot is the first refusal point: a
 // models.yaml with an unknown key is a load error that stops the process,
-// naming the file — never a silent fall-back to the defaults.
+// naming the file — never a fall-back to the defaults.
 func TestNew_MalformedModelsConfigFailsBoot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models.yaml")
 	if err := os.WriteFile(path, []byte("teirs:\n  fast: some-model\n"), 0o600); err != nil {
@@ -39,7 +39,7 @@ func TestNew_MalformedModelsConfigFailsBoot(t *testing.T) {
 
 // TestNew_UnknownAdapterIDFailsBootAndListsKnown: an unknown execution adapter
 // id is a boot error naming the id and listing the known ones — the executor
-// is never silently substituted.
+// is never substituted.
 func TestNew_UnknownAdapterIDFailsBootAndListsKnown(t *testing.T) {
 	_, err := New(config.Config{ExecutionAdapter: "claude-code"}, quietLogger(), &store.Store{})
 	if err == nil {

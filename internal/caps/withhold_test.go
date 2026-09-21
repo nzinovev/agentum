@@ -8,8 +8,9 @@ import (
 // TestEffective_WithheldSourceWriteDropsWritesAndBash: an implementer template
 // with Withheld: SourceWriteCategories yields only fs.read, git.read, and
 // artifact.write — the pre-approval profile a plan stage's gate enforces.
-// exec.bash is withheld alongside fs.write/git.write on purpose (ADR 0003 D3):
-// withholding only fs.write would be theatre since bash allows shell redirects.
+// exec.bash is withheld alongside fs.write/git.write on purpose:
+// withholding only fs.write would still allow writing source, since bash
+// allows shell redirects.
 func TestEffective_WithheldSourceWriteDropsWritesAndBash(t *testing.T) {
 	t.Parallel()
 	profile := Effective(Input{

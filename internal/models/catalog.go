@@ -17,14 +17,14 @@ var ErrUnknownModel = errors.New("models: unknown model")
 // CatalogUnsupported is the evidence label for an adapter that cannot be asked
 // to enumerate its runtime's models. A run records that models were never
 // checked rather than checked-and-passed; the two facts must stay
-// distinguishable after the fact, or a degraded check would read as a clean
-// one.
+// distinguishable after the fact, or a check that did not run would appear
+// to have passed.
 const CatalogUnsupported = "unsupported"
 
 // suggestMaxDistance is the Levenshtein bound below which a catalog model
 // counts as a near spelling of the requested one. Far enough to catch a real
 // typo, near enough that thirty names do not produce three plausible-looking
-// strangers.
+// near misses.
 const suggestMaxDistance = 3
 
 // suggestLimit caps how many near spellings the refusal carries. The full list
@@ -32,7 +32,7 @@ const suggestMaxDistance = 3
 // nearest, not everything.
 const suggestLimit = 3
 
-// CatalogModel is one model the runtime says it can run. Variants is the
+// CatalogModel is one model the runtime's catalog lists. Variants is the
 // declared reasoning-variant vocabulary of exactly this model (empty = none
 // declared); VariantsKnown distinguishes "declares no variants" from "the
 // variants field was absent or reshaped" — the first is a model fact the
@@ -44,7 +44,7 @@ type CatalogModel struct {
 	VariantsKnown bool     // false = the record carried no readable variants field
 }
 
-// Catalog is what a runtime says it can run: a value obtained by asking the
+// Catalog is the runtime's model listing: a value obtained by asking the
 // runtime, never a table maintained here. A catalog that could not be obtained
 // or read in full is Available=false with a Reason — a fact to record, never a
 // refusal ground: "could not check" must not become "does not exist".
@@ -60,7 +60,7 @@ type Catalog struct {
 }
 
 // UnknownModel is the typed refusal for a model a fully-read catalog does not
-// contain. The fields are the ingredients of the message: the model asked for,
+// contain. The fields are the parts of the message: the model asked for,
 // the nearest spellings found, the known providers (when the provider half
 // itself is unknown), and the listing command.
 type UnknownModel struct {
@@ -103,9 +103,9 @@ func (unknown *UnknownModel) Error() string {
 func (unknown *UnknownModel) Unwrap() error { return ErrUnknownModel }
 
 // usable reports whether this catalog may ground a refusal: it was obtained,
-// and it is not empty. An empty-yet-Available catalog is treated as not
-// obtained rather than as "the runtime runs nothing" — the second reading
-// would refuse every model with a text that lies about the reason.
+// and it is not empty. An empty catalog that reports Available counts as not
+// obtained. Reading it as "the runtime runs nothing" would refuse every model
+// and name a reason that is wrong.
 func (catalog Catalog) usable() bool {
 	return catalog.Available && len(catalog.Models) > 0
 }
@@ -205,7 +205,7 @@ func (catalog Catalog) Providers() []string {
 // "failed: <reason>" — the same vocabulary the runtime readiness probe uses,
 // so evidence readers see one shape for probed runtime facts. The third label
 // of the vocabulary, CatalogUnsupported, is decided by the caller from the
-// adapter descriptor: a value this type cannot know is "was never asked".
+// adapter descriptor: a value this type cannot decide is "was never asked".
 func (catalog Catalog) Label() string {
 	if catalog.Available {
 		return fmt.Sprintf("ok (%d models)", len(catalog.Models))

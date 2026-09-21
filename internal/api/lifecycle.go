@@ -211,7 +211,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// "final_review"; at the plan gate it is the pack-declared plan-approval name
 	// (resolved from the pack, not hardcoded — a hardcoded "plan" would collide
 	// with the recorded approve when the pack names its approval differently, and
-	// ON CONFLICT DO NOTHING would silently discard the reject). The same name
+	// ON CONFLICT DO NOTHING would discard the reject). The same name
 	// keys the idempotency check, so a repeat reject after any gate reject
 	// returns 200 regardless of which gate fired first.
 	planName := api.planApprovalName(r.Context(), run)
@@ -260,7 +260,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 		// approve under the SAME name (same gate) is a conflicting decision — but
 		// CreateApproval's ON CONFLICT DO NOTHING would mask it. So when a row
 		// already exists under this name with a different decision, fail the tx
-		// with a 409-shape error instead of silently dropping the reject. This is
+		// with a 409-shape error instead of dropping the reject. This is
 		// the case the review flagged: reject at a non-approval paused_gate used
 		// to hardcode "plan", collide, and seal "approved".
 		if existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
@@ -293,7 +293,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 // conflictingGateDecision is returned inside the reject tx when a decision row
 // already exists under the resolved gate name with a different decision. The
 // handler surfaces it as a 409 rather than letting CreateApproval's
-// ON CONFLICT DO NOTHING silently discard the reject.
+// ON CONFLICT DO NOTHING discard the reject.
 type conflictingGateDecision struct {
 	name     string
 	existing string

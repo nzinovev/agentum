@@ -224,7 +224,7 @@ func TestProbe_UnparseableOutputHasADistinctReason(t *testing.T) {
 
 // TestProbe_HangIsKilledAtTimeout: a runtime that produces nothing and never
 // exits is killed at the probe timeout, yields a distinct reason, and leaves
-// no child behind (the cancellation watcher retires only after the process is
+// no child behind (the cancellation watcher stops only after the process is
 // reaped — the same machinery the run path uses).
 func TestProbe_HangIsKilledAtTimeout(t *testing.T) {
 	// Cannot use t.Parallel: it shrinks probeTimeout and killGrace, which are

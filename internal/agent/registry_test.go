@@ -103,10 +103,11 @@ func TestDescribe_ReturnedTiersAreACopy(t *testing.T) {
 }
 
 // TestOpencodeDescriptor_DeclaredOptionsMatchArgv is the assertion that keeps
-// the descriptor's declaration honest when a per-variant option lands: the declared model
+// the descriptor's declaration accurate when a per-variant option lands: the
+// declared model
 // options must equal the set of option fields buildOpencodeArgs can actually
 // emit. A descriptor that declares an option the argv builder ignores would
-// silently accept and drop it; an argv builder that emits an undeclared option
+// accept and drop it; an argv builder that emits an undeclared option
 // would bypass the SupportedBy refusal. Both are bugs, and this test is where
 // they surface.
 func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
@@ -241,7 +242,7 @@ func TestNoExecutorNameOutsideThisPackage(t *testing.T) {
 // rather than selecting anything: config.Load recognises the retired
 // AGENTUM_OPENCODE_BINARY only to refuse it by name, so the operator learns
 // where the override moved. Removing the literal would remove the refusal and
-// bring back the silent-ignore the refusal exists to prevent. Any addition is
+// bring back the ignored override the refusal exists to prevent. Any addition is
 // a decision, not a formality.
 func allowedExecutorLiteral(literal string) bool {
 	return literal == `"AGENTUM_OPENCODE_BINARY"`

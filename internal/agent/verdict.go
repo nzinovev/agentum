@@ -142,9 +142,9 @@ func ParseVerdictJSON(data []byte) (VerdictJSON, error) {
 		default:
 			return VerdictJSON{}, fmt.Errorf("verdict.json: findings[%d].severity %q is not one of {blocker, major, minor}", index, finding.Severity)
 		}
-		// category is optional (ADR 0003 D9.5); when present it must be a known
+		// category is optional; when present it must be a known
 		// member of the advisory taxonomy. An unknown value is a contract
-		// violation rather than a silent drop, so a typo does not masquerade as
+		// violation rather than an ignored value, so a typo does not appear as
 		// "no category".
 		if finding.Category != "" && !knownFindingCategories[finding.Category] {
 			return VerdictJSON{}, fmt.Errorf("verdict.json: findings[%d].category %q is not one of {implementation_defect, plan_deviation, plan_defect, requirement_ambiguity}", index, finding.Category)

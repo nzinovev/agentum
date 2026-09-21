@@ -141,7 +141,7 @@ func TestIsTerminal(t *testing.T) {
 		}
 	}
 	if len(terminal) != 3 || len(nonTerminal) != 6 {
-		// guard against silently dropping a state when the enum grows
+		// guard against dropping a state when the enum grows
 		t.Logf("state set changed: terminal=%d nonTerminal=%d — update this test", len(terminal), len(nonTerminal))
 	}
 }

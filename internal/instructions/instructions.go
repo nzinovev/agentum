@@ -23,9 +23,9 @@ import (
 
 // Byte budgets for the instruction channel. A single instruction file is capped
 // at MaxFileBytes; the whole set is capped at MaxTotalBytes. Both exist because
-// context is finite and a 10 MiB AGENTS.md would silently displace the run,
-// and because truncation must be a recorded fact rather than a silent shrink
-// (ADR 0002 D3). Files are processed in declaration order; a file that would
+// context is finite and a 10 MiB AGENTS.md would displace the run,
+// and because truncation must be a recorded fact rather than an unrecorded
+// shrink. Files are processed in declaration order; a file that would
 // cross the per-file budget is cut at the last line boundary that fits, and
 // once the total budget is spent the remaining files are delivered as zero
 // bytes — every such outcome is recorded per file.
@@ -103,12 +103,12 @@ const (
 	ActionRemove  RestoreAction = "remove"  // worktree holds a file the pin does not; delete it
 )
 
-// ValidatePath applies ADR 0002 D1's rules for one project-instruction path:
+// ValidatePath applies the channel's rules for one project-instruction path:
 // repo-relative (no absolute path), no ".." escape, forward slashes, non-empty.
 // Mirrors checks.pathEscapes but lives here so the rule is owned by the channel
 // that enforces it. Backslashes are rejected because the delivery channel and
 // the edit-deny patterns are written in forward-slash form; a mixed convention
-// would silently fail to match.
+// would fail to match.
 //
 // The path is normalised to forward slashes first, so the absolute-path and
 // escape checks are OS-independent: a unix-shaped "/etc/x" is rejected on
@@ -282,7 +282,7 @@ type pinEntry struct {
 // assembleOrder unions auto and declared into a stable, de-duplicated order:
 // the runtime baseline first, then declared paths in their listed order. A path
 // appearing in both is kept as runtime (the runtime loads it regardless, and
-// the runtime label is the honest attribution).
+// the runtime label is the accurate attribution).
 func assembleOrder(declared, auto []string) []pinEntry {
 	entries := make([]pinEntry, 0, len(auto)+len(declared))
 	seen := make(map[string]bool, len(auto)+len(declared))
@@ -440,8 +440,8 @@ func Execute(plan []Restoration, pinned []File, worktreeRoot string) (done []Res
 		case ActionRestore:
 			file, ok := byPath[restoration.Path]
 			if !ok {
-				// A restoration for a path we did not pin is a caller bug; fail
-				// loudly rather than guess.
+				// A restoration for a path we did not pin is a caller bug; report
+				// it rather than guess.
 				return done, fmt.Errorf("instructions: restore plan references unpinned path %q", restoration.Path)
 			}
 			absolutePath := filepath.Join(worktreeRoot, filepath.FromSlash(restoration.Path))
@@ -478,7 +478,7 @@ func Execute(plan []Restoration, pinned []File, worktreeRoot string) (done []Res
 // hashBytes returns the lowercase sha256 hex of buf. Empty input yields the
 // well-known empty-hash, which is a legitimate delivered hash for a file cut to
 // zero by the total budget — the evidence then reads "delivered_hash is the
-// empty hash, delivered_bytes is 0," which is honest.
+// empty hash, delivered_bytes is 0," which is accurate.
 func hashBytes(buf []byte) string {
 	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:])

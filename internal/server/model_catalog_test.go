@@ -14,7 +14,7 @@ import (
 // catalogStubAdapter fakes the adapter surface validateModelTiers reads:
 // identity from the descriptor, the model listing from a fixed value. Invoke
 // is never reached — the validation runs before any worker starts — so its
-// stub refuses loudly if that ever changes.
+// stub fails the test if that ever changes.
 type catalogStubAdapter struct {
 	descriptor agent.Descriptor
 	catalog    models.Catalog
@@ -114,9 +114,10 @@ func TestValidateModelTiers_NonEnumeratingAdapterIsNeverAsked(t *testing.T) {
 
 // TestValidateModelTiers_DefaultTierDriftStopsTheProcess: the boot check
 // covers the EFFECTIVE tiers — the adapter's baked-in defaults when there is
-// no models.yaml. Defaults are a build-time claim about the runtime's
-// catalog, upstream renames retire them, and without this check a clean
-// install would boot silently and then refuse every run at start.
+// no models.yaml. Defaults are fixed at build time while the runtime's
+// catalog changes (upstream renames and removals have invalidated them
+// before), and without this check a clean
+// install would boot and then refuse every run at start.
 func TestValidateModelTiers_DefaultTierDriftStopsTheProcess(t *testing.T) {
 	instance := &Server{
 		log: quietLogger(),
@@ -142,8 +143,8 @@ func TestValidateModelTiers_DefaultTierDriftStopsTheProcess(t *testing.T) {
 }
 
 // TestValidateModelTiers_DefaultsPresentBoots: with the defaults present in
-// the catalog and no models.yaml, boot proceeds — the "no configuration
-// needed" promise holds.
+// the catalog and no models.yaml, boot proceeds — the no-configuration case
+// holds.
 func TestValidateModelTiers_DefaultsPresentBoots(t *testing.T) {
 	descriptor := catalogStubDescriptor()
 	instance := &Server{

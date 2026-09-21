@@ -146,7 +146,7 @@ func TestRender_ReviewFindings_OmittedWhenNil(t *testing.T) {
 // TestRender_TaskSection: the request renders as the block's FIRST section —
 // ahead of the output contract — with the title in bold and the description
 // verbatim; an empty description renders an explicit unknown-request marker
-// instead of a silently empty section; and no overrides-shaped content appears
+// instead of an empty section; and no overrides-shaped content appears
 // anywhere outside the resolved checks section (overrides never reach the
 // model).
 func TestRender_TaskSection(t *testing.T) {

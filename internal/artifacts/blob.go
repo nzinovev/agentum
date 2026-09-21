@@ -50,8 +50,8 @@ type BlobStore struct {
 	Root string
 }
 
-// BlobStore is the only production ObjectStore. The assertion keeps the
-// interface and the implementation from drifting apart silently.
+// BlobStore is the only production ObjectStore. The assertion turns drift
+// between the interface and the implementation into a compile error.
 var _ ObjectStore = (*BlobStore)(nil)
 
 // NewBlobStore returns a BlobStore rooted at root. The directory is not

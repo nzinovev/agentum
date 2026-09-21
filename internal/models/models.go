@@ -17,7 +17,7 @@
 //
 // Nothing here is ever best-effort: an unknown tier, an empty model string, an
 // unknown config key, or an option the adapter does not declare is an error.
-// Silent ignoring and default substitution are forbidden.
+// Ignoring an input or substituting a default is forbidden.
 package models
 
 import (
@@ -72,7 +72,7 @@ const OptionModel OptionName = "model"
 // closed struct: a parameter that is not a field here does not exist, and no
 // caller appends strings to argv. Reading it field by field (rather than
 // rendering it into a string) is what lets an adapter refuse a parameter it
-// cannot honor instead of silently dropping it.
+// cannot honor instead of dropping it.
 type Options struct {
 	Model string `json:"model,omitempty"`
 }
@@ -135,7 +135,7 @@ func (options Options) SupportedBy(supported []OptionName) error {
 // Selection is a resolved tier: the tier name, the derived provider, and the
 // options the adapter will run with. Provider is the part of the model string
 // before the first "/" (opencode documents --model as "provider/model"); a
-// runtime whose model names carry no provider simply yields an empty one. The
+// runtime whose model names carry no provider yields an empty one. The
 // split is recorded here rather than re-derived by every reader.
 type Selection struct {
 	Tier     string  `json:"tier"`
@@ -161,7 +161,7 @@ func SplitProvider(model string) (provider string) {
 // Returns ErrNoConfig (wrapped) when absent — callers fall back to the active
 // adapter's defaults. Decoding is strict (unknown keys are errors), and a tier
 // whose model string is empty is refused: a file that was already broken must
-// stop the process rather than silently not apply.
+// stop the process instead of going unapplied.
 //
 // AGENTUM_MODELS_CONFIG is the one path whose absence is an error rather than
 // a miss: naming a file that is not there is a broken configuration, and
@@ -177,7 +177,7 @@ func Load() (*Config, error) {
 			// A path the operator named explicitly is a statement of intent,
 			// not a place to look: falling through to <cwd>/models.yaml or
 			// ~/.config would run on tiers they did not choose, and the only
-			// visible symptom would be the wrong model. The implicit
+			// visible sign would be the wrong model. The implicit
 			// candidates are searched, so an absent one is just absent.
 			if candidate.explicit {
 				return nil, fmt.Errorf(
@@ -202,8 +202,8 @@ func Load() (*Config, error) {
 			}
 			return nil, fmt.Errorf("models: parse %s: %w", path, err)
 		}
-		// A file that declares no tiers is the same case reached through a
-		// different door (`tiers: {}`), and it is worse than useless: a non-nil
+		// A file that declares no tiers reaches the same refusal through
+		// `tiers: {}`, and refusing it here matters: a non-nil
 		// override REPLACES the adapter's defaults, so every tier resolution
 		// would fail at run start with "unknown tier" instead of here, where
 		// the file is named.
@@ -253,8 +253,8 @@ func candidatePaths() []candidate {
 // Resolve resolves a tier to a Selection. If override is non-nil, its tiers are
 // used (with the override's default); otherwise fallback is used (the active
 // adapter's Descriptor.DefaultTiers). An empty tier falls back to the applicable
-// default. An unknown tier is an error — Agentum never silently picks a model,
-// and never substitutes a default for a name it could not resolve.
+// default. An unknown tier is an error: Agentum does not pick a model or
+// substitute a default on its own.
 func Resolve(override *Config, fallback Config, tier string) (Selection, error) {
 	if override != nil {
 		return resolveFrom(*override, tier)

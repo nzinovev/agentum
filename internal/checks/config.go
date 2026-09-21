@@ -29,7 +29,7 @@ import (
 
 // APIVersion is the api value the project config declares. An empty api is
 // treated as v1 to ease adoption; a non-empty api must match exactly so a
-// future incompatible format is detected rather than silently misread.
+// future incompatible format is detected rather than misread.
 const APIVersion = "agentum/v1"
 
 // ConfigFile is the versioned project configuration file the checks registry

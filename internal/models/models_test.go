@@ -33,8 +33,8 @@ func adapterDefaults() Config {
 }
 
 func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
-	// A typo like "teirs:" must be a load error, not a silently-ignored key
-	// that quietly falls back to the adapter defaults.
+	// A typo like "teirs:" must be a load error, not an ignored key
+	// that falls back to the adapter defaults.
 	writeConfig(t, "teirs:\n  fast: some-model\ndefault: fast\n")
 	if _, err := Load(); err == nil {
 		t.Fatal("unknown top-level key must fail Load")
@@ -43,7 +43,7 @@ func TestLoad_UnknownTopLevelKeyRejected(t *testing.T) {
 
 func TestLoad_UnknownKeyUnderTiersRejected(t *testing.T) {
 	// The object form per tier is later work; today a nested map under a tier
-	// is a decode error, not a silently dropped entry.
+	// is a decode error, not a dropped entry.
 	writeConfig(t, "tiers:\n  fast:\n    model: some-model\n")
 	if _, err := Load(); err == nil {
 		t.Fatal("nested key under tiers must fail Load")
@@ -92,7 +92,7 @@ func TestLoad_EmptyFileRejectedWithTheFix(t *testing.T) {
 // TestLoad_ExplicitPathThatDoesNotExistIsAnError: the one path the operator
 // named is a statement of intent. Searching past it to <cwd>/models.yaml or
 // ~/.config would run the process on tiers nobody chose, and the only visible
-// symptom would be the wrong model — the silent-fallback class model
+// sign would be the wrong model — the unnoticed-fallback class model
 // resolution removes everywhere else.
 func TestLoad_ExplicitPathThatDoesNotExistIsAnError(t *testing.T) {
 	// Non-parallel: mutates env.

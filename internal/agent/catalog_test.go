@@ -183,8 +183,8 @@ func TestCatalog_ReadsNamesVariantsAndTheUnknownFields(t *testing.T) {
 // TestCatalog_UnreadableRecordInvalidatesTheWholeCatalog is the rule a
 // half-read catalog would break: the test must assert the CATALOG is
 // unavailable, not that one model went missing — fifteen read records out of
-// thirty would refuse the other fifteen as non-existent, which is the lie an
-// unavailable catalog exists to avoid.
+// thirty would refuse the other fifteen as non-existent, which is the false
+// refusal an unavailable catalog exists to avoid.
 func TestCatalog_UnreadableRecordInvalidatesTheWholeCatalog(t *testing.T) {
 	adapter, _ := fakeCatalogAdapter(t, "unreadable")
 	catalog := adapter.Catalog(context.Background())

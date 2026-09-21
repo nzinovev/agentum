@@ -78,7 +78,8 @@ func nullStringOr(value sql.NullString) string {
 // runCreateRequest is the POST /runs body. The request half — title +
 // description — reaches the model; the overrides half configures the run and
 // is orchestrator-only. Decoded with DisallowUnknownFields: a typo'd or legacy
-// `input` blob is a loud 400, not a silently dropped key that weakens the run.
+// `input` blob is a 400 that names the field, not an ignored key that weakens
+// the run.
 type runCreateRequest struct {
 	ProjectID    string          `json:"project_id"`
 	PipelinePack string          `json:"pipeline_pack"`
@@ -186,7 +187,7 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// MaxBytesReader, not io.LimitReader: LimitReader reports EOF at the cap
-	// with no error, so an oversized body arrives silently truncated and fails
+	// with no error, so an oversized body arrives truncated and fails
 	// as "invalid JSON" — a message that sends the author looking for a syntax
 	// error that is not there. MaxBytesReader returns a real error instead.
 	//
@@ -305,7 +306,8 @@ func (api *API) handleListRuns(w http.ResponseWriter, r *http.Request) {
 // handleStartRun POST /api/v1/runs/{id}/start
 // Transitions created -> running through engine.Next and enqueues a run job.
 // The worker (not this request) drives the stages; the handler returns as soon
-// as the job is queued. An illegal transition is a 409, never a silent write.
+// as the job is queued. An illegal transition is a 409; the write does not
+// happen.
 func (api *API) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunStart, "GetRun")
 	if !ok {

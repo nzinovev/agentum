@@ -12,7 +12,7 @@ import (
 // headers, AWS AKIA keys, GitHub PATs, generic token/secret/password labels)
 // and leaves everything else alone. It is intentionally conservative: false
 // negatives (missed secrets) are the operator's problem; false positives
-// (mangled artifacts) are worse, because they silently corrupt evidence.
+// (mangled artifacts) are worse, because they corrupt evidence with no error.
 type DefaultScanner struct {
 	// Policy decides what a finding does. Zero value is PolicyRedact, so a
 	// DefaultScanner{} behaves like the pre-policy redactor.
