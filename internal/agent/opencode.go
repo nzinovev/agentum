@@ -81,8 +81,12 @@ func (adapter *OpencodeAdapter) errPrefix() string {
 func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-chan Event, error) {
 	descriptor := adapter.Describe()
 	// Defence in depth: re-check what was handed in, regardless of what the
-	// caller believed. An option outside the descriptor's set is refused and no
-	// subprocess starts.
+	// caller believed. Inconsistent options (a variant without a model, a
+	// whitespace value) and an option outside the descriptor's set are both
+	// refused here and no subprocess starts.
+	if err := inv.Model.Options.Validate(); err != nil {
+		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
+	}
 	if err := inv.Model.Options.SupportedBy(descriptor.ModelOptions); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}
@@ -90,7 +94,8 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	// it is checked against the catalog here too — a selection assembled by any
 	// path, not only run-start resolution. The check costs one memoized probe
 	// per process, and an unavailable catalog validates as nil: "could not
-	// check" never becomes "does not exist".
+	// check" never becomes "does not exist". The same call grounds the variant
+	// vocabulary check when the catalog read it.
 	if err := adapter.Catalog(ctx).Validate(inv.Model); err != nil {
 		return nil, fmt.Errorf("execution adapter %q: %w", descriptor.ID, err)
 	}
@@ -420,10 +425,28 @@ func buildOpencodeArgs(bin string, inv Invocation) []string {
 	if inv.ResumeSession != "" {
 		args = append(args, "--session", inv.ResumeSession)
 	}
-	if inv.Model.Options.Model != "" {
-		args = append(args, "--model", inv.Model.Options.Model)
-	}
+	args = appendModelOptionArgs(args, inv.Model.Options)
 	args = append(args, inv.Prompt+"\n\n"+inv.RoutingBlock)
+	return args
+}
+
+// appendModelOptionArgs appends the model option flags: --model, then
+// --variant immediately behind it when one is set. The variant qualifies the
+// model that precedes it — without a model the flag does not exist, which is
+// why the nesting is not two independent ifs — and a process listing then
+// shows one decision, not two. An empty variant never yields a flag, not even
+// an empty one. The ONE caller-facing contract: options must already be
+// validated and declared (models.Options.Validate, SupportedBy); this helper
+// only renders argv and is shared by Invoke and the model check so the two
+// cannot drift apart.
+func appendModelOptionArgs(args []string, options models.Options) []string {
+	if options.Model == "" {
+		return args
+	}
+	args = append(args, "--model", options.Model)
+	if options.Variant != "" {
+		args = append(args, "--variant", options.Variant)
+	}
 	return args
 }
 

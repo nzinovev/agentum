@@ -238,9 +238,39 @@ func (adapter *OpencodeAdapter) runCatalogProbe(ctx context.Context) models.Cata
 		}
 		return catalog
 	}
+	logUnknownVariantVocabulary(parsed.models)
 	catalog.Models = parsed.models
 	catalog.Available = true
 	return catalog
+}
+
+// logUnknownVariantVocabulary writes ONE warning when any catalog record came
+// without a readable variants field: the variant check is skipped for those
+// models, and an operator sending a typo'd variant deserves to know it will
+// not be caught. One line, not one per record — a runtime that renames the
+// field emits it on every model of the listing, and thirty identical warnings
+// bury everything else in the log. Records are sorted, so the first unknown
+// one is stable across runs. Inside the memoized probe, so the warning fires
+// once per process, not once per catalog reader.
+func logUnknownVariantVocabulary(entries []models.CatalogModel) {
+	unknownCount := 0
+	firstUnknown := ""
+	for _, entry := range entries {
+		if entry.VariantsKnown {
+			continue
+		}
+		if unknownCount == 0 {
+			firstUnknown = entry.ID
+		}
+		unknownCount++
+	}
+	if unknownCount == 0 {
+		return
+	}
+	slog.Warn("variant vocabulary unavailable; variant validation skipped",
+		"adapter", string(opencodeDescriptor.ID),
+		"records", unknownCount,
+		"first_model", firstUnknown)
 }
 
 // catalogSource is the listing command as an operator would type it, for

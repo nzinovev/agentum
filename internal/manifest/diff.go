@@ -349,8 +349,8 @@ func adapterDeclaredCapabilities(section *AdapterEvidence) []string {
 }
 
 // diffModels compares each shared attempt's model selection: tier, provider,
-// model id, and the remaining options (a per-variant option lands there
-// eventually). The former run-level scalar comparison is gone with the run-level section — a
+// model id, variant, and any later option (the catch-all axis). The former
+// run-level scalar comparison is gone with the run-level section — a
 // "primary model" summary maintained by a merge function is what produced the
 // overwritten-evidence defect in the first place.
 func diffModels(left, right []InvocationEvidence) *SectionDelta {
@@ -369,10 +369,13 @@ func diffModels(left, right []InvocationEvidence) *SectionDelta {
 		if leftRecord.Model.Provider != rightRecord.Model.Provider {
 			return newDelta("model-provider", "model provider differs")
 		}
+		if leftRecord.Model.Options.Variant != rightRecord.Model.Options.Variant {
+			return newDelta("model-variant", "model variant differs")
+		}
 		if leftRecord.Model.Options != rightRecord.Model.Options {
-			// Same model string, different remaining options (e.g. what a
-			// future per-variant field would add). Unreachable today — Options
-			// carries one field — but wired so the field lands on the right axis.
+			// Same model string, different remaining options. Variant has its
+			// own axis above; the next option field lands here, and the axis
+			// is wired so it does.
 			return newDelta("model-options", "model options differ")
 		}
 		return nil

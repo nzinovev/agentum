@@ -54,6 +54,41 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestEncodeDecode_VariantRoundTripsWithoutBumpingTheSchema: a variant inside
+// a record's options round-trips through the sealed-manifest encoding, and a
+// body written before the field existed decodes unchanged with the schema
+// still reading "2" — an optional field inside an existing object is not a
+// schema change, and sealed bodies must not pay for one.
+func TestEncodeDecode_VariantRoundTripsWithoutBumpingTheSchema(t *testing.T) {
+	t.Parallel()
+	withVariant := testInvocation("inv-1", "spec", 0)
+	withVariant.Model.Options.Variant = "high"
+	encoded, encodeErr := encodeBody(Body{Schema: schemaVersion, Invocations: []InvocationEvidence{withVariant}})
+	if encodeErr != nil {
+		t.Fatalf("encode: %v", encodeErr)
+	}
+	decoded, decodeErr := decodeBody(encoded)
+	if decodeErr != nil {
+		t.Fatalf("decode: %v", decodeErr)
+	}
+	if decoded.Schema != schemaVersion {
+		t.Errorf("Schema = %q; want %q", decoded.Schema, schemaVersion)
+	}
+	if decoded.Invocations[0].Model.Options.Variant != "high" {
+		t.Errorf("Variant not preserved: %+v", decoded.Invocations[0].Model.Options)
+	}
+
+	preVariant := []byte(`{"schema_version": "2", "invocations": [{"invocation_id": "inv-1", "stage": "spec",
+		"model": {"tier": "strong", "options": {"model": "stub/model"}}}]}`)
+	legacy, legacyErr := decodeBody(preVariant)
+	if legacyErr != nil {
+		t.Fatalf("decode a body written before variant existed: %v", legacyErr)
+	}
+	if legacy.Schema != schemaVersion || legacy.Invocations[0].Model.Options.Variant != "" {
+		t.Errorf("pre-variant body changed: schema %q, options %+v", legacy.Schema, legacy.Invocations[0].Model.Options)
+	}
+}
+
 func TestDecodeEmptyBodyReturnsSchema(t *testing.T) {
 	t.Parallel()
 	body, err := decodeBody(nil)
@@ -98,6 +133,38 @@ func TestMergeBodies_TwoAttemptsAtOneStageSurviveAsTwoRecords(t *testing.T) {
 	}
 	if merged.Invocations[0].Prompt.RenderedHash == merged.Invocations[1].Prompt.RenderedHash {
 		t.Errorf("two attempts must carry distinct rendered hashes: %+v", merged.Invocations)
+	}
+}
+
+// TestMergeBodies_TwoVariantsOfOneStageSurviveAsTwoRecords: a stage attempted
+// twice under different variants — the shape a paused run whose models.yaml
+// was edited between attempts produces — merges as two records whose variants
+// stay independently readable. A merge that collapsed or overwrote one would
+// hide exactly the difference the variant axis exists to surface.
+func TestMergeBodies_TwoVariantsOfOneStageSurviveAsTwoRecords(t *testing.T) {
+	t.Parallel()
+	firstAttempt := testInvocation("inv-low", "review", 0)
+	firstAttempt.Model.Options.Variant = "low"
+	base := Body{Schema: schemaVersion, Invocations: []InvocationEvidence{firstAttempt}}
+	secondAttempt := testInvocation("inv-high", "review", 0)
+	secondAttempt.Model.Options.Variant = "high"
+	patch := Body{Invocations: []InvocationEvidence{secondAttempt}}
+
+	merged := mergeBodies(base, patch)
+	if len(merged.Invocations) != 2 {
+		t.Fatalf("merged invocations = %d, want 2: %+v", len(merged.Invocations), merged.Invocations)
+	}
+	byID := map[string]models.Selection{}
+	for _, record := range merged.Invocations {
+		byID[record.InvocationID] = record.Model
+	}
+	if byID["inv-low"].Options.Variant != "low" || byID["inv-high"].Options.Variant != "high" {
+		t.Errorf("variants after merge = %v / %v; want each attempt's own", byID["inv-low"].Options.Variant, byID["inv-high"].Options.Variant)
+	}
+	// And the diff over the two reads the variant axis, not a set difference.
+	delta := DiffManifests(base, patch).Model
+	if delta == nil || delta.Reason != "model-variant" {
+		t.Errorf("diff of the two variants = %+v; want model-variant", delta)
 	}
 }
 

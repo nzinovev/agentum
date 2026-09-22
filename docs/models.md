@@ -3,8 +3,9 @@
 Agentum is a **coordinator, not a credential manager.** It does not handle API
 keys, provider endpoints, or base URLs. You install and configure the coding
 agent (`opencode`) yourself, exactly as you would if you were running it
-standalone. Agentum's only model-handling job is to decide which **model string**
-to pass to the agent binary's `--model` flag.
+standalone. Agentum's only model-handling job is to decide which **model
+string** — and, on tiers that declare one, which **variant** — reaches the
+agent binary's `--model` / `--variant` flags.
 
 The intended UX: clone, `make run`, and Agentum works — because your opencode is
 already configured on your machine.
@@ -13,8 +14,9 @@ already configured on your machine.
 
 1. A pack's stage names a **tier** (`fast`, `strong`, `reasoning`) — a portable
    label, not a concrete model. (See `docs/pack-format.md`.)
-2. At run time Agentum resolves the tier to a model string and passes
-   `--model <string>` to the agent subprocess.
+2. At run time Agentum resolves the tier to a model string and an optional
+   variant, and passes `--model <string>` (plus `--variant <value>` when set)
+   to the agent subprocess.
 3. The **agent binary** resolves that string to a real provider + endpoint +
    credentials using **your** configuration (`opencode auth`, env vars, …).
 
@@ -58,6 +60,28 @@ tiers:
 default: strong
 ```
 
+A tier value is either a bare model string (above) or a `{model, variant}`
+mapping. `variant` is the runtime's reasoning-effort setting, passed to the
+agent's `--variant` flag; the two forms mix freely in one file:
+
+```yaml
+tiers:
+  fast: zai-coding-plan/glm-5.2-highspeed
+  strong:
+    model: zai-coding-plan/glm-5.3
+    variant: low
+  reasoning:
+    model: zai-coding-plan/glm-5.3
+    variant: high
+default: strong
+```
+
+**A variant is declared on a tier, nowhere else.** There is no per-run or
+per-project variant override. Different stages running at different efforts is
+the pack's job: a stage names a tier (`stage.tier`), the tier carries the
+variant, and two tiers on one model with different variants are the way
+"plan on high, implement on low" is written.
+
 When `models.yaml` is present it **replaces** the built-in defaults. Per-adapter
 overrides are a future addition; today the file applies globally, so pick strings
 your active agent understands.
@@ -82,10 +106,28 @@ your active agent understands.
 ## Strict loading
 
 `models.yaml` is decoded strictly: an unknown key (a `teirs:` typo, a
-misspelled `defualt:`), a tier whose model string is empty, or a nested object
-where a string is expected are load **errors** that stop the process at boot
-with the file named — the process does not fall back to the defaults and
-leave your configuration unapplied.
+misspelled `defualt:`), a tier whose model string is empty, or a value that is
+neither a model string nor a `{model, variant}` mapping are load **errors**
+that stop the process at boot with the file named — the process does not fall
+back to the defaults and leave your configuration unapplied.
+
+The mapping form carries its own strictness, and each refusal names the line:
+
+| Input | Refusal |
+|---|---|
+| `strong: {model: m, varaint: high}` | `line N: unknown field "varaint" in a tier definition (known: model, variant)` |
+| `strong: 42`, `strong: true` | `line N: a tier is either a model string or a {model, variant} mapping, got !!int` / `!!bool` |
+| `strong: [a, b]` | `line N: a tier is either a model string or a {model, variant} mapping` |
+| `model` or `variant` carrying a number, boolean, `null`, a list, or an object | `line N: tier field "model"` / `"variant" must be a string, got TAG` |
+| `strong: {model: a, model: b}` | `line N: mapping key "model" already defined at line M` |
+| `strong: {variant: high}` | `tier "strong": declares variant "high" but no model` |
+| `strong:` (null), `strong: ""`, `strong: {model: "  "}` | `tier "strong": has an empty model string` |
+| `strong: {model: m, variant: ""}` or a whitespace-only variant | `line N: a tier declares an empty variant; remove the key to run without one` |
+
+The empty-variant row is the boundary between "no option" and "broken option":
+an absent `variant` key runs the model at the runtime's own default effort, and
+an explicitly empty one is refused so the file cannot look like it configured
+something it did not.
 
 Three more refusals follow from the same rule, and each one names its fix:
 
@@ -130,6 +172,35 @@ model names would hide it.
 ```
 unknown model "zai-coding-plan/glm-5.3-hispeed" (did you mean "zai-coding-plan/glm-5.3-highspeed"?); list them with: opencode models zai-coding-plan
 ```
+
+### The variant vocabulary
+
+A configured variant is checked against the same listing, because the runtime
+does not check it itself: `--variant hgih` runs as if it read `--variant high`,
+with no warning and no error, and the only sign of the typo would be every run
+answering at the wrong effort. The listing declares each model's variant
+vocabulary (`opencode models <provider> --verbose`, the `variants` field), so
+the check asks the runtime rather than maintaining a list here — a new provider
+arrives with its own vocabulary. The refusal enumerates it:
+
+```
+validate models config, tier "strong": execution adapter "opencode": model "zai-coding-plan/glm-5.3" declares no variant "medium" (declares: high, low, max)
+```
+
+The check runs at the same three points as the model check (boot, run start,
+`Invoke`) and refuses at the first one it reaches — before any invocation. What
+each catalog state means for it:
+
+| Catalog state | A configured variant |
+|---|---|
+| obtained, model found, vocabulary read | accepted on exact match; anything else is the refusal above |
+| obtained, model found, vocabulary read and empty | refused — the model declares no variants at all |
+| obtained, but the record carried no readable `variants` field | accepted; the boot log warns once with `variant vocabulary unavailable; variant validation skipped` |
+| not obtained | accepted; the run proceeds with the variant unchecked, like the model |
+
+A model that declares no variants is a fact the checker acts on; a record whose
+`variants` field was absent or reshaped is the runtime's format moving, and
+nothing about variants may be concluded from it. The two states stay distinct.
 
 **"Could not check" is never "does not exist."** The listing is the runtime's
 own output, read as a schema with optional fields: unknown fields are ignored,

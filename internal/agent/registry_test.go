@@ -87,7 +87,7 @@ func TestDescribe_IDMatchesTheConstant(t *testing.T) {
 	if descriptor.AdapterVersion == "" || strings.Contains(descriptor.AdapterVersion, "opencode") {
 		t.Errorf("AdapterVersion = %q; want a bare version, not a name-shaped string", descriptor.AdapterVersion)
 	}
-	if descriptor.DefaultTiers.Tiers["strong"] == "" || descriptor.DefaultTiers.Default == "" {
+	if descriptor.DefaultTiers.Tiers["strong"].Model == "" || descriptor.DefaultTiers.Default == "" {
 		t.Errorf("DefaultTiers must carry the tier map and a default: %+v", descriptor.DefaultTiers)
 	}
 }
@@ -95,21 +95,44 @@ func TestDescribe_IDMatchesTheConstant(t *testing.T) {
 func TestDescribe_ReturnedTiersAreACopy(t *testing.T) {
 	t.Parallel()
 	descriptor := NewOpencodeAdapter("opencode").Describe()
-	descriptor.DefaultTiers.Tiers["strong"] = "mutated"
+	descriptor.DefaultTiers.Tiers["strong"] = models.TierDefinition{Model: "mutated"}
 	again := NewOpencodeAdapter("opencode").Describe()
-	if again.DefaultTiers.Tiers["strong"] == "mutated" {
+	if again.DefaultTiers.Tiers["strong"].Model == "mutated" {
 		t.Error("Describe must return a fresh tiers map; mutating the result leaked into the descriptor")
 	}
 }
 
+// TestDescribe_DefaultTiersDeclareNoVariant: a run without models.yaml passes
+// no --variant — not because the flag is suppressed, but because no default
+// tier declares one. Which effort a fresh install runs at is the runtime's own
+// behaviour; a default growing a variant would silently move every clean
+// install to a different effort, and this is the test that falls.
+func TestDescribe_DefaultTiersDeclareNoVariant(t *testing.T) {
+	t.Parallel()
+	descriptor := NewOpencodeAdapter("opencode").Describe()
+	for tierName := range descriptor.DefaultTiers.Tiers {
+		selection, resolveErr := models.Resolve(nil, descriptor.DefaultTiers, tierName)
+		if resolveErr != nil {
+			t.Fatalf("Resolve on default tier %q: %v", tierName, resolveErr)
+		}
+		if selection.Options.Variant != "" {
+			t.Errorf("default tier %q declares variant %q; defaults must leave the effort to the runtime",
+				tierName, selection.Options.Variant)
+		}
+		argv := buildOpencodeArgs("opencode", Invocation{Model: selection})
+		if positionOf(argv, "--variant") >= 0 {
+			t.Errorf("argv for default tier %q carries --variant: %v", tierName, argv)
+		}
+	}
+}
+
 // TestOpencodeDescriptor_DeclaredOptionsMatchArgv is the assertion that keeps
-// the descriptor's declaration accurate when a per-variant option lands: the
-// declared model
-// options must equal the set of option fields buildOpencodeArgs can actually
-// emit. A descriptor that declares an option the argv builder ignores would
-// accept and drop it; an argv builder that emits an undeclared option
-// would bypass the SupportedBy refusal. Both are bugs, and this test is where
-// they surface.
+// the descriptor's declaration accurate as model options land: the declared
+// model options must equal the set of option fields buildOpencodeArgs can
+// actually emit. A descriptor that declares an option the argv builder
+// ignores would accept and drop it; an argv builder that emits an undeclared
+// option would bypass the SupportedBy refusal. Both are bugs, and this test
+// is where they surface.
 func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
 	t.Parallel()
 	descriptor := NewOpencodeAdapter("opencode").Describe()
@@ -120,6 +143,9 @@ func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
 	if positionOf(baseline, "--model") >= 0 {
 		emits[models.OptionModel] = true
 	}
+	if positionOf(baseline, "--variant") >= 0 {
+		emits[models.OptionVariant] = true
+	}
 	withModel := buildOpencodeArgs("opencode", Invocation{
 		Model: models.Selection{Options: models.Options{Model: "provider/model"}},
 	})
@@ -127,6 +153,16 @@ func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
 		t.Fatal("a populated model option must emit --model")
 	}
 	emits[models.OptionModel] = true
+	withVariant := buildOpencodeArgs("opencode", Invocation{
+		Model: models.Selection{Options: models.Options{Model: "provider/model", Variant: "high"}},
+	})
+	if positionOf(withVariant, "--model") < 0 {
+		t.Fatal("a variant never travels without its model")
+	}
+	if positionOf(withVariant, "--variant") < 0 {
+		t.Fatal("a populated variant option must emit --variant")
+	}
+	emits[models.OptionVariant] = true
 
 	declared := map[models.OptionName]bool{}
 	for _, name := range descriptor.ModelOptions {

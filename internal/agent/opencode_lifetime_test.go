@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/models"
 )
 
 // Subprocess contract tests for the opencode adapter.
@@ -41,6 +43,10 @@ const (
 	// into, so a test can assert what boundary the child was actually started
 	// under rather than what the caller believed it passed.
 	fakeConfigDumpEnv = "AGENTUM_FAKE_CONFIG_DUMP"
+	// fakeArgvDumpEnv names a file the fake writes the argv it was started
+	// with (JSON-encoded), so a test can assert the flags that reached the
+	// process — the contract the typed options render into.
+	fakeArgvDumpEnv = "AGENTUM_FAKE_ARGV"
 )
 
 // Fake agent behaviours.
@@ -142,6 +148,11 @@ func runFakeAgent(mode string) int {
 	if dumpPath := os.Getenv(fakeConfigDumpEnv); dumpPath != "" {
 		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
 	}
+	if argvPath := os.Getenv(fakeArgvDumpEnv); argvPath != "" {
+		if raw, marshalErr := json.Marshal(os.Args); marshalErr == nil {
+			_ = os.WriteFile(argvPath, raw, 0o600)
+		}
+	}
 	delay := 100 * time.Millisecond
 	if raw := os.Getenv(fakeDelayEnv); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil {
@@ -182,7 +193,10 @@ func runFakeAgent(mode string) int {
 
 // fakeInvocation wires the adapter to the test binary as its agent, and returns
 // the adapter plus the invocation to run. profile carries the timeouts under
-// test; an empty profile means no caps and no limits.
+// test; an empty profile means no caps and no limits. The selection names a
+// model because Invoke refuses an empty one outright, and it names one the
+// fixture catalog lists because the same fake answers the catalog probe and
+// Invoke checks the selection against that listing.
 func fakeInvocation(t *testing.T, mode string, delay time.Duration, profile caps.Profile) (*OpencodeAdapter, Invocation) {
 	t.Helper()
 	self, err := os.Executable()
@@ -204,6 +218,10 @@ func fakeInvocation(t *testing.T, mode string, delay time.Duration, profile caps
 		ArtifactDir: artifactDir,
 		Prompt:      "fake stage",
 		Profile:     profile,
+		Model: models.Selection{
+			Tier:    "strong",
+			Options: models.Options{Model: "opencode/muse-spark-1.3-contributor-free"},
+		},
 	}
 }
 

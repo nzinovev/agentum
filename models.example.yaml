@@ -25,12 +25,26 @@
 #
 # Example below: a z.ai / GLM setup using the coding-plan subscription. See
 # docs/models.md.
+#
+# A tier value is either a bare model string (the three below) or a
+# {model, variant} mapping (the commented pair): variant is the runtime's
+# reasoning-effort setting and reaches the agent's --variant flag, validated
+# against the runtime's own per-model variant listing — a value the model does
+# not declare fails boot with the vocabulary named. A tier key takes one form
+# or the other, never both. Two tiers on one model with different variants are
+# how "plan on high, implement on low" is written (stages pick via stage.tier).
 
 # Example: GLM via the z.ai coding plan (swap tiers to taste).
 tiers:
   fast: zai-coding-plan/glm-5-turbo
   strong: zai-coding-plan/glm-5.1
   reasoning: zai-coding-plan/glm-5.2
+  # focused:
+  #   model: zai-coding-plan/glm-5.3
+  #   variant: high
+  # relaxed:
+  #   model: zai-coding-plan/glm-5.3
+  #   variant: low
 
 # Default tier when a pack/stage doesn't name one.
 default: strong

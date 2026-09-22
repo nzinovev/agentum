@@ -34,10 +34,10 @@ func (stub stubExecution) Describe() agent.Descriptor {
 		ModelOptions:     []models.OptionName{models.OptionModel},
 		EnumeratesModels: stub.enumeratesModels,
 		DefaultTiers: models.Config{
-			Tiers: map[string]string{
-				"fast":      "stub/fast-model",
-				"strong":    "stub/strong-model",
-				"reasoning": "stub/reasoning-model",
+			Tiers: map[string]models.TierDefinition{
+				"fast":      {Model: "stub/fast-model"},
+				"strong":    {Model: "stub/strong-model"},
+				"reasoning": {Model: "stub/reasoning-model"},
 			},
 			Default: "fast",
 		},
