@@ -73,9 +73,7 @@ func (limits modelTestLimits) retention() time.Duration {
 }
 
 // modelCheckTarget is one (model, variant) pair a check will invoke, with the
-// tier that asked for it. Variant is carried for the surface's shape: tiers
-// today declare models only, and the value arrives empty until they grow a
-// variant of their own.
+// tier that asked for it.
 type modelCheckTarget struct {
 	Tier    string `json:"tier,omitempty"`
 	Model   string `json:"model"`
@@ -304,10 +302,10 @@ func (api *API) handleListModels(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(tierNames)
 	tiers := make([]modelsTierResponse, 0, len(tierNames))
 	for _, tierName := range tierNames {
-		modelName := api.resolvedTiers.Tiers[tierName]
-		_, inCatalog := catalog.Lookup(modelName)
+		definition := api.resolvedTiers.Tiers[tierName]
+		_, inCatalog := catalog.Lookup(definition.Model)
 		tiers = append(tiers, modelsTierResponse{
-			Tier: tierName, Model: modelName, Variant: "", InCatalog: inCatalog,
+			Tier: tierName, Model: definition.Model, Variant: definition.Variant, InCatalog: inCatalog,
 		})
 	}
 	writeJSON(w, http.StatusOK, modelsResponse{
@@ -337,21 +335,23 @@ type modelTestRequest struct {
 }
 
 // parseModelTestRequest validates the body against the process's resolved
-// tiers and deduplicates (model, variant) pairs — three tiers naming one
-// model are one paid call, attributed to the first tier (sorted) that named
-// it.
+// tiers and deduplicates (model, variant) pairs — three tiers naming one pair
+// are one paid call, attributed to the first tier (sorted) that named it.
 //
-// A variant is REFUSED, not echoed-then-dropped: the execution adapter has no
-// variant parameter yet (it arrives with tier variants later), and a check
-// that ran without the requested variant would report a setting that had no
-// effect — the same drop-the-undeclared-option move the model rules
-// forbid everywhere else.
+// A variant travels with its model: an explicit {model, variant} pair is
+// checked as one unit. A variant alongside a tier is refused — the tier
+// carries its own variant from models.yaml, and a request that overrode it
+// would answer a configuration question nobody asked; a variant with no
+// target at all names nothing to check.
 func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Config, ceilingSeconds int) (modelTestRequest, error) {
 	if request.Tier != "" && request.Model != "" {
 		return modelTestRequest{}, fmt.Errorf("tier and model are mutually exclusive: name one")
 	}
-	if request.Variant != "" {
-		return modelTestRequest{}, fmt.Errorf("variant is not supported by this build yet; check the model without it")
+	if request.Variant != "" && request.Tier != "" {
+		return modelTestRequest{}, fmt.Errorf("variant is not accepted with a tier: the tier carries its own variant; name a model to check a specific pair")
+	}
+	if request.Variant != "" && request.Model == "" {
+		return modelTestRequest{}, fmt.Errorf("variant needs a model to qualify: name a model or a tier")
 	}
 	timeoutSecs := request.TimeoutSecs
 	if timeoutSecs == 0 {
@@ -363,16 +363,17 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 
 	var targets []modelCheckTarget
 	seen := make(map[string]bool)
-	addTarget := func(tier, modelName string) {
-		if seen[modelName] {
+	addTarget := func(tier, modelName, variant string) {
+		pairKey := modelName + "\x00" + variant
+		if seen[pairKey] {
 			return
 		}
-		seen[modelName] = true
-		targets = append(targets, modelCheckTarget{Tier: tier, Model: modelName})
+		seen[pairKey] = true
+		targets = append(targets, modelCheckTarget{Tier: tier, Model: modelName, Variant: variant})
 	}
 	switch {
 	case request.Tier != "":
-		modelName, found := resolvedTiers.Tiers[request.Tier]
+		definition, found := resolvedTiers.Tiers[request.Tier]
 		if !found {
 			known := make([]string, 0, len(resolvedTiers.Tiers))
 			for tierName := range resolvedTiers.Tiers {
@@ -381,9 +382,9 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 			sort.Strings(known)
 			return modelTestRequest{}, fmt.Errorf("unknown tier %q (known: %s)", request.Tier, strings.Join(known, ", "))
 		}
-		addTarget(request.Tier, modelName)
+		addTarget(request.Tier, definition.Model, definition.Variant)
 	case request.Model != "":
-		addTarget("", request.Model)
+		addTarget("", request.Model, request.Variant)
 	default:
 		// Empty body: every configured tier, deduplicated by pair.
 		tierNames := make([]string, 0, len(resolvedTiers.Tiers))
@@ -392,7 +393,8 @@ func parseModelTestRequest(request modelTestRequestBody, resolvedTiers models.Co
 		}
 		sort.Strings(tierNames)
 		for _, tierName := range tierNames {
-			addTarget(tierName, resolvedTiers.Tiers[tierName])
+			definition := resolvedTiers.Tiers[tierName]
+			addTarget(tierName, definition.Model, definition.Variant)
 		}
 	}
 	if len(targets) == 0 {
@@ -545,13 +547,16 @@ func (api *API) runModelCheck(ctx context.Context, principal authz.Principal, ch
 		selection := models.Selection{
 			Tier:     target.Tier,
 			Provider: models.SplitProvider(target.Model),
-			Options:  models.Options{Model: target.Model},
+			Options:  models.Options{Model: target.Model, Variant: target.Variant},
 		}
 		outcome := tester.TestModel(ctx, selection, deadline)
+		// All three identity fields come from the outcome, not the target: the
+		// 202 already handed the client the targets, and the result must say
+		// what the adapter actually checked — one source, not a spliced pair.
 		result := modelCheckResult{
-			Tier:      target.Tier,
-			Model:     target.Model,
-			Variant:   target.Variant,
+			Tier:      outcome.Tier,
+			Model:     outcome.Model,
+			Variant:   outcome.Variant,
 			Outcome:   outcome.Outcome,
 			LatencyMs: outcome.Latency.Milliseconds(),
 			Reason:    outcome.Reason,

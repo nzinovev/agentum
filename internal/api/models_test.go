@@ -18,13 +18,18 @@ import (
 )
 
 // modelSurfaceAdapter fakes the adapter behind the model surface: a fixed
-// descriptor + catalog, and a ModelTester that counts invocations and can be
-// held mid-check so "running" is observable deterministically.
+// descriptor + catalog, and a ModelTester that counts invocations, records the
+// selections it was handed, and can be held mid-check so "running" is
+// observable deterministically.
 type modelSurfaceAdapter struct {
 	descriptor agent.Descriptor
 	catalog    models.Catalog
 	// testCalls counts TestModel invocations.
 	testCalls int
+	// selections records every selection TestModel was handed, so a test can
+	// assert the pair that reached the adapter rather than the pair the
+	// request carried.
+	selections []models.Selection
 	// release, when non-nil, is closed by TestModel before it returns: the
 	// check blocks on gate until the test lets it finish.
 	gate chan struct{}
@@ -44,6 +49,7 @@ func (fake *modelSurfaceAdapter) Catalog(context.Context) models.Catalog { retur
 func (fake *modelSurfaceAdapter) TestModel(ctx context.Context, selection models.Selection, deadline time.Duration) agent.ModelCheck {
 	fake.mu.Lock()
 	fake.testCalls++
+	fake.selections = append(fake.selections, selection)
 	fake.mu.Unlock()
 	if fake.gate != nil {
 		// A blocked check is still deadline-bounded; the tests release long
@@ -55,7 +61,7 @@ func (fake *modelSurfaceAdapter) TestModel(ctx context.Context, selection models
 	}
 	latency := 25 * time.Millisecond
 	return agent.ModelCheck{
-		Model: selection.Options.Model, Tier: selection.Tier,
+		Model: selection.Options.Model, Variant: selection.Options.Variant, Tier: selection.Tier,
 		Outcome: agent.ModelCheckOK, Latency: latency, CheckedAt: time.Now().UTC(),
 	}
 }
@@ -64,6 +70,13 @@ func (fake *modelSurfaceAdapter) calls() int {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.testCalls
+}
+
+// handedSelections returns a copy of the selections TestModel received.
+func (fake *modelSurfaceAdapter) handedSelections() []models.Selection {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]models.Selection(nil), fake.selections...)
 }
 
 // newModelSurfaceAPI builds an API wired for the model-surface tests: the
@@ -94,10 +107,12 @@ func newModelSurfaceAPI(t *testing.T, gate chan struct{}) (*API, *modelSurfaceAd
 	apiInst := New(nil, nil, nil, nil,
 		WithExecutionAdapter(fake),
 		WithResolvedTiers(models.Config{
-			Tiers: map[string]string{
-				"fast":   "prov/one-model",
-				"strong": "prov/one-model",
-				"deep":   "prov/other-model",
+			Tiers: map[string]models.TierDefinition{
+				"fast": {Model: "prov/one-model"},
+				// strong names the same pair as fast, so the empty-body
+				// dedupe shape survives; deep carries the variant.
+				"strong": {Model: "prov/one-model"},
+				"deep":   {Model: "prov/other-model", Variant: "high"},
 			},
 			Default: "strong",
 		}),
@@ -176,17 +191,19 @@ func TestModelsSurface_ListTiersAndCatalogStatus(t *testing.T) {
 	if len(response.Tiers) != 3 {
 		t.Fatalf("tiers = %+v; want the three configured", response.Tiers)
 	}
-	for _, expected := range []struct{ tier, model string }{
-		{"deep", "prov/other-model"}, {"fast", "prov/one-model"}, {"strong", "prov/one-model"},
+	for _, expected := range []struct{ tier, model, variant string }{
+		{"deep", "prov/other-model", "high"},
+		{"fast", "prov/one-model", ""},
+		{"strong", "prov/one-model", ""},
 	} {
 		matched := false
 		for _, tier := range response.Tiers {
-			if tier.Tier == expected.tier && tier.Model == expected.model && tier.Variant == "" && tier.InCatalog {
+			if tier.Tier == expected.tier && tier.Model == expected.model && tier.Variant == expected.variant && tier.InCatalog {
 				matched = true
 			}
 		}
 		if !matched {
-			t.Errorf("tiers = %+v; want %s -> %s, in catalog, no variant", response.Tiers, expected.tier, expected.model)
+			t.Errorf("tiers = %+v; want %s -> %s/%s, in catalog", response.Tiers, expected.tier, expected.model, expected.variant)
 		}
 	}
 }
@@ -291,9 +308,10 @@ func TestModelsSurface_MissingHeaderIsRefused(t *testing.T) {
 
 // TestModelsSurface_BadRequests covers the validation table: an unknown tier,
 // a timeout above the ceiling (named in the message), an unknown body field,
-// and tier+model together.
+// tier+model together, a variant overriding a tier's own, and a variant with
+// no target at all.
 func TestModelsSurface_BadRequests(t *testing.T) {
-	apiInst, _ := newModelSurfaceAPI(t, nil)
+	apiInst, fake := newModelSurfaceAPI(t, nil)
 	cases := []struct {
 		name string
 		body string
@@ -303,10 +321,10 @@ func TestModelsSurface_BadRequests(t *testing.T) {
 		{"timeout above ceiling", `{"tier":"fast","timeout_seconds":9999}`, "between 1 and 120"},
 		{"unknown body field", `{"tiers":"fast"}`, "parse body"},
 		{"tier and model together", `{"tier":"fast","model":"prov/one-model"}`, "mutually exclusive"},
-		// The adapter has no variant parameter yet; a check that echoed the
-		// field while running without it would answer a question nobody
-		// asked. Refused, not dropped.
-		{"variant not supported yet", `{"model":"prov/one-model","variant":"high"}`, "variant is not supported"},
+		// A tier carries its own variant from models.yaml; a request that
+		// overrode it would check a pair the process never runs.
+		{"variant with a tier", `{"tier":"deep","variant":"low"}`, "variant is not accepted with a tier"},
+		{"variant without a target", `{"variant":"high"}`, "variant needs a model"},
 	}
 	for _, testCase := range cases {
 		recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-"+testCase.name, testCase.body)
@@ -317,6 +335,9 @@ func TestModelsSurface_BadRequests(t *testing.T) {
 		if !strings.Contains(recorder.Body.String(), testCase.want) {
 			t.Errorf("%s: body = %s; want it to contain %q", testCase.name, recorder.Body, testCase.want)
 		}
+	}
+	if calls := fake.calls(); calls != 0 {
+		t.Errorf("adapter tested %d times; a refused request must test nothing", calls)
 	}
 }
 
@@ -397,6 +418,117 @@ func TestModelsSurface_UnauthenticatedIsRefused(t *testing.T) {
 	apiInst.handleGetModelTest(stateRecorder, httptest.NewRequest("GET", "/api/v1/models/test/chk_x", nil))
 	if stateRecorder.Code != 401 {
 		t.Errorf("GET /models/test/{id} without a principal = %d; want 401", stateRecorder.Code)
+	}
+}
+
+// TestModelsSurface_TierTargetCarriesItsVariant: a check named by tier hands
+// the adapter the tier's full pair — model and variant — asserted from the
+// selection the fake received, not from the request body.
+func TestModelsSurface_TierTargetCarriesItsVariant(t *testing.T) {
+	apiInst, fake := newModelSurfaceAPI(t, nil)
+
+	recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-tier-pair", `{"tier":"deep"}`)
+	if recorder.Code != 202 {
+		t.Fatalf("status = %d; body %s", recorder.Code, recorder.Body)
+	}
+	var accepted struct {
+		Targets []struct {
+			Tier    string `json:"tier"`
+			Model   string `json:"model"`
+			Variant string `json:"variant"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &accepted); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, recorder.Body)
+	}
+	if len(accepted.Targets) != 1 {
+		t.Fatalf("targets = %+v; want the one tier", accepted.Targets)
+	}
+	target := accepted.Targets[0]
+	if target.Model != "prov/other-model" || target.Variant != "high" {
+		t.Errorf("target = %+v; want the tier's model and variant", target)
+	}
+	waitForModelCheckCalls(t, fake, 1)
+	for _, selection := range fake.handedSelections() {
+		if selection.Options.Variant != "high" || selection.Options.Model != "prov/other-model" {
+			t.Errorf("adapter received %+v; want the tier's pair", selection.Options)
+		}
+	}
+}
+
+// TestModelsSurface_ExplicitPairIsCheckedAsOneUnit: {model, variant} names
+// the pair directly. The same model under two variants is TWO paid calls —
+// they answer different questions — while the identical pair is one.
+func TestModelsSurface_ExplicitPairIsCheckedAsOneUnit(t *testing.T) {
+	apiInst, fake := newModelSurfaceAPI(t, nil)
+
+	recorder := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-explicit-pair",
+		`{"model":"prov/one-model","variant":"high"}`)
+	if recorder.Code != 202 {
+		t.Fatalf("status = %d; body %s", recorder.Code, recorder.Body)
+	}
+	var accepted struct {
+		Targets []struct {
+			Model   string `json:"model"`
+			Variant string `json:"variant"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &accepted); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, recorder.Body)
+	}
+	if len(accepted.Targets) != 1 || accepted.Targets[0].Variant != "high" {
+		t.Fatalf("targets = %+v; want the explicit pair", accepted.Targets)
+	}
+	waitForModelCheckCalls(t, fake, 1)
+	selections := fake.handedSelections()
+	if len(selections) != 1 || selections[0].Options.Variant != "high" {
+		t.Errorf("adapter received %+v; want the explicit pair", selections)
+	}
+}
+
+// TestModelsSurface_VariantsOfOneModelAreDistinctTargets: the same model
+// under two variants is TWO paid calls — they answer different questions —
+// while two tiers naming the identical pair stay one (the empty-body dedupe
+// the other test pins). Driven as two requests because one request names one
+// intent.
+func TestModelsSurface_VariantsOfOneModelAreDistinctTargets(t *testing.T) {
+	apiInst, fake := newModelSurfaceAPI(t, nil)
+
+	first := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-pair-a", `{"model":"prov/one-model"}`)
+	if first.Code != 202 {
+		t.Fatalf("first status = %d; body %s", first.Code, first.Body)
+	}
+	second := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-pair-b", `{"model":"prov/one-model","variant":"high"}`)
+	if second.Code != 202 {
+		t.Fatalf("second status = %d; body %s", second.Code, second.Body)
+	}
+	waitForModelCheckCalls(t, fake, 2)
+	variants := map[string]bool{}
+	for _, selection := range fake.handedSelections() {
+		variants[selection.Options.Variant] = true
+	}
+	if !variants[""] || !variants["high"] {
+		t.Errorf("adapter saw variants %v; want both the bare model and the variant pair", variants)
+	}
+}
+
+// TestModelsSurface_ReusedKeyWithDifferentPairConflicts: the fingerprint
+// hashes the targets, so the same Idempotency-Key naming a different pair is
+// the same 409 as a different model — a key names one intent, and the intent
+// includes the variant.
+func TestModelsSurface_ReusedKeyWithDifferentPairConflicts(t *testing.T) {
+	apiInst, _ := newModelSurfaceAPI(t, nil)
+
+	first := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-pair-conflict", `{"model":"prov/one-model"}`)
+	if first.Code != 202 {
+		t.Fatalf("first status = %d; body %s", first.Code, first.Body)
+	}
+	conflict := modelSurfaceRequest(t, apiInst, "POST", "/api/v1/models/test", "key-pair-conflict", `{"model":"prov/one-model","variant":"high"}`)
+	if conflict.Code != 409 {
+		t.Fatalf("conflict status = %d; body %s", conflict.Code, conflict.Body)
+	}
+	if !strings.Contains(conflict.Body.String(), "Idempotency-Key") {
+		t.Errorf("body = %s; want it to name the header", conflict.Body)
 	}
 }
 

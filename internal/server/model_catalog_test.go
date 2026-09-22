@@ -34,10 +34,10 @@ func catalogStubDescriptor() agent.Descriptor {
 	return agent.Descriptor{
 		ID:               "stub",
 		AdapterVersion:   "0.0.0-test",
-		ModelOptions:     []models.OptionName{models.OptionModel},
+		ModelOptions:     []models.OptionName{models.OptionModel, models.OptionVariant},
 		EnumeratesModels: true,
 		DefaultTiers: models.Config{
-			Tiers:   map[string]string{"fast": "stub/fast-model"},
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/fast-model"}},
 			Default: "fast",
 		},
 	}
@@ -57,7 +57,7 @@ func TestValidateModelTiers_BrokenTierStopsTheProcess(t *testing.T) {
 			catalog: models.Catalog{Available: true, Models: []models.CatalogModel{{ID: "stub/fast-model"}}},
 		},
 		models: &models.Config{
-			Tiers:   map[string]string{"fast": "stub/typo-model"},
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/typo-model"}},
 			Default: "fast",
 		},
 	}
@@ -84,7 +84,7 @@ func TestValidateModelTiers_UnavailableCatalogBoots(t *testing.T) {
 			catalog:    models.Catalog{Reason: "timeout"},
 		},
 		models: &models.Config{
-			Tiers:   map[string]string{"fast": "stub/any-model-at-all"},
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/any-model-at-all"}},
 			Default: "fast",
 		},
 	}
@@ -103,7 +103,7 @@ func TestValidateModelTiers_NonEnumeratingAdapterIsNeverAsked(t *testing.T) {
 		log:     quietLogger(),
 		adapter: &catalogStubAdapter{descriptor: descriptor},
 		models: &models.Config{
-			Tiers:   map[string]string{"fast": "stub/fast-model"},
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/fast-model"}},
 			Default: "fast",
 		},
 	}
@@ -159,5 +159,78 @@ func TestValidateModelTiers_DefaultsPresentBoots(t *testing.T) {
 	}
 	if err := instance.validateModelTiers(context.Background()); err != nil {
 		t.Fatalf("valid default tiers must boot: %v", err)
+	}
+}
+
+// TestValidateModelTiers_VariantOutsideVocabularyStopsTheProcess: a tier whose
+// variant the model's declared vocabulary does not contain is a boot refusal
+// naming the tier, the model, and the vocabulary — the runtime would run a
+// different effort silently, so boot is the only place the typo surfaces.
+func TestValidateModelTiers_VariantOutsideVocabularyStopsTheProcess(t *testing.T) {
+	instance := &Server{
+		log: quietLogger(),
+		adapter: &catalogStubAdapter{
+			descriptor: catalogStubDescriptor(),
+			catalog: models.Catalog{Available: true, Models: []models.CatalogModel{
+				{ID: "stub/fast-model", Variants: []string{"high", "low"}, VariantsKnown: true},
+			}},
+		},
+		models: &models.Config{
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/fast-model", Variant: "medium"}},
+			Default: "fast",
+		},
+	}
+	err := instance.validateModelTiers(context.Background())
+	if err == nil {
+		t.Fatal("a variant outside the declared vocabulary must stop the process at boot")
+	}
+	message := err.Error()
+	for _, wanted := range []string{`tier "fast"`, `declares no variant "medium"`, "declares: high, low", `"stub"`} {
+		if !strings.Contains(message, wanted) {
+			t.Errorf("error %q does not name %q", message, wanted)
+		}
+	}
+}
+
+// TestValidateModelTiers_UnknownVocabularyBoots: a catalog whose records came
+// without a readable variants field cannot ground a variant refusal — the
+// process boots and the run proceeds with the configured variant unchecked.
+func TestValidateModelTiers_UnknownVocabularyBoots(t *testing.T) {
+	instance := &Server{
+		log: quietLogger(),
+		adapter: &catalogStubAdapter{
+			descriptor: catalogStubDescriptor(),
+			catalog: models.Catalog{Available: true, Models: []models.CatalogModel{
+				{ID: "stub/fast-model", VariantsKnown: false},
+			}},
+		},
+		models: &models.Config{
+			Tiers:   map[string]models.TierDefinition{"fast": {Model: "stub/fast-model", Variant: "medium"}},
+			Default: "fast",
+		},
+	}
+	if err := instance.validateModelTiers(context.Background()); err != nil {
+		t.Fatalf("an unknown vocabulary must not stop the process: %v", err)
+	}
+}
+
+// TestValidateModelTiers_InconsistentTierFailsThroughResolve: a tier with a
+// variant but no model — assembled in Go, Load never involved — is refused at
+// boot by the same consistency check the file path applies.
+func TestValidateModelTiers_InconsistentTierFailsThroughResolve(t *testing.T) {
+	instance := &Server{
+		log:     quietLogger(),
+		adapter: &catalogStubAdapter{descriptor: catalogStubDescriptor(), catalog: models.Catalog{Available: true, Models: []models.CatalogModel{{ID: "stub/fast-model"}}}},
+		models: &models.Config{
+			Tiers:   map[string]models.TierDefinition{"fast": {Variant: "high"}},
+			Default: "fast",
+		},
+	}
+	err := instance.validateModelTiers(context.Background())
+	if err == nil {
+		t.Fatal("a variant without a model must stop the process at boot")
+	}
+	if !strings.Contains(err.Error(), `declares variant "high" but no model`) {
+		t.Errorf("error %q does not name the variant", err)
 	}
 }

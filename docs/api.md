@@ -371,7 +371,7 @@ manifest body. Reason strings:
 | Axis | Reasons |
 |---|---|
 | `prompts` | `prompt-hash` (differing `stage_prompt_hash` on a shared attempt), `prompt-set` |
-| `model` | `model-id`, `model-tier`, `model-provider`, `model-options`, `model-set` |
+| `model` | `model-id`, `model-tier`, `model-provider`, `model-variant`, `model-options`, `model-set` |
 | `capabilities` | `capability-declared`, `capability-granted`, `capability-effective` |
 | `adapter` | `adapter-id`, `adapter-version`, `adapter-runtime-version`, `adapter-capabilities` |
 
@@ -402,7 +402,7 @@ tenant-scoped, like `run:create`.
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
 | `GET` | `/models` | ✅ | → `200` with the adapter id, the default tier, the catalog status, and the resolved tiers |
-| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. `variant` is refused (`400`) until the adapter has a variant parameter — the response would otherwise carry a field the check did not use |
+| `POST` | `/models/test` | ✅ | requires an `Idempotency-Key` header; body `{tier}` or `{model, variant?}` or empty (all tiers), optional `timeout_seconds` (1–120, default 60) → `202 {check_id, targets}`. A `variant` alongside a `tier`, or with no target at all, is `400 bad_input`: the tier carries its own variant, and a variant qualifies a model |
 | `GET` | `/models/test/{id}` | ✅ | → `200 {check_id, state, results}` / `404 not_found` |
 
 ### `GET /models`
@@ -414,7 +414,7 @@ tenant-scoped, like `run:create`.
   "catalog": {"status": "ok", "models": 30, "checked_at": "2026-09-09T12:00:00Z"},
   "tiers": [
     {"tier": "fast",   "model": "zai-coding-plan/glm-5.2-highspeed", "variant": "", "in_catalog": true},
-    {"tier": "strong", "model": "zai-coding-plan/glm-5.3",           "variant": "", "in_catalog": true}
+    {"tier": "strong", "model": "zai-coding-plan/glm-5.3",           "variant": "high", "in_catalog": true}
   ]
 }
 ```
@@ -422,7 +422,8 @@ tenant-scoped, like `run:create`.
 `catalog.status` uses the probe label vocabulary: `ok`, `failed: <reason>`,
 or `unsupported` (the adapter cannot list its runtime). `in_catalog` is
 false whenever that question could not be answered — the status field records
-which of the two it was. The tiers are the boot-resolved values runs use,
+which of the two it was. `variant` is the tier's own, empty when the tier
+declares none. The tiers are the boot-resolved values runs use,
 never a re-read of the file.
 
 ### `POST /models/test` — accept, don't hold the session
@@ -430,8 +431,9 @@ never a re-read of the file.
 The check invokes the model, which can take up to the timeout, so the request
 is **accepted** (`202`) and executed in the background; results arrive as
 events on the tenant stream and `GET /models/test/{id}` serves state for a
-reconnecting client. Targets are deduplicated by model — three tiers naming
-one model are one paid call — and execution is serialized, so accepted checks
+reconnecting client. Targets are deduplicated by the exact `(model, variant)`
+pair — three tiers naming one pair are one paid call, while the same model
+under two variants is two — and execution is serialized, so accepted checks
 queue rather than fan out.
 
 **`Idempotency-Key` is required.** Without it, a retried request runs a second
@@ -447,7 +449,7 @@ unknown one.
 | same `Idempotency-Key`, same body | `202` + the **same** `check_id`; no second check runs |
 | same key, different body | `409 conflict` — a key matches one body |
 | header absent | `400 bad_input` (header named) |
-| unknown tier / broken body / `timeout_seconds` above the ceiling / `variant` | `400 bad_input` (ceiling named; variant is not supported yet) |
+| unknown tier / broken body / `timeout_seconds` above the ceiling / a `variant` with a `tier` or without a target | `400 bad_input` (ceiling named; the variant refusals say which shape to send instead) |
 | already `8` unfinished checks queued for the tenant | `429 too_many_requests` (cap named; replays of accepted checks still return `202`) |
 | unknown, TTL-expired, or foreign `check_id` on GET | `404 not_found` (finished results remain in the tenant's event stream) |
 
@@ -473,7 +475,7 @@ replay), one event per model so a live consumer sees progress:
 | `event` | When | Payload |
 |---|---|---|
 | `models.test_started` | request accepted | `{check_id, targets}` |
-| `models.test_model_checked` | after each model | `{check_id, tier, model, variant, outcome, latency_ms, reason}` |
+| `models.test_model_checked` | after each model | `{check_id, tier, model, variant, outcome, latency_ms, reason}` — `variant` is the pair the check ran with, empty when none was set |
 | `models.test_finished` | all targets checked | `{check_id, results, duration_ms}` |
 
 The events carry no `run_id` (a check is not a run) and the actor is `human`:
@@ -540,7 +542,7 @@ data: {"run_id":"...","stage":"implement","stop_reason":"gate"}
 | `memory.committed` | `{run_id, entries:[...]}` | memory layer at final approval |
 | `run.log` | `{run_id, level, message}` | runner / adapter diagnostics |
 | `models.test_started` | `{check_id, targets}` | API when an on-demand model check is accepted (no `run_id`; see "Models") |
-| `models.test_model_checked` | `{check_id, tier, model, variant, outcome, latency_ms, reason}` | API after each checked model |
+| `models.test_model_checked` | `{check_id, tier, model, variant, outcome, latency_ms, reason}` — `variant` carries the checked pair's variant, empty when none | API after each checked model |
 | `models.test_finished` | `{check_id, results, duration_ms}` | API when the check completes |
 
 Pre-release: the `payload` shapes are stable in shape but may gain fields; the

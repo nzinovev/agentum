@@ -57,10 +57,11 @@ type Descriptor struct {
 }
 
 // clone returns a deep copy so a caller cannot mutate the adapter's declared
-// defaults through the value Describe handed it. The slice and the tiers map
-// are the only mutable parts, and a nil one stays nil: "declares no tiers" and
+// defaults through the value Describe handed it. The slices and the tiers map
+// are the mutable parts, and a nil one stays nil: "declares no tiers" and
 // "declares an empty tier set" are different claims, and models.Resolve reads
-// them differently.
+// them differently. The tier values themselves are two strings — copying the
+// map by key is a deep copy.
 func (descriptor Descriptor) clone() Descriptor {
 	out := descriptor
 	if descriptor.ModelOptions != nil {
@@ -70,9 +71,9 @@ func (descriptor Descriptor) clone() Descriptor {
 		out.AutoInstructions = append([]string(nil), descriptor.AutoInstructions...)
 	}
 	if descriptor.DefaultTiers.Tiers != nil {
-		out.DefaultTiers.Tiers = make(map[string]string, len(descriptor.DefaultTiers.Tiers))
-		for tier, model := range descriptor.DefaultTiers.Tiers {
-			out.DefaultTiers.Tiers[tier] = model
+		out.DefaultTiers.Tiers = make(map[string]models.TierDefinition, len(descriptor.DefaultTiers.Tiers))
+		for tier, definition := range descriptor.DefaultTiers.Tiers {
+			out.DefaultTiers.Tiers[tier] = definition
 		}
 	}
 	return out
@@ -84,19 +85,24 @@ func (descriptor Descriptor) clone() Descriptor {
 // The names are a build-time claim about the runtime's catalog and are
 // checked against it at boot — upstream renames and removals have retired
 // defaults before, and the boot check is what turns that drift into a named
-// error instead of every run failing on start.
+// error instead of every run failing on start. The defaults declare no
+// variant: which effort a fresh install runs at is the runtime's own
+// behaviour, not a claim this build makes for it.
 var opencodeDescriptor = Descriptor{
-	ID:               AdapterOpencode,
-	AdapterVersion:   "1.0.0",
+	ID: AdapterOpencode,
+	// 1.1.0: the argv grew --variant and the declared option set grew with
+	// it — the bump is what keeps the adapter-version diff axis saying
+	// "same adapter, different observable behaviour" across this change.
+	AdapterVersion:   "1.1.0",
 	Binary:           "opencode",
-	ModelOptions:     []models.OptionName{models.OptionModel},
+	ModelOptions:     []models.OptionName{models.OptionModel, models.OptionVariant},
 	EnumeratesModels: true,
 	AutoInstructions: autoInstructionBaseline,
 	DefaultTiers: models.Config{
-		Tiers: map[string]string{
-			"fast":      "opencode/nemotron-3.5-lightning-free",
-			"strong":    "opencode/muse-spark-1.3-contributor-free",
-			"reasoning": "opencode/nemotron-3-ultra-free",
+		Tiers: map[string]models.TierDefinition{
+			"fast":      {Model: "opencode/nemotron-3.5-lightning-free"},
+			"strong":    {Model: "opencode/muse-spark-1.3-contributor-free"},
+			"reasoning": {Model: "opencode/nemotron-3-ultra-free"},
 		},
 		Default: "strong",
 	},

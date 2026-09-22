@@ -9,6 +9,18 @@ Once tagged releases begin, this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **A tier in `models.yaml` may declare a `variant` alongside its model.** The
+  value is the runtime's reasoning-effort setting and reaches the agent's
+  `--variant` flag, so "plan on high effort, implement on low" is two tiers on
+  one model with different variants, wired to stages by `stage.tier`. The value
+  is checked against the runtime's own per-model variant listing at boot, run
+  start, and `Invoke`; a variant the model does not declare fails with the
+  declared vocabulary named, and `GET /api/v1/models` plus the model check
+  (`POST /api/v1/models/test`, `{model, variant}`) carry the pair. Nothing to
+  do unless you want the setting: tiers without a `variant` run exactly as
+  before.
+
 ### Fixed
 - **The model-check registry is tenant-scoped.** Before this, keys were keyed
   by the bare header and check reads by the bare id, so a second tenant could
@@ -22,10 +34,6 @@ Once tagged releases begin, this project adheres to
   without a `models.yaml`, the new defaults apply on the next boot:
   `fast` → `opencode/nemotron-3.5-lightning-free`, `strong` →
   `opencode/muse-spark-1.3-contributor-free`; `reasoning` is unchanged.
-- **A model-check request carrying `variant` returns `400 bad_input` naming
-  the field.** Before this, the response and events echoed the requested
-  variant while the check ran without it. If you send `variant` to
-  `POST /api/v1/models/test`, drop the field until the adapter accepts one.
 - **The accepted-check queue is bounded per tenant.** Before this, every
   `202` queued a goroutine with no backpressure, so a hundred keys were a
   hundred paid calls queued. Past 8 unfinished checks the answer is

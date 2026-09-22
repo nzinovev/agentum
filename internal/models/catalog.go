@@ -102,6 +102,37 @@ func (unknown *UnknownModel) Error() string {
 
 func (unknown *UnknownModel) Unwrap() error { return ErrUnknownModel }
 
+// ErrUnknownVariant is returned by Catalog.Validate for a selection whose
+// variant a fully-read catalog does not list for the requested model. The
+// runtime does not refuse an unknown variant itself — it silently runs the
+// model at a different effort — so this check is the only place the mistake
+// surfaces. It does not wrap ErrUnknownModel: a variant refusal says the model
+// was found.
+var ErrUnknownVariant = errors.New("models: unknown variant")
+
+// UnknownVariant is the typed refusal for a variant a catalog read in full
+// does not list for the requested model. Variants carries the vocabulary the
+// model DOES declare (empty when it declares none at all), so the message can
+// enumerate it; the caller adds tier, stage, and adapter by the same scheme as
+// UnknownModel.
+type UnknownVariant struct {
+	Model    string
+	Variant  string
+	Variants []string
+}
+
+// Error renders the refusal with its fix: the declared vocabulary, or the
+// statement that the model declares none.
+func (unknown *UnknownVariant) Error() string {
+	if len(unknown.Variants) == 0 {
+		return fmt.Sprintf("model %q declares no variants at all", unknown.Model)
+	}
+	return fmt.Sprintf("model %q declares no variant %q (declares: %s)",
+		unknown.Model, unknown.Variant, strings.Join(unknown.Variants, ", "))
+}
+
+func (unknown *UnknownVariant) Unwrap() error { return ErrUnknownVariant }
+
 // usable reports whether this catalog may ground a refusal: it was obtained,
 // and it is not empty. An empty catalog that reports Available counts as not
 // obtained. Reading it as "the runtime runs nothing" would refuse every model
@@ -124,8 +155,11 @@ func (catalog Catalog) Lookup(model string) (CatalogModel, bool) {
 // catalog cannot ground a refusal — not obtained, unreadable, or empty — so a
 // transient probe failure never turns into "no such model" for models that
 // exist. Against a full catalog an unknown model is a typed *UnknownModel
-// carrying the fix. An empty model string is not this check's question
-// (configuration refuses it elsewhere) and passes.
+// carrying the fix. A variant is checked only when the model was found and the
+// record's vocabulary was readable (VariantsKnown): an unknown vocabulary is
+// "cannot conclude", not "declares nothing", and validates as nil. An empty
+// model string is not this check's question (configuration refuses it
+// elsewhere) and passes.
 func (catalog Catalog) Validate(selection Selection) error {
 	if !catalog.usable() {
 		return nil
@@ -134,14 +168,22 @@ func (catalog Catalog) Validate(selection Selection) error {
 	if model == "" {
 		return nil
 	}
-	if _, found := catalog.Lookup(model); found {
+	entry, found := catalog.Lookup(model)
+	if !found {
+		provider := SplitProvider(model)
+		if provider != "" && !containsString(catalog.Providers(), provider) {
+			return &UnknownModel{Model: model, Providers: catalog.Providers()}
+		}
+		return &UnknownModel{Model: model, Suggestions: catalog.Suggest(model), Source: catalog.Source}
+	}
+	variant := selection.Options.Variant
+	if variant == "" || !entry.VariantsKnown {
 		return nil
 	}
-	provider := SplitProvider(model)
-	if provider != "" && !containsString(catalog.Providers(), provider) {
-		return &UnknownModel{Model: model, Providers: catalog.Providers()}
+	if containsString(entry.Variants, variant) {
+		return nil
 	}
-	return &UnknownModel{Model: model, Suggestions: catalog.Suggest(model), Source: catalog.Source}
+	return &UnknownVariant{Model: model, Variant: variant, Variants: entry.Variants}
 }
 
 // Suggest returns the catalog models within suggestMaxDistance edits of the

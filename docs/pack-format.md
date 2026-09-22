@@ -91,7 +91,7 @@ stages:
 | `capabilities` | list | Pack-wide MCP capability declarations. A stage narrows to the pack∩stage subset (enforcement comes later). |
 | `budgets.fix_cycles` | int | Per-pipeline fix-loop cap, ≥ 0. Replaces a hardcoded cycle count. |
 | `budgets.ask_to_edit` | int | Per-pipeline scoped-edit recursion cap, ≥ 0. |
-| `tiers.default` | string | Fallback tier name. Resolves to a concrete model id via the BYO-models config (not yet wired). |
+| `tiers.default` | string | Fallback tier name. Resolves through the BYO-models config to a model id and an optional variant (`docs/models.md`). |
 | `checks` | object | Optional. Adds project checks to every run of this pack **by name only** — `required` makes a check mandatory (failure blocks delivery), `optional` runs it without blocking. Names must exist in the project registry (`.agentum.yaml`); `checks.Resolve` rejects unknown names at run time. A pack can never supply a command, remove a baseline check, or weaken an already-mandatory check. |
 | `entry` | string | The stage the run starts at. Must be defined in `stages`. |
 | `stages` | map | Named map of stage id → stage definition. See below. |

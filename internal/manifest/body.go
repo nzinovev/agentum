@@ -928,7 +928,11 @@ func fillInvocationEvidence(existing InvocationEvidence, patch InvocationEvidenc
 	if patch.Adapter.ID != "" {
 		existing.Adapter = patch.Adapter
 	}
-	if patch.Model.Tier != "" || patch.Model.Options.Model != "" {
+	// Selection is comparable, so the guard is the zero value rather than a
+	// field enumeration — the opening write always sets the model and tier
+	// whole, and an enumeration here is a trap for the next field Options
+	// grows.
+	if patch.Model != (models.Selection{}) {
 		existing.Model = patch.Model
 	}
 	if patch.Prompt.StagePromptHash != "" {

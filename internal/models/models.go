@@ -50,23 +50,37 @@ const (
 // failure and a working default. Wrapped with the path by Load.
 var errEmptyConfig = errors.New("declares no tiers; delete the file to use the execution adapter's built-in tiers")
 
-// Config is a tier→model mapping plus the default tier. The file format is
-// unchanged from schema day one: tiers stay map[string]string, and the object
-// form (strong: {model: …, variant: high}) is later work that will grow the
-// value type, not this shape.
+// TierDefinition is one tier as an operator writes it in models.yaml. The
+// value is either a bare string naming the model, or a mapping of model and an
+// optional variant. Variant is the runtime's reasoning-effort setting.
+//
+// This is the FILE format, deliberately not the adapter contract: a key added
+// here does not reach an argv until the adapter's descriptor declares it, and
+// an adapter option does not become a file key here. Merging the two would
+// make every future adapter option YAML surface and every future file key an
+// argv candidate by construction.
+type TierDefinition struct {
+	Model   string `yaml:"model"`
+	Variant string `yaml:"variant,omitempty"`
+}
+
+// Config is a tier→definition mapping plus the default tier.
 type Config struct {
-	Tiers   map[string]string `yaml:"tiers"`
-	Default string            `yaml:"default"`
+	Tiers   map[string]TierDefinition `yaml:"tiers"`
+	Default string                    `yaml:"default"`
 }
 
 // OptionName is the name of one model parameter an adapter may or may not
-// understand (e.g. "model", later "variant"). The vocabulary of names lives
-// here; which subset a runtime accepts lives in the adapter's descriptor.
+// understand (e.g. "model", "variant"). The vocabulary of names lives here;
+// which subset a runtime accepts lives in the adapter's descriptor.
 type OptionName string
 
 // OptionModel selects the model string passed to the runtime's --model flag.
-// A per-variant option selects OptionVariant.
-const OptionModel OptionName = "model"
+// OptionVariant selects the reasoning-effort setting passed to --variant.
+const (
+	OptionModel   OptionName = "model"
+	OptionVariant OptionName = "variant"
+)
 
 // Options is the structured model configuration handed to an adapter. It is a
 // closed struct: a parameter that is not a field here does not exist, and no
@@ -74,37 +88,81 @@ const OptionModel OptionName = "model"
 // rendering it into a string) is what lets an adapter refuse a parameter it
 // cannot honor instead of dropping it.
 type Options struct {
-	Model string `json:"model,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Variant string `json:"variant,omitempty"`
+}
+
+// Option is one populated model parameter: its name and the value it carries.
+// The value is part of the record because a refusal naming only "variant" does
+// not say which of the three tiers declared it.
+type Option struct {
+	Name  OptionName
+	Value string
+}
+
+// Populated returns the populated options as name+value pairs, sorted by name,
+// so the set is stable for comparisons and error messages.
+func (options Options) Populated() []Option {
+	populated := make([]Option, 0, 2)
+	if options.Model != "" {
+		populated = append(populated, Option{Name: OptionModel, Value: options.Model})
+	}
+	if options.Variant != "" {
+		populated = append(populated, Option{Name: OptionVariant, Value: options.Variant})
+	}
+	sort.Slice(populated, func(left, right int) bool { return populated[left].Name < populated[right].Name })
+	return populated
 }
 
 // Names returns the populated option names, sorted, so the set is stable for
 // comparisons and error messages.
 func (options Options) Names() []OptionName {
-	names := make([]OptionName, 0, 1)
-	if options.Model != "" {
-		names = append(names, OptionModel)
+	populated := options.Populated()
+	names := make([]OptionName, 0, len(populated))
+	for _, option := range populated {
+		names = append(names, option.Name)
 	}
-	sort.Slice(names, func(left, right int) bool { return names[left] < names[right] })
 	return names
+}
+
+// Validate returns an error for an empty or whitespace-only model and for a
+// variant that is only whitespace. An empty Variant is the absence of the
+// option and passes; a variant without a model names the variant, because
+// "which effort" is not a question until "which model" is answered. The
+// strictly-empty-variant-key refusal belongs to the file format and lives in
+// TierDefinition.UnmarshalYAML.
+func (options Options) Validate() error {
+	if strings.TrimSpace(options.Model) == "" {
+		if options.Variant != "" {
+			return fmt.Errorf("declares variant %q but no model", options.Variant)
+		}
+		return errors.New("has an empty model string")
+	}
+	if options.Variant != "" && strings.TrimSpace(options.Variant) == "" {
+		return fmt.Errorf("variant %q is only whitespace", options.Variant)
+	}
+	return nil
 }
 
 // ErrUnsupportedOption is returned by SupportedBy when an option is populated
 // that the declared supported set does not contain.
 var ErrUnsupportedOption = errors.New("models: unsupported model option")
 
-// UnsupportedOption wraps ErrUnsupportedOption with the option names the
+// UnsupportedOption wraps ErrUnsupportedOption with the populated options the
 // declared enforcer cannot take. Mirrors caps.Unsupported deliberately: the
-// adapter confirms what it can honor, and the refusal carries the specifics.
+// adapter confirms what it can honor, and the refusal carries the specifics —
+// the values included, because variant may sit on any of several tiers and a
+// name alone leaves the operator guessing which one.
 type UnsupportedOption struct {
-	Options []OptionName
+	Options []Option
 }
 
 func (unsupported *UnsupportedOption) Error() string {
-	names := make([]string, 0, len(unsupported.Options))
-	for _, name := range unsupported.Options {
-		names = append(names, string(name))
+	rendered := make([]string, 0, len(unsupported.Options))
+	for _, option := range unsupported.Options {
+		rendered = append(rendered, fmt.Sprintf("%s=%q", option.Name, option.Value))
 	}
-	return fmt.Sprintf("models: unsupported model options: %s", strings.Join(names, ", "))
+	return fmt.Sprintf("models: unsupported model options: %s", strings.Join(rendered, ", "))
 }
 
 func (unsupported *UnsupportedOption) Unwrap() error { return ErrUnsupportedOption }
@@ -119,17 +177,71 @@ func (options Options) SupportedBy(supported []OptionName) error {
 	for _, name := range supported {
 		supportedSet[name] = struct{}{}
 	}
-	missing := make([]OptionName, 0)
-	for _, name := range options.Names() {
-		if _, found := supportedSet[name]; !found {
-			missing = append(missing, name)
+	populated := options.Populated()
+	missing := make([]Option, 0)
+	for _, option := range populated {
+		if _, found := supportedSet[option.Name]; !found {
+			missing = append(missing, option)
 		}
 	}
 	if len(missing) > 0 {
-		sort.Slice(missing, func(left, right int) bool { return missing[left] < missing[right] })
+		sort.Slice(missing, func(left, right int) bool { return missing[left].Name < missing[right].Name })
 		return &UnsupportedOption{Options: missing}
 	}
 	return nil
+}
+
+// UnmarshalYAML accepts both tier forms — a bare model string, or a
+// {model, variant} mapping — and enforces the mapping's own strictness.
+// Node.Decode does not inherit KnownFields, so without the key check here an
+// unknown key inside the mapping would reach the struct unrefused. Decode also
+// renders !!int and !!bool scalars as strings, so a tier written as 42 would
+// otherwise decode as the model "42"; the tag checks refuse that. Decoding is
+// kept after the checks because it owns the duplicate-key refusal, which a
+// hand-rolled walk cannot replace without losing it.
+func (definition *TierDefinition) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag != "!!str" {
+			return fmt.Errorf("line %d: a tier is either a model string or a {model, variant} mapping, got %s",
+				value.Line, value.Tag)
+		}
+		*definition = TierDefinition{Model: value.Value}
+		return nil
+	case yaml.MappingNode:
+		for index := 0; index+1 < len(value.Content); index += 2 {
+			key := value.Content[index]
+			fieldValue := value.Content[index+1]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return fmt.Errorf("line %d: a tier field name must be a string", key.Line)
+			}
+			switch key.Value {
+			case "model", "variant":
+			default:
+				return fmt.Errorf("line %d: unknown field %q in a tier definition (known: model, variant)",
+					key.Line, key.Value)
+			}
+			if fieldValue.Kind != yaml.ScalarNode || fieldValue.Tag != "!!str" {
+				return fmt.Errorf("line %d: tier field %q must be a string, got %s",
+					fieldValue.Line, key.Value, fieldValue.Tag)
+			}
+			if key.Value == "variant" && strings.TrimSpace(fieldValue.Value) == "" {
+				return fmt.Errorf("line %d: a tier declares an empty variant; remove the key to run without one",
+					fieldValue.Line)
+			}
+		}
+		// A local type sheds this method, so Decode lands on the plain struct
+		// instead of recursing.
+		type tierFields TierDefinition
+		var fields tierFields
+		if err := value.Decode(&fields); err != nil {
+			return err
+		}
+		*definition = TierDefinition(fields)
+		return nil
+	default:
+		return fmt.Errorf("line %d: a tier is either a model string or a {model, variant} mapping", value.Line)
+	}
 }
 
 // Selection is a resolved tier: the tier name, the derived provider, and the
@@ -210,9 +322,12 @@ func Load() (*Config, error) {
 		if len(config.Tiers) == 0 {
 			return nil, fmt.Errorf("models: %s: %w", path, errEmptyConfig)
 		}
-		for tier, model := range config.Tiers {
-			if strings.TrimSpace(model) == "" {
-				return nil, fmt.Errorf("models: %s: tier %q has an empty model string", path, tier)
+		for tier, definition := range config.Tiers {
+			// The same consistency check resolveFrom applies at resolution
+			// time, paid here so the file is named once at boot instead of
+			// the failing tier surfacing per run.
+			if err := (Options{Model: definition.Model, Variant: definition.Variant}).Validate(); err != nil {
+				return nil, fmt.Errorf("models: %s: tier %q: %w", path, tier, err)
 			}
 		}
 		if config.Default != "" {
@@ -269,13 +384,20 @@ func resolveFrom(config Config, tier string) (Selection, error) {
 	if tier == "" {
 		return Selection{}, fmt.Errorf("models: no tier given and no default configured")
 	}
-	model, ok := config.Tiers[tier]
+	definition, ok := config.Tiers[tier]
 	if !ok {
 		return Selection{}, fmt.Errorf("models: unknown tier %q", tier)
 	}
+	// Options are checked before the selection exists: a caller assembling a
+	// Config in Go — without Load ever running — gets the same consistency
+	// refusal the file path produces.
+	options := Options{Model: definition.Model, Variant: definition.Variant}
+	if err := options.Validate(); err != nil {
+		return Selection{}, fmt.Errorf("models: tier %q: %w", tier, err)
+	}
 	return Selection{
 		Tier:     tier,
-		Provider: SplitProvider(model),
-		Options:  Options{Model: model},
+		Provider: SplitProvider(definition.Model),
+		Options:  options,
 	}, nil
 }

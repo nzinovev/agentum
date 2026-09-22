@@ -231,6 +231,112 @@ func TestCatalog_LookupAndVariantsSemantics(t *testing.T) {
 	}
 }
 
+// selectionWithVariant builds a selection carrying a variant, for the
+// vocabulary checks.
+func selectionWithVariant(model, variant string) Selection {
+	return Selection{Provider: SplitProvider(model), Options: Options{Model: model, Variant: variant}}
+}
+
+// TestCatalog_ValidateVariantVocabulary is the variant half of the catalog
+// check. The runtime does not refuse an unknown variant itself — it silently
+// runs a different effort — so this table is the only refusal the mistake
+// gets, and its rows are the states a record's variants field can leave:
+// known with keys, known and empty, unknown, absent from an unusable catalog.
+func TestCatalog_ValidateVariantVocabulary(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog()
+	cases := []struct {
+		name      string
+		selection Selection
+		wantErr   string // "" means accepted
+	}{
+		{"declared variant passes", selectionWithVariant("zai-coding-plan/glm-5.3", "high"), ""},
+		{"undeclared variant refused with the vocabulary", selectionWithVariant("zai-coding-plan/glm-5.3", "medium"),
+			`model "zai-coding-plan/glm-5.3" declares no variant "medium" (declares: high, low, max)`},
+		{"variant on a model with none at all", selectionWithVariant("zai/glm-4.7", "high"),
+			`model "zai/glm-4.7" declares no variants at all`},
+		{"no variant requested", selectionWithVariant("zai/glm-4.7", ""), ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := catalog.Validate(testCase.selection)
+			if testCase.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate = %v; want accepted", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate accepted %v; want the refusal %q", testCase.selection, testCase.wantErr)
+			}
+			if err.Error() != testCase.wantErr {
+				t.Errorf("Validate = %q; want %q", err.Error(), testCase.wantErr)
+			}
+			if !errors.Is(err, ErrUnknownVariant) {
+				t.Errorf("refusal must wrap ErrUnknownVariant: %v", err)
+			}
+			if errors.Is(err, ErrUnknownModel) {
+				t.Errorf("variant refusal must not claim an unknown model: %v", err)
+			}
+		})
+	}
+}
+
+// TestCatalog_ValidateUnknownVocabularySkipsVariantButKeepsModel: a record
+// whose variants field was absent or reshaped (VariantsKnown=false) means
+// nothing may be concluded about the vocabulary — a requested variant passes —
+// while the model's EXISTENCE is still checked against the same catalog.
+func TestCatalog_ValidateUnknownVocabularySkipsVariantButKeepsModel(t *testing.T) {
+	t.Parallel()
+	// zai-coding-plan/glm-5.3 with an unreadable variants field.
+	unknownVocabulary := Catalog{
+		Available: true,
+		Models: []CatalogModel{
+			{ID: "zai-coding-plan/glm-5.3", VariantsKnown: false},
+		},
+	}
+	if err := unknownVocabulary.Validate(selectionWithVariant("zai-coding-plan/glm-5.3", "medium")); err != nil {
+		t.Fatalf("unknown vocabulary must skip the variant check: %v", err)
+	}
+	if err := unknownVocabulary.Validate(selectionWithVariant("zai-coding-plan/glm-5.4", "high")); err == nil {
+		t.Fatal("unknown vocabulary must still refuse an unknown model")
+	} else if !errors.Is(err, ErrUnknownModel) {
+		t.Errorf("refusal must remain a model refusal: %v", err)
+	}
+}
+
+// TestCatalog_ValidateEmptyKnownVocabularyRefusesAnyVariant: known and empty
+// is a model fact — the model declares no variants — so any requested variant
+// is refused, unlike the unknown-vocabulary state.
+func TestCatalog_ValidateEmptyKnownVocabularyRefusesAnyVariant(t *testing.T) {
+	t.Parallel()
+	catalog := Catalog{
+		Available: true,
+		Models: []CatalogModel{
+			{ID: "zai/glm-4.7", VariantsKnown: true},
+		},
+	}
+	err := catalog.Validate(selectionWithVariant("zai/glm-4.7", "low"))
+	if err == nil {
+		t.Fatal("a variant on a model that declares none must be refused")
+	}
+	var unknown *UnknownVariant
+	if !errors.As(err, &unknown) || len(unknown.Variants) != 0 {
+		t.Errorf("refusal must be an UnknownVariant with an empty vocabulary: %v", err)
+	}
+}
+
+// TestCatalog_ValidateVariantRequiresTheModelToBeFound: an unknown model with
+// a variant is a model refusal, not a variant one — the vocabulary question
+// never comes up for a model the catalog does not contain.
+func TestCatalog_ValidateVariantRequiresTheModelToBeFound(t *testing.T) {
+	t.Parallel()
+	err := testCatalog().Validate(selectionWithVariant("zai-coding-plan/qwen-9", "high"))
+	if !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("Validate = %v; want the unknown-model refusal", err)
+	}
+}
+
 // TestLevenshtein pins the distance primitive on the cases the suggestion
 // rule is reasoned about with, including the two-edit typo and a
 // beyond-the-bound pair.

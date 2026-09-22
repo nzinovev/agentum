@@ -903,7 +903,8 @@ invocation: `body.invocations` carries one record per stage ATTEMPT, keyed by
 `invocation_id` (`stage` / `sequence` / `cycle` are coordinates for a reader,
 never merge keys). Each record opens before the adapter starts — invocation
 id, adapter id + implementation version + probed runtime version, the model
-selection, both prompt hashes, the effective capability profile — and closes
+selection (tier, model, and the variant when the tier declares one), both
+prompt hashes, the effective capability profile — and closes
 after the stream drains with telemetry and the stop reason. A fix cycle's
 second `review` therefore leaves a second record with its own model, profile,
 and rendered prompt hash; nothing is overwritten. Two prompt hashes are
@@ -939,7 +940,7 @@ differences only — the things that meaningfully change what an agent would do:
 - per-attempt prompts (the `stage_prompt_hash` on each invocation record)
 - adapter (id, adapter implementation version, the SET of runtime versions
   observed across the run's invocations, declared capabilities)
-- model (per attempt: id, tier, provider, options)
+- model (per attempt: id, tier, provider, variant, other options)
 - declared / granted capability sets and each shared attempt's effective profile
 - memory slice (entry hashes)
 - input artifact revisions
@@ -956,7 +957,8 @@ a run; it counts attempts at one coordinate in `sequence` order, is derived at
 comparison time, and never appears in the manifest body. The axes compare
 shared keys before set differences: a
 fix cycle whose second `review` ran a different model reports `model-id`
-(the specific answer), while a run with an extra attempt reports `model-set`.
+(the specific answer), one that differed only in the reasoning variant reports
+`model-variant`, while a run with an extra attempt reports `model-set`.
 Two runs on the same tier and model but different runtime builds differ on
 `adapter-runtime-version` and nothing else — the axis that answers
 "identical configuration, different result".

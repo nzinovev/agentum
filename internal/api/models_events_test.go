@@ -62,9 +62,13 @@ func modelEventCatalog() models.Catalog {
 	}}
 }
 
+// modelEventTiers declares one tier carrying a variant, so the event payload
+// assertions cover the pair, not the model alone.
 func modelEventTiers() models.Config {
 	return models.Config{
-		Tiers:   map[string]string{"fast": "prov/one-model"},
+		Tiers: map[string]models.TierDefinition{
+			"fast": {Model: "prov/one-model", Variant: "high"},
+		},
 		Default: "fast",
 	}
 }
@@ -141,11 +145,22 @@ func TestModelCheckEvents_ArriveInOrderOnTheTenantStream(t *testing.T) {
 		}
 	}
 
+	// The per-model and finishing events carry the pair the adapter checked —
+	// model AND variant — so a replaying client renders what actually ran.
+	checkedPayload := map[string]any{}
+	if err := json.Unmarshal(events[1].Payload, &checkedPayload); err != nil {
+		t.Fatalf("decode model_checked payload: %v", err)
+	}
+	if checkedPayload["variant"] != "high" {
+		t.Errorf("model_checked variant = %v; want high (the tier's own)", checkedPayload["variant"])
+	}
+
 	// The finishing event carries the result table — the durable copy a
 	// reconnecting client replays from the stream after the registry's TTL.
 	var finishedPayload struct {
 		Results []struct {
 			Model   string `json:"model"`
+			Variant string `json:"variant"`
 			Outcome string `json:"outcome"`
 		} `json:"results"`
 	}
@@ -154,5 +169,8 @@ func TestModelCheckEvents_ArriveInOrderOnTheTenantStream(t *testing.T) {
 	}
 	if len(finishedPayload.Results) != 1 || finishedPayload.Results[0].Model != "prov/one-model" {
 		t.Errorf("finished payload results = %+v; want the one target", finishedPayload.Results)
+	}
+	if finishedPayload.Results[0].Variant != "high" {
+		t.Errorf("finished payload variant = %q; want high", finishedPayload.Results[0].Variant)
 	}
 }

@@ -108,11 +108,13 @@ instead of skipping — a skipped database test there would be a lost check.
   change which instructions or checks gate a run.
 - **The execution target is a registry entry.** Adapters are selected by id
   through `internal/agent`'s registry and describe themselves (`Describe()`:
-  id, implementation version, binary, understood model options, baked-in tier
+  id, implementation version, binary, understood model options (`model` and
+  `variant` for the opencode adapter), baked-in tier
   defaults, and the instruction files the runtime injects by itself; `Probe()`: the runtime's own version, memoized per process;
   `Catalog()`: the runtime's model listing, memoized per process — a model
   outside a fully-read catalog is refused at the same three points as an
-  undeclared option, while a catalog that could not be obtained validates as
+  undeclared option, and a variant outside the model's declared vocabulary
+  the same way, while a catalog that could not be obtained validates as
   nil and lands in evidence as the `model_catalog` label).
   No caller names a runtime-injected instruction file either — the baseline
   comes from the descriptor, because another executor injects another file and

@@ -145,6 +145,25 @@ func TestDiffManifests_ModelIdChange(t *testing.T) {
 	}
 }
 
+// TestDiffManifests_ModelVariantChangeIsItsOwnAxis: two attempts differing
+// only in the variant report model-variant — "a different reasoning effort"
+// is a specific answer, not "something in the options differs" and not a
+// set difference.
+func TestDiffManifests_ModelVariantChangeIsItsOwnAxis(t *testing.T) {
+	t.Parallel()
+	left := diffBodyOfOneAttempt(testInvocation("inv-1", "spec", 0))
+	variantChanged := testInvocation("inv-2", "spec", 0)
+	variantChanged.Model.Options.Variant = "high"
+	right := diffBodyOfOneAttempt(variantChanged)
+	delta := DiffManifests(left, right).Model
+	if delta == nil {
+		t.Fatal("expected Model delta for variant change")
+	}
+	if delta.Reason != "model-variant" {
+		t.Errorf("Reason = %q, want model-variant", delta.Reason)
+	}
+}
+
 func TestDiffManifests_CapabilitySetChange(t *testing.T) {
 	t.Parallel()
 	left := Body{Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}}}

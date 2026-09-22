@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,28 +86,50 @@ type ModelTester interface {
 	TestModel(ctx context.Context, selection models.Selection, deadline time.Duration) ModelCheck
 }
 
-// TestModel implements ModelTester for opencode. The catalog is consulted
-// first and for free: a model the runtime does not even list is unknown_model
-// with no invocation and no bill. Otherwise one `run` with a trivial prompt
-// starts in a temporary directory under a deny-everything permission config
-// and the scrubbed environment; the first stdout line is this runtime's
-// observable output, so the process group is stopped the moment it arrives and
-// the check costs a few tokens rather than a whole answer. A deadline with no
-// line is a timeout, and the group is killed.
+// TestModel implements ModelTester for opencode. The selection is validated
+// and the catalog consulted first and for free: an inconsistent option set, a
+// model the runtime does not list, or a variant outside the model's declared
+// vocabulary are answered with no invocation and no bill. Otherwise one `run`
+// with a trivial prompt starts in a temporary directory under a
+// deny-everything permission config and the scrubbed environment; the first
+// stdout line is this runtime's observable output, so the process group is
+// stopped the moment it arrives and the check costs a few tokens rather than
+// a whole answer. A deadline with no line is a timeout, and the group is
+// killed.
 func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.Selection, deadline time.Duration) ModelCheck {
+	descriptor := adapter.Describe()
 	check := ModelCheck{
 		Model:     selection.Options.Model,
+		Variant:   selection.Options.Variant,
 		Tier:      selection.Tier,
 		CheckedAt: time.Now().UTC(),
 	}
-	if check.Model == "" {
+	// The same three refusals an invocation gets, paid before any subprocess:
+	// consistency, the declared option set, the catalog. A check that started
+	// the runtime anyway would bill for an answer the configuration can never
+	// use. All three speak Invoke's "execution adapter %q" lead-in — one fact,
+	// one wording, whichever entry refused.
+	if validateErr := selection.Options.Validate(); validateErr != nil {
 		check.Outcome = ModelCheckError
-		check.Reason = "no model configured"
+		check.Reason = fmt.Sprintf("execution adapter %q: %v", descriptor.ID, validateErr)
+		return check
+	}
+	if optionErr := selection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
+		check.Outcome = ModelCheckError
+		check.Reason = fmt.Sprintf("execution adapter %q: %v", descriptor.ID, optionErr)
 		return check
 	}
 	if catalogErr := adapter.Catalog(ctx).Validate(selection); catalogErr != nil {
-		check.Outcome = ModelCheckUnknownModel
-		check.Reason = catalogErr.Error()
+		// Only an unknown MODEL is the unknown_model outcome — the diagnostic's
+		// own question, "is this model reachable"; every other catalog refusal
+		// (a variant outside the vocabulary) is the generic error with its
+		// cause.
+		if errors.Is(catalogErr, models.ErrUnknownModel) {
+			check.Outcome = ModelCheckUnknownModel
+		} else {
+			check.Outcome = ModelCheckError
+		}
+		check.Reason = fmt.Sprintf("execution adapter %q: %v", descriptor.ID, catalogErr)
 		return check
 	}
 	if deadline <= 0 {
@@ -151,7 +174,9 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 		check.Reason = fmt.Sprintf("binary %q not found", adapter.binary)
 		return check
 	}
-	args := []string{bin, "run", "--format", "json", "--auto", "--model", selection.Options.Model, modelTestPrompt}
+	args := []string{bin, "run", "--format", "json", "--auto"}
+	args = appendModelOptionArgs(args, selection.Options)
+	args = append(args, modelTestPrompt)
 	cmd := exec.CommandContext(testCtx, args[0], args[1:]...)
 	setProcessGroup(cmd)
 	cmd.Dir = workdir
