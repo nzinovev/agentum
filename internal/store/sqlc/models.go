@@ -152,6 +152,33 @@ type RunManifestCorrection struct {
 	CreatedAt  time.Time       `json:"created_at"`
 }
 
+type RunPublication struct {
+	ID               string         `json:"id"`
+	TenantID         string         `json:"tenant_id"`
+	UserID           string         `json:"user_id"`
+	RunID            string         `json:"run_id"`
+	Provider         string         `json:"provider"`
+	TargetHost       string         `json:"target_host"`
+	TargetOwner      string         `json:"target_owner"`
+	TargetRepository string         `json:"target_repository"`
+	BaseBranch       string         `json:"base_branch"`
+	RemoteBranch     string         `json:"remote_branch"`
+	PublishedCommit  string         `json:"published_commit"`
+	State            string         `json:"state"`
+	PrNumber         sql.NullInt32  `json:"pr_number"`
+	PrUrl            sql.NullString `json:"pr_url"`
+	PrState          sql.NullString `json:"pr_state"`
+	BranchPushedAt   sql.NullTime   `json:"branch_pushed_at"`
+	PublishedAt      sql.NullTime   `json:"published_at"`
+	Attempts         int32          `json:"attempts"`
+	LastErrorCode    sql.NullString `json:"last_error_code"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
+	LeaseOwner       sql.NullString `json:"lease_owner"`
+	LeaseExpiresAt   sql.NullTime   `json:"lease_expires_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
 type StageInvocation struct {
 	ID                string                `json:"id"`
 	TenantID          string                `json:"tenant_id"`

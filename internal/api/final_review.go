@@ -19,15 +19,16 @@ import (
 // revision-content endpoints — the payload carries ids, not blobs, so a large
 // diff does not have to be inlined.
 type finalReviewResponse struct {
-	Run       runResponse           `json:"run"`
-	Plan      *finalReviewPlan      `json:"plan,omitempty"`
-	Git       *finalReviewGit       `json:"git,omitempty"`
-	Diff      *finalReviewDiff      `json:"diff,omitempty"`
-	Stages    []finalReviewStage    `json:"stages,omitempty"`
-	Review    *finalReviewVerdict   `json:"review,omitempty"`
-	Checks    *finalReviewChecks    `json:"checks,omitempty"`
-	Manifest  *finalReviewManifest  `json:"manifest,omitempty"`
-	Decisions []finalReviewDecision `json:"decisions,omitempty"`
+	Run         runResponse           `json:"run"`
+	Plan        *finalReviewPlan      `json:"plan,omitempty"`
+	Git         *finalReviewGit       `json:"git,omitempty"`
+	Diff        *finalReviewDiff      `json:"diff,omitempty"`
+	Stages      []finalReviewStage    `json:"stages,omitempty"`
+	Review      *finalReviewVerdict   `json:"review,omitempty"`
+	Checks      *finalReviewChecks    `json:"checks,omitempty"`
+	Manifest    *finalReviewManifest  `json:"manifest,omitempty"`
+	Decisions   []finalReviewDecision `json:"decisions,omitempty"`
+	Publication *publicationResponse  `json:"publication,omitempty"`
 }
 
 type finalReviewPlan struct {
@@ -129,7 +130,22 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	response.Diff, response.Review = api.finalReviewDiffAndVerdict(r.Context(), run, response.Stages)
 	// Manifest summary (when wired).
 	response.Manifest = api.finalReviewManifest(r.Context(), run)
+	// Publication block: the same shape GET .../publication answers with.
+	// Assembled from durable rows only — this handler never contacts the
+	// provider, so the review works with a delivery, without one, and while
+	// one is failing.
+	response.Publication = api.finalReviewPublication(r, run)
 	writeJSON(w, http.StatusOK, response)
+}
+
+// finalReviewPublication renders the publication block. The block is
+// present whenever the surface can say something: a row, a configuration
+// that says off, or an enabled-but-not-attempted state. The one silent case
+// is a read failure, which leaves the block out rather than failing the
+// whole review.
+func (api *API) finalReviewPublication(r *http.Request, run sqlc.Run) *publicationResponse {
+	view := api.publicationView(r, run)
+	return &view
 }
 
 // finalReviewPlan reads the approval artifact's current revision and the

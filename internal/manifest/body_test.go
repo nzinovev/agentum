@@ -391,7 +391,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 		{
 			name: "empty body reports every expected section missing",
 			body: Body{Schema: schemaVersion},
-			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"},
+			want: []string{"memory", "publication", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"},
 		},
 		{
 			name: "fully populated body reports nothing missing",
@@ -400,6 +400,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
 				Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
 				Checks:        &CheckEvidence{SetVersion: "v1", Ran: true},
+				Publication:   &PublicationEvidence{State: "published"},
 				Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
 				Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 				Context:       &ContextEvidence{SkillsProbe: "ok"},
@@ -412,7 +413,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 				Capabilities: &CapabilityProfile{Declared: []string{"fs.read"}},
 				Invocations:  []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
 			},
-			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks"},
+			want: []string{"memory", "publication", "context", "gate_decisions", "artifacts", "checks"},
 		},
 		{
 			name: "a record without a prompt hash leaves invocations missing",
@@ -423,7 +424,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 					Capabilities: InvocationCaps{Role: "implementer", Profile: json.RawMessage(`{}`)},
 				}},
 			},
-			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "invocations"},
+			want: []string{"memory", "publication", "context", "gate_decisions", "artifacts", "checks", "invocations"},
 		},
 		{
 			name: "a record without a profile leaves capabilities missing",
@@ -434,7 +435,7 @@ func TestMissingSections_DerivesFromBody(t *testing.T) {
 					Prompt: InvocationPrompt{StagePromptHash: "h"},
 				}},
 			},
-			want: []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities"},
+			want: []string{"memory", "publication", "context", "gate_decisions", "artifacts", "checks", "capabilities"},
 		},
 	}
 	for _, testCase := range tests {
@@ -514,8 +515,8 @@ func TestEvidenceComplete_MemoryDoesNotBlockCompleteness(t *testing.T) {
 		t.Error("a run with every wired section present should be complete despite memory being absent")
 	}
 	// And `missing` still reports memory.
-	if missing := body.MissingSections(); len(missing) != 1 || missing[0] != "memory" {
-		t.Errorf("MissingSections = %v, want [memory] — the gap list must still report it", missing)
+	if missing := body.MissingSections(); len(missing) != 2 || missing[0] != "memory" || missing[1] != "publication" {
+		t.Errorf("MissingSections = %v, want [memory publication] — the gap list must still report both", missing)
 	}
 }
 
@@ -1002,8 +1003,10 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 			t.Errorf("MissingSections reports %q — the new sections must not be in expectedSections", section)
 		}
 	}
-	// The expected sections list now includes context (ADR 0002).
-	wantMissing := []string{"memory", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"}
+	// The expected sections list counts context and publication beside the
+	// rest: context is an input the run records, publication is an outcome
+	// reported missing without degrading.
+	wantMissing := []string{"memory", "publication", "context", "gate_decisions", "artifacts", "checks", "capabilities", "invocations"}
 	if len(missing) != len(wantMissing) {
 		t.Fatalf("MissingSections = %v, want %v", missing, wantMissing)
 	}
@@ -1111,5 +1114,60 @@ func TestAdapterEvidence_ModelCatalogRoundTripsAndMerges(t *testing.T) {
 	untouched := mergeBodies(decoded, Body{Adapter: &AdapterEvidence{ID: "other"}})
 	if untouched.Adapter.ModelCatalog != "ok (30 models)" {
 		t.Errorf("ModelCatalog = %q; an unset patch value must leave the recorded label alone", untouched.Adapter.ModelCatalog)
+	}
+}
+
+// TestPublicationSection_PresenceAndCompleteness pins the section's two
+// reading rules: an absent publication lands in `missing` without degrading
+// evidence_complete (delivery is best-effort and may happen after the seal),
+// and a recorded failure counts as present — a refused delivery is a fact the
+// reviewer must see, not a gap.
+func TestPublicationSection_PresenceAndCompleteness(t *testing.T) {
+	t.Parallel()
+	complete := Body{
+		GateDecisions: []GateDecision{{Stage: "s", Gate: "final", Decision: "approved"}},
+		Artifacts:     &ArtifactEvidence{Outputs: []ArtifactRef{{Name: "x"}}},
+		Checks:        &CheckEvidence{SetVersion: "v1", Ran: true},
+		Capabilities:  &CapabilityProfile{Declared: []string{"fs.read"}},
+		Invocations:   []InvocationEvidence{testInvocation("inv-1", "spec", 0)},
+		Context:       &ContextEvidence{SkillsProbe: "ok"},
+	}
+	if !complete.IsEvidenceComplete() {
+		t.Fatal("baseline body should be complete")
+	}
+	if missing := complete.MissingSections(); len(missing) != 2 || missing[0] != "memory" || missing[1] != "publication" {
+		t.Errorf("MissingSections = %v, want [memory publication]", missing)
+	}
+
+	failed := complete
+	failed.Publication = &PublicationEvidence{State: "failed", LastErrorCode: "credentials_missing"}
+	if !failed.IsEvidenceComplete() {
+		t.Error("a recorded failed publication degraded completeness; delivery is best-effort")
+	}
+	if missing := failed.MissingSections(); len(missing) != 1 || missing[0] != "memory" {
+		t.Errorf("MissingSections = %v, want [memory] — a recorded failure is present, not missing", missing)
+	}
+}
+
+// TestMergeBodies_PublicationPatchReplacesTheSection: the publication section
+// carries one current state, not a history — the latest patch wins, which is
+// what makes a correction chain read as the newest observed outcome.
+func TestMergeBodies_PublicationPatchReplacesTheSection(t *testing.T) {
+	t.Parallel()
+	base := Body{Schema: schemaVersion, Publication: &PublicationEvidence{
+		Provider: "noop", State: "failed", LastErrorCode: "credentials_missing",
+	}}
+	patch := Body{Publication: &PublicationEvidence{
+		Provider: "github", State: "published", PullRequest: 7, PullRequestURL: "https://example.com/pr/7",
+	}}
+	merged := mergeBodies(base, patch)
+	if merged.Publication == nil || merged.Publication.State != "published" || merged.Publication.PullRequest != 7 {
+		t.Errorf("merged publication = %+v; want the patch's published state with pull request 7", merged.Publication)
+	}
+	if merged.Publication.LastErrorCode != "" {
+		t.Errorf("merged publication kept last_error_code %q from the base; the patch replaces the section", merged.Publication.LastErrorCode)
+	}
+	if merged2 := mergeBodies(base, Body{}); merged2.Publication == nil || merged2.Publication.State != "failed" {
+		t.Errorf("an empty patch dropped the publication section: %+v", merged2.Publication)
 	}
 }

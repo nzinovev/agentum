@@ -72,6 +72,10 @@ type Store interface {
 	// for a (run, name), used by the plan_revision_drift check. Shared with the
 	// artifacts sync path.
 	CurrentArtifactRevisionForName(ctx context.Context, arg sqlc.CurrentArtifactRevisionForNameParams) (sqlc.ArtifactRevision, error)
+	// EnsurePublication creates the run's publication row in pending, the
+	// unique index making a second call a no-op. Called at the final gate;
+	// the publish job carries the attempt.
+	EnsurePublication(ctx context.Context, arg sqlc.EnsurePublicationParams) (sqlc.RunPublication, error)
 }
 
 // Sink forwards a live stream chunk to subscribers (e.g. an in-memory SSE broker).
@@ -113,6 +117,10 @@ type Runner struct {
 	// checkExec runs the orchestrator-owned project checks at the delivery
 	// boundary. nil in unit tests; project checks are skipped then.
 	checkExec *checks.Executor
+	// publication is the final-gate hook: when enabled, a run reaching the
+	// review gate gets a publication row and a publish job. Zero value is
+	// disabled.
+	publication PublicationHook
 }
 
 // manifestService is the subset of the manifest.Service surface the runner
@@ -174,6 +182,11 @@ type Deps struct {
 	// gate; a mandatory failure blocks delivery by failing the record.
 	CheckExec *checks.Executor
 
+	// Publication configures the final-gate publication hook. Zero value is
+	// disabled: no publication row is created and no publish job is
+	// enqueued.
+	Publication PublicationHook
+
 	// HardTimeout / IdleTimeout are the per-invocation caps applied to every
 	// stage invocation (zero = no cap). Sourced from config; carried by the
 	// effective capability profile to the adapter.
@@ -206,6 +219,7 @@ func New(deps Deps) *Runner {
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink, log: log,
 		art: deps.Artifacts, syncer: syncer, mfst: manifestServiceOrNil(deps.Manifest),
 		checkExec:   deps.CheckExec,
+		publication: deps.Publication,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
 	}
 }
@@ -214,26 +228,60 @@ func New(deps Deps) *Runner {
 // abort an in-flight run.
 func (runner *Runner) Cancels() *CancelRegistry { return runner.cancels }
 
-// Handle is the job-worker entry point. It dispatches by job kind; run /
-// continue / advance all enter the shared stage loop from different entry
-// points. cancel is a no-op here — the cancel HTTP handler aborts the active
-// run via the registry and drives the FSM transition directly (04 §7.5).
-func (runner *Runner) Handle(ctx context.Context, job sqlc.Job) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	switch job.Kind {
-	case "run", "continue", "advance":
-		return runner.drive(ctx, job)
-	case "teardown":
-		return runner.teardown(ctx, job)
-	case "cleanup":
-		return runner.cleanup(ctx, job)
-	case "cancel":
-		return nil
-	default:
-		return fmt.Errorf("runner: unknown job kind %q", job.Kind)
-	}
+// jobKindPublish is the queue kind the publication coordinator serves. The
+// coordinator and the runner never import each other; this string in the
+// jobs table is the whole connection between them.
+const jobKindPublish = "publish"
+
+// PublicationHook configures what reaching the final gate does on the
+// publication side. Zero value (disabled) creates no row and enqueues no
+// job: with publication off, a run on a repository without a remote reaches
+// review without a publication error.
+type PublicationHook struct {
+	Enabled bool
+	// Provider is the publication provider id recorded on the row — the id
+	// the coordinator resolves through the provider registry at attempt
+	// time. Empty records empty, which no registry entry resolves; the
+	// wiring that enables the hook supplies the id.
+	Provider string
+}
+
+// The per-kind job entries. Dispatch lives in the queue's kind table, not
+// here: the runner registers one method per kind it serves and never sees a
+// job of another kind. run / continue / advance enter the shared stage loop
+// from different entry points, which the loop resolves from the kind the job
+// row carries.
+//
+// cancel has no runner method at all — the cancel HTTP handler aborts the
+// active run via the registry and drives the FSM transition directly, and
+// the queue row is only the bookkeeping the handler enqueued
+// transactionally. The wiring table maps it to a no-op.
+
+// HandleRun serves the "run" job kind: enter the stage loop for a fresh run.
+func (runner *Runner) HandleRun(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
+// HandleContinue serves the "continue" job kind: re-enter the current stage,
+// resuming its captured session.
+func (runner *Runner) HandleContinue(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
+// HandleAdvance serves the "advance" job kind: re-enter the loop past a gate
+// by resolving the current stage's transition.
+func (runner *Runner) HandleAdvance(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
+// HandleTeardown serves the "teardown" job kind.
+func (runner *Runner) HandleTeardown(ctx context.Context, job sqlc.Job) error {
+	return runner.teardown(ctx, job)
+}
+
+// HandleCleanup serves the "cleanup" job kind.
+func (runner *Runner) HandleCleanup(ctx context.Context, job sqlc.Job) error {
+	return runner.cleanup(ctx, job)
 }
 
 // teardown removes the run's worktree once it has reached a terminal state
@@ -1623,7 +1671,47 @@ func (runner *Runner) transitionToFinalState(ctx context.Context, record sqlc.Ru
 		return fmt.Errorf("persist final: %w", err)
 	}
 	runner.emit(ctx, record, EvRunStateChanged, map[string]any{"from": record.State, "to": string(newState), "stage": stageID})
+	// Publication starts HERE, at the gate, not at approval: the pull request
+	// is what a human reviews, so it must be able to exist before the review
+	// happens. Best-effort by design — a failure below is logged and the run
+	// stays at the gate with its branch and result commit intact.
+	runner.schedulePublication(ctx, record)
 	return nil
+}
+
+// schedulePublication creates the run's publication row in pending and
+// enqueues the publish job, once a run has reached the review gate with its
+// result commit pinned. Both writes are best-effort and independent: either
+// failing is logged and changes nothing about the run, whose transition to
+// the review gate has already committed. A row without a job is recovered by
+// the queue's publication probe; a job without a row is a no-op for the
+// coordinator.
+func (runner *Runner) schedulePublication(ctx context.Context, record sqlc.Run) {
+	if !runner.publication.Enabled {
+		return
+	}
+	// Read the result commit back: recordResultCommit pinned it on the store,
+	// and the in-memory row predates the write.
+	refreshed, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
+	if err != nil {
+		runner.log.Warn("publication: reload run at gate", "run", record.ID, "error", err)
+		return
+	}
+	if _, err := runner.store.EnsurePublication(ctx, sqlc.EnsurePublicationParams{
+		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
+		Provider:        runner.publication.Provider,
+		RemoteBranch:    worktree.BranchFor(record.ID),
+		PublishedCommit: refreshed.ResultCommit.String,
+	}); err != nil {
+		runner.log.Warn("publication: create pending row", "run", record.ID, "error", err)
+		return
+	}
+	if _, err := runner.store.EnqueueJob(ctx, sqlc.EnqueueJobParams{
+		TenantID: record.TenantID, UserID: record.UserID,
+		RunID: record.ID, Kind: jobKindPublish, Payload: []byte("{}"),
+	}); err != nil {
+		runner.log.Warn("publication: enqueue job", "run", record.ID, "error", err)
+	}
 }
 
 // invocationOutcome is invokeStage's verdict for one adapter run. The three

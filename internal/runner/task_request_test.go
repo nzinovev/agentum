@@ -69,7 +69,7 @@ func TestRunner_RoutingBlockCarriesTaskRequest(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(context.Background(), job("run", "Tr", "tn", "us")); err != nil {
+	if err := runner.HandleRun(context.Background(), job("run", "Tr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if len(adapter.blocks) == 0 {

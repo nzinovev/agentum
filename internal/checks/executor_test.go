@@ -174,6 +174,23 @@ func TestScrubbedEnvDropsCredentials(t *testing.T) {
 	}
 }
 
+// TestScrubbedEnvDropsPublishToken: the publisher's token variable is matched
+// by the check executor's credential filter. The check executor is the second
+// consumer that must never see the delivery credential, and renaming the
+// variable without updating the suffix list would open the path — this test is
+// what makes the rename visible.
+func TestScrubbedEnvDropsPublishToken(t *testing.T) {
+	t.Setenv("AGENTUM_PUBLISH_TOKEN", "ghp_publisher_value")
+
+	if !isCredentialKey("AGENTUM_PUBLISH_TOKEN") {
+		t.Fatal("isCredentialKey does not match AGENTUM_PUBLISH_TOKEN; a rename must update the suffix list")
+	}
+	joined := strings.Join(scrubbedEnv(), "\n")
+	if strings.Contains(joined, "ghp_publisher_value") {
+		t.Error("scrubbed env kept the publisher token")
+	}
+}
+
 func TestExecutorEmptySet(t *testing.T) {
 	executor := NewExecutor(ExecutorDeps{})
 	report, err := executor.Run(context.Background(), &Set{}, t.TempDir())

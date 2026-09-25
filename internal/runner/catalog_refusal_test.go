@@ -54,7 +54,7 @@ func TestRunner_StageOnUnknownModelFailsRunStart(t *testing.T) {
 		Models:    []models.CatalogModel{{ID: "stub/somewhere-else"}},
 	})
 
-	runErr := runner.Handle(t.Context(), job("run", "Tcat", "tn", "us"))
+	runErr := runner.HandleRun(t.Context(), job("run", "Tcat", "tn", "us"))
 	if runErr == nil {
 		t.Fatal("a run whose stage model is unknown must fail at start")
 	}
@@ -80,7 +80,7 @@ func TestRunner_UnavailableCatalogLetsTheRunProceed(t *testing.T) {
 	t.Parallel()
 	runner, store := newCatalogRefusalRunner(t, models.Catalog{Reason: "timeout"})
 
-	if runErr := runner.Handle(t.Context(), job("run", "Tcat", "tn", "us")); runErr != nil {
+	if runErr := runner.HandleRun(t.Context(), job("run", "Tcat", "tn", "us")); runErr != nil {
 		t.Fatalf("run with an unavailable catalog failed: %v", runErr)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {

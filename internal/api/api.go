@@ -57,12 +57,27 @@ type API struct {
 	modelTest modelTestLimits
 	// modelChecks is the in-process registry of accepted model checks.
 	modelChecks *modelCheckRegistry
+	// publication mirrors the server's publication switch: whether the
+	// surface answers with real state and which provider id rows are created
+	// under. Zero value is off — the read answers "disabled" and the write
+	// refuses, so a build without publication configured behaves like
+	// publication switched off.
+	publication publicationConfig
 	// runContext is the server run's context, attached when Run starts: the
 	// model check's background goroutine derives from it, so a shutdown
 	// cancels pending checks and kills their subprocesses instead of
 	// orphaning them. Nil until then (unit tests): handlers fall back to a
 	// cancellation-detached request context.
 	runContext context.Context
+}
+
+// publicationConfig is the publication surface's configuration slice: the
+// switch and the provider id new publication rows record. The provider id
+// reaches the registry only at attempt time; the API stores it, it does not
+// resolve it.
+type publicationConfig struct {
+	enabled  bool
+	provider string
 }
 
 // Option configures an API at construction. Used for the artifact store +
@@ -109,6 +124,15 @@ func WithResolvedTiers(tiers models.Config) Option {
 func WithModelTestLimits(maxSeconds, retentionMinutes int) Option {
 	return func(apiInst *API) {
 		apiInst.modelTest = modelTestLimits{maxSeconds: maxSeconds, retentionMinutes: retentionMinutes}
+	}
+}
+
+// WithPublicationConfig attaches the publication surface's configuration: the
+// switch and the provider id new publication rows record. Unset means
+// publication is off.
+func WithPublicationConfig(enabled bool, provider string) Option {
+	return func(apiInst *API) {
+		apiInst.publication = publicationConfig{enabled: enabled, provider: provider}
 	}
 }
 
@@ -175,6 +199,11 @@ func (api *API) Register(mux interface {
 	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupRun)
 	mux.HandleFunc("GET /api/v1/runs/{id}/final-review", api.handleFinalReview)
+
+	// Publication surface: the delivery state (always answerable for an
+	// existing run) and the explicit retry.
+	mux.HandleFunc("GET /api/v1/runs/{id}/publication", api.handleGetPublication)
+	mux.HandleFunc("POST /api/v1/runs/{id}/publish", api.handlePublishRun)
 
 	// Stage invocations (read-only for now).
 	mux.HandleFunc("GET /api/v1/runs/{id}/invocations", api.handleListInvocations)
