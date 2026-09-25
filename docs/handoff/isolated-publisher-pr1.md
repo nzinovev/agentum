@@ -43,7 +43,15 @@ the first attempt and then frozen.
 - The `run_publications` target columns are `NOT NULL` — without
   `DEFAULT ''` the gate-time insert (which carries no target yet) fails with
   a not-null violation. The default is in the migration; keep it when the
-  columns change.
+  columns change. The alternative, still open for PR2 if the sentinel gets in
+  the way: make the four columns nullable, since NULL is what "not derived
+  yet" means. The freeze in `RecordPublicationSuccess` then becomes
+  `COALESCE(target_host, $3)` instead of `COALESCE(NULLIF(target_host, ''), $3)`,
+  and the target-presence check in `publicationView` stops being a disjunction
+  of five comparisons against the empty string. Cost of switching: one
+  migration plus those two call sites. Reason it was not done now: nothing in
+  PR1 derives a target, so the sentinel is never read, and `''` kept the
+  migration to one table with no nullable columns to reason about.
 - `httptest` + direct handler dispatch does not populate `r.PathValue("id")`
   — tests must call `request.SetPathValue` themselves (see
   `internal/api/publication_test.go`).
@@ -75,3 +83,4 @@ the first attempt and then frozen.
 - [ ] `internal/publication/service.go` — where the provider is resolved and the outcome recorded; PR2's target derivation slots in beside `assembleDelivery`
 - [ ] `internal/store/queries/run_publications.sql` — the freeze semantics already in `RecordPublicationSuccess`, and the claim predicate that matches the recovery probe on expired AND NULL leases
 - [ ] `internal/config/config.go` — the refusal pattern PR2's six variables follow (`AGENTUM_OPENCODE_BINARY` refusal is the model)
+- [ ] `internal/api/publication.go` — the publication `state` the API answers with is the row's own state OR one of three API-only values (`disabled`, `not_attempted`, `unavailable`), declared as constants beside the response shape. PR3's `docs/api.md` section documents all four cases, not three: `unavailable` means the row could not be read, which is not the same answer as "no publication".

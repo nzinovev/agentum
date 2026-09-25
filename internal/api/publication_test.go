@@ -212,6 +212,44 @@ func TestGetPublicationShowsAnExistingRowWhileDisabled(t *testing.T) {
 	}
 }
 
+// TestGetPublicationSeparatesAReadFailureFromAnAbsence: a read that did not
+// complete answers "unavailable", never "not_attempted" or "disabled". The
+// reader must be able to tell an absent publication from an unread one, which
+// is the distinction the coordinator already draws for a manifest it could not
+// read. The status stays 200: the same view rides inside the final review, and
+// a failed delivery-state read must not take the review down.
+func TestGetPublicationSeparatesAReadFailureFromAnAbsence(t *testing.T) {
+	t.Parallel()
+	handle := dbtest.Store(t)
+	apiInst := New(handle.Store.DB, handle.Queries, slog.New(slog.DiscardHandler), nil,
+		WithPublicationConfig(true, "noop"))
+
+	// Closing the pool is the cheapest read failure that is not ErrNoRows;
+	// the harness's own cleanup closes it again, which is a no-op.
+	if err := handle.Store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+publicationTestUser+"/publication", nil)
+	request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
+		TenantID: publicationTestTenant, UserID: publicationTestUser,
+	}))
+	view := apiInst.publicationView(request, sqlc.Run{ID: publicationTestUser, TenantID: publicationTestTenant})
+	if view.State != publicationStateUnavailable {
+		t.Errorf("state = %q, want %q — an unread row is not an absent one",
+			view.State, publicationStateUnavailable)
+	}
+
+	// The same failure with publication switched off must not read as
+	// "disabled": the switch describes what new runs do, not what this read
+	// found out.
+	offInst := New(handle.Store.DB, handle.Queries, slog.New(slog.DiscardHandler), nil,
+		WithPublicationConfig(false, ""))
+	if offView := offInst.publicationView(request, sqlc.Run{ID: publicationTestUser, TenantID: publicationTestTenant}); offView.State != publicationStateUnavailable {
+		t.Errorf("state with publication off = %q, want %q", offView.State, publicationStateUnavailable)
+	}
+}
+
 // TestPublishRunPreconditions pins the three 409s: publication off in
 // configuration, a run not in a deliverable state, and an attempt already in
 // flight under a live lease.

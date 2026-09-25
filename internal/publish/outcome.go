@@ -63,6 +63,30 @@ const (
 	ReasonProviderError ReasonCode = "provider_error"
 )
 
+// allReasonCodes is the vocabulary's roster, in declaration order. Retryable
+// classifies through a switch, so a code added without a case lands in that
+// switch's default and is silently treated as blocking — the
+// misclassification a closed vocabulary exists to prevent. The partition test
+// walks this slice and names the code no set claims, which turns "someone
+// forgot the case" into a failing test instead of a wrong next action shown
+// to a person.
+var allReasonCodes = []ReasonCode{
+	ReasonCredentialsMissing,
+	ReasonCredentialsRejected,
+	ReasonNetworkUnreachable,
+	ReasonRemoteUnknown,
+	ReasonBaseBranchUnknown,
+	ReasonNonFastForward,
+	ReasonPushRejected,
+	ReasonDraftUnsupported,
+	ReasonPullRequestClosed,
+	ReasonChecksNotPassed,
+	ReasonCommitMismatch,
+	ReasonSecretInDescription,
+	ReasonProviderUnknown,
+	ReasonProviderError,
+}
+
 // Retryable reports whether a repeated attempt can clear this reason. A
 // missing or rejected credential, an unreachable network, and an unnamed
 // provider failure are states outside the delivery that a retry re-tests.

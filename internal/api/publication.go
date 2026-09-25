@@ -15,10 +15,9 @@ import (
 // same string the server's kind table maps to it.
 const jobKindPublish = "publish"
 
-// publicationResponse is the run's delivery state. It answers for every form
-// of absence: a run exists, so a missing publication is an explicit
-// "disabled" (switched off in configuration) or "not_attempted" (on, but the
-// run never reached the gate) — never a 404.
+// publicationResponse is the run's delivery state: the publication row's own
+// state when a row exists, and otherwise one of the three values below. A run
+// exists, so the answer is never a 404.
 type publicationResponse struct {
 	RunID           string                      `json:"run_id"`
 	State           string                      `json:"state"`
@@ -33,6 +32,23 @@ type publicationResponse struct {
 	CreatedAt       string                      `json:"created_at,omitempty"`
 	UpdatedAt       string                      `json:"updated_at,omitempty"`
 }
+
+// The states the API adds to the row's own vocabulary, for the cases where no
+// row state applies. Named constants because the UI branches on this value the
+// same way it branches on an error code, and a closed set is what lets it.
+const (
+	// publicationStateDisabled: no row, and publication is switched off in
+	// configuration. Nothing will be delivered until it is switched on.
+	publicationStateDisabled = "disabled"
+	// publicationStateNotAttempted: no row, publication is on, and the run
+	// has not reached the gate that creates one.
+	publicationStateNotAttempted = "not_attempted"
+	// publicationStateUnavailable: the row could not be read. Distinct from
+	// the two above because "nothing was recorded" and "we could not look"
+	// are different claims, and a reader acting on the first one when the
+	// second is true acts on a guess.
+	publicationStateUnavailable = "unavailable"
+)
 
 // publicationTargetView names where the delivery goes. Host and path only —
 // no URL a credential could be recovered from.
@@ -61,9 +77,9 @@ type publicationErrorView struct {
 
 // handleGetPublication GET /api/v1/runs/{id}/publication
 // Answers 200 for every existing run: the row's state when a publication
-// exists, "not_attempted" when publication is on but the run never reached
-// the gate, "disabled" when publication is off. The handler reads Postgres
-// only — no provider is contacted, so the answer costs one query.
+// exists, and otherwise "disabled", "not_attempted", or "unavailable" as the
+// constants above define them. The handler reads Postgres only — no provider
+// is contacted, so the answer costs one query.
 func (api *API) handleGetPublication(w http.ResponseWriter, r *http.Request) {
 	_, run, ok := api.requireRunForAction(w, r, authz.ActionRunRead, "GetRun(publication)")
 	if !ok {
@@ -137,20 +153,28 @@ func (api *API) handlePublishRun(w http.ResponseWriter, r *http.Request) {
 // FIRST and wins over the configuration: a publication that happened stays
 // visible — its pull request, target, and times — after the operator switches
 // publication off, because "delivered" is a fact about the run and "off" is a
-// fact about what new runs will do. Only a missing row answers the absence
-// form the configuration names. A read failure answers the absence form too,
-// rather than failing the payload; the write paths are the ones that matter.
+// fact about what new runs will do.
+//
+// Only a missing row answers the absence form the configuration names. A read
+// that did not complete answers unavailable instead — the same distinction the
+// coordinator draws for a manifest it could not read, and for the same reason:
+// a reader must be able to tell an absent publication from an unread one. The
+// status stays 200 either way, because this block also rides inside the final
+// review, and a failed read of the delivery state must not take the review
+// down with it.
 func (api *API) publicationView(r *http.Request, run sqlc.Run) publicationResponse {
-	response := publicationResponse{RunID: run.ID, State: "not_attempted"}
+	response := publicationResponse{RunID: run.ID, State: publicationStateNotAttempted}
 	row, err := api.queries.GetPublicationForRun(r.Context(), sqlc.GetPublicationForRunParams{
 		TenantID: principalTenant(r), RunID: run.ID,
 	})
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			logUnexpected(api.log, err, "GetPublicationForRun(view)")
+			response.State = publicationStateUnavailable
+			return response
 		}
 		if !api.publication.enabled {
-			response.State = "disabled"
+			response.State = publicationStateDisabled
 		}
 		return response
 	}

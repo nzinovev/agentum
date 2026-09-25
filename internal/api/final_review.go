@@ -138,11 +138,11 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// finalReviewPublication renders the publication block. The block is
-// present whenever the surface can say something: a row, a configuration
-// that says off, or an enabled-but-not-attempted state. The one silent case
-// is a read failure, which leaves the block out rather than failing the
-// whole review.
+// finalReviewPublication renders the publication block, which is always
+// present: the view answers with the row's state, with the absence form the
+// configuration names, or with unavailable when the row could not be read. The
+// review therefore never loses a section to the delivery-state read, and the
+// reviewer is never left guessing which of the three absences applied.
 func (api *API) finalReviewPublication(r *http.Request, run sqlc.Run) *publicationResponse {
 	view := api.publicationView(r, run)
 	return &view

@@ -150,6 +150,24 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 			t.Errorf("reason %q reported retryable; a retry without an external change reproduces it", code)
 		}
 	}
+
+	// The partition must cover the whole vocabulary. Without this, a code
+	// added in a later change passes the two loops above by being absent from
+	// both, and falls into Retryable's default — blocking by silence rather
+	// than by decision.
+	classified := make(map[ReasonCode]bool, len(retryable)+len(blocking))
+	for _, code := range append(append([]ReasonCode{}, retryable...), blocking...) {
+		classified[code] = true
+	}
+	for _, code := range allReasonCodes {
+		if !classified[code] {
+			t.Errorf("reason %q is declared but claimed by neither set; classify it as retryable or blocking", code)
+		}
+	}
+	if len(classified) != len(allReasonCodes) {
+		t.Errorf("partition covers %d distinct codes, the vocabulary declares %d; the sets carry a duplicate or a code that no longer exists",
+			len(classified), len(allReasonCodes))
+	}
 }
 
 // TestNoopPublisherProbesNotReady: the placeholder's probe answers not ready
