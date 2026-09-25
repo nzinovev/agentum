@@ -133,7 +133,7 @@ func runSingleStageOnce(t *testing.T, runPack *pack.Pack, supported []caps.Categ
 	}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "C1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "C1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	var observed caps.Profile
@@ -318,7 +318,7 @@ func TestInvocation_UnenforceableProfileDoesNotStart(t *testing.T) {
 	}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "U1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "U1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if len(adapter.captured) != 0 {
@@ -405,7 +405,7 @@ func newFakeStoreWithPack(t *testing.T, runPack *pack.Pack) *fakeStore {
 		claimed: fullSupport,
 	}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
-	if err := runner.Handle(t.Context(), job("run", "A1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "A1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	return store

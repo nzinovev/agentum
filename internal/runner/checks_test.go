@@ -83,7 +83,7 @@ func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
-	handleErr := runner.Handle(context.Background(), job("run", "Tc", "tn", "us"))
+	handleErr := runner.HandleRun(context.Background(), job("run", "Tc", "tn", "us"))
 	assertHandleError(t, handleErr, tc.wantErr)
 	if got := store.taskState(); got != tc.wantState {
 		t.Fatalf("state = %q, want %q", got, tc.wantState)
@@ -166,7 +166,7 @@ func TestRunner_DeliveryChecksUnknownPackCheckFails(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: executor,
 	})
 
-	if err := runner.Handle(context.Background(), job("run", "Tu", "tn", "us")); err == nil {
+	if err := runner.HandleRun(context.Background(), job("run", "Tu", "tn", "us")); err == nil {
 		t.Fatal("expected Handle error for unregistered pack check name")
 	}
 	if got := store.taskState(); got != "failed" {
@@ -255,7 +255,7 @@ func TestRunner_MalformedStoredOverridesFailRun(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
-	handleErr := runner.Handle(context.Background(), job("run", "Tm", "tn", "us"))
+	handleErr := runner.HandleRun(context.Background(), job("run", "Tm", "tn", "us"))
 	if handleErr == nil {
 		t.Fatal("expected Handle error for malformed stored overrides, got nil")
 	}

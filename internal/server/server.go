@@ -18,6 +18,8 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/publication"
+	"github.com/nzinovev/agentum/internal/publish"
 	"github.com/nzinovev/agentum/internal/runner"
 	"github.com/nzinovev/agentum/internal/store"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -98,25 +100,58 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		HardTimeout: time.Duration(cfg.HardTimeoutSeconds) * time.Second,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
 		Log:         log,
+		// Publication stays off until the configuration surface exists: a
+		// run on a repository without a remote must reach review without a
+		// publication error. The provider table holds only the refusing
+		// placeholder in this build, so enabling the hook buys nothing yet.
+		Publication: runner.PublicationHook{},
+	})
+
+	// The publication coordinator serves the "publish" kind. It is wired
+	// unconditionally — the queue's kind table names it, and a publish job
+	// from the recovery probe or an explicit retry must find its handler even
+	// while the final-gate hook is off.
+	publicationService := publication.New(publication.Deps{
+		Store:    queries,
+		Manifest: manifestService,
+		Registry: publish.NewRegistry(publish.RegistryOptions{}),
+		Log:      log,
+	})
+
+	// The kind table IS the dispatch: every job kind names the component
+	// that serves it, and a kind no table row names is refused. The runner
+	// and the publication coordinator are peers here — neither imports the
+	// other, and this table is the whole connection between them.
+	handlerMux := jobs.NewMux(map[string]jobs.Handler{
+		"run":      jobs.HandlerFunc(runnerInst.HandleRun),
+		"continue": jobs.HandlerFunc(runnerInst.HandleContinue),
+		"advance":  jobs.HandlerFunc(runnerInst.HandleAdvance),
+		"teardown": jobs.HandlerFunc(runnerInst.HandleTeardown),
+		"cleanup":  jobs.HandlerFunc(runnerInst.HandleCleanup),
+		"cancel":   jobs.HandlerFunc(func(context.Context, sqlc.Job) error { return nil }),
+		"publish":  publicationService,
 	})
 
 	worker := jobs.New(jobs.Deps{
 		Store:       jobs.QueueStore{Q: queries},
-		Handler:     runnerInst,
+		Handler:     handlerMux,
 		MaxAttempts: cfg.JobMaxAttempts,
 		Log:         log,
 	})
 
 	// The reconciler repairs stale job leases AND orphaned running runs (a
-	// crash between the FSM transition and EnqueueJob). *sqlc.Queries satisfies
-	// RunStore directly; QueueStore adapts the queue side. The tenant seam is
-	// the single-tenant id from config until SSO/RBAC arrive.
+	// crash between the FSM transition and EnqueueJob), and restores lost
+	// publications (pending without a live job, publishing with an expired
+	// lease). *sqlc.Queries satisfies RunStore and PublicationStore directly;
+	// QueueStore adapts the queue side. The tenant seam is the single-tenant
+	// id from config until SSO/RBAC arrive.
 	reconciler := jobs.NewReconciler(jobs.ReconcilerDeps{
-		TenantID:    cfg.TenantID,
-		Queue:       jobs.QueueStore{Q: queries},
-		Runs:        queries,
-		MaxAttempts: cfg.JobMaxAttempts,
-		Log:         log,
+		TenantID:     cfg.TenantID,
+		Queue:        jobs.QueueStore{Q: queries},
+		Runs:         queries,
+		Publications: queries,
+		MaxAttempts:  cfg.JobMaxAttempts,
+		Log:          log,
 	})
 
 	apiInst := api.New(dataStore.DB, queries, log, runnerInst.Cancels(),
@@ -124,7 +159,8 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		api.WithPackSource(packs),
 		api.WithExecutionAdapter(adapter),
 		api.WithResolvedTiers(effectiveTierConfig(modelsCfg, adapter.Describe())),
-		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes))
+		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes),
+		api.WithPublicationConfig(false, ""))
 
 	return &Server{
 		cfg: cfg, log: log, store: dataStore, adapter: adapter, models: modelsCfg,

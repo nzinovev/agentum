@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,5 +146,90 @@ func TestReconciler_SkipsAlreadyRepaired(t *testing.T) {
 	defer runStore.mu.Unlock()
 	if len(runStore.transitions) != 0 {
 		t.Fatalf("expected no transitions, got %v", runStore.transitions)
+	}
+}
+
+// fakePublicationStore seeds stale publications and records the publish jobs
+// the reconciler enqueues for them.
+type fakePublicationStore struct {
+	mu           sync.Mutex
+	stale        []sqlc.RunPublication
+	enqueued     []string
+	findStaleErr error
+}
+
+func (store *fakePublicationStore) FindStalePublications(context.Context, sqlc.FindStalePublicationsParams) ([]sqlc.RunPublication, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.findStaleErr != nil {
+		return nil, store.findStaleErr
+	}
+	return store.stale, nil
+}
+
+func (store *fakePublicationStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.enqueued = append(store.enqueued, arg.Kind)
+	return sqlc.Job{Kind: arg.Kind}, nil
+}
+
+// TestReconciler_RequeuesLostPublications: a lost publication — its row
+// exists and the work it describes was never finished — gets a fresh publish
+// job. The probe never sees a failed or blocked row (the query excludes
+// them); what it returns, it re-enqueues.
+func TestReconciler_RequeuesLostPublications(t *testing.T) {
+	t.Parallel()
+	publications := &fakePublicationStore{stale: []sqlc.RunPublication{
+		{ID: "pub-1", TenantID: "tn", UserID: "us", RunID: "T-lost-pending", State: "pending"},
+		{ID: "pub-2", TenantID: "tn", UserID: "us", RunID: "T-lost-publishing", State: "publishing"},
+	}}
+	reconciler := NewReconciler(ReconcilerDeps{
+		TenantID: "tn", Queue: newFakeQueue(), Runs: &fakeRunStore{},
+		Publications: publications, StaleAfter: time.Minute, MaxAttempts: 3,
+	})
+
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	publications.mu.Lock()
+	defer publications.mu.Unlock()
+	if len(publications.enqueued) != 2 {
+		t.Fatalf("enqueued = %v, want two publish jobs", publications.enqueued)
+	}
+	for _, kind := range publications.enqueued {
+		if kind != "publish" {
+			t.Errorf("enqueued kind = %q, want publish", kind)
+		}
+	}
+}
+
+// TestReconciler_PublicationProbeOptional: a reconciler built without the
+// publication store skips the third probe — the first two still run and
+// reconcile cleanly on an empty queue.
+func TestReconciler_PublicationProbeOptional(t *testing.T) {
+	t.Parallel()
+	reconciler := NewReconciler(ReconcilerDeps{
+		TenantID: "tn", Queue: newFakeQueue(), Runs: &fakeRunStore{},
+		StaleAfter: time.Minute, MaxAttempts: 3,
+	})
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile without publications: %v", err)
+	}
+}
+
+// TestReconciler_PublicationProbeErrorIsReportedNotSwallowed: a probe that
+// cannot read its rows returns an error naming the pass, so a broken probe
+// is visible in the log instead of silently publishing nothing.
+func TestReconciler_PublicationProbeErrorIsReportedNotSwallowed(t *testing.T) {
+	t.Parallel()
+	publications := &fakePublicationStore{findStaleErr: errors.New("db down")}
+	reconciler := NewReconciler(ReconcilerDeps{
+		TenantID: "tn", Queue: newFakeQueue(), Runs: &fakeRunStore{},
+		Publications: publications, StaleAfter: time.Minute, MaxAttempts: 3,
+	})
+	err := reconciler.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reconcile publications") {
+		t.Fatalf("Reconcile error = %v, want one naming the publications pass", err)
 	}
 }

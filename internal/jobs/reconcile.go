@@ -23,36 +23,55 @@ type RunStore interface {
 	AppendEvent(ctx context.Context, arg sqlc.AppendEventParams) (sqlc.Event, error)
 }
 
+// PublicationStore is the publication-queue surface the reconciler's third
+// probe needs: finding lost publications and re-enqueueing their jobs. The
+// probe restores work the system did not finish; it does not retry outcomes
+// the publication coordinator recorded, and that boundary lives in the
+// query, not here. Declared as a separate interface (and optional in Deps)
+// so a test reconciler — or a build without publication — runs the first
+// two probes alone.
+type PublicationStore interface {
+	FindStalePublications(ctx context.Context, arg sqlc.FindStalePublicationsParams) ([]sqlc.RunPublication, error)
+	EnqueueJob(ctx context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error)
+}
+
 // Reconciler repairs the queue and run state that a worker crash or an
 // enqueue/transition race leaves behind (F.6.1 AC #6). It runs at boot AND on a
 // periodic ticker — not only process startup — so a dead worker's stale lease
 // or a run whose desired runnable state lost its job is repaired without a
 // restart.
 //
-// Two probes:
+// Three probes:
 //   - Stale jobs: status='running' whose heartbeat is older than staleAfter.
 //     Re-queued (or failed past the poison bound).
 //   - Orphaned runs: state='running' with no live (pending/running) job — the
 //     outcome of a crash between the FSM transition and EnqueueJob, or a job
 //     that exhausted attempts. Repaired to paused_user_stop (interrupted) so a
 //     human explicitly resumes; a half-run stage is never blindly replayed.
+//   - Lost publications: pending with no live publish job, or publishing with
+//     an expired lease — the row exists, the work it describes was never
+//     finished. Re-enqueued, bounded by the same attempts bound as the queue.
+//     A failed or blocked publication is never returned by the probe: the
+//     system restores unfinished work, it does not retry a recorded outcome.
 type Reconciler struct {
-	tenantID string
-	queue    Store
-	runs     RunStore
-	stale    time.Duration
-	maxAtt   int
-	log      *slog.Logger
+	tenantID     string
+	queue        Store
+	runs         RunStore
+	publications PublicationStore
+	stale        time.Duration
+	maxAtt       int
+	log          *slog.Logger
 }
 
 // ReconcilerDeps bundles Reconciler construction.
 type ReconcilerDeps struct {
-	TenantID    string
-	Queue       Store
-	Runs        RunStore
-	StaleAfter  time.Duration
-	MaxAttempts int
-	Log         *slog.Logger
+	TenantID     string
+	Queue        Store
+	Runs         RunStore
+	Publications PublicationStore
+	StaleAfter   time.Duration
+	MaxAttempts  int
+	Log          *slog.Logger
 }
 
 const (
@@ -78,21 +97,26 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 	}
 	return &Reconciler{
 		tenantID: deps.TenantID, queue: deps.Queue, runs: deps.Runs,
-		stale: stale, maxAtt: maxAtt, log: log,
+		publications: deps.Publications,
+		stale:        stale, maxAtt: maxAtt, log: log,
 	}
 }
 
-// Reconcile runs one pass of both probes. Safe to call from boot recovery or
+// Reconcile runs one pass of every probe. Safe to call from boot recovery or
 // the periodic loop. Errors are returned but each sub-step is best-effort: a
 // failure in one does not skip the others.
 func (rec *Reconciler) Reconcile(ctx context.Context) error {
 	staleErr := rec.requeueStaleJobs(ctx)
 	orphanErr := rec.repairOrphanedRuns(ctx)
+	publicationErr := rec.requeueLostPublications(ctx)
 	if staleErr != nil {
 		return fmt.Errorf("reconcile stale jobs: %w", staleErr)
 	}
 	if orphanErr != nil {
 		return fmt.Errorf("reconcile orphaned runs: %w", orphanErr)
+	}
+	if publicationErr != nil {
+		return fmt.Errorf("reconcile publications: %w", publicationErr)
 	}
 	return nil
 }
@@ -148,6 +172,36 @@ func (rec *Reconciler) repairOrphanedRuns(ctx context.Context) error {
 			rec.log.Warn("reconcile: emit event", "run", run.ID, "error", emitErr)
 		}
 		rec.log.Info("reconcile: paused orphaned run", "run", run.ID, "from", "running", "to", "paused_user_stop")
+	}
+	return nil
+}
+
+// requeueLostPublications restores publications whose work was lost: a row
+// in pending whose job never enqueued (or already finished without the row
+// moving), and a row in publishing whose lease expired — its worker died
+// mid-attempt. Each gets a fresh publish job; the lease in the row is what
+// keeps two workers from delivering the same run. The attempts bound is
+// applied by the probe's query, so a publication the system keeps losing is
+// eventually left for a person to see.
+func (rec *Reconciler) requeueLostPublications(ctx context.Context) error {
+	if rec.publications == nil {
+		return nil
+	}
+	lost, err := rec.publications.FindStalePublications(ctx, sqlc.FindStalePublicationsParams{
+		TenantID: rec.tenantID, Attempts: int32(rec.maxAtt),
+	})
+	if err != nil {
+		return fmt.Errorf("find lost: %w", err)
+	}
+	for _, publication := range lost {
+		if _, enqueueErr := rec.publications.EnqueueJob(ctx, sqlc.EnqueueJobParams{
+			TenantID: publication.TenantID, UserID: publication.UserID,
+			RunID: publication.RunID, Kind: "publish", Payload: []byte("{}"),
+		}); enqueueErr != nil {
+			rec.log.Error("reconcile: requeue publication", "run", publication.RunID, "error", enqueueErr)
+			continue
+		}
+		rec.log.Info("reconcile: requeued publication", "run", publication.RunID, "state", publication.State)
 	}
 	return nil
 }

@@ -142,7 +142,7 @@ func TestRunner_TwoStagesOnDifferentVariantsInOnePipeline(t *testing.T) {
 	t.Parallel()
 	adapter, evidence, runner, store := newVariantRunner(t, variantCatalog())
 
-	if runErr := runner.Handle(t.Context(), job("run", "Tvar", "tn", "us")); runErr != nil {
+	if runErr := runner.HandleRun(t.Context(), job("run", "Tvar", "tn", "us")); runErr != nil {
 		t.Fatalf("run failed: %v", runErr)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {
@@ -205,7 +205,7 @@ func TestRunner_UndeclaredVariantOptionStopsRunStart(t *testing.T) {
 	}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Models: variantTierConfig()})
 
-	runErr := runner.Handle(t.Context(), job("run", "Tund", "tn", "us"))
+	runErr := runner.HandleRun(t.Context(), job("run", "Tund", "tn", "us"))
 	if runErr == nil {
 		t.Fatal("a stage variant the adapter does not declare must fail the run at start")
 	}
@@ -251,7 +251,7 @@ func TestRunner_VariantOutsideVocabularyFailsRunStart(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Models: variantTierConfig()})
 
-	runErr := runner.Handle(t.Context(), job("run", "Tvoc", "tn", "us"))
+	runErr := runner.HandleRun(t.Context(), job("run", "Tvoc", "tn", "us"))
 	if runErr == nil {
 		t.Fatal("a variant outside the declared vocabulary must fail the run at start")
 	}
@@ -286,7 +286,7 @@ func TestRunner_UnknownVocabularyAndUnavailableCatalogLetTheVariantRun(t *testin
 	for _, state := range states {
 		t.Run(state.name, func(t *testing.T) {
 			adapter, _, runner, store := newVariantRunner(t, state.catalog)
-			if runErr := runner.Handle(t.Context(), job("run", "Tvar", "tn", "us")); runErr != nil {
+			if runErr := runner.HandleRun(t.Context(), job("run", "Tvar", "tn", "us")); runErr != nil {
 				t.Fatalf("run failed: %v", runErr)
 			}
 			if got := store.taskState(); got != "awaiting_final_review" {
@@ -324,7 +324,7 @@ func TestRunner_InconsistentTierConfigAssembledInGoFailsRunStart(t *testing.T) {
 	}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Models: brokenConfig})
 
-	runErr := runner.Handle(t.Context(), job("run", "Tbrk", "tn", "us"))
+	runErr := runner.HandleRun(t.Context(), job("run", "Tbrk", "tn", "us"))
 	if runErr == nil {
 		t.Fatal("a variant without a model must fail the run at start")
 	}

@@ -74,7 +74,7 @@ func TestRunner_RunExecutesInPinnedCheckoutNotProjectPath(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "T-pin", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-pin", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestRunner_UnavailableCheckoutPausesWithoutWorktree(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 
-	if err := runner.Handle(t.Context(), job("run", "T-gone", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-gone", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func TestRunner_ForeignCheckoutPauses(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: &scriptAdapter{},
 	})
 
-	if err := runner.Handle(t.Context(), job("run", "T-foreign", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-foreign", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {
@@ -246,7 +246,7 @@ func TestRunner_RepoMoveContinuesInMovedCopy(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	// First run: creates the worktree and pauses at the human gate.
-	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -265,7 +265,7 @@ func TestRunner_RepoMoveContinuesInMovedCopy(t *testing.T) {
 	store.mu.Unlock()
 
 	// The advance job continues the run in the moved copy.
-	if err := runner.Handle(t.Context(), job("advance", runID, "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", runID, "tn", "us")); err != nil {
 		t.Fatalf("advance after move: %v", err)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {
@@ -335,7 +335,7 @@ func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	store.record.State = "done"
 	store.mu.Unlock()
 
-	if err := runner.Handle(t.Context(), job("teardown", runID, "tn", "us")); err != nil {
+	if err := runner.HandleTeardown(t.Context(), job("teardown", runID, "tn", "us")); err != nil {
 		t.Fatalf("teardown after move: %v", err)
 	}
 	if worktree.DirPresent(worktree.PathFor(moved, runID)) {
@@ -388,7 +388,7 @@ func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", runID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", runID, "tn", "us")); err != nil {
 		t.Fatalf("initial run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -407,7 +407,7 @@ func TestRunner_UnrepairableWorktreePauses(t *testing.T) {
 		t.Fatalf("prune worktree metadata: %v", err)
 	}
 
-	if err := runner.Handle(t.Context(), job("advance", runID, "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", runID, "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {

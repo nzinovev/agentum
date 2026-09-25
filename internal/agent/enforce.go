@@ -724,9 +724,13 @@ var configEnvVars = []string{
 // is recorded but maps to no env var); this keeps the model forward-compatible
 // with non-env secret sources (a vault, a file) without pretending we un-redact
 // something we cannot.
+//
+// A Git provider's token has no entry and never gets one: the publisher that
+// delivers a run is not an agent, and no capability grant may hand the
+// delivery credential to a stage. The model and infrastructure secrets below
+// are a different surface — they name the accounts the project itself runs
+// on, not its repository.
 var secretEnvMap = map[string][]string{
-	"secret.github_token":    {"GITHUB_TOKEN", "GH_TOKEN"},
-	"secret.gitlab_token":    {"GITLAB_TOKEN"},
 	"secret.anthropic_key":   {"ANTHROPIC_API_KEY"},
 	"secret.openai_key":      {"OPENAI_API_KEY"},
 	"secret.aws_credentials": {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"},
