@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -133,9 +134,13 @@ type fakeManifest struct {
 	added    []manifest.Body
 	corrects []manifest.Body
 	addErr   error
+	getErr   error // injected: a read that did not complete
 }
 
 func (manifestFake *fakeManifest) Get(context.Context, string, string) (manifest.Body, manifest.SealInfo, []manifest.Correction, error) {
+	if manifestFake.getErr != nil {
+		return manifest.Body{}, manifest.SealInfo{}, nil, manifestFake.getErr
+	}
 	sealInfo := manifest.SealInfo{}
 	if manifestFake.sealed {
 		sealInfo.SealedAt = sql.NullTime{Valid: true}
@@ -180,12 +185,17 @@ func (publisher scriptedPublisher) Publish(context.Context, publish.Delivery) (p
 	return publisher.result, nil
 }
 
-// scriptedRegistry resolves every id to one scripted publisher.
+// scriptedRegistry resolves every id to one scripted publisher, or fails
+// with the scripted error.
 type scriptedRegistry struct {
-	publisher publish.Publisher
+	publisher  publish.Publisher
+	resolveErr error
 }
 
 func (registry scriptedRegistry) Resolve(publish.ProviderID) (publish.Publisher, error) {
+	if registry.resolveErr != nil {
+		return nil, registry.resolveErr
+	}
 	return registry.publisher, nil
 }
 
@@ -494,5 +504,96 @@ func TestRowWriteFailureFailsTheJob(t *testing.T) {
 	}
 	if !errors.Is(err, harness.store.failureWrite) {
 		t.Errorf("error = %v, want the row-write failure wrapped", err)
+	}
+}
+
+// TestManifestReadFailureIsATransientRefusalNotAGateVerdict: a manifest read
+// that does not complete is a failure on this side, not a fact about the run.
+// It lands as provider_error in the failed state — the retry re-reads — and
+// never as checks_not_passed, which would name the run's evidence and block.
+func TestManifestReadFailureIsATransientRefusalNotAGateVerdict(t *testing.T) {
+	t.Parallel()
+	publisher := scriptedPublisher{id: "github", result: publish.Result{BranchPushed: true, PullRequest: 4}}
+	harness := newCoordinatorHarness(t, passingChecks(), publisher)
+	harness.mfst.getErr = errors.New("db down")
+
+	if err := harness.handle(t); err != nil {
+		t.Fatalf("Handle returned %v; a manifest read failure is an outcome, not a job failure", err)
+	}
+	if harness.store.row.State != "failed" {
+		t.Errorf("state = %q, want failed — the attempt is re-run, not reconfigured", harness.store.row.State)
+	}
+	if harness.store.row.LastErrorCode.String != "provider_error" {
+		t.Errorf("last_error_code = %q, want provider_error", harness.store.row.LastErrorCode.String)
+	}
+	if count := harness.store.eventCount(EvPublicationFailed); count != 1 {
+		t.Errorf("publication_failed events = %d, want 1", count)
+	}
+}
+
+// TestUnresolvedProviderIdIsBlocked: a provider id the registry cannot
+// resolve is blocked, not failed — the row's id is frozen, so a retry with
+// the configuration unfixed resolves the same nothing, and the next action
+// is a corrected configuration, not another attempt.
+func TestUnresolvedProviderIdIsBlocked(t *testing.T) {
+	t.Parallel()
+	harness := newCoordinatorHarness(t, passingChecks(), scriptedPublisher{id: "github"})
+	harness.service = New(Deps{
+		Store: harness.store, Manifest: harness.mfst,
+		Registry: scriptedRegistry{resolveErr: errors.New(`unknown publication provider "gihub" (known: github, noop)`)},
+		Log:      slog.New(slog.DiscardHandler),
+	})
+
+	if err := harness.handle(t); err != nil {
+		t.Fatalf("Handle returned %v", err)
+	}
+	if harness.store.row.State != "blocked" {
+		t.Errorf("state = %q, want blocked — a retry cannot clear an unresolved id", harness.store.row.State)
+	}
+	if harness.store.row.LastErrorCode.String != "provider_unknown" {
+		t.Errorf("last_error_code = %q, want provider_unknown", harness.store.row.LastErrorCode.String)
+	}
+	if !strings.Contains(harness.store.row.LastErrorMessage.String, "gihub") {
+		t.Errorf("last_error_message = %q; want the registry's own text naming the id", harness.store.row.LastErrorMessage.String)
+	}
+}
+
+// TestRefusedAttemptKeepsTheProviderProfileLabel: a failed attempt still
+// names the boundary it ran under — the label lets a reviewer reconstruct
+// which provider version refused, and a refusal is exactly when that
+// question comes up.
+func TestRefusedAttemptKeepsTheProviderProfileLabel(t *testing.T) {
+	t.Parallel()
+	publisher := scriptedPublisher{
+		id:      "github",
+		refusal: &publish.Refusal{Code: publish.ReasonNetworkUnreachable, Message: "dial timeout"},
+	}
+	harness := newCoordinatorHarness(t, passingChecks(), publisher)
+
+	if err := harness.handle(t); err != nil {
+		t.Fatalf("Handle returned %v", err)
+	}
+	if len(harness.mfst.added) != 1 || harness.mfst.added[0].Publication == nil {
+		t.Fatalf("evidence writes = %d, want one publication section", len(harness.mfst.added))
+	}
+	if label := harness.mfst.added[0].Publication.Profile; label != "publisher-github-9.9.9" {
+		t.Errorf("profile = %q, want publisher-github-9.9.9 on the refusal path too", label)
+	}
+}
+
+// TestGateRefusalCarriesNoProviderProfileLabel: a refusal that happened
+// before any provider was resolved carries no label — nothing ran under a
+// boundary, and an empty label says so instead of guessing one.
+func TestGateRefusalCarriesNoProviderProfileLabel(t *testing.T) {
+	t.Parallel()
+	harness := newCoordinatorHarness(t, nil, scriptedPublisher{id: "github"})
+	if err := harness.handle(t); err != nil {
+		t.Fatalf("Handle returned %v", err)
+	}
+	if len(harness.mfst.added) != 1 || harness.mfst.added[0].Publication == nil {
+		t.Fatalf("evidence writes = %d, want one publication section", len(harness.mfst.added))
+	}
+	if label := harness.mfst.added[0].Publication.Profile; label != "" {
+		t.Errorf("profile = %q, want empty — no provider was reached", label)
 	}
 }

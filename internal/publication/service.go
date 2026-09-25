@@ -167,22 +167,32 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 	// The delivery gate reads the manifest the run itself recorded: the
 	// checks section's verdict and its bound commit. The checks are never
 	// re-run here — the gate's input is the durable record, not a fresh
-	// execution whose outcome could differ from what was reviewed.
-	body, sealInfo := service.readManifest(ctx, record)
+	// execution whose outcome could differ from what was reviewed. A manifest
+	// that cannot be READ is not a gate verdict: it is a transient failure on
+	// this side, recorded as provider_error and retried — the same
+	// distinction the delivery-commit check draws between "could not read"
+	// and "nothing recorded".
+	body, sealInfo, manifestErr := service.readManifest(ctx, record)
+	if manifestErr != nil {
+		return service.recordRefusal(ctx, record, publish.ReasonProviderError, manifestErr.Error(), publish.Result{}, nil)
+	}
 	if refusalCode, refusalMessage, refused := gateRefusal(body, nullStringOr(record.ResultCommit)); refused {
-		return service.recordRefusal(ctx, record, refusalCode, refusalMessage, publish.Result{})
+		return service.recordRefusal(ctx, record, refusalCode, refusalMessage, publish.Result{}, nil)
 	}
 
 	provider, resolveErr := service.registry.Resolve(publish.ProviderID(row.Provider))
 	if resolveErr != nil {
-		return service.recordRefusal(ctx, record, publish.ReasonProviderError, resolveErr.Error(), publish.Result{})
+		// The row's provider is frozen; a retry with the configuration
+		// unfixed resolves the same nothing. Blocked, with the registry's own
+		// message naming the id and the known ones.
+		return service.recordRefusal(ctx, record, publish.ReasonProviderUnknown, resolveErr.Error(), publish.Result{}, nil)
 	}
 
 	delivery := service.assembleDelivery(ctx, record, row, body, sealInfo)
 	result, publishErr := provider.Publish(ctx, delivery)
 	if publishErr != nil {
 		code, message := publish.Classify(publishErr)
-		return service.recordRefusal(ctx, record, code, message, result)
+		return service.recordRefusal(ctx, record, code, message, result, provider)
 	}
 
 	updated, err := service.store.RecordPublicationSuccess(ctx, sqlc.RecordPublicationSuccessParams{
@@ -243,19 +253,24 @@ func (service *Service) loadOrCreateRow(ctx context.Context, record sqlc.Run) (s
 	return created, nil
 }
 
-// readManifest returns the run's manifest body and seal metadata, or zero
-// values when no manifest exists or it cannot be read. A zero body fails the
-// delivery gate with checks_not_passed: no recorded evidence says the checks
-// ran, and the gate's input is the record, never a guess.
-func (service *Service) readManifest(ctx context.Context, record sqlc.Run) (manifest.Body, manifest.SealInfo) {
+// readManifest returns the run's manifest body and seal metadata. No manifest
+// row at all is the absence form: zero values come back with no error, and
+// the delivery gate refuses with checks_not_passed — no recorded evidence
+// says the checks ran, and the gate's input is the record, never a guess. Any
+// other failure is an error the CALLER records as a transient refusal; it is
+// not a verdict about the run.
+func (service *Service) readManifest(ctx context.Context, record sqlc.Run) (manifest.Body, manifest.SealInfo, error) {
 	if service.mfst == nil {
-		return manifest.Body{}, manifest.SealInfo{}
+		return manifest.Body{}, manifest.SealInfo{}, nil
 	}
 	body, sealInfo, _, err := service.mfst.Get(ctx, record.TenantID, record.ID)
 	if err != nil {
-		return manifest.Body{}, manifest.SealInfo{}
+		if errors.Is(err, manifest.ErrNoManifest) {
+			return manifest.Body{}, manifest.SealInfo{}, nil
+		}
+		return manifest.Body{}, manifest.SealInfo{}, fmt.Errorf("publication: read manifest: %w", err)
 	}
-	return body, sealInfo
+	return body, sealInfo, nil
 }
 
 // gateRefusal enforces the delivery gate: a publication leaves the host only
@@ -301,7 +316,7 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 			BaseBranch:   row.BaseBranch,
 			RemoteBranch: row.RemoteBranch,
 		},
-		Branch:       row.RemoteBranch,
+		Branch:       branchForRun(record.ID),
 		BaseCommit:   record.BaseCommit.String,
 		ResultCommit: record.ResultCommit.String,
 		Request: publish.RequestRef{
@@ -314,9 +329,18 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 			Missing:  body.MissingSections(),
 		},
 	}
-	if project, err := service.store.GetProject(ctx, sqlc.GetProjectParams{
+	project, projectErr := service.store.GetProject(ctx, sqlc.GetProjectParams{
 		ID: record.ProjectID, TenantID: record.TenantID,
-	}); err == nil {
+	})
+	if projectErr != nil {
+		// The delivery continues without the project reference rather than
+		// failing the attempt: the push path in the provider reads the
+		// checkout from the run row, and a missing project identity degrades
+		// the pull request body, not the delivery itself. Logged because an
+		// empty CheckoutPath in a delivery is otherwise invisible.
+		service.log.Warn("publication: load project for delivery",
+			"run", record.ID, "error", projectErr)
+	} else {
 		delivery.Project = publish.ProjectRef{
 			ID: project.ID, RepoIdentity: project.RepoIdentity, CheckoutPath: record.CheckoutPath,
 		}
@@ -344,9 +368,11 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 // recordRefusal writes a refused attempt: the row gets the reason code, the
 // provider's message, and the state — failed when a retry can clear the
 // reason, blocked when it cannot. The event and the manifest evidence say
-// the same thing. A pushed branch is kept: an attempt can push and still fail
-// the pull request.
-func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, code publish.ReasonCode, message string, result publish.Result) error {
+// the same thing, and the evidence carries the boundary label of the
+// provider the attempt reached (nil when none was resolved — a gate refusal,
+// an unresolved registry id). A pushed branch is kept: an attempt can push
+// and still fail the pull request.
+func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, code publish.ReasonCode, message string, result publish.Result, provider publish.Publisher) error {
 	state := "blocked"
 	if code.Retryable() {
 		state = "failed"
@@ -364,7 +390,7 @@ func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, code
 	service.emit(ctx, record, EvPublicationFailed, map[string]any{
 		"code": string(code), "state": state, "message": message,
 	})
-	service.recordEvidence(ctx, record, updated, nil)
+	service.recordEvidence(ctx, record, updated, provider)
 	return nil
 }
 
@@ -458,3 +484,11 @@ func nullStringOr(value sql.NullString) string {
 func nullStringEvent(runID string) sql.NullString {
 	return sql.NullString{String: runID, Valid: runID != ""}
 }
+
+// branchForRun mirrors worktree.BranchFor without importing the worktree
+// package: the coordinator names branches, it does not manage them. The
+// branch name is a pure function of the run id. Delivery.Branch is the LOCAL
+// branch by contract — the remote branch carries its own name in Target, and
+// the two stop being the same string the moment a remote-side prefix
+// appears.
+func branchForRun(runID string) string { return "agentum/" + runID }

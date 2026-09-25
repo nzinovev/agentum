@@ -138,6 +138,7 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 		ReasonChecksNotPassed,
 		ReasonCommitMismatch,
 		ReasonSecretInDescription,
+		ReasonProviderUnknown,
 	}
 	for _, code := range retryable {
 		if !code.Retryable() {
@@ -148,5 +149,23 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 		if code.Retryable() {
 			t.Errorf("reason %q reported retryable; a retry without an external change reproduces it", code)
 		}
+	}
+}
+
+// TestNoopPublisherProbesNotReady: the placeholder's probe answers not ready
+// with the same reason its attempts refuse with — a readiness surface must
+// not call a build that cannot deliver anything available.
+func TestNoopPublisherProbesNotReady(t *testing.T) {
+	t.Parallel()
+	publisher := NewNoopPublisher()
+	probe, err := publisher.Probe(t.Context())
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if probe.Ready {
+		t.Error("probe ready; the placeholder cannot deliver anything")
+	}
+	if probe.Reason == "" {
+		t.Error("probe reason empty; it must name why delivery is unavailable")
 	}
 }

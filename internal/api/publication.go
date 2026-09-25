@@ -108,10 +108,12 @@ func (api *API) handlePublishRun(w http.ResponseWriter, r *http.Request) {
 
 	// The row (created here when missing — the gate may have run while
 	// publication was off) and the job land in one transaction, so an enqueue
-	// failure cannot leave a pending row no job will ever serve.
+	// failure cannot leave a pending row no job will ever serve. The row's
+	// user_id is the run's author, the same value the gate writes — not the
+	// caller's, which is the same person today and stops being it with RBAC.
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		if _, ensureErr := qtx.EnsurePublication(r.Context(), sqlc.EnsurePublicationParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
+			TenantID: principal.TenantID, UserID: run.UserID, RunID: run.ID,
 			Provider:        api.publication.provider,
 			RemoteBranch:    branchForRun(run.ID),
 			PublishedCommit: nullStringOr(run.ResultCommit),
@@ -131,20 +133,25 @@ func (api *API) handlePublishRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, api.publicationView(r, run))
 }
 
-// publicationView assembles the response from durable state: the row when it
-// exists, else the explicit absence named by the configuration. Reading is
-// best-effort below the row: a read error answers not_attempted rather than
-// failing the payload, because the write paths are the ones that matter.
+// publicationView assembles the response from durable state. The row is read
+// FIRST and wins over the configuration: a publication that happened stays
+// visible — its pull request, target, and times — after the operator switches
+// publication off, because "delivered" is a fact about the run and "off" is a
+// fact about what new runs will do. Only a missing row answers the absence
+// form the configuration names. A read failure answers the absence form too,
+// rather than failing the payload; the write paths are the ones that matter.
 func (api *API) publicationView(r *http.Request, run sqlc.Run) publicationResponse {
 	response := publicationResponse{RunID: run.ID, State: "not_attempted"}
-	if !api.publication.enabled {
-		response.State = "disabled"
-		return response
-	}
 	row, err := api.queries.GetPublicationForRun(r.Context(), sqlc.GetPublicationForRunParams{
 		TenantID: principalTenant(r), RunID: run.ID,
 	})
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			logUnexpected(api.log, err, "GetPublicationForRun(view)")
+		}
+		if !api.publication.enabled {
+			response.State = "disabled"
+		}
 		return response
 	}
 	response.State = row.State

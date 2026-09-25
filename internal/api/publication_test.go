@@ -163,6 +163,55 @@ func TestGetPublicationAnswersEveryAbsenceExplicitly(t *testing.T) {
 	}
 }
 
+// TestGetPublicationShowsAnExistingRowWhileDisabled: a delivered run keeps
+// its pull request, target, and times after the operator switches publication
+// off. The row is a fact about the run; the configuration governs what new
+// runs do. Answering "disabled" here would erase a delivery that happened.
+func TestGetPublicationShowsAnExistingRowWhileDisabled(t *testing.T) {
+	t.Parallel()
+	enabledHarness := newPublicationHarness(t, true)
+	runID := enabledHarness.insertPublicationRun(t, "awaiting_final_review")
+	if _, err := enabledHarness.queries.EnsurePublication(context.Background(), sqlc.EnsurePublicationParams{
+		TenantID: publicationTestTenant, UserID: publicationTestUser, RunID: runID,
+		Provider: "github", RemoteBranch: "agentum/" + runID, PublishedCommit: "abc123",
+	}); err != nil {
+		t.Fatalf("ensure publication: %v", err)
+	}
+	if _, err := enabledHarness.queries.RecordPublicationSuccess(context.Background(), sqlc.RecordPublicationSuccessParams{
+		TenantID: publicationTestTenant, RunID: runID,
+		TargetHost: "github.com", TargetOwner: "example", TargetRepository: "repo", BaseBranch: "main",
+		PrNumber: sql.NullInt32{Int32: 12, Valid: true},
+		PrUrl:    sql.NullString{String: "https://github.com/example/repo/pull/12", Valid: true},
+		PrState:  sql.NullString{String: "open", Valid: true},
+	}); err != nil {
+		t.Fatalf("record success: %v", err)
+	}
+
+	// The same database read through an API whose publication switch is off.
+	disabledView := New(enabledHarness.db, enabledHarness.queries, slog.New(slog.DiscardHandler), nil, WithPublicationConfig(false, "noop"))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/publication", nil)
+	request.SetPathValue("id", runID)
+	request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
+		TenantID: publicationTestTenant, UserID: publicationTestUser,
+	}))
+	recorder := httptest.NewRecorder()
+	disabledView.handleGetPublication(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET while disabled: status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodePublication(t, recorder)
+	if response.State != "published" {
+		t.Errorf("state = %q, want published — the row wins over the switch", response.State)
+	}
+	if response.PullRequest == nil || response.PullRequest.Number != 12 ||
+		response.PullRequest.URL != "https://github.com/example/repo/pull/12" {
+		t.Errorf("pull request = %+v, want number 12 with its URL", response.PullRequest)
+	}
+	if response.PublishedAt == "" || response.BranchPushedAt == "" {
+		t.Errorf("published_at = %q, branch_pushed_at = %q; a delivered run keeps its times", response.PublishedAt, response.BranchPushedAt)
+	}
+}
+
 // TestPublishRunPreconditions pins the three 409s: publication off in
 // configuration, a run not in a deliverable state, and an attempt already in
 // flight under a live lease.

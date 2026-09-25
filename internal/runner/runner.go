@@ -239,10 +239,9 @@ const jobKindPublish = "publish"
 // review without a publication error.
 type PublicationHook struct {
 	Enabled bool
-	// Provider is the publication provider id recorded on the row — the id
-	// the coordinator resolves through the provider registry at attempt
-	// time. Empty records empty, which no registry entry resolves; the
-	// wiring that enables the hook supplies the id.
+	// Provider is the publication provider id recorded on the row. Empty
+	// defers the choice to the registry's default entry at attempt time —
+	// the same id an enabled-but-unconfigured gate ends up publishing under.
 	Provider string
 }
 
@@ -1702,7 +1701,11 @@ func (runner *Runner) schedulePublication(ctx context.Context, record sqlc.Run) 
 		Provider:        runner.publication.Provider,
 		RemoteBranch:    worktree.BranchFor(record.ID),
 		PublishedCommit: refreshed.ResultCommit.String,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// The empty return is the idempotent case — the row already exists
+		// (a re-entry into the final gate, or the explicit retry creating it
+		// first) — and the job below must still be enqueued. Same reading as
+		// the approval write and the API's retry.
 		runner.log.Warn("publication: create pending row", "run", record.ID, "error", err)
 		return
 	}

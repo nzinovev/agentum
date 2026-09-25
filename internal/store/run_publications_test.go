@@ -153,6 +153,34 @@ func TestClaimPublicationExcludesASecondWorkerAndHonoursAnExpiredLease(t *testin
 	}
 }
 
+// TestClaimPublicationTakesARowWithNoLease: a publishing row with a NULL
+// lease is claimable. The claim predicate must match the recovery probe's —
+// without the explicit IS NULL branch, three-valued logic leaves such a row
+// unclaimable while the probe keeps re-enqueueing it, and the attempts bound
+// never grows because the increment lives inside the claim.
+func TestClaimPublicationTakesARowWithNoLease(t *testing.T) {
+	handle := dbtest.Store(t)
+	runID := insertPublicationFixture(t, handle.Store.DB, "claim-null-lease")
+	ensurePublication(t, handle.Queries, runID)
+	if _, err := handle.Store.DB.ExecContext(t.Context(),
+		`UPDATE run_publications SET state = 'publishing', lease_expires_at = NULL WHERE run_id = $1`, runID); err != nil {
+		t.Fatalf("null the lease: %v", err)
+	}
+
+	claimed, err := handle.Queries.ClaimPublication(t.Context(), sqlc.ClaimPublicationParams{
+		TenantID:       publicationTestTenantID,
+		RunID:          runID,
+		LeaseOwner:     sql.NullString{String: "worker-d", Valid: true},
+		LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("claim with NULL lease: %v", err)
+	}
+	if claimed.LeaseOwner.String != "worker-d" || claimed.Attempts != 1 {
+		t.Errorf("claim owner = %q, attempts = %d; want worker-d, 1", claimed.LeaseOwner.String, claimed.Attempts)
+	}
+}
+
 // TestFindStalePublicationsReturnsLostWorkOnly: the recovery probe returns a
 // pending row with no live publish job and a publishing row with an expired
 // lease, and never returns a failed or blocked row — the system restores

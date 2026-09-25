@@ -50,9 +50,16 @@ const (
 	// ReasonSecretInDescription: the rendered pull request body tripped the
 	// secret scanner under the reject policy.
 	ReasonSecretInDescription ReasonCode = "secret_in_description"
-	// ReasonProviderError: the provider answered with a failure this
-	// vocabulary does not name — an unnamed HTTP error, or a configured
-	// provider id that resolves to no registry entry.
+	// ReasonProviderUnknown: the provider id recorded on the publication row
+	// resolves to no registry entry. A retry with the configuration unfixed
+	// reproduces it — and the frozen row keeps the id — so the attempt is
+	// blocked, and the action is a corrected configuration plus a new
+	// publication, not a retry.
+	ReasonProviderUnknown ReasonCode = "provider_unknown"
+	// ReasonProviderError: a failure this vocabulary does not name, most often
+	// an unnamed provider answer or a transient failure on Agentum's own side
+	// (a manifest read that did not complete). Retryable: the attempt is
+	// re-run, not reconfigured.
 	ReasonProviderError ReasonCode = "provider_error"
 )
 

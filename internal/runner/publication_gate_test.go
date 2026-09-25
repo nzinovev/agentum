@@ -124,3 +124,35 @@ func TestFinalGatePublicationFailuresDoNotBlockTheGate(t *testing.T) {
 		})
 	}
 }
+
+// TestFinalGatePublicationHookToleratesAnExistingRow: the idempotent insert
+// reads as an empty return (sql.ErrNoRows), which must not read as failure —
+// a re-entry into the final gate still owes the queue its publish job. The
+// FSM does not reach the gate twice today; the re-entry handling around this
+// hook (like recordResultCommit's) does not lean on that.
+func TestFinalGatePublicationHookToleratesAnExistingRow(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore(sqlc.Run{
+		ID: "T-pub-again", TenantID: "tn", UserID: "us", State: "running",
+		ResultCommit: sql.NullString{String: "abc123", Valid: true},
+	}, sqlc.Project{})
+	// The row already exists — the fake's second EnsurePublication reads as
+	// the empty return the unique index produces.
+	store.publications = append(store.publications, sqlc.RunPublication{
+		RunID: "T-pub-again", Provider: "noop", State: "pending",
+	})
+	runnerInstance := gateRunner(store, PublicationHook{Enabled: true, Provider: "noop"})
+
+	if err := runnerInstance.transitionToFinalState(t.Context(), store.record, "", "review"); err != nil {
+		t.Fatalf("transitionToFinalState: %v", err)
+	}
+	if state := gateRecord(store).State; state != "awaiting_final_review" {
+		t.Errorf("run state = %q, want awaiting_final_review", state)
+	}
+	if len(store.publications) != 1 {
+		t.Errorf("publication rows = %d, want the one that already existed", len(store.publications))
+	}
+	if len(store.enqueued) != 1 || store.enqueued[0] != "publish" {
+		t.Errorf("enqueued = %v, want [publish] — the existing row must not swallow the job", store.enqueued)
+	}
+}

@@ -59,8 +59,19 @@ the first attempt and then frozen.
 ## What PR2 Must Read Before Starting
 
 - [ ] This file
+- [ ] **The pull request body sequencing decision**: PR2 creates real draft
+  pull requests, and the full body template with its artifact revision lands
+  in PR3. Between the two, pull requests would go out with an empty
+  description. Decision to carry into PR2: it renders a MINIMAL body from the
+  fields the coordinator already assembles (request title and description,
+  `base_commit..result_commit`, the checks table with its "no checks
+  declared" line, the evidence line, the closing line that merge is a human
+  action); PR3 replaces that with the full template and stores the published
+  text as an artifact revision. The alternative — releasing PR2 and PR3
+  together — is on the table only if the minimal body turns out to duplicate
+  the template's structure.
 - [ ] The plan document: `/home/nikita/Documents/urbanVault/проекты/Agentum/ADR/0010-isolated-publisher-push-and-draft-pr.md` — sections «План поставки» (PR2), «Решения» on the git surface (two commands, push by SHA), the askpass token transport and allow-list environment, the target derivation and freezing, the GitHub client's closed operation table, and idempotency (the three paths to one pull request)
 - [ ] `internal/publish/publish.go` — the contract shapes PR2 implements
 - [ ] `internal/publication/service.go` — where the provider is resolved and the outcome recorded; PR2's target derivation slots in beside `assembleDelivery`
-- [ ] `internal/store/queries/run_publications.sql` — the freeze semantics already in `RecordPublicationSuccess`
+- [ ] `internal/store/queries/run_publications.sql` — the freeze semantics already in `RecordPublicationSuccess`, and the claim predicate that matches the recovery probe on expired AND NULL leases
 - [ ] `internal/config/config.go` — the refusal pattern PR2's six variables follow (`AGENTUM_OPENCODE_BINARY` refusal is the model)

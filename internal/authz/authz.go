@@ -102,10 +102,12 @@ const (
 	ActionRunReject  = "run:reject"
 	ActionRunCancel  = "run:cancel"
 
-	// ActionRunPublish reads a run's publication state and requests an
-	// (re-)attempt at delivering it. Separate from run:advance for the same
-	// reason the gate verbs are separate: delivery touches an external
-	// provider, and granting it is a different right than approving a result.
+	// ActionRunPublish requests a publication attempt (or a repeat) for a
+	// run at the review gate. Reading the delivery state rides run:read on
+	// the same endpoints every run sub-resource uses. Kept separate from
+	// run:advance for the same reason the gate verbs are separate: delivery
+	// touches an external provider, and granting it is a different right
+	// than approving a result.
 	ActionRunPublish = "run:publish"
 
 	// ActionRunCleanup deletes the delivery artifacts (the run branch) of an

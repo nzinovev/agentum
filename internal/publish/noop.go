@@ -33,9 +33,11 @@ func (NoopPublisher) Describe() Descriptor {
 	}
 }
 
-// Probe answers ready: the placeholder holds no network to reach.
+// Probe answers not ready: this provider cannot deliver anything, and a
+// readiness surface must not report a deliverable build. The reason is the
+// same one Publish refuses with, so the probe and the attempt name one fact.
 func (NoopPublisher) Probe(context.Context) (ProbeResult, error) {
-	return ProbeResult{Ready: true}, nil
+	return ProbeResult{Ready: false, Reason: "no publication provider is configured in this build"}, nil
 }
 
 // Publish refuses every delivery: no credential can reach this provider.

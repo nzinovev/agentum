@@ -26,7 +26,11 @@ WHERE tenant_id = $1 AND run_id = $2;
 -- mutual exclusion by lease, not by row lock — the network call that follows
 -- must not run inside a transaction, so two workers racing here resolve by
 -- the conditional UPDATE, and the loser reads no row. A publishing row whose
--- lease has expired is claimable again: its worker died mid-attempt.
+-- lease has expired is claimable again: its worker died mid-attempt. A
+-- publishing row with a NULL lease is claimable too, matching the recovery
+-- probe's predicate — without the explicit IS NULL branch, SQL three-valued
+-- logic makes (state <> 'publishing' OR lease_expires_at < now()) evaluate
+-- to NULL on such a row, and no claim ever matches it.
 UPDATE run_publications
 SET state = 'publishing',
     attempts = attempts + 1,
@@ -34,7 +38,7 @@ SET state = 'publishing',
     lease_expires_at = $4,
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
-  AND (state <> 'publishing' OR lease_expires_at < now())
+  AND (state <> 'publishing' OR lease_expires_at IS NULL OR lease_expires_at < now())
 RETURNING *;
 
 -- name: RecordPublicationSuccess :one
