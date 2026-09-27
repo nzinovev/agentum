@@ -111,6 +111,10 @@ type Publisher interface {
 // absent for the same reason — it reaches the provider at construction, not
 // per call.
 type Delivery struct {
+	// PullRequest is the previously recorded provider number, zero on first delivery.
+	PullRequest int
+	// DraftRejected persists a refusal to create this PR as a draft.
+	DraftRejected bool
 	// Run identifies the run being published.
 	Run RunRef
 	// Project identifies the repository and the pinned local checkout the

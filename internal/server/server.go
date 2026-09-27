@@ -66,6 +66,17 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		return nil, adapterErr
 	}
 
+	var publicationCredential publish.Credential
+	if cfg.PublishEnabled {
+		publicationCredential = publish.StaticCredential(cfg.PublishToken)
+	}
+	publicationRegistry := publish.NewRegistry(publish.RegistryOptions{
+		DefaultProvider: publish.ProviderID(cfg.PublishProvider), Credential: publicationCredential, APIBase: cfg.PublishAPIBase,
+	})
+	publicationProvider, publicationErr := publicationRegistry.Resolve("")
+	if publicationErr != nil {
+		return nil, fmt.Errorf("publication provider: %w", publicationErr)
+	}
 	queries := sqlc.New(dataStore.DB)
 
 	// The execution model: pack source over a configured root, the resolved
@@ -100,11 +111,7 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		HardTimeout: time.Duration(cfg.HardTimeoutSeconds) * time.Second,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
 		Log:         log,
-		// Publication stays off until the configuration surface exists: a
-		// run on a repository without a remote must reach review without a
-		// publication error. The provider table holds only the refusing
-		// placeholder in this build, so enabling the hook buys nothing yet.
-		Publication: runner.PublicationHook{},
+		Publication: runner.PublicationHook{Enabled: cfg.PublishEnabled, Provider: string(publicationProvider.ID())},
 	})
 
 	// The publication coordinator serves the "publish" kind. It is wired
@@ -112,10 +119,12 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	// from the recovery probe or an explicit retry must find its handler even
 	// while the final-gate hook is off.
 	publicationService := publication.New(publication.Deps{
-		Store:    queries,
-		Manifest: manifestService,
-		Registry: publish.NewRegistry(publish.RegistryOptions{}),
-		Log:      log,
+		Store:      queries,
+		Manifest:   manifestService,
+		Registry:   publicationRegistry,
+		Remote:     cfg.PublishRemote,
+		BaseBranch: cfg.PublishBaseBranch,
+		Log:        log,
 	})
 
 	// The kind table IS the dispatch: every job kind names the component
@@ -160,7 +169,7 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		api.WithExecutionAdapter(adapter),
 		api.WithResolvedTiers(effectiveTierConfig(modelsCfg, adapter.Describe())),
 		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes),
-		api.WithPublicationConfig(false, ""))
+		api.WithPublicationConfig(cfg.PublishEnabled, string(publicationProvider.ID())))
 
 	return &Server{
 		cfg: cfg, log: log, store: dataStore, adapter: adapter, models: modelsCfg,

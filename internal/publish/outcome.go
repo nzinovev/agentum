@@ -12,6 +12,14 @@ import (
 type ReasonCode string
 
 const (
+	// ReasonUnsafeGitConfig names a local setting that can redirect authenticated execution.
+	ReasonUnsafeGitConfig ReasonCode = "unsafe_git_config"
+	// ReasonProviderRateLimited records a temporary provider quota refusal.
+	ReasonProviderRateLimited ReasonCode = "provider_rate_limited"
+	// ReasonPullRequestNotFound preserves a recorded PR identity that the provider did not return.
+	ReasonPullRequestNotFound ReasonCode = "pull_request_not_found"
+	// ReasonLeaseBudgetExhausted stops network work before the publication lease expires.
+	ReasonLeaseBudgetExhausted ReasonCode = "lease_budget_exhausted"
 	// ReasonCredentialsMissing: no credential reached the provider. Retrying
 	// after the configuration is fixed clears it.
 	ReasonCredentialsMissing ReasonCode = "credentials_missing"
@@ -70,6 +78,10 @@ const (
 // forgot the case" into a failing test instead of a wrong next action shown
 // to a person.
 var allReasonCodes = []ReasonCode{
+	ReasonUnsafeGitConfig,
+	ReasonProviderRateLimited,
+	ReasonPullRequestNotFound,
+	ReasonLeaseBudgetExhausted,
 	ReasonCredentialsMissing,
 	ReasonCredentialsRejected,
 	ReasonNetworkUnreachable,
@@ -87,14 +99,16 @@ var allReasonCodes = []ReasonCode{
 }
 
 // Retryable reports whether a repeated attempt can clear this reason. A
-// missing or rejected credential, an unreachable network, and an unnamed
-// provider failure are states outside the delivery that a retry re-tests.
+// missing or rejected credential, an unreachable network, a provider limit,
+// an exhausted lease, and an unnamed failure can be re-tested by an explicit retry.
 // Every other reason names a fact about the delivery or the remote that a
 // retry without an external change reproduces, so the publication is blocked
 // and the reason names the action required.
 func (code ReasonCode) Retryable() bool {
 	switch code {
-	case ReasonCredentialsMissing,
+	case ReasonProviderRateLimited,
+		ReasonLeaseBudgetExhausted,
+		ReasonCredentialsMissing,
 		ReasonCredentialsRejected,
 		ReasonNetworkUnreachable,
 		ReasonProviderError:
@@ -106,10 +120,11 @@ func (code ReasonCode) Retryable() bool {
 
 // Refusal is a publication attempt that did not complete, carrying its reason
 // from the closed vocabulary plus the provider's message. The message is
-// available during the invocation; durable records use SafeRefusal instead.
+// available during the invocation; durable records use SafeError or SafeRefusal.
 type Refusal struct {
-	Code    ReasonCode
-	Message string
+	configKey string
+	Code      ReasonCode
+	Message   string
 }
 
 // Error renders the refusal with its code first, so a log line names the
@@ -123,6 +138,8 @@ func (refusal *Refusal) Error() string {
 // an attempt can push the branch and still fail the pull request, and the
 // row keeps the half that succeeded.
 type Result struct {
+	// DraftRejected records an explicit provider failure to create a draft.
+	DraftRejected bool
 	// BranchPushed is true when the result commit reached the remote branch.
 	BranchPushed bool
 	// PullRequest is the number of the created or updated draft pull
@@ -131,8 +148,8 @@ type Result struct {
 	// PullRequestURL is the provider's page for that pull request.
 	PullRequestURL string
 	// PullRequestState is the observed state of the pull request
-	// ("open" on success; a closed or merged observation is a Refusal, not a
-	// Result).
+	// ("open" on success). A closed or merged observation accompanies a Refusal
+	// so the coordinator can retain that state.
 	PullRequestState string
 }
 
@@ -154,23 +171,39 @@ func Classify(err error) (ReasonCode, string) {
 // Provider prose can contain arbitrary secrets, including unrecognizable tokens.
 func SafeRefusal(code ReasonCode) (ReasonCode, string) {
 	messages := map[ReasonCode]string{
-		ReasonCredentialsMissing:  "publication credentials are missing",
-		ReasonCredentialsRejected: "the provider rejected publication credentials",
-		ReasonNetworkUnreachable:  "the publication provider could not be reached",
-		ReasonRemoteUnknown:       "the checkout has no usable publication remote",
-		ReasonBaseBranchUnknown:   "the pull request base branch could not be determined",
-		ReasonNonFastForward:      "the remote branch has diverged",
-		ReasonPushRejected:        "the provider rejected the branch push",
-		ReasonDraftUnsupported:    "the repository does not support draft pull requests",
-		ReasonPullRequestClosed:   "the pull request is closed or merged",
-		ReasonChecksNotPassed:     "mandatory check evidence is missing or failed",
-		ReasonCommitMismatch:      "the result commit is missing or differs from the checked commit",
-		ReasonSecretInDescription: "the pull request description contains credential material",
-		ReasonProviderUnknown:     "the configured publication provider is unknown",
-		ReasonProviderError:       "the publication attempt could not be completed",
+		ReasonUnsafeGitConfig:      "a local git configuration key is unsafe for publication",
+		ReasonProviderRateLimited:  "the provider rate limit was reached; wait for the limit to reset before retrying publication",
+		ReasonPullRequestNotFound:  "the recorded pull request was not found; verify its repository and head branch before retrying",
+		ReasonLeaseBudgetExhausted: "the publication lease has insufficient time remaining for a network attempt",
+		ReasonCredentialsMissing:   "publication credentials are missing",
+		ReasonCredentialsRejected:  "the provider rejected publication credentials",
+		ReasonNetworkUnreachable:   "the publication provider could not be reached",
+		ReasonRemoteUnknown:        "the publication repository is missing, inaccessible, or has no usable remote",
+		ReasonBaseBranchUnknown:    "the pull request base branch could not be determined",
+		ReasonNonFastForward:       "the remote branch has diverged",
+		ReasonPushRejected:         "the provider rejected the branch push",
+		ReasonDraftUnsupported:     "the repository does not support draft pull requests",
+		ReasonPullRequestClosed:    "the pull request is closed or merged",
+		ReasonChecksNotPassed:      "mandatory check evidence is missing or failed",
+		ReasonCommitMismatch:       "the result commit is missing or differs from the checked commit",
+		ReasonSecretInDescription:  "the pull request description contains credential material",
+		ReasonProviderUnknown:      "the configured publication provider is unknown",
+		ReasonProviderError:        "the publication attempt could not be completed",
 	}
 	if message, exists := messages[code]; exists {
 		return code, message
 	}
 	return ReasonProviderError, messages[ReasonProviderError]
+}
+
+// SafeError retains only structured diagnostics produced by this package.
+// Provider prose and scoped config names may contain credentials.
+func SafeError(err error) (ReasonCode, string) {
+	code, _ := Classify(err)
+	code, message := SafeRefusal(code)
+	var refusal *Refusal
+	if code == ReasonUnsafeGitConfig && errors.As(err, &refusal) && refusal.configKey != "" {
+		message += ": " + refusal.configKey
+	}
+	return code, message
 }

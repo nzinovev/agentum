@@ -178,6 +178,7 @@ type RunPublication struct {
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	RequestID        int64          `json:"request_id"`
+	DraftRejected    bool           `json:"draft_rejected"`
 }
 
 type StageInvocation struct {

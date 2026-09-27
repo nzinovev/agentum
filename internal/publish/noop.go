@@ -4,11 +4,8 @@ import (
 	"context"
 )
 
-// ProviderNoop is the no-op registry entry: it describes a real provider
-// shape and refuses every publication with credentials_missing. Publication
-// is wired end to end — row, gate, job, evidence — before any networked
-// provider exists, and this entry is what keeps the registry non-empty and
-// the coordinator exercised until then.
+// ProviderNoop is the refusing registry entry used to exercise publication
+// without network access. It always returns credentials_missing.
 const ProviderNoop ProviderID = "noop"
 
 // NoopPublisher is the implementation behind ProviderNoop.

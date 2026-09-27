@@ -94,3 +94,67 @@ func TestLoad_ArtifactScanPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicationConfiguration(test *testing.T) {
+	for _, scenario := range []struct {
+		name, enabled, token, provider, apiBase string
+		wantError                               bool
+	}{
+		{name: "disabled", enabled: "false", provider: "github", apiBase: "https://api.github.com"},
+		{name: "enabled", enabled: "true", token: "test-token", provider: "github", apiBase: "https://api.github.com"},
+		{name: "missing-token", enabled: "true", provider: "github", apiBase: "https://api.github.com", wantError: true},
+		{name: "blank-token", enabled: "true", token: " ", provider: "github", apiBase: "https://api.github.com", wantError: true},
+		{name: "unknown-provider", enabled: "true", token: "test-token", provider: "absent", apiBase: "https://api.github.com", wantError: true},
+		{name: "invalid-boolean", enabled: "perhaps", provider: "github", apiBase: "https://api.github.com", wantError: true},
+		{name: "credential-url", enabled: "true", token: "test-token", provider: "github", apiBase: "https://secret@api.github.com", wantError: true},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			test.Setenv("AGENTUM_PUBLISH_ENABLED", scenario.enabled)
+			test.Setenv("AGENTUM_PUBLISH_TOKEN", scenario.token)
+			test.Setenv("AGENTUM_PUBLISH_PROVIDER", scenario.provider)
+			test.Setenv("AGENTUM_PUBLISH_API_BASE", scenario.apiBase)
+			cfg, err := Load()
+			if (err != nil) != scenario.wantError {
+				test.Fatalf("Load error=%v wantError=%t", err, scenario.wantError)
+			}
+			if err != nil && (strings.Contains(err.Error(), "test-token") || strings.Contains(err.Error(), "secret@")) {
+				test.Fatal("error contains credential")
+			}
+			if scenario.name == "missing-token" && (!strings.Contains(err.Error(), "AGENTUM_PUBLISH_ENABLED") || !strings.Contains(err.Error(), "AGENTUM_PUBLISH_TOKEN")) {
+				test.Fatalf("missing context: %v", err)
+			}
+			if err == nil && cfg.PublishEnabled != (scenario.enabled == "true") {
+				test.Fatal("enabled setting lost")
+			}
+		})
+	}
+}
+
+func TestPublicationTargetConfigurationFailsAtBoot(test *testing.T) {
+	for _, scenario := range []struct{ name, remote, base, invalid string }{
+		{"defaults", "origin", "", ""},
+		{"slash-branch", "delivery", "release/1.2", ""},
+		{"empty-remote", "", "main", "AGENTUM_PUBLISH_REMOTE"},
+		{"remote-option", "-origin", "main", "AGENTUM_PUBLISH_REMOTE"},
+		{"remote-space", "my remote", "main", "AGENTUM_PUBLISH_REMOTE"},
+		{"remote-newline", "origin\n", "main", "AGENTUM_PUBLISH_REMOTE"},
+		{"base-space", "origin", "my branch", "AGENTUM_PUBLISH_BASE_BRANCH"},
+		{"base-parent", "origin", "release/../main", "AGENTUM_PUBLISH_BASE_BRANCH"},
+		{"base-newline", "origin", "main\n", "AGENTUM_PUBLISH_BASE_BRANCH"},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			test.Setenv("AGENTUM_PUBLISH_REMOTE", scenario.remote)
+			test.Setenv("AGENTUM_PUBLISH_BASE_BRANCH", scenario.base)
+			_, err := Load()
+			if scenario.invalid == "" {
+				if err != nil {
+					test.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), scenario.invalid) {
+				test.Fatalf("err=%v want %s", err, scenario.invalid)
+			}
+		})
+	}
+}

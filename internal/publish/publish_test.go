@@ -20,11 +20,11 @@ func TestRegistryResolvesByIdAndRefusesUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve default: %v", err)
 	}
-	if resolved.ID() != ProviderNoop {
-		t.Errorf("default provider = %q, want %q", resolved.ID(), ProviderNoop)
+	if resolved.ID() != ProviderGitHub {
+		t.Errorf("default provider = %q, want %q", resolved.ID(), ProviderGitHub)
 	}
 
-	byID, err := registry.Resolve(ProviderNoop)
+	byID, err := registry.Resolve(ProviderGitHub)
 	if err != nil {
 		t.Fatalf("resolve by id: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestRegistryResolvesByIdAndRefusesUnknown(t *testing.T) {
 	if err == nil {
 		t.Fatal("unknown id resolved; want error")
 	}
-	for _, known := range []string{"noop"} {
+	for _, known := range []string{"github", "noop"} {
 		if !strings.Contains(err.Error(), known) {
 			t.Errorf("error %q does not name known id %q", err, known)
 		}
@@ -123,12 +123,14 @@ func TestClassifyKeepsRefusalCodeAndDefaultsToProviderError(t *testing.T) {
 func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 	t.Parallel()
 	retryable := []ReasonCode{
+		ReasonProviderRateLimited, ReasonLeaseBudgetExhausted,
 		ReasonCredentialsMissing,
 		ReasonCredentialsRejected,
 		ReasonNetworkUnreachable,
 		ReasonProviderError,
 	}
 	blocking := []ReasonCode{
+		ReasonUnsafeGitConfig, ReasonPullRequestNotFound,
 		ReasonRemoteUnknown,
 		ReasonBaseBranchUnknown,
 		ReasonNonFastForward,
