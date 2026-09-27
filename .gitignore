@@ -29,3 +29,6 @@ models.yaml
 .vscode/
 .DS_Store
 tmp/
+
+# Local implementation handoffs.
+/docs/handoff/
