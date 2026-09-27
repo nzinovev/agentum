@@ -1012,44 +1012,42 @@ func TestNewSections_DoNotAffectCompleteness(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef: two attempts at one
-// stage can produce byte-identical output, and artifacts.Put is a plain INSERT
-// — each capture is a real revision row carrying its own source invocation.
-// De-duplicating on (name, content) dropped the second ref and left the
-// surviving one naming the FIRST attempt as the producer, so grouping by
-// invocation_id answered "nothing" for the repeat attempt and the manifest
-// disagreed with artifact_revisions.
-func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(t *testing.T) {
-	firstAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
-		Outputs: []ArtifactRef{{
-			Name: "result.json", Kind: "result_json", RevisionID: "rev-1",
-			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-1",
-		}},
-	}}
-	repeatAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
-		Outputs: []ArtifactRef{{
-			Name: "result.json", Kind: "result_json", RevisionID: "rev-2",
-			ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-2",
-		}},
-	}}
+// TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef preserves the last
+// review's verdict even when an identical output reuses an earlier revision.
+func TestMergeBodies_RepeatAttemptKeepsItsOwnArtifactRef(test *testing.T) {
+	for _, repeatedRevision := range []string{"rev-1", "rev-2"} {
+		test.Run(repeatedRevision, func(test *testing.T) {
+			firstAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+				Outputs: []ArtifactRef{{
+					Name: "review/verdict.json", Kind: "verdict_json", RevisionID: "rev-1",
+					ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-1",
+				}},
+			}}
+			repeatAttempt := Body{Schema: schemaVersion, Artifacts: &ArtifactEvidence{
+				Outputs: []ArtifactRef{{
+					Name: "review/verdict.json", Kind: "verdict_json", RevisionID: repeatedRevision,
+					ContentHash: "same-bytes", Stage: "review", InvocationID: "inv-2",
+				}},
+			}}
 
-	merged := mergeBodies(firstAttempt, repeatAttempt)
-	outputs := merged.Artifacts.Outputs
-	if len(outputs) != 2 {
-		t.Fatalf("outputs = %d, want 2 (identical bytes from two attempts are two revisions): %+v", len(outputs), outputs)
-	}
-	producers := map[string]string{}
-	for _, ref := range outputs {
-		producers[ref.InvocationID] = ref.RevisionID
-	}
-	if producers["inv-1"] != "rev-1" || producers["inv-2"] != "rev-2" {
-		t.Errorf("each ref must keep its own producer and revision, got %+v", producers)
+			merged := mergeBodies(mergeBodies(firstAttempt, repeatAttempt), repeatAttempt)
+			outputs := merged.Artifacts.Outputs
+			if len(outputs) != 2 {
+				test.Fatalf("outputs = %d, want two invocation references: %+v", len(outputs), outputs)
+			}
+			producers := map[string]string{}
+			for _, reference := range outputs {
+				producers[reference.InvocationID] = reference.RevisionID
+			}
+			if producers["inv-1"] != "rev-1" || producers["inv-2"] != repeatedRevision {
+				test.Errorf("producer/revision references = %+v", producers)
+			}
+		})
 	}
 }
 
-// TestMergeBodies_SameRevisionRecordedTwiceStaysOne: the revision id is what
-// identifies a recorded artifact, so a patch replaying a ref the body already
-// holds does not duplicate it.
+// TestMergeBodies_SameRevisionRecordedTwiceStaysOne keeps replay of one
+// invocation reference idempotent.
 func TestMergeBodies_SameRevisionRecordedTwiceStaysOne(t *testing.T) {
 	ref := ArtifactRef{
 		Name: "plan.md", RevisionID: "rev-1", ContentHash: "hash",

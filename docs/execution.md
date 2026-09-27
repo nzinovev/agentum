@@ -310,6 +310,12 @@ On boot, before the worker starts:
    which could re-run a half-completed stage. Session-id resume makes the
    re-run cheap if a session was captured.
 
+3. **Recover lost publications** — re-enqueue `pending` rows without a live
+   publish job and `publishing` rows with an expired lease. Publication attempts
+   and failed jobs for the current request are bounded by
+   `AGENTUM_JOB_MAX_ATTEMPTS`. Recorded `failed` and `blocked` outcomes require
+   [explicit retry](api.md#publication).
+
 Recovery is best-effort and conservative: it pauses for a human rather than
 re-running a stage with no record.
 
@@ -341,6 +347,117 @@ Artifact *files* are durable independently of the worktree —
 `artifact_revisions` rows + the content-addressed blob store survive teardown.
 The parsed `result.json` is still on `stage_invocations.result`; the revisions
 store adds the bytes and the immutable edit chain.
+
+## Publication
+
+When an enabled run reaches `awaiting_final_review`, the runner creates one
+publication row and queues a separate `publish` job. Final human approval is
+not required to open the draft PR. Publication leaves the run state unchanged;
+its outcome appears in the [publication API and final review](api.md#publication).
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENTUM_PUBLISH_ENABLED` | `false` | Enable automatic publication at the final gate and explicit publish requests. |
+| `AGENTUM_PUBLISH_PROVIDER` | `github` | Registered provider id; `noop` is a network-free refusal provider. |
+| `AGENTUM_PUBLISH_TOKEN` | empty | Provider credential; required when publication is enabled. |
+| `AGENTUM_PUBLISH_API_BASE` | `https://api.github.com` | HTTPS API root, including `/api/v3` for GitHub Enterprise when required. |
+| `AGENTUM_PUBLISH_REMOTE` | `origin` | Remote in the run's pinned local checkout. |
+| `AGENTUM_PUBLISH_BASE_BRANCH` | empty | Explicit PR base branch; empty uses the resolution rules below. |
+
+Boot refuses an enabled publisher with no token, an unregistered provider,
+an invalid remote name or base branch, or an API URL with credentials, query,
+fragment, or a non-HTTPS scheme. The token needs repository contents and
+pull-request write access. It is excluded from agent and project-check
+subprocesses, manifests, events, API responses, and logs. A disabled publisher
+receives no token, including while handling an older queued job.
+
+The complete application environment example is [`.env.example`](../.env.example).
+Agentum reads the process environment. To use that file locally, copy it to
+`.env`, set the needed values, then export them before starting the application:
+
+```sh
+set -a
+. ./.env
+set +a
+make run
+```
+
+### Gate, target, and lease
+
+The worker requires recorded passing mandatory checks and a checked commit
+identical to `result_commit`. It does not rerun checks. An empty project check
+set permits publication and produces the explicit description line
+“The project declares no checks.”
+
+The worker claims a five-minute lease before preparing the delivery. A GitHub
+publication call has a two-minute timeout and must also fit inside the remaining
+lease budget. Less than one second of usable budget yields
+`lease_budget_exhausted`. Outcome writes check the attempt and lease owner;
+an expired worker cannot overwrite a newer attempt. Provider calls run outside
+database transactions.
+
+Local Git configuration is checked before authenticated requests. Settings that
+can redirect Git or execute repository hooks produce `unsafe_git_config` with
+the offending key. Ordinary notes, aliases, filters, submodule definitions, and
+pull settings are accepted. Fixed Git settings disable hooks, credential
+helpers, fsmonitor, redirects, and recursive pushes during delivery.
+
+| Destination input | Resolution |
+|---|---|
+| Explicit base branch | Use `AGENTUM_PUBLISH_BASE_BRANCH`. |
+| `base_ref` names an existing remote branch | Use that branch, removing a leading `refs/heads/`. |
+| `base_ref` is a SHA, tag, or absent branch | Use the repository's default branch. |
+| Remote does not identify an accessible repository | Record `remote_unknown`. |
+| Remote host differs from configured API host | Refuse before sending credentials; `api.github.com` maps to `github.com`. |
+
+The destination is frozen before push. Retries retain the same provider,
+repository, base branch, and `agentum/<run-id>` remote branch even if the local
+remote changes. Git verifies the full result SHA and pushes that SHA with a
+fixed refspec. No force push or merge operation is available.
+
+### Description and retries
+
+The embedded `internal/publish/pr-template.md` template contains the task
+request and its input revision, branch and commit range, approved plan revision
+and approval, checks, reviewer verdict, completed fix-cycle count, and manifest
+completeness. Plan metadata comes from the revision bound to the newest approved
+artifact-bound decision, ordered by decision time and then id. Editable artifact
+kinds do not change that selection.
+The verdict comes from the last recorded reviewer invocation's artifact.
+Missing or invalid plan/verdict metadata is stated as not recorded. Storage
+read failures remain retryable. Completed fix cycles count distinct cycle numbers
+whose latest attempts in each recorded fixer stage finished with `status: complete`. Check output, diff
+content, plan text, and reviewer findings are excluded.
+
+Before any provider write, the coordinator stores the rendered text as
+`publication/pr-description.md`, kind `pr_description`, actor `system`.
+This store uses prose scanning rules, preserving task text about authentication
+while detecting credential-shaped values. `AGENTUM_ARTIFACT_SCAN_POLICY=reject` blocks a matching description with
+`secret_in_description`; `redact` stores and publishes the redacted bytes.
+Creation and update both send exactly the saved revision bytes. A missing or
+corrupted description is blocked with `description_invalid`. Identical
+rendered content reuses the current revision. These revisions remain accessible
+through the artifact API and do not become a `publication` stage in final review.
+
+| Retry situation | Behavior |
+|---|---|
+| PR number recorded | Find that PR and update only its title and description. |
+| Provider created a PR before a crash lost the local number | Recover it by head branch; a duplicate-creation response triggers the same lookup. |
+| Human removed draft status from a previously accepted PR | Preserve that choice on update. |
+| Provider ignored draft at creation | Record `draft_unsupported`; retries cannot accept the same ordinary PR until it is observed as draft. |
+| PR closed or merged | Record `pull_request_closed`; do not reopen or replace it. |
+| Recorded number no longer found | Record `pull_request_not_found`; do not create a replacement. |
+| Rate limit or temporary failure | Record `failed`; retry explicitly after addressing the cause. |
+
+Publication failures preserve the local branch and `result_commit`. Terminal
+worktree teardown retains them as described above. Explicit cleanup removes the
+local delivery branch and never deletes a remote branch or PR. Publication
+records and artifact revisions survive cleanup. A human performs the merge.
+
+Publication events carry actor `system`. Evidence written after manifest sealing
+uses a `publication_updated` correction; it does not rewrite the sealed body.
 
 ## Safe lifecycle, checkpoints, and code egress
 

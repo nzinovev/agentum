@@ -61,6 +61,16 @@ Two capabilities are **never granted to an agent**:
 - Resource limits (`time.hard`, `time.idle`) are **constraints**, not
   permissions. They ride on the profile as `HardTimeout` / `IdleTimeout` fields.
 
+## Publication credentials
+
+The Git-provider token is an orchestrator credential, not an agent capability.
+`AGENTUM_PUBLISH_TOKEN` reaches only the publisher registered for the separate
+`publish` job. Agent invocations and project-check subprocesses drop publication
+credentials from their environments, including when an agent profile grants a
+`secret.*` capability. The publisher has a fixed Git/HTTP operation set with no
+merge operation. See [Publication](execution.md#publication) for configuration
+and delivery behavior.
+
 ## How an effective profile is computed
 
 ```

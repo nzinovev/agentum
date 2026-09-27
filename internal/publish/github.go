@@ -209,6 +209,9 @@ func (publisher *githubPublisher) Publish(ctx context.Context, delivery Delivery
 	if !validBranch(delivery.Target.BaseBranch) || !validBranch(delivery.Target.RemoteBranch) || delivery.Target.BaseBranch == delivery.Target.RemoteBranch {
 		return result, refuse(ReasonBaseBranchUnknown)
 	}
+	if err := delivery.Description.Validate(); err != nil {
+		return result, err
+	}
 	if err := publisher.ValidateCheckout(ctx, delivery.Project.CheckoutPath); err != nil {
 		return result, err
 	}
@@ -230,7 +233,7 @@ func (publisher *githubPublisher) Publish(ctx context.Context, delivery Delivery
 	if delivery.PullRequest != 0 {
 		return result, refuse(ReasonPullRequestNotFound)
 	}
-	payload := map[string]any{"title": delivery.Request.Title, "body": renderMinimalBody(delivery), "head": delivery.Target.RemoteBranch, "base": delivery.Target.BaseBranch, "draft": true}
+	payload := map[string]any{"title": delivery.Request.Title, "body": delivery.Description.Text, "head": delivery.Target.RemoteBranch, "base": delivery.Target.BaseBranch, "draft": true}
 	status, response, err := publisher.request(ctx, opCreatePullRequest, delivery.Target, "", nil, payload, token)
 	if err != nil {
 		return result, err
@@ -301,7 +304,7 @@ func (publisher *githubPublisher) updatePullRequest(ctx context.Context, deliver
 		result.DraftRejected = true
 		return result, refuse(ReasonDraftUnsupported)
 	}
-	payload := map[string]string{"title": delivery.Request.Title, "body": renderMinimalBody(delivery)}
+	payload := map[string]string{"title": delivery.Request.Title, "body": delivery.Description.Text}
 	status, response, err := publisher.request(ctx, opUpdatePullRequest, delivery.Target, strconv.Itoa(existing.Number), nil, payload, token)
 	if err != nil {
 		return result, err

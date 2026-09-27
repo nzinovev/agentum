@@ -1104,7 +1104,7 @@ func appendUniqueString(base []string, additions []string) []string {
 }
 
 // mergeArtifactEvidence merges two ArtifactEvidence. Inputs and Outputs are
-// appended; entries matched by RevisionID are de-duplicated. Existing may be
+// appended; matching revision and invocation pairs are de-duplicated. Existing may be
 // nil — the patch becomes the result.
 func mergeArtifactEvidence(existing *ArtifactEvidence, patch *ArtifactEvidence) *ArtifactEvidence {
 	if existing == nil {
@@ -1136,22 +1136,15 @@ func appendUniqueArtifactRef(base []ArtifactRef, additions []ArtifactRef) []Arti
 	return out
 }
 
-// sameArtifactRef reports whether two refs describe the same recorded
-// artifact. The revision id decides whenever both carry one: two distinct
-// revisions are two records even when their bytes are identical, because
-// artifacts.Put is a plain INSERT with no content de-duplication — a repeat
-// attempt that produced a byte-identical output has its OWN revision row with
-// its own source_invocation_id, and dropping the ref would leave the manifest
-// naming the earlier attempt as the producer and disagreeing with
-// artifact_revisions.
-//
-// The (name, content) fallback covers refs carrying no revision id, and it
-// carries the invocation for the same reason. Inputs leave InvocationID empty
-// on both sides (the worktree sync runs before any invocation row exists), so
-// their de-duplication is unchanged.
+// sameArtifactRef keeps a reused revision attached to each invocation that
+// produced its bytes. Replaying the same invocation's reference is idempotent.
+// The revision row retains its original source_invocation_id, so
+// ListForInvocation on a later invocation does not return the reused row.
+// Consumers of repeated outputs must follow these manifest references.
+// References without revision ids fall back to name, hash, and invocation.
 func sameArtifactRef(present, addition ArtifactRef) bool {
 	if present.RevisionID != "" && addition.RevisionID != "" {
-		return present.RevisionID == addition.RevisionID
+		return present.RevisionID == addition.RevisionID && present.InvocationID == addition.InvocationID
 	}
 	return present.ContentHash != "" &&
 		present.Name == addition.Name &&

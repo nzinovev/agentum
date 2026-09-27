@@ -17,6 +17,7 @@ import (
 // unable to rewrite a checkpoint commit or delete a delivery branch, and a
 // test is what makes the boundary survive the next convenient import.
 var forbiddenImports = map[string]string{
+	"github.com/nzinovev/agentum/internal/artifacts":   "bypasses the coordinator's scanned description",
 	"github.com/nzinovev/agentum/internal/store":       "reads the database",
 	"github.com/nzinovev/agentum/internal/worktree":    "owns branch state",
 	"github.com/nzinovev/agentum/internal/agent":       "invokes executors",

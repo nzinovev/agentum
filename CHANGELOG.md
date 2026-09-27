@@ -10,6 +10,13 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Runs at final review can publish their checked commit and a draft GitHub PR.**
+  Operators can enable publication with `AGENTUM_PUBLISH_ENABLED=true` and a
+  provider token; existing installations remain disabled. Final review exposes
+  delivery status and explicit retry. PR descriptions include review evidence
+  and are saved as scanned artifact revisions. Merge remains a human action.
+  <!-- Add the delivery PR number when this entry is merged. -->
+
 - **A tier in `models.yaml` may declare a `variant` alongside its model.** The
   value is the runtime's reasoning-effort setting and reaches the agent's
   `--variant` flag, so "plan on high effort, implement on low" is two tiers on

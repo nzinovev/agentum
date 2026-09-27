@@ -119,6 +119,10 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	// from the recovery probe or an explicit retry must find its handler even
 	// while the final-gate hook is off.
 	publicationService := publication.New(publication.Deps{
+		Artifacts: publication.NewDescriptionStore(artifacts.SQLStoreDeps{
+			DB: dataStore.DB, Queries: queries, Blobs: artifacts.NewBlobStore(cfg.ArtifactRoot),
+			ScanPolicy: artifacts.ScanPolicy(cfg.ArtifactScanPolicy), Log: log,
+		}),
 		Store:      queries,
 		Manifest:   manifestService,
 		Registry:   publicationRegistry,

@@ -103,14 +103,11 @@ type Publisher interface {
 	Publish(ctx context.Context, delivery Delivery) (Result, error)
 }
 
-// Delivery is the complete input to one publication attempt. Every field is a
-// scalar or a hash: artifact BODIES are deliberately absent (their names,
-// revision ids, and content hashes ride along instead), because the pull
-// request body is rendered by the orchestrator from exactly these fields and
-// a provider that never sees a body can never leak one. The credential is
-// absent for the same reason — it reaches the provider at construction, not
-// per call.
+// Delivery is the immutable input to one publication attempt. Source artifacts
+// appear only as metadata. Description carries the scanned publication text;
+// credentials reach the provider at construction, never through a delivery.
 type Delivery struct {
+	Description DescriptionRef
 	// PullRequest is the previously recorded provider number, zero on first delivery.
 	PullRequest int
 	// DraftRejected persists a refusal to create this PR as a draft.
@@ -148,6 +145,13 @@ type Delivery struct {
 	// Evidence summarizes the manifest: sealed or not, complete or not,
 	// which sections are missing.
 	Evidence EvidenceRef
+}
+
+// DescriptionRef binds the provider payload to the stored, scanned revision.
+type DescriptionRef struct {
+	Text        string
+	RevisionID  string
+	ContentHash string
 }
 
 // RunRef identifies the run behind a delivery.

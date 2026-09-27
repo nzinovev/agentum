@@ -35,7 +35,8 @@ const (
 // fakeStore records the coordinator's writes. claimLost scripts the lease
 // race; failureWrite scripts the one error the job is allowed to fail on.
 type fakeStore struct {
-	mu sync.Mutex
+	invocations []sqlc.StageInvocation
+	mu          sync.Mutex
 
 	run    sqlc.Run
 	row    sqlc.RunPublication
@@ -44,11 +45,21 @@ type fakeStore struct {
 	events        []string
 	eventPayloads [][]byte
 	projectErr    error
+	approvals     []sqlc.RunApproval
+	approvalsErr  error
 
 	claimLeaseOverride *sql.NullTime
 	claimLost          bool
 	failureWrite       error
 	successWrites      int
+}
+
+func (store *fakeStore) ListStageInvocationsForRun(context.Context, sqlc.ListStageInvocationsForRunParams) ([]sqlc.StageInvocation, error) {
+	return store.invocations, nil
+}
+
+func (store *fakeStore) ListApprovalsForRun(context.Context, sqlc.ListApprovalsForRunParams) ([]sqlc.RunApproval, error) {
+	return store.approvals, store.approvalsErr
 }
 
 func (store *fakeStore) GetRun(context.Context, sqlc.GetRunParams) (sqlc.Run, error) {
@@ -275,10 +286,11 @@ func newCoordinatorHarness(t *testing.T, checks *manifest.CheckEvidence, provide
 	}
 	manifestFake := &fakeManifest{body: body}
 	service := New(Deps{
-		Store:    store,
-		Manifest: manifestFake,
-		Registry: scriptedRegistry{publisher: provider},
-		Log:      slog.New(slog.DiscardHandler),
+		Artifacts: newMemoryDescriptions(),
+		Store:     store,
+		Manifest:  manifestFake,
+		Registry:  scriptedRegistry{publisher: provider},
+		Log:       slog.New(slog.DiscardHandler),
 	})
 	return &coordinatorHarness{service: service, store: store, mfst: manifestFake}
 }

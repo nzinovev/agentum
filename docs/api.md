@@ -21,7 +21,8 @@ and land with the epic named in the table.
 
   Codes are stable machine identifiers; the UI branches on them. Current codes:
   `not_found`, `illegal_transition`, `bad_input`, `unauthorized`, `forbidden`,
-  `not_implemented`, `internal`, `conflict`, `too_many_requests`.
+  `not_implemented`, `internal`, `conflict`, `too_many_requests`,
+  `publication_disabled`, `publication_not_ready`.
 - **Identity is implicit.** Every write carries `tenant_id` and `user_id` from
   the resolved Principal, never the request body.
 - **State transitions** route through `engine.Next`. An illegal transition
@@ -110,7 +111,9 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
-| `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions`. Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
+| `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions` / `publication`. Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
+| `GET` | `/runs/{id}/publication` | ✅ | → `200 Publication`; requires `run:read`. See [Publication](#publication). |
+| `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
 | `POST` | `/runs/{id}/cleanup` | ✅ | terminal run → branch deleted (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) |
 
 `base_ref` is the git ref the run builds against (branch / tag / SHA / `HEAD`).
@@ -168,6 +171,101 @@ gate".
   "updated_at": "2026-07-05T..."
 }
 ```
+
+## Publication
+
+`GET /api/v1/runs/{id}/publication` reads stored delivery state without calling
+the provider. `GET /api/v1/runs/{id}/final-review` includes the same object as
+`publication`. Publication failure leaves the implementation review available.
+
+| `state` | Meaning |
+|---|---|
+| `disabled` | No publication row; publication is disabled in configuration. |
+| `not_attempted` | No publication row; publication is enabled. |
+| `unavailable` | The publication row could not be read. |
+| `pending` | A publication attempt is requested. |
+| `publishing` | A worker claimed the publication lease. |
+| `published` | The checked commit was pushed and the PR was created or updated. |
+| `failed` | The last attempt has a retryable failure. |
+| `blocked` | The last attempt requires a change to the delivery or destination. |
+
+Every state above returns `200` for an accessible run. The absence forms contain
+only `run_id` and `state`. An existing row remains visible when publication is
+switched off. An unknown or foreign run returns `404 not_found`; the usual
+`401 unauthorized` and `403 forbidden` guards apply to both endpoints.
+
+```json
+{
+  "run_id": "uuid",
+  "state": "published",
+  "provider": "github",
+  "target": {
+    "provider": "github",
+    "host": "github.com",
+    "owner": "example",
+    "repository": "project",
+    "base_branch": "main",
+    "remote_branch": "agentum/uuid"
+  },
+  "published_commit": "full-result-commit-sha",
+  "pull_request": {"number": 42, "url": "https://github.com/example/project/pull/42", "state": "open"},
+  "branch_pushed_at": "2026-09-27T12:00:00.000000000Z",
+  "published_at": "2026-09-27T12:00:01.000000000Z",
+  "attempts": 1,
+  "created_at": "2026-09-27T11:59:59.000000000Z",
+  "updated_at": "2026-09-27T12:00:01.000000000Z"
+}
+```
+
+Unset target fields and timestamps are omitted; `attempts` is omitted at zero.
+`published_commit` names the intended checked commit even while publication is
+pending or failed. `pull_request` appears once a number is recorded; its state
+is the last observed `open`, `closed`, or `merged` value. Failures add
+`last_error: {code, message}` with a safe diagnostic. A failed attempt can still
+carry a pushed branch or a recorded PR number.
+
+`POST /api/v1/runs/{id}/publish` queues an attempt and returns `202` with the
+current Publication object. It does not wait for network work. A repeated
+request retains the frozen destination and the recorded PR identity.
+
+| Precondition failure | Response |
+|---|---|
+| Publication disabled | `409 publication_disabled` |
+| Run outside `awaiting_final_review` / `done`, missing passing mandatory checks, or mismatched checked/result commit | `409 publication_not_ready` |
+| An attempt holds an unexpired lease | `409 conflict` |
+| Store or manifest read/write failure | `500 internal` |
+
+A recorded `failed` or `blocked` outcome permits explicit retry after its cause
+has been addressed. The recovery probe does not automatically retry either
+state. The closed `last_error.code` vocabulary is:
+
+| Code | State | Meaning / operator action |
+|---|---|---|
+| `credentials_missing` | `failed` | Configure the publication token. |
+| `credentials_rejected` | `failed` | Correct the token or its permissions. |
+| `network_unreachable` | `failed` | Restore provider connectivity. |
+| `provider_rate_limited` | `failed` | Wait for the provider limit to reset. |
+| `lease_budget_exhausted` | `failed` | Retry with time remaining in the lease. |
+| `provider_error` | `failed` | An unclassified provider or local storage/execution failure prevented completion. |
+| `unsafe_git_config` | `blocked` | Remove the local Git setting named by the diagnostic. |
+| `remote_unknown` | `blocked` | Configure an accessible publication repository. |
+| `base_branch_unknown` | `blocked` | Supply a valid base branch. |
+| `non_fast_forward` | `blocked` | A human must resolve the remote branch divergence. |
+| `push_rejected` | `blocked` | Resolve the provider's push restriction. |
+| `draft_unsupported` | `blocked` | The provider must support draft PRs; no ordinary PR fallback is accepted. |
+| `pull_request_closed` | `blocked` | The PR was closed or merged; it is neither reopened nor replaced. |
+| `pull_request_not_found` | `blocked` | The recorded PR number was not found; no replacement is created. |
+| `checks_not_passed` | `blocked` | The mandatory-check gate did not pass. |
+| `commit_mismatch` | `blocked` | The result commit is missing or differs from the checked commit. |
+| `description_invalid` | `blocked` | The stored description or revision reference is missing or fails its integrity check; repair the data before retrying. |
+| `secret_in_description` | `blocked` | The artifact scanner rejected the rendered PR description. |
+| `provider_unknown` | `blocked` | The frozen provider id is not registered. |
+
+The published description is an artifact of kind `pr_description`, named
+`publication/pr-description.md`. Read its immutable revisions through the
+[artifact endpoints](#artifacts). It is excluded from the final-review `stages`
+array. See [Publication execution](execution.md#publication) for the template,
+scanning, lease, and retention rules.
 
 ## Stage invocations
 
@@ -539,6 +637,9 @@ data: {"run_id":"...","stage":"implement","stop_reason":"gate"}
 | `stage.result` | `{run_id, invocation_id, status, open_questions, ...}` | runner after result.json |
 | `stage.artifact_rejected` | `{run_id, stage, path, reason}` | runner when a declared artifact is refused (`reason` ∈ `escapes_worktree`, `unresolvable`, `secret_detected`) |
 | `run.delivery_commit_diverged` | `{run_id, result_commit, checks_commit, checkpoint_label}` | runner at teardown when `result_commit` differs from the commit the delivery checks verified; the run is not failed, but the sealed manifest reads `evidence_complete: false` |
+| `run.publication_started` | `{run_id, attempts, state}` | publication worker after claiming the lease; actor `system` |
+| `run.published` | `{run_id, pull_request, url, branch}` | publication worker after recording success; actor `system` |
+| `run.publication_failed` | `{run_id, code, state, message}` | publication worker after recording refusal; actor `system` |
 | `memory.committed` | `{run_id, entries:[...]}` | memory layer at final approval |
 | `run.log` | `{run_id, level, message}` | runner / adapter diagnostics |
 | `models.test_started` | `{check_id, targets}` | API when an on-demand model check is accepted (no `run_id`; see "Models") |

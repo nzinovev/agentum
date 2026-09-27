@@ -137,6 +137,8 @@ The one name of execution is **run**, on every layer — schema, Go, API, and
 docs alike. `task` remains only the name of the work item, which is not an
 entity yet.
 
+Publication is a delivery outcome stored separately from the run state.
+
 ## Actor, creator, owner
 
 Every recorded action carries two facts beside it:

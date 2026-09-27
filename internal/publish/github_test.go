@@ -2,6 +2,8 @@ package publish
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,6 +32,12 @@ func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher,
 		BaseCommit: strings.Repeat("b", 40), ResultCommit: strings.Repeat("a", 40), Request: RequestRef{Title: "Request title", Description: "Request description"},
 		Checks: ChecksSeal{MandatoryPassed: true, Commit: strings.Repeat("a", 40)},
 	}
+	body, err := RenderDescription(delivery)
+	if err != nil {
+		test.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	delivery.Description = DescriptionRef{Text: string(body), RevisionID: "stored-description", ContentHash: hex.EncodeToString(digest[:])}
 	return publisher, delivery
 }
 

@@ -233,9 +233,9 @@ func (api *API) finalReviewStages(ctx context.Context, run sqlc.Run) []finalRevi
 
 // isStageScopedKind reports whether a revision kind lives in a per-stage artifact
 // dir (name "<stage>/<file>") rather than the worktree proper. Mirrors the
-// runner's isArtifactDirKind so the payload and the sync redirect agree on which
-// revisions are stage-scoped. Agent-declared source files (kind "file"/"code")
-// are NOT stage-scoped and are excluded from the stages section.
+// runner's stage artifact kinds. The sync redirect also includes pr_description,
+// which is orchestration output rather than a stage. Agent-declared source
+// files (kind "file"/"code") are excluded from the stages section.
 func isStageScopedKind(kind string) bool {
 	switch kind {
 	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat":

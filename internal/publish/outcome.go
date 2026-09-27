@@ -12,6 +12,8 @@ import (
 type ReasonCode string
 
 const (
+	// ReasonDescriptionInvalid refuses an absent or corrupted stored description.
+	ReasonDescriptionInvalid ReasonCode = "description_invalid"
 	// ReasonUnsafeGitConfig names a local setting that can redirect authenticated execution.
 	ReasonUnsafeGitConfig ReasonCode = "unsafe_git_config"
 	// ReasonProviderRateLimited records a temporary provider quota refusal.
@@ -78,6 +80,7 @@ const (
 // forgot the case" into a failing test instead of a wrong next action shown
 // to a person.
 var allReasonCodes = []ReasonCode{
+	ReasonDescriptionInvalid,
 	ReasonUnsafeGitConfig,
 	ReasonProviderRateLimited,
 	ReasonPullRequestNotFound,
@@ -106,6 +109,8 @@ var allReasonCodes = []ReasonCode{
 // and the reason names the action required.
 func (code ReasonCode) Retryable() bool {
 	switch code {
+	case ReasonDescriptionInvalid:
+		return false
 	case ReasonProviderRateLimited,
 		ReasonLeaseBudgetExhausted,
 		ReasonCredentialsMissing,
@@ -171,6 +176,7 @@ func Classify(err error) (ReasonCode, string) {
 // Provider prose can contain arbitrary secrets, including unrecognizable tokens.
 func SafeRefusal(code ReasonCode) (ReasonCode, string) {
 	messages := map[ReasonCode]string{
+		ReasonDescriptionInvalid:   "the stored pull request description is missing or fails its integrity check; repair the description before retrying",
 		ReasonUnsafeGitConfig:      "a local git configuration key is unsafe for publication",
 		ReasonProviderRateLimited:  "the provider rate limit was reached; wait for the limit to reset before retrying publication",
 		ReasonPullRequestNotFound:  "the recorded pull request was not found; verify its repository and head branch before retrying",

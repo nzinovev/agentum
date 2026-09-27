@@ -12,6 +12,7 @@ import (
 
 	"log/slog"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/dbtest"
 	"github.com/nzinovev/agentum/internal/manifest"
@@ -478,5 +479,31 @@ func TestPublishRetryBindsJobToNewRequest(test *testing.T) {
 		if _, err := harness.db.ExecContext(test.Context(), `UPDATE run_publications SET state = $3 WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenant, runID, state); err != nil {
 			test.Fatal(err)
 		}
+	}
+}
+
+func TestPublicationDescriptionIsNotAReviewStage(test *testing.T) {
+	harness := newPublicationHarness(test, true)
+	runID := harness.insertPublicationRun(test, "awaiting_final_review")
+	store := artifacts.NewSQLStore(artifacts.SQLStoreDeps{DB: harness.db, Queries: harness.queries, Blobs: artifacts.NewBlobStore(test.TempDir())})
+	for _, artifact := range []struct{ name, kind string }{
+		{name: "publication/pr-description.md", kind: "pr_description"},
+		{name: "review/verdict.json", kind: "verdict_json"},
+	} {
+		_, err := store.Put(test.Context(), artifacts.PutParams{TenantID: publicationTestTenant, UserID: publicationTestUser, RunID: runID, Name: artifact.name, Kind: artifact.kind, Bytes: []byte("stored evidence"), Actor: artifacts.ActorSystem})
+		if err != nil {
+			test.Fatal(err)
+		}
+	}
+	recorder := harness.callPublication(test, http.MethodGet, "/api/v1/runs/"+runID+"/final-review", runID)
+	if recorder.Code != http.StatusOK {
+		test.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response finalReviewResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		test.Fatal(err)
+	}
+	if len(response.Stages) != 1 || response.Stages[0].Stage != "review" || response.Publication == nil {
+		test.Fatalf("stages=%+v publication=%+v", response.Stages, response.Publication)
 	}
 }
