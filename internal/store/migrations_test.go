@@ -24,6 +24,7 @@ var expectedTables = []string{
 	"run_checkpoints",
 	"run_manifest_corrections",
 	"run_manifests",
+	"run_publications",
 	"runs",
 	"stage_invocations",
 }

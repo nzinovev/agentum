@@ -546,23 +546,49 @@ func TestBuildChildEnv_CarriesInlineConfig(t *testing.T) {
 	}
 }
 
-// TestBuildChildEnv_ScrubsCredentialsUnlessGranted: GITHUB_TOKEN is stripped by
-// default and re-added only when secret.github_token is granted.
-func TestBuildChildEnv_ScrubsCredentialsUnlessGranted(t *testing.T) {
+// TestBuildChildEnv_ScrubsCredentialsEvenWhenGranted: GITHUB_TOKEN is stripped,
+// and a profile granted secret.github_token does NOT get it back — the Git
+// provider's token belongs to the publisher, which is not an agent, and the
+// deny must not depend on no role handing out the grant.
+func TestBuildChildEnv_ScrubsCredentialsEvenWhenGranted(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_secret_value")
+	t.Setenv("GH_TOKEN", "ghp_other_value")
+	t.Setenv("GITLAB_TOKEN", "glpat_value")
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin") // non-credential, must survive
 
 	scrubbed := buildChildEnv(caps.Profile{}, "", nil)
-	if envLookup(scrubbed, "GITHUB_TOKEN") != "" {
-		t.Errorf("GITHUB_TOKEN survived scrub: %v", scrubbed)
+	for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN"} {
+		if envLookup(scrubbed, key) != "" {
+			t.Errorf("%s survived scrub", key)
+		}
 	}
 	if envLookup(scrubbed, "PATH") == "" {
 		t.Error("PATH was scrubbed; non-credential vars must pass through")
 	}
 
+	// The artificial grant is the point: today no role issues secret.*, so the
+	// old behaviour (a grant un-redacting the token) was unreachable — this
+	// test pins the construction, not the current role table.
 	granted := buildChildEnv(caps.Profile{Grants: []caps.Token{"secret.github_token"}}, "", nil)
-	if got := envLookup(granted, "GITHUB_TOKEN"); got != "ghp_secret_value" {
-		t.Errorf("GITHUB_TOKEN with grant = %q, want ghp_secret_value", got)
+	if got := envLookup(granted, "GITHUB_TOKEN"); got != "" {
+		t.Errorf("GITHUB_TOKEN with an artificial secret.github_token grant = %q; a grant must not un-redact the provider token", got)
+	}
+	if got := envLookup(granted, "GH_TOKEN"); got != "" {
+		t.Errorf("GH_TOKEN with an artificial secret.github_token grant = %q; a grant must not un-redact the provider token", got)
+	}
+}
+
+// TestCredentialDenyListCoversPublishToken: the publisher's token variable is
+// matched by the adapter's credential filter. The publisher carries the token
+// deliberately, the agent must never see it, and renaming the variable without
+// updating the filter would open exactly that path — this test is what makes
+// the rename visible.
+func TestCredentialDenyListCoversPublishToken(t *testing.T) {
+	t.Setenv("AGENTUM_PUBLISH_TOKEN", "ghp_publisher_value")
+
+	scrubbed := buildChildEnv(caps.Profile{Grants: []caps.Token{"secret.github_token"}}, "", nil)
+	if got := envLookup(scrubbed, "AGENTUM_PUBLISH_TOKEN"); got != "" {
+		t.Errorf("AGENTUM_PUBLISH_TOKEN survived the adapter scrub: %q", got)
 	}
 }
 

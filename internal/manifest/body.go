@@ -72,6 +72,7 @@ type TokenUsage struct {
 //   - Artifacts     — input + output artifact revisions (outputs keyed by
 //     invocation)
 //   - Checks        — check set version + their results
+//   - Publication   — delivery outcome: remote branch, pull request, state
 //   - GateDecisions — gate decisions: human and system alike
 //   - Git           — branch, checkpoint, result commits
 //   - ExecutionCoordinate — optional (delivery step / execution unit / phase)
@@ -92,6 +93,7 @@ type Body struct {
 	Context             *ContextEvidence     `json:"context,omitempty"`
 	Artifacts           *ArtifactEvidence    `json:"artifacts,omitempty"`
 	Checks              *CheckEvidence       `json:"checks,omitempty"`
+	Publication         *PublicationEvidence `json:"publication,omitempty"`
 	GateDecisions       []GateDecision       `json:"gate_decisions,omitempty"`
 	Git                 *GitEvidence         `json:"git,omitempty"`
 	ExecutionCoordinate *ExecutionCoordinate `json:"execution_coordinate,omitempty"`
@@ -391,6 +393,29 @@ type CheckResult struct {
 	Source             string `json:"source,omitempty"`
 }
 
+// PublicationEvidence is the delivery outcome: where the run's result was
+// published and what became of it. Publication is an outcome of delivery, not
+// an input, so the section never becomes a diff axis — two runs are
+// comparable on what went into them, not on whether either was delivered.
+// The section carries no credential and no URL a credential could be
+// recovered from: host and path name the destination, nothing else.
+type PublicationEvidence struct {
+	Provider        string    `json:"provider"`
+	Host            string    `json:"host"`
+	Owner           string    `json:"owner"`
+	Repository      string    `json:"repository"`
+	BaseBranch      string    `json:"base_branch"`
+	RemoteBranch    string    `json:"remote_branch"`
+	PublishedCommit string    `json:"published_commit"`
+	State           string    `json:"state"`
+	PullRequest     int       `json:"pull_request,omitempty"`
+	PullRequestURL  string    `json:"pull_request_url,omitempty"`
+	Attempts        int       `json:"attempts,omitempty"`
+	LastErrorCode   string    `json:"last_error_code,omitempty"`
+	Profile         string    `json:"profile,omitempty"`
+	At              time.Time `json:"at"`
+}
+
 // GateDecision is one gate decision, whoever made it. Decision is one of:
 // approved (a gate was passed), rejected (the run was cancelled), edited (a
 // human edit at a human_edit gate — the edit is the approval), continued (a
@@ -463,6 +488,13 @@ type expectedSection struct {
 
 var expectedSections = []expectedSection{
 	{name: "memory", present: func(body *Body) bool { return body.Memory != nil }, countsTowardCompleteness: false},
+	// Publication is best-effort: a run may be delivered long after its
+	// manifest is sealed, or never. An absent publication lands in `missing`
+	// so a reviewer sees the subsystem explicitly, but it does not degrade
+	// the completeness flag — "not delivered yet" is not "evidence degraded".
+	// A recorded failed publication is present (the section exists and says
+	// failed), so it never reads as missing.
+	{name: "publication", present: func(body *Body) bool { return body.Publication != nil }, countsTowardCompleteness: false},
 	{name: "context", present: func(body *Body) bool { return body.Context != nil }, countsTowardCompleteness: true},
 	{name: "gate_decisions", present: func(body *Body) bool { return len(body.GateDecisions) > 0 }, countsTowardCompleteness: true},
 	{name: "artifacts", present: func(body *Body) bool { return body.Artifacts != nil }, countsTowardCompleteness: true},
@@ -816,6 +848,13 @@ func mergeBodies(existing Body, patch Body) Body {
 	}
 	if patch.Checks != nil {
 		merged.Checks = mergeCheckEvidence(merged.Checks, patch.Checks)
+	}
+	// Publication has one current state, not a history: a patch replaces the
+	// section wholesale, like Project and Pack. Amending a sealed manifest
+	// chains corrections whose newest link is authoritative, so the section
+	// reads as the latest observed publication outcome.
+	if patch.Publication != nil {
+		merged.Publication = patch.Publication
 	}
 	if len(patch.GateDecisions) > 0 {
 		merged.GateDecisions = appendUniqueGateDecision(merged.GateDecisions, patch.GateDecisions)

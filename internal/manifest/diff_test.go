@@ -463,3 +463,18 @@ func TestDiffManifests_ResumeIsAnAttemptInTheSetDiff(t *testing.T) {
 		t.Errorf("Model delta = %+v, want model-set", diff.Model)
 	}
 }
+
+// TestDiffManifests_PublicationIsNotADiffAxis: publication is an outcome of
+// delivery, not an input — one run delivered and one not delivered are still
+// comparable runs, and the diff must not grow an axis that says otherwise.
+func TestDiffManifests_PublicationIsNotADiffAxis(t *testing.T) {
+	t.Parallel()
+	left := diffBodyOfOneAttempt(testInvocation("inv-left-1", "plan", 0))
+	right := diffBodyOfOneAttempt(testInvocation("inv-right-1", "plan", 0))
+	right.Publication = &PublicationEvidence{State: "published", RemoteBranch: "agentum/r2"}
+
+	diff := DiffManifests(left, right)
+	if !diff.Empty() {
+		t.Errorf("diff = %+v; want empty — two identical-input runs do not differ because one was delivered", diff)
+	}
+}

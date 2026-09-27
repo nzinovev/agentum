@@ -70,7 +70,7 @@ func TestRunner_AutoIfCleanPassRecordsSystemDecision(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Manifest: nil})
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", "T-aic", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-aic", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestRunner_PlainAutoGateRecordsNoDecision(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", "T-auto", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-auto", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if decisions := systemDecisions(manifestFake); len(decisions) != 0 {
@@ -137,7 +137,7 @@ func TestRunner_AutoIfCleanDirtyTreeStopsForHumanWithoutSystemDecision(t *testin
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", "T-dirty", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-dirty", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -183,7 +183,7 @@ func TestRunner_AutoOnApprovalAdvanceRecordsSystemDecision(t *testing.T) {
 	})
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("advance", "T-aoa", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "T-aoa", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestRunner_HumanApprovalAdvanceRecordsNoSystemDecision(t *testing.T) {
 	})
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("advance", "T-hum", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "T-hum", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	// The human's decision at a human gate is recorded by the API handler in

@@ -97,7 +97,7 @@ func TestLoop_ChangesRequestedThenApproved(t *testing.T) {
 	// is not available here; the recording store is not an SQLStore, so the
 	// syncer is nil and sync is a no-op — acceptable for this loop test).
 
-	if err := runner.Handle(t.Context(), job("run", "T-loop1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-loop1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	wantCalls := []string{"spec", "review", "fix", "review"}
@@ -134,7 +134,7 @@ func TestLoop_ApprovedOnFirstPass(t *testing.T) {
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
-	if err := runner.Handle(t.Context(), job("run", "T-loop2", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-loop2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	wantCalls := []string{"spec", "review"}
@@ -173,7 +173,7 @@ func TestLoop_BudgetExhaustedStopsAndPreserves(t *testing.T) {
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: artStore,
 	})
-	if err := runner.Handle(t.Context(), job("run", "T-loop3", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-loop3", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {
@@ -257,7 +257,7 @@ func TestLoop_WorkerRestartContinuesCycle(t *testing.T) {
 	// advance from the gate at review: the verdict says changes_requested, so
 	// the resolver wants to enter fix; but the budget (1) is already spent
 	// (one fix at cycle 0), so the entry is refused -> paused_user_stop.
-	if err := runner.Handle(t.Context(), job("advance", "T-loop4", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "T-loop4", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {
@@ -384,7 +384,7 @@ func TestLoop_ResultSummaryCannotOverrideVerdict(t *testing.T) {
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
-	if err := runner.Handle(t.Context(), job("run", "T-loop5", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-loop5", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	// The lying summary did NOT route to done; the verdict routed to fix, then
@@ -420,7 +420,7 @@ func TestLoop_NoVerdictArtifactStops(t *testing.T) {
 	runner := New(Deps{
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, Artifacts: newRecordingStore(),
 	})
-	if err := runner.Handle(t.Context(), job("run", "T-loop6", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-loop6", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_user_stop" {
@@ -476,7 +476,7 @@ func TestLoop_TransitionRecordsPerLap(t *testing.T) {
 	// checkpoint_test.go:246).
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", "T-rec", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T-rec", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 

@@ -46,7 +46,7 @@ func TestRunner_DeliveryChecksCommitBoundToCheckpoint(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
-	if err := runner.Handle(context.Background(), job("run", "Tcb", "tn", "us")); err != nil {
+	if err := runner.HandleRun(context.Background(), job("run", "Tcb", "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {
@@ -395,7 +395,7 @@ func TestRunner_AutoIfCleanGateFiresOnUndeclaredWrite(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter,
 	})
 
-	if err := runner.Handle(context.Background(), job("run", "Tg", "tn", "us")); err != nil {
+	if err := runner.HandleRun(context.Background(), job("run", "Tg", "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -427,7 +427,7 @@ func TestRunner_AutoIfCleanGateAdvancesOnCleanTree(t *testing.T) {
 		Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter, CheckExec: checks.NewExecutor(checks.ExecutorDeps{}),
 	})
 
-	if err := runner.Handle(context.Background(), job("run", "Tc", "tn", "us")); err != nil {
+	if err := runner.HandleRun(context.Background(), job("run", "Tc", "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Clean tree → gate auto-advances → terminal → delivery checks → final gate.

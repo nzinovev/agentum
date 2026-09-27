@@ -58,7 +58,7 @@ func TestRunnerLive_EndToEnd(t *testing.T) {
 
 	// run: spec stage invoked by the real adapter → result.json → human_approval
 	// gate pauses the record.
-	if err := runner.Handle(ctx, job("run", "LIVE1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(ctx, job("run", "LIVE1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {

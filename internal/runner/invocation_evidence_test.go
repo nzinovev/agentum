@@ -139,7 +139,7 @@ func TestInvocationEvidence_FixCycleLeavesTwoReviewRecords(t *testing.T) {
 	})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if want := []string{"spec", "review", "fix", "review"}; !equalStringSlices(adapter.calls, want) {
@@ -219,7 +219,7 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: &refusingAdapter{}})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestInvocationEvidence_StreamFailureRecordsNoTelemetry(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: &failingStreamAdapter{}})
 	runner.mfst = fakeManifest
 
-	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 
@@ -357,7 +357,7 @@ func TestResolveExecutionPlan_UnresolvableTierFailsBeforeAnyInvocation(t *testin
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
+	err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("an unresolvable tier must fail the run")
 	}
@@ -397,7 +397,7 @@ func TestResolveExecutionPlan_ValidatesEveryStageOfThePack(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
+	err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("a late stage's unresolvable tier must fail the run at start")
 	}
@@ -460,7 +460,7 @@ func TestResolveExecutionPlan_UnsupportedOptionFailsBeforeAnyInvocation(t *testi
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us"))
+	err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us"))
 	if err == nil {
 		t.Fatal("an option the adapter does not declare must fail the run")
 	}

@@ -36,6 +36,13 @@ type fakeStore struct {
 	// artifactRevisions maps revision name -> current revision. Used by the
 	// plan_revision_drift check.
 	artifactRevisions map[string]sqlc.ArtifactRevision
+	// publications records the publication rows the final gate created, so a
+	// test can assert the hook without a database.
+	publications []sqlc.RunPublication
+	// publicationErr / enqueueErr script the final-gate hook's two
+	// best-effort writes failing.
+	publicationErr error
+	enqueueErr     error
 }
 
 func newFakeStore(record sqlc.Run, project sqlc.Project) *fakeStore {
@@ -194,8 +201,31 @@ func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParam
 func (store *fakeStore) EnqueueJob(_ context.Context, arg sqlc.EnqueueJobParams) (sqlc.Job, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.enqueueErr != nil {
+		return sqlc.Job{}, store.enqueueErr
+	}
 	store.enqueued = append(store.enqueued, arg.Kind)
 	return sqlc.Job{Kind: arg.Kind}, nil
+}
+
+func (store *fakeStore) EnsurePublication(_ context.Context, arg sqlc.EnsurePublicationParams) (sqlc.RunPublication, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.publicationErr != nil {
+		return sqlc.RunPublication{}, store.publicationErr
+	}
+	if len(store.publications) > 0 {
+		// The unique index on run_id: a second ensure is a no-op the caller
+		// learns about from the empty return.
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
+	row := sqlc.RunPublication{
+		ID: "pub-1", TenantID: arg.TenantID, UserID: arg.UserID, RunID: arg.RunID,
+		Provider: arg.Provider, RemoteBranch: arg.RemoteBranch,
+		PublishedCommit: arg.PublishedCommit, State: "pending",
+	}
+	store.publications = append(store.publications, row)
+	return row, nil
 }
 
 // approvalKey is the map key for fakeStore.approvals: runID + "/" + name.
@@ -317,7 +347,7 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: src, Adapter: adapter})
 
 	// run: spec completes but the human_approval gate pauses.
-	if err := runner.Handle(t.Context(), job("run", "T1", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T1", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -328,7 +358,7 @@ func TestRunner_RunToPauseThenAdvanceToFinal(t *testing.T) {
 	}
 
 	// advance: gate passed → impl auto-advances → done terminal → final gate.
-	if err := runner.Handle(t.Context(), job("advance", "T1", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "T1", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	if got := store.taskState(); got != "awaiting_final_review" {
@@ -374,7 +404,7 @@ func TestRunner_PlanApprovalNotApprovedStopsAtPausedGate(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "Tpa", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "Tpa", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -417,7 +447,7 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "Tpa2", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "Tpa2", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -433,7 +463,7 @@ func TestRunner_PlanApprovalAdvanceRunsImplementer(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	if err := runner.Handle(t.Context(), job("advance", "Tpa2", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "Tpa2", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	// THE anti-regression assertion: the implementer actually ran. With the
@@ -481,7 +511,7 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "Tdr", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "Tdr", "tn", "us")); err != nil {
 		t.Fatalf("run job: %v", err)
 	}
 	if got := store.taskState(); got != "paused_gate" {
@@ -494,7 +524,7 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 	// Advance (the handler's approval write is a no-op here — the row exists and
 	// CreateApproval is ON CONFLICT DO NOTHING — so the runner job alone models
 	// the post-request state faithfully).
-	if err := runner.Handle(t.Context(), job("advance", "Tdr", "tn", "us")); err != nil {
+	if err := runner.HandleAdvance(t.Context(), job("advance", "Tdr", "tn", "us")); err != nil {
 		t.Fatalf("advance job: %v", err)
 	}
 	// Drift persists: paused again at the approval stage, implementer still
@@ -548,7 +578,7 @@ func TestRunner_BlockedPausesForOpenQuestions(t *testing.T) {
 	}}
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
-	if err := runner.Handle(t.Context(), job("run", "T2", "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", "T2", "tn", "us")); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := store.taskState(); got != "paused_open_questions" {
@@ -577,7 +607,7 @@ func TestRunner_CancelAbortsInFlightRun(t *testing.T) {
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, Adapter: adapter})
 
 	done := make(chan error, 1)
-	go func() { done <- runner.Handle(t.Context(), job("run", "T3", "tn", "us")) }()
+	go func() { done <- runner.HandleRun(t.Context(), job("run", "T3", "tn", "us")) }()
 
 	// Wait for the registry to register the run, then cancel it.
 	waitForRegistered(runner.Cancels(), "T3", 2*time.Second)

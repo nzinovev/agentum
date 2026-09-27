@@ -53,6 +53,14 @@ const (
 	codeConflict            = "conflict"             // an optimistic-concurrency / state collision
 	codePreconditionMissing = "precondition_missing" // a required If-Match-style precondition was absent
 	codeTooManyRequests     = "too_many_requests"    // a bounded queue / rate surface is full
+	// codePublicationDisabled: the publication surface is switched off in
+	// configuration. 409, not 404 — the run exists and the answer names why
+	// nothing can be delivered, rather than claiming the resource is missing.
+	codePublicationDisabled = "publication_disabled"
+	// codePublicationNotReady: the run has not reached the state a
+	// publication can deliver — the review gate with its pinned result
+	// commit, or the done state after approval.
+	codePublicationNotReady = "publication_not_ready"
 )
 
 // writeError emits a structured error response.

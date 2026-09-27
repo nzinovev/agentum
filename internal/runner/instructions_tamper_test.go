@@ -153,7 +153,7 @@ func TestInstructions_TamperReproduction(t *testing.T) {
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -293,7 +293,7 @@ func TestInstructions_NoTamperIsNoOp(t *testing.T) {
 	manifestFake := &fakeManifestService{}
 	runner.mfst = manifestFake
 
-	if err := runner.Handle(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
+	if err := runner.HandleRun(t.Context(), job("run", record.ID, "tn", "us")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 

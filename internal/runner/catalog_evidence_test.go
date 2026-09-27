@@ -70,7 +70,7 @@ func TestRunner_CatalogLabelInEvidence_Failed(t *testing.T) {
 		enumeratesModels: true,
 		catalog:          models.Catalog{Reason: "timeout"},
 	})
-	if runErr := runner.Handle(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
+	if runErr := runner.HandleRun(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
 		t.Fatalf("run failed: %v", runErr)
 	}
 	section := recordedAdapterSection(fake)
@@ -90,7 +90,7 @@ func TestRunner_CatalogLabelInEvidence_Ok(t *testing.T) {
 		enumeratesModels: true,
 		catalog:          workingStubCatalog(),
 	})
-	if runErr := runner.Handle(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
+	if runErr := runner.HandleRun(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
 		t.Fatalf("run failed: %v", runErr)
 	}
 	section := recordedAdapterSection(fake)
@@ -111,7 +111,7 @@ func TestRunner_CatalogLabelInEvidence_Ok(t *testing.T) {
 func TestRunner_CatalogLabelInEvidence_Unsupported(t *testing.T) {
 	t.Parallel()
 	runner, fake := newCatalogEvidenceRunner(t, stubExecution{})
-	if runErr := runner.Handle(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
+	if runErr := runner.HandleRun(t.Context(), job("run", "Tev", "tn", "us")); runErr != nil {
 		t.Fatalf("run failed: %v", runErr)
 	}
 	section := recordedAdapterSection(fake)
