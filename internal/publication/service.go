@@ -26,6 +26,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/publish"
@@ -57,6 +58,8 @@ const correctionReasonPublication = "publication_updated"
 // nullable columns are adapted where used; the interface exists so unit tests
 // substitute a fake without a database.
 type Store interface {
+	ListStageInvocationsForRun(context.Context, sqlc.ListStageInvocationsForRunParams) ([]sqlc.StageInvocation, error)
+	ListApprovalsForRun(context.Context, sqlc.ListApprovalsForRunParams) ([]sqlc.RunApproval, error)
 	FreezePublicationTarget(context.Context, sqlc.FreezePublicationTargetParams) (sqlc.RunPublication, error)
 	GetRun(ctx context.Context, arg sqlc.GetRunParams) (sqlc.Run, error)
 	GetProject(ctx context.Context, arg sqlc.GetProjectParams) (sqlc.Project, error)
@@ -87,6 +90,7 @@ type providerRegistry interface {
 
 // Service is the publication coordinator. It serves the "publish" job kind.
 type Service struct {
+	artifacts  DescriptionStore
 	remote     string
 	baseBranch string
 	readRemote func(context.Context, string, string) (string, error)
@@ -99,8 +103,10 @@ type Service struct {
 
 // Deps bundles Service construction. Manifest may be nil (unit tests);
 // evidence writes become no-ops then. Registry nil means the real registry
-// with its default table. LeaseTTL zero means DefaultLeaseTTL.
+// with its default table. LeaseTTL zero means DefaultLeaseTTL. Artifacts is
+// required: a missing store refuses publication before provider writes.
 type Deps struct {
+	Artifacts  DescriptionStore
 	Remote     string
 	BaseBranch string
 	Store      Store
@@ -130,7 +136,7 @@ func New(deps Deps) *Service {
 	}
 	return &Service{
 		remote: remote, baseBranch: deps.BaseBranch, readRemote: readPublicationRemote,
-		store: deps.Store, mfst: deps.Manifest, registry: registry,
+		artifacts: deps.Artifacts, store: deps.Store, mfst: deps.Manifest, registry: registry,
 		leaseTTL: leaseTTL, log: log,
 	}
 }
@@ -256,6 +262,15 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 		}
 		delivery.Target = publish.Target{Provider: provider.ID(), Host: frozen.TargetHost, Owner: frozen.TargetOwner, Repository: frozen.TargetRepository, BaseBranch: frozen.BaseBranch, RemoteBranch: frozen.RemoteBranch}
 	}
+	description, descriptionErr := service.prepareDescription(attemptCtx, delivery)
+	if descriptionErr != nil {
+		code, _ := publish.Classify(descriptionErr)
+		if errors.Is(descriptionErr, artifacts.ErrSecretDetected) {
+			code = publish.ReasonSecretInDescription
+		}
+		return service.recordRefusal(ctx, record, claimed, code, publish.Result{}, provider)
+	}
+	delivery.Description = description
 	result, publishErr := provider.Publish(attemptCtx, delivery)
 	if publishErr != nil {
 		code, _ := publish.Classify(publishErr)
@@ -435,7 +450,9 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 		}
 		delivery.Checks = seal
 	}
-	delivery.Review = publish.ReviewRef{FixCycles: maxInvocationCycle(body)}
+	if err := service.attachReviewMetadata(ctx, record, body, &delivery); err != nil {
+		return publish.Delivery{}, err
+	}
 	return delivery, nil
 }
 
@@ -550,18 +567,6 @@ func inputRevisionOf(body manifest.Body) string {
 		return ""
 	}
 	return body.Input.Revision
-}
-
-// maxInvocationCycle returns the highest fix-cycle any stage invocation
-// reached — the number of review ⇄ fix cycles the run completed.
-func maxInvocationCycle(body manifest.Body) int {
-	highest := 0
-	for _, invocation := range body.InvocationRecords() {
-		if int(invocation.Cycle) > highest {
-			highest = int(invocation.Cycle)
-		}
-	}
-	return highest
 }
 
 // nullStringOr returns the inner string when Valid, else "".

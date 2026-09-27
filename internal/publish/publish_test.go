@@ -130,6 +130,7 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 		ReasonProviderError,
 	}
 	blocking := []ReasonCode{
+		ReasonDescriptionInvalid,
 		ReasonUnsafeGitConfig, ReasonPullRequestNotFound,
 		ReasonRemoteUnknown,
 		ReasonBaseBranchUnknown,

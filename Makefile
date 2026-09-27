@@ -27,7 +27,7 @@ tidy: ## go mod tidy
 build: ## build all packages
 	go build ./...
 
-SOURCES := $(wildcard cmd/agentum/*.go internal/*/*.go internal/store/migrations/*.sql)
+SOURCES := $(wildcard cmd/agentum/*.go internal/*/*.go internal/store/migrations/*.sql) internal/publish/pr-template.md
 
 $(AGENTUM_BIN): $(SOURCES)
 	@mkdir -p bin

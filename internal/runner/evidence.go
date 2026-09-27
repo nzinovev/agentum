@@ -726,14 +726,12 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 	}
 }
 
-// isArtifactDirKind reports whether a revision kind lives in the per-stage
-// artifact dir rather than the worktree proper. Such revisions have names of
-// the form "<stage>/<file>" and are materialized at the artifact-dir path on
-// sync (ADR 0003 D6.2) instead of being skipped — a human edit to plan/plan.md
-// must reach the implementer after an advance, which the old skip prevented.
+// isArtifactDirKind redirects orchestration artifacts into the excluded
+// artifact directory. Publication descriptions are included here but excluded
+// from the final-review stage list: they must never enter checkpoint commits.
 func isArtifactDirKind(kind string) bool {
 	switch kind {
-	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat":
+	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat", "pr_description":
 		return true
 	}
 	return false

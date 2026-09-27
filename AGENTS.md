@@ -106,6 +106,13 @@ instead of skipping — a skipped database test there would be a lost check.
   instruction set (`instructions:` in `.agentum.yaml` ∪ the runtime-injected
   `AGENTS.md`) is pinned from `base_commit` the same way: the agent cannot
   change which instructions or checks gate a run.
+- **Publication runs as a separate queue handler.** The `publish` job in
+  `internal/publication` receives durable delivery metadata and calls the
+  provider registry in `internal/publish`. The runner and publisher coordinator
+  must not import each other. Provider credentials reach neither agent
+  invocations nor project checks. PR descriptions pass through the artifact
+  store's scanner before the provider receives the stored revision bytes.
+  Publication failures preserve the run result; merging remains a human action.
 - **The execution target is a registry entry.** Adapters are selected by id
   through `internal/agent`'s registry and describe themselves (`Describe()`:
   id, implementation version, binary, understood model options (`model` and
