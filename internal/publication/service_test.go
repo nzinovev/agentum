@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
 
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/publish"
@@ -42,9 +45,10 @@ type fakeStore struct {
 	eventPayloads [][]byte
 	projectErr    error
 
-	claimLost     bool
-	failureWrite  error
-	successWrites int
+	claimLeaseOverride *sql.NullTime
+	claimLost          bool
+	failureWrite       error
+	successWrites      int
 }
 
 func (store *fakeStore) GetRun(context.Context, sqlc.GetRunParams) (sqlc.Run, error) {
@@ -88,7 +92,22 @@ func (store *fakeStore) ClaimPublication(_ context.Context, arg sqlc.ClaimPublic
 	store.row.State = "publishing"
 	store.row.LeaseOwner = arg.LeaseOwner
 	store.row.LeaseExpiresAt = arg.LeaseExpiresAt
+	if store.claimLeaseOverride != nil {
+		store.row.LeaseExpiresAt = *store.claimLeaseOverride
+	}
 	store.row.Attempts++
+	return store.row, nil
+}
+
+func (store *fakeStore) FreezePublicationTarget(_ context.Context, arg sqlc.FreezePublicationTargetParams) (sqlc.RunPublication, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.row.State != "publishing" || store.row.Attempts != arg.Attempts || store.row.LeaseOwner != arg.LeaseOwner {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
+	if store.row.TargetHost == "" {
+		store.row.TargetHost, store.row.TargetOwner, store.row.TargetRepository, store.row.BaseBranch = arg.TargetHost, arg.TargetOwner, arg.TargetRepository, arg.BaseBranch
+	}
 	return store.row, nil
 }
 
@@ -100,6 +119,7 @@ func (store *fakeStore) RecordPublicationSuccess(_ context.Context, arg sqlc.Rec
 	}
 	store.successWrites++
 	store.row.State = "published"
+	store.row.DraftRejected = false
 	store.row.PrNumber = arg.PrNumber
 	store.row.PrUrl = arg.PrUrl
 	return store.row, nil
@@ -115,7 +135,14 @@ func (store *fakeStore) RecordPublicationFailure(_ context.Context, arg sqlc.Rec
 		return sqlc.RunPublication{}, store.failureWrite
 	}
 	store.row.State = arg.State
+	store.row.DraftRejected = store.row.DraftRejected || arg.DraftRejected
 	store.row.BranchPushedAt = arg.BranchPushedAt
+	if arg.PrState.Valid {
+		store.row.PrState = arg.PrState
+	}
+	if arg.PrNumber.Valid {
+		store.row.PrNumber = arg.PrNumber
+	}
 	store.row.LastErrorCode = arg.LastErrorCode
 	store.row.LastErrorMessage = arg.LastErrorMessage
 	return store.row, nil
@@ -681,6 +708,7 @@ func TestLateAttemptDoesNotEmitOutcomeOrEvidence(test *testing.T) {
 				harness.store.row.Attempts++
 				harness.store.row.LeaseOwner = sql.NullString{String: "new-worker", Valid: true}
 				harness.store.row.State = "published"
+				harness.store.row.DraftRejected = false
 				harness.store.row.PrNumber = sql.NullInt32{Int32: 42, Valid: true}
 			},
 		}
@@ -723,5 +751,170 @@ func TestQueuedJobsCannotRetryRecordedRefusal(test *testing.T) {
 		if harness.store.row.Attempts != 2 {
 			test.Fatal("explicit request was not processed")
 		}
+	}
+}
+
+type resolvingPublisher struct {
+	scriptedPublisher
+	resolutions int
+}
+
+func (publisher *resolvingPublisher) ResolveTarget(_ context.Context, target publish.Target, _, override string) (publish.Target, error) {
+	publisher.resolutions++
+	target.BaseBranch = "main"
+	if override != "" {
+		target.BaseBranch = override
+	}
+	return target, nil
+}
+
+func TestTargetFrozenBeforePartialFailureAndReusedOnRetry(test *testing.T) {
+	provider := &resolvingPublisher{scriptedPublisher: scriptedPublisher{id: "test", result: publish.Result{BranchPushed: true}, refusal: &publish.Refusal{Code: publish.ReasonNetworkUnreachable}}}
+	harness := newCoordinatorHarness(test, passingChecks(), provider)
+	remoteReads := 0
+	harness.service.readRemote = func(context.Context, string, string) (string, error) {
+		remoteReads++
+		return "git@github.com:owner/repository.git", nil
+	}
+	provider.onPublish = func(delivery publish.Delivery) {
+		if harness.store.row.TargetHost != "github.com" || harness.store.row.TargetOwner != "owner" || harness.store.row.BaseBranch != "main" {
+			test.Fatalf("push before freeze: %+v", harness.store.row)
+		}
+		if delivery.Target.Owner != "owner" {
+			test.Fatal("target drift")
+		}
+	}
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if harness.store.row.State != "failed" || !harness.store.row.BranchPushedAt.Valid {
+		test.Fatalf("partial outcome: %+v", harness.store.row)
+	}
+	harness.service.readRemote = func(context.Context, string, string) (string, error) {
+		remoteReads++
+		return "https://github.com/different/repo.git", nil
+	}
+	harness.store.row.State = "pending"
+	harness.service.baseBranch = "changed-base"
+	provider.refusal = nil
+	provider.result = publish.Result{BranchPushed: true, PullRequest: 42, PullRequestState: "open"}
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if remoteReads != 1 || provider.resolutions != 1 || harness.store.row.State != "published" {
+		test.Fatalf("reads=%d resolutions=%d state=%s", remoteReads, provider.resolutions, harness.store.row.State)
+	}
+}
+
+func TestMissingRemoteBlocksBeforeProvider(test *testing.T) {
+	provider := &resolvingPublisher{scriptedPublisher: scriptedPublisher{id: "test", onPublish: func(publish.Delivery) { test.Error("provider called") }}}
+	harness := newCoordinatorHarness(test, passingChecks(), provider)
+	harness.service.readRemote = func(context.Context, string, string) (string, error) {
+		return "", &publish.Refusal{Code: publish.ReasonRemoteUnknown}
+	}
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if harness.store.row.State != "blocked" || harness.store.row.LastErrorCode.String != string(publish.ReasonRemoteUnknown) {
+		test.Fatalf("outcome=%+v", harness.store.row)
+	}
+}
+
+func TestClosedPullRequestObservationIsRecorded(test *testing.T) {
+	harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{
+		id: "test", result: publish.Result{BranchPushed: true, PullRequest: 42, PullRequestState: "merged"}, refusal: &publish.Refusal{Code: publish.ReasonPullRequestClosed},
+	})
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if harness.store.row.PrState.String != "merged" || harness.store.row.PrNumber.Int32 != 42 || harness.store.row.State != "blocked" {
+		test.Fatalf("observation lost: %+v", harness.store.row)
+	}
+}
+
+func TestUnsafeCheckoutFailsBeforeRemoteReadsOrNetwork(test *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(500) }))
+	defer server.Close()
+	registry := publish.NewRegistry(publish.RegistryOptions{Credential: publish.StaticCredential("test-token"), APIBase: server.URL})
+	provider, err := registry.Resolve("")
+	if err != nil {
+		test.Fatal(err)
+	}
+	harness := newCoordinatorHarness(test, passingChecks(), provider)
+	checkout := test.TempDir()
+	for _, arguments := range [][]string{{"init", checkout}, {"-C", checkout, "config", "core.hooksPath", "/sensitive/value"}} {
+		if output, err := exec.Command("git", arguments...).CombinedOutput(); err != nil {
+			test.Fatalf("git: %s %v", output, err)
+		}
+	}
+	harness.store.run.CheckoutPath = checkout
+	harness.service.readRemote = func(context.Context, string, string) (string, error) {
+		test.Error("remote read before preflight passed")
+		return "", nil
+	}
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	row := harness.store.row
+	if calls != 0 || row.TargetHost != "" || row.State != "blocked" || row.LastErrorCode.String != string(publish.ReasonUnsafeGitConfig) {
+		test.Fatalf("calls=%d row=%+v", calls, row)
+	}
+	if !strings.Contains(row.LastErrorMessage.String, "core.hookspath") || strings.Contains(row.LastErrorMessage.String, "/sensitive/value") {
+		test.Fatalf("unsafe diagnostic=%s", row.LastErrorMessage.String)
+	}
+}
+
+func TestInsufficientLeaseBudgetStopsBeforeProvider(test *testing.T) {
+	for _, scenario := range []string{"tiny-budget", "expired", "missing-expiry"} {
+		test.Run(scenario, func(test *testing.T) {
+			harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{onPublish: func(publish.Delivery) { test.Error("provider called without lease budget") }})
+			switch scenario {
+			case "tiny-budget":
+				harness.service.leaseTTL = time.Millisecond
+			case "expired":
+				harness.store.claimLeaseOverride = &sql.NullTime{Time: time.Now().Add(-time.Second), Valid: true}
+			case "missing-expiry":
+				harness.store.claimLeaseOverride = &sql.NullTime{}
+			}
+			if err := harness.handle(test); err != nil {
+				test.Fatal(err)
+			}
+			if row := harness.store.row; row.State != "failed" || row.LastErrorCode.String != string(publish.ReasonLeaseBudgetExhausted) {
+				test.Fatalf("row=%+v", row)
+			}
+		})
+	}
+}
+
+func TestDeliveryRetainsDraftRejectionAcrossOtherFailures(test *testing.T) {
+	provider := scriptedPublisher{result: publish.Result{BranchPushed: true, PullRequest: 42, DraftRejected: true}, refusal: &publish.Refusal{Code: publish.ReasonDraftUnsupported}}
+	harness := newCoordinatorHarness(test, passingChecks(), provider)
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if !harness.store.row.DraftRejected {
+		test.Fatal("draft refusal not persisted")
+	}
+	harness.store.row.State = "pending"
+	harness.store.projectErr = errors.New("temporary read failure")
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if !harness.store.row.DraftRejected || harness.store.row.LastErrorCode.String != string(publish.ReasonProviderError) {
+		test.Fatalf("draft refusal lost: %+v", harness.store.row)
+	}
+	harness.store.projectErr = nil
+	harness.store.row.State = "pending"
+	harness.service.registry = scriptedRegistry{publisher: scriptedPublisher{result: publish.Result{BranchPushed: true, PullRequest: 42}, onPublish: func(delivery publish.Delivery) {
+		if !delivery.DraftRejected || delivery.PullRequest != 42 {
+			test.Fatalf("delivery=%+v", delivery)
+		}
+	}}}
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if harness.store.row.DraftRejected {
+		test.Fatal("successful draft confirmation did not clear refusal")
 	}
 }

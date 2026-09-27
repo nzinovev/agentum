@@ -5,12 +5,21 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"github.com/nzinovev/agentum/internal/publish"
 )
 
 // Config is resolved entirely from the environment (12-factor). The Tenant*
 // fields are the single-tenant seam: they stand in for real identity until
 // SSO/RBAC arrive at the same boundary.
 type Config struct {
+	PublishEnabled    bool
+	PublishProvider   string
+	PublishToken      string
+	PublishAPIBase    string
+	PublishRemote     string
+	PublishBaseBranch string
 	HTTPAddr          string
 	DatabaseURL       string
 	LogLevel          string
@@ -82,6 +91,11 @@ const retiredBinaryEnv = "AGENTUM_OPENCODE_BINARY"
 
 func Load() (Config, error) {
 	cfg := Config{
+		PublishProvider:   getenv("AGENTUM_PUBLISH_PROVIDER", string(publish.ProviderGitHub)),
+		PublishToken:      getenv("AGENTUM_PUBLISH_TOKEN", ""),
+		PublishAPIBase:    getenv("AGENTUM_PUBLISH_API_BASE", publish.DefaultAPIBase),
+		PublishRemote:     getenv("AGENTUM_PUBLISH_REMOTE", "origin"),
+		PublishBaseBranch: getenv("AGENTUM_PUBLISH_BASE_BRANCH", ""),
 		HTTPAddr:          getenv("AGENTUM_HTTP_ADDR", ":8080"),
 		DatabaseURL:       getenv("AGENTUM_DATABASE_URL", defaultDatabaseURL()),
 		LogLevel:          getenv("AGENTUM_LOG_LEVEL", "info"),
@@ -108,6 +122,27 @@ func Load() (Config, error) {
 		ModelTestMaxSeconds:       getenvInt("AGENTUM_MODEL_TEST_MAX_SECONDS", 120),
 		ModelTestRetentionMinutes: getenvInt("AGENTUM_MODEL_TEST_RETENTION_MINUTES", 60),
 	}
+	enabled, publishErr := strconv.ParseBool(getenv("AGENTUM_PUBLISH_ENABLED", "false"))
+	if publishErr != nil {
+		return cfg, fmt.Errorf("AGENTUM_PUBLISH_ENABLED must be a boolean")
+	}
+	cfg.PublishEnabled = enabled
+	if enabled && strings.TrimSpace(cfg.PublishToken) == "" {
+		return cfg, fmt.Errorf("AGENTUM_PUBLISH_TOKEN must be set when AGENTUM_PUBLISH_ENABLED is true")
+	}
+	if _, err := publish.NewRegistry(publish.RegistryOptions{DefaultProvider: publish.ProviderID(cfg.PublishProvider)}).Resolve(""); err != nil {
+		return cfg, err
+	}
+	if err := publish.ValidateAPIBase(cfg.PublishAPIBase); err != nil {
+		return cfg, fmt.Errorf("AGENTUM_PUBLISH_API_BASE must be an HTTPS URL without credentials, query, or fragment")
+	}
+	if err := publish.ValidateRemoteName(cfg.PublishRemote); err != nil {
+		return cfg, fmt.Errorf("AGENTUM_PUBLISH_REMOTE must be a nonempty valid remote name")
+	}
+	if err := publish.ValidateBaseBranch(cfg.PublishBaseBranch); err != nil {
+		return cfg, fmt.Errorf("AGENTUM_PUBLISH_BASE_BRANCH must be empty or a valid branch name")
+	}
+
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("AGENTUM_DATABASE_URL must be set")
 	}

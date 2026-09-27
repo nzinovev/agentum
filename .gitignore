@@ -14,6 +14,7 @@ vendor/
 # Local env / runtime
 .env
 .env.*
+!.env.example
 *.local
 
 # Optional tier→model override. Stays local; copy from models.example.yaml.
@@ -28,3 +29,6 @@ models.yaml
 .vscode/
 .DS_Store
 tmp/
+
+# Local implementation handoffs.
+/docs/handoff/

@@ -8,6 +8,9 @@ import (
 // providers at construction — the one place it is handed out — and never
 // travels with a Delivery.
 type RegistryOptions struct {
+	APIBase string
+	// ProbeTarget supplies the repository for a project-scoped readiness check.
+	ProbeTarget Target
 	// DefaultProvider is the entry an empty id resolves to. Empty means the
 	// first registered entry.
 	DefaultProvider ProviderID
@@ -26,16 +29,15 @@ type Registry struct {
 	defaultID  ProviderID
 }
 
-// NewRegistry builds the registry with every provider this compile ships. The
-// table currently holds one entry that refuses every publication with
-// credentials_missing; the networked provider is a row here when it lands,
-// not a branch in a caller.
+// NewRegistry builds the registry with every provider this build ships.
 func NewRegistry(options RegistryOptions) *Registry {
 	noopPublisher := NewNoopPublisher()
+	githubPublisher := newGitHubPublisher(options)
 	publishers := map[ProviderID]Publisher{
-		noopPublisher.ID(): noopPublisher,
+		noopPublisher.ID():   noopPublisher,
+		githubPublisher.ID(): githubPublisher,
 	}
-	orderedIDs := []ProviderID{noopPublisher.ID()}
+	orderedIDs := []ProviderID{githubPublisher.ID(), noopPublisher.ID()}
 	defaultID := options.DefaultProvider
 	if defaultID == "" {
 		defaultID = orderedIDs[0]

@@ -374,3 +374,103 @@ func TestRecoveryBoundsFailuresBeforePublicationClaim(test *testing.T) {
 		test.Fatal("explicit retry inherited old failed-job budget")
 	}
 }
+
+func TestPublicationTargetFreezeSurvivesFailureAndRejectsStaleOwner(test *testing.T) {
+	handle := dbtest.Store(test)
+	runID := insertPublicationFixture(test, handle.Store.DB, "freeze-target")
+	ensurePublication(test, handle.Queries, runID)
+	claimed := claimPublication(test, handle.Queries, runID, 0, "first-owner")
+	params := sqlc.FreezePublicationTargetParams{
+		TenantID: publicationTestTenantID, UserID: publicationTestUserID, RunID: runID,
+		TargetHost: "github.com", TargetOwner: "owner", TargetRepository: "repo", BaseBranch: "main",
+		Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+	}
+	frozen, err := handle.Queries.FreezePublicationTarget(test.Context(), params)
+	if err != nil || frozen.TargetOwner != "owner" {
+		test.Fatalf("freeze: %+v %v", frozen, err)
+	}
+	for _, change := range []string{"tenant", "user", "attempt", "owner"} {
+		invalid := params
+		switch change {
+		case "tenant":
+			invalid.TenantID = "00000000-0000-0000-0000-000000000000"
+		case "user":
+			invalid.UserID = "00000000-0000-0000-0000-000000000000"
+		case "attempt":
+			invalid.Attempts++
+		case "owner":
+			invalid.LeaseOwner.String = "stale-owner"
+		}
+		if _, err := handle.Queries.FreezePublicationTarget(test.Context(), invalid); !errors.Is(err, sql.ErrNoRows) {
+			test.Fatalf("invalid %s freeze: %v", change, err)
+		}
+	}
+	failed, err := handle.Queries.RecordPublicationFailure(test.Context(), sqlc.RecordPublicationFailureParams{
+		TenantID: publicationTestTenantID, RunID: runID, State: "blocked", Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+		PrNumber: sql.NullInt32{Int32: 42, Valid: true}, PrState: sql.NullString{String: "closed", Valid: true},
+		BranchPushedAt: sql.NullTime{Time: time.Now(), Valid: true},
+	})
+	if err != nil || failed.PrState.String != "closed" || failed.TargetHost != "github.com" {
+		test.Fatalf("failure: %+v %v", failed, err)
+	}
+	requested, err := handle.Queries.RequestPublication(test.Context(), sqlc.RequestPublicationParams{TenantID: publicationTestTenantID, RunID: runID})
+	if err != nil {
+		test.Fatal(err)
+	}
+	claimed = claimPublication(test, handle.Queries, runID, requested.RequestID, "second-owner")
+	params.Attempts, params.LeaseOwner = claimed.Attempts, claimed.LeaseOwner
+	params.TargetOwner, params.BaseBranch = "changed-owner", "changed-base"
+	frozen, err = handle.Queries.FreezePublicationTarget(test.Context(), params)
+	if err != nil || frozen.TargetOwner != "owner" || frozen.BaseBranch != "main" || frozen.PrNumber.Int32 != 42 {
+		test.Fatalf("retry changed frozen target: %+v %v", frozen, err)
+	}
+}
+
+func TestDraftRejectionSurvivesMigrationAndUnrelatedFailure(test *testing.T) {
+	handle := dbtest.Store(test)
+	runID := insertPublicationFixture(test, handle.Store.DB, "draft-rejected")
+	ensurePublication(test, handle.Queries, runID)
+	claimed := claimPublication(test, handle.Queries, runID, 0, "creator")
+	if _, err := handle.Queries.RecordPublicationFailure(test.Context(), sqlc.RecordPublicationFailureParams{
+		TenantID: publicationTestTenantID, RunID: runID, State: "blocked", Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+		PrNumber: sql.NullInt32{Int32: 42, Valid: true}, LastErrorCode: sql.NullString{String: "draft_unsupported", Valid: true},
+	}); err != nil {
+		test.Fatal(err)
+	}
+	// Existing rows from before the marker must retain an observed draft refusal on upgrade.
+	if err := handle.Store.MigrateDownTo(test.Context(), 14); err != nil {
+		test.Fatal(err)
+	}
+	if err := handle.Store.Migrate(test.Context()); err != nil {
+		test.Fatal(err)
+	}
+	row, err := handle.Queries.GetPublicationForRun(test.Context(), sqlc.GetPublicationForRunParams{TenantID: publicationTestTenantID, RunID: runID})
+	if err != nil || !row.DraftRejected {
+		test.Fatalf("backfill row=%+v err=%v", row, err)
+	}
+	for _, success := range []bool{false, true} {
+		requested, err := handle.Queries.RequestPublication(test.Context(), sqlc.RequestPublicationParams{TenantID: publicationTestTenantID, RunID: runID})
+		if err != nil {
+			test.Fatal(err)
+		}
+		claimed = claimPublication(test, handle.Queries, runID, requested.RequestID, "retry")
+		if success {
+			row, err = handle.Queries.RecordPublicationSuccess(test.Context(), sqlc.RecordPublicationSuccessParams{
+				TenantID: publicationTestTenantID, RunID: runID, Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+				PrNumber: sql.NullInt32{Int32: 42, Valid: true},
+			})
+		} else {
+			row, err = handle.Queries.RecordPublicationFailure(test.Context(), sqlc.RecordPublicationFailureParams{
+				TenantID: publicationTestTenantID, RunID: runID, State: "failed", Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+				LastErrorCode: sql.NullString{String: "provider_rate_limited", Valid: true},
+			})
+		}
+		if err != nil || row.DraftRejected == success {
+			test.Fatalf("success=%t row=%+v err=%v", success, row, err)
+		}
+		stale, err := handle.Queries.FindStalePublications(test.Context(), sqlc.FindStalePublicationsParams{TenantID: publicationTestTenantID, Attempts: 10})
+		if err != nil || len(stale) != 0 {
+			test.Fatalf("recorded outcome scheduled again: %+v %v", stale, err)
+		}
+	}
+}

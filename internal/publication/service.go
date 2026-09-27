@@ -45,6 +45,9 @@ const (
 // before the recovery probe considers its worker dead.
 const DefaultLeaseTTL = 5 * time.Minute
 
+// minimumAttemptBudget prevents starting network work with an expiring lease.
+const minimumAttemptBudget = time.Second
+
 // correctionReasonPublication is the manifest-correction reason a publication
 // recorded after the seal carries. The sealed body stays the snapshot of seal
 // time; the correction chain's newest link is the current state.
@@ -54,6 +57,7 @@ const correctionReasonPublication = "publication_updated"
 // nullable columns are adapted where used; the interface exists so unit tests
 // substitute a fake without a database.
 type Store interface {
+	FreezePublicationTarget(context.Context, sqlc.FreezePublicationTargetParams) (sqlc.RunPublication, error)
 	GetRun(ctx context.Context, arg sqlc.GetRunParams) (sqlc.Run, error)
 	GetProject(ctx context.Context, arg sqlc.GetProjectParams) (sqlc.Project, error)
 	GetPublicationForRun(ctx context.Context, arg sqlc.GetPublicationForRunParams) (sqlc.RunPublication, error)
@@ -83,22 +87,27 @@ type providerRegistry interface {
 
 // Service is the publication coordinator. It serves the "publish" job kind.
 type Service struct {
-	store    Store
-	mfst     ManifestEvidence
-	registry providerRegistry
-	leaseTTL time.Duration
-	log      *slog.Logger
+	remote     string
+	baseBranch string
+	readRemote func(context.Context, string, string) (string, error)
+	store      Store
+	mfst       ManifestEvidence
+	registry   providerRegistry
+	leaseTTL   time.Duration
+	log        *slog.Logger
 }
 
 // Deps bundles Service construction. Manifest may be nil (unit tests);
 // evidence writes become no-ops then. Registry nil means the real registry
 // with its default table. LeaseTTL zero means DefaultLeaseTTL.
 type Deps struct {
-	Store    Store
-	Manifest ManifestEvidence
-	Registry providerRegistry
-	LeaseTTL time.Duration
-	Log      *slog.Logger
+	Remote     string
+	BaseBranch string
+	Store      Store
+	Manifest   ManifestEvidence
+	Registry   providerRegistry
+	LeaseTTL   time.Duration
+	Log        *slog.Logger
 }
 
 // New builds a Service.
@@ -115,7 +124,12 @@ func New(deps Deps) *Service {
 	if registry == nil {
 		registry = publish.NewRegistry(publish.RegistryOptions{})
 	}
+	remote := deps.Remote
+	if remote == "" {
+		remote = "origin"
+	}
 	return &Service{
+		remote: remote, baseBranch: deps.BaseBranch, readRemote: readPublicationRemote,
 		store: deps.Store, mfst: deps.Manifest, registry: registry,
 		leaseTTL: leaseTTL, log: log,
 	}
@@ -148,7 +162,7 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 			return fmt.Errorf("publication: decode request: %w", err)
 		}
 	}
-	row, err := service.loadOrCreateRow(ctx, record)
+	_, err = service.loadOrCreateRow(ctx, record)
 	if err != nil {
 		return err
 	}
@@ -190,21 +204,62 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 		return service.recordRefusal(ctx, record, claimed, refusalCode, publish.Result{}, nil)
 	}
 
-	provider, resolveErr := service.registry.Resolve(publish.ProviderID(row.Provider))
+	provider, resolveErr := service.registry.Resolve(publish.ProviderID(claimed.Provider))
 	if resolveErr != nil {
 		// The row's provider is frozen; a retry with the configuration
 		// unfixed cannot resolve it either.
 		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderUnknown, publish.Result{}, nil)
 	}
 
-	delivery, deliveryErr := service.assembleDelivery(ctx, record, row, body, sealInfo)
+	delivery, deliveryErr := service.assembleDelivery(ctx, record, claimed, body, sealInfo)
 	if deliveryErr != nil {
 		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderError, publish.Result{}, nil)
 	}
-	result, publishErr := provider.Publish(ctx, delivery)
+	attemptBudget := time.Until(claimed.LeaseExpiresAt.Time) - service.leaseTTL/5
+	if !claimed.LeaseExpiresAt.Valid || attemptBudget < minimumAttemptBudget {
+		return service.recordRefusal(ctx, record, claimed, publish.ReasonLeaseBudgetExhausted, publish.Result{}, provider)
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, attemptBudget)
+	defer cancel()
+	if validator, ok := provider.(publish.CheckoutValidator); ok {
+		if preflightErr := validator.ValidateCheckout(attemptCtx, record.CheckoutPath); preflightErr != nil {
+			code, _ := publish.Classify(preflightErr)
+			return service.recordRefusal(ctx, record, claimed, code, publish.Result{}, provider, preflightErr)
+		}
+	}
+	if resolver, ok := provider.(publish.TargetResolver); ok && delivery.Target.Host == "" {
+		remoteURL, remoteErr := service.readRemote(attemptCtx, record.CheckoutPath, service.remote)
+		if remoteErr != nil {
+			code, _ := publish.Classify(remoteErr)
+			return service.recordRefusal(ctx, record, claimed, code, publish.Result{}, provider)
+		}
+		target, targetErr := publish.ParseRemote(remoteURL)
+		if targetErr != nil {
+			return service.recordRefusal(ctx, record, claimed, publish.ReasonRemoteUnknown, publish.Result{}, provider)
+		}
+		target.Provider, target.RemoteBranch = provider.ID(), claimed.RemoteBranch
+		target, targetErr = resolver.ResolveTarget(attemptCtx, target, record.BaseRef, service.baseBranch)
+		if targetErr != nil {
+			code, _ := publish.Classify(targetErr)
+			return service.recordRefusal(ctx, record, claimed, code, publish.Result{}, provider)
+		}
+		frozen, freezeErr := service.store.FreezePublicationTarget(attemptCtx, sqlc.FreezePublicationTargetParams{
+			TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
+			TargetHost: target.Host, TargetOwner: target.Owner, TargetRepository: target.Repository, BaseBranch: target.BaseBranch,
+			Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
+		})
+		if errors.Is(freezeErr, sql.ErrNoRows) {
+			return nil
+		}
+		if freezeErr != nil {
+			return fmt.Errorf("publication: freeze target: %w", freezeErr)
+		}
+		delivery.Target = publish.Target{Provider: provider.ID(), Host: frozen.TargetHost, Owner: frozen.TargetOwner, Repository: frozen.TargetRepository, BaseBranch: frozen.BaseBranch, RemoteBranch: frozen.RemoteBranch}
+	}
+	result, publishErr := provider.Publish(attemptCtx, delivery)
 	if publishErr != nil {
 		code, _ := publish.Classify(publishErr)
-		return service.recordRefusal(ctx, record, claimed, code, result, provider)
+		return service.recordRefusal(ctx, record, claimed, code, result, provider, publishErr)
 	}
 
 	if !result.BranchPushed || result.PullRequest <= 0 || int64(result.PullRequest) > math.MaxInt32 {
@@ -324,6 +379,8 @@ func GateRefusal(body manifest.Body, resultCommit string) (publish.ReasonCode, s
 // provider reads them before that.
 func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, row sqlc.RunPublication, body manifest.Body, sealInfo manifest.SealInfo) (publish.Delivery, error) {
 	delivery := publish.Delivery{
+		PullRequest:   int(row.PrNumber.Int32),
+		DraftRejected: row.DraftRejected,
 		Run: publish.RunRef{
 			ID: record.ID, TenantID: record.TenantID, CreatorUserID: record.UserID,
 			InputRevision: inputRevisionOf(body),
@@ -389,8 +446,18 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 // provider the attempt reached (nil when none was resolved — a gate refusal,
 // an unresolved registry id). A pushed branch is kept: an attempt can push
 // and still fail the pull request.
-func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, claimed sqlc.RunPublication, code publish.ReasonCode, result publish.Result, provider publish.Publisher) error {
+func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, claimed sqlc.RunPublication, code publish.ReasonCode, result publish.Result, provider publish.Publisher, causes ...error) error {
 	code, message := publish.SafeRefusal(code)
+	if len(causes) > 0 {
+		code, message = publish.SafeError(causes[0])
+	}
+	if result.PullRequest < 0 || int64(result.PullRequest) > math.MaxInt32 {
+		result.PullRequest = 0
+	}
+	observedState := result.PullRequestState
+	if observedState != "open" && observedState != "closed" && observedState != "merged" {
+		observedState = ""
+	}
 	state := "blocked"
 	if code.Retryable() {
 		state = "failed"
@@ -399,9 +466,13 @@ func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, clai
 		TenantID: record.TenantID, RunID: record.ID,
 		Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
 		State:            state,
+		DraftRejected:    result.DraftRejected,
 		LastErrorCode:    sql.NullString{String: string(code), Valid: true},
 		LastErrorMessage: sql.NullString{String: message, Valid: message != ""},
 		BranchPushedAt:   sql.NullTime{Time: time.Now().UTC(), Valid: result.BranchPushed},
+		PrNumber:         sql.NullInt32{Int32: int32(result.PullRequest), Valid: result.PullRequest > 0},
+		PrUrl:            sql.NullString{String: result.PullRequestURL, Valid: result.PullRequestURL != ""},
+		PrState:          sql.NullString{String: observedState, Valid: observedState != ""},
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil

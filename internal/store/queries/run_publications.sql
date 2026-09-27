@@ -57,6 +57,7 @@ RETURNING *;
 -- and lease owner can record the outcome.
 UPDATE run_publications
 SET state = 'published',
+    draft_rejected = false,
     target_host = COALESCE(NULLIF(target_host, ''), $3),
     target_owner = COALESCE(NULLIF(target_owner, ''), $4),
     target_repository = COALESCE(NULLIF(target_repository, ''), $5),
@@ -81,12 +82,17 @@ RETURNING *;
 -- reason, blocked when it cannot. branch_pushed_at keeps an earlier
 -- successful push: an attempt can push the branch and still fail the pull
 -- request, and the row must keep the half that succeeded. The lease is
--- released. Only the current attempt and lease owner can record the outcome.
+-- released. A draft refusal survives other failures until a successful delivery.
+-- Only the current attempt and lease owner can record the outcome.
 UPDATE run_publications
 SET state = $3,
+    draft_rejected = draft_rejected OR sqlc.arg(draft_rejected)::boolean,
     last_error_code = $4,
     last_error_message = $5,
     branch_pushed_at = COALESCE($6, branch_pushed_at),
+    pr_number = COALESCE(sqlc.narg(pr_number)::integer, pr_number),
+    pr_url = COALESCE(sqlc.narg(pr_url)::text, pr_url),
+    pr_state = COALESCE(sqlc.narg(pr_state)::text, pr_state),
     lease_owner = NULL,
     lease_expires_at = NULL,
     updated_at = now()
@@ -126,3 +132,17 @@ WHERE publication.tenant_id = $1
       )
   )
 ORDER BY publication.created_at;
+
+-- name: FreezePublicationTarget :one
+-- FreezePublicationTarget pins the destination before any network write.
+-- A failed push or a crash after PR creation must retry against this destination.
+UPDATE run_publications
+SET target_host = COALESCE(NULLIF(target_host, ''), $3),
+    target_owner = COALESCE(NULLIF(target_owner, ''), $4),
+    target_repository = COALESCE(NULLIF(target_repository, ''), $5),
+    base_branch = COALESCE(NULLIF(base_branch, ''), $6),
+    updated_at = now()
+WHERE tenant_id = $1 AND run_id = $2 AND user_id = $7
+  AND state = 'publishing' AND attempts = $8 AND lease_owner = $9
+  AND lease_expires_at > now()
+RETURNING *;
