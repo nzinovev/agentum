@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"log/slog"
 
@@ -37,7 +38,9 @@ type fakeStore struct {
 	row    sqlc.RunPublication
 	hasRow bool
 
-	events []string
+	events        []string
+	eventPayloads [][]byte
+	projectErr    error
 
 	claimLost     bool
 	failureWrite  error
@@ -49,7 +52,7 @@ func (store *fakeStore) GetRun(context.Context, sqlc.GetRunParams) (sqlc.Run, er
 }
 
 func (store *fakeStore) GetProject(context.Context, sqlc.GetProjectParams) (sqlc.Project, error) {
-	return sqlc.Project{ID: "project-1"}, nil
+	return sqlc.Project{ID: "project-1"}, store.projectErr
 }
 
 func (store *fakeStore) GetPublicationForRun(context.Context, sqlc.GetPublicationForRunParams) (sqlc.RunPublication, error) {
@@ -74,13 +77,17 @@ func (store *fakeStore) EnsurePublication(_ context.Context, arg sqlc.EnsurePubl
 	return store.row, nil
 }
 
-func (store *fakeStore) ClaimPublication(_ context.Context, _ sqlc.ClaimPublicationParams) (sqlc.RunPublication, error) {
+func (store *fakeStore) ClaimPublication(_ context.Context, arg sqlc.ClaimPublicationParams) (sqlc.RunPublication, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.claimLost {
+	if store.claimLost || store.row.RequestID != arg.RequestID ||
+		(store.row.State != "pending" && store.row.State != "publishing") ||
+		(store.row.State == "publishing" && store.row.LeaseExpiresAt.Valid && store.row.LeaseExpiresAt.Time.After(time.Now())) {
 		return sqlc.RunPublication{}, sql.ErrNoRows
 	}
 	store.row.State = "publishing"
+	store.row.LeaseOwner = arg.LeaseOwner
+	store.row.LeaseExpiresAt = arg.LeaseExpiresAt
 	store.row.Attempts++
 	return store.row, nil
 }
@@ -88,6 +95,9 @@ func (store *fakeStore) ClaimPublication(_ context.Context, _ sqlc.ClaimPublicat
 func (store *fakeStore) RecordPublicationSuccess(_ context.Context, arg sqlc.RecordPublicationSuccessParams) (sqlc.RunPublication, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.row.State != "publishing" || store.row.Attempts != arg.Attempts || store.row.LeaseOwner != arg.LeaseOwner {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
 	store.successWrites++
 	store.row.State = "published"
 	store.row.PrNumber = arg.PrNumber
@@ -98,10 +108,14 @@ func (store *fakeStore) RecordPublicationSuccess(_ context.Context, arg sqlc.Rec
 func (store *fakeStore) RecordPublicationFailure(_ context.Context, arg sqlc.RecordPublicationFailureParams) (sqlc.RunPublication, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.row.State != "publishing" || store.row.Attempts != arg.Attempts || store.row.LeaseOwner != arg.LeaseOwner {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
 	if store.failureWrite != nil {
 		return sqlc.RunPublication{}, store.failureWrite
 	}
 	store.row.State = arg.State
+	store.row.BranchPushedAt = arg.BranchPushedAt
 	store.row.LastErrorCode = arg.LastErrorCode
 	store.row.LastErrorMessage = arg.LastErrorMessage
 	return store.row, nil
@@ -111,6 +125,7 @@ func (store *fakeStore) AppendEvent(_ context.Context, arg sqlc.AppendEventParam
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.events = append(store.events, arg.Type)
+	store.eventPayloads = append(store.eventPayloads, arg.Payload)
 	return sqlc.Event{}, nil
 }
 
@@ -163,9 +178,10 @@ func (manifestFake *fakeManifest) Correct(_ context.Context, _, _, _, _ string, 
 
 // scriptedPublisher serves a fixed outcome per provider id.
 type scriptedPublisher struct {
-	id      publish.ProviderID
-	result  publish.Result
-	refusal *publish.Refusal
+	id        publish.ProviderID
+	result    publish.Result
+	refusal   *publish.Refusal
+	onPublish func(publish.Delivery)
 }
 
 func (publisher scriptedPublisher) ID() publish.ProviderID { return publisher.id }
@@ -178,7 +194,10 @@ func (scriptedPublisher) Probe(context.Context) (publish.ProbeResult, error) {
 	return publish.ProbeResult{Ready: true}, nil
 }
 
-func (publisher scriptedPublisher) Publish(context.Context, publish.Delivery) (publish.Result, error) {
+func (publisher scriptedPublisher) Publish(_ context.Context, delivery publish.Delivery) (publish.Result, error) {
+	if publisher.onPublish != nil {
+		publisher.onPublish(delivery)
+	}
 	if publisher.refusal != nil {
 		return publisher.result, publisher.refusal
 	}
@@ -216,7 +235,8 @@ func newCoordinatorHarness(t *testing.T, checks *manifest.CheckEvidence, provide
 	store := &fakeStore{
 		run: sqlc.Run{
 			ID: coordinatorTestRun, TenantID: coordinatorTestTenant, UserID: "user-1",
-			State: "awaiting_final_review", Title: "title", Description: "description",
+			CheckoutPath: "/tmp/checkout",
+			State:        "awaiting_final_review", Title: "title", Description: "description",
 			ResultCommit: sql.NullString{String: coordinatorTestCommit, Valid: true},
 		},
 		row: sqlc.RunPublication{
@@ -553,8 +573,8 @@ func TestUnresolvedProviderIdIsBlocked(t *testing.T) {
 	if harness.store.row.LastErrorCode.String != "provider_unknown" {
 		t.Errorf("last_error_code = %q, want provider_unknown", harness.store.row.LastErrorCode.String)
 	}
-	if !strings.Contains(harness.store.row.LastErrorMessage.String, "gihub") {
-		t.Errorf("last_error_message = %q; want the registry's own text naming the id", harness.store.row.LastErrorMessage.String)
+	if strings.Contains(harness.store.row.LastErrorMessage.String, "gihub") {
+		t.Error("registry error text escaped the safe diagnostic boundary")
 	}
 }
 
@@ -595,5 +615,113 @@ func TestGateRefusalCarriesNoProviderProfileLabel(t *testing.T) {
 	}
 	if label := harness.mfst.added[0].Publication.Profile; label != "" {
 		t.Errorf("profile = %q, want empty — no provider was reached", label)
+	}
+}
+
+func TestIncompleteResultIsARecordedFailure(test *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		result publish.Result
+	}{
+		{name: "empty"},
+		{name: "only push", result: publish.Result{BranchPushed: true}},
+		{name: "only PR", result: publish.Result{PullRequest: 3}},
+		{name: "negative PR", result: publish.Result{BranchPushed: true, PullRequest: -1}},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{id: "github", result: scenario.result})
+			if err := harness.handle(test); err != nil {
+				test.Fatal(err)
+			}
+			if harness.store.row.State != "failed" || harness.store.successWrites != 0 || harness.store.eventCount(EvPublished) != 0 {
+				test.Fatalf("incomplete result recorded as success: %+v", harness.store.row)
+			}
+			if harness.store.row.BranchPushedAt.Valid != scenario.result.BranchPushed {
+				test.Fatal("partial push evidence lost")
+			}
+		})
+	}
+}
+
+func TestProjectReadFailureStopsBeforeProvider(test *testing.T) {
+	harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{id: "github", onPublish: func(publish.Delivery) { test.Fatal("provider called without project") }})
+	harness.store.projectErr = errors.New("project read failed")
+	if err := harness.handle(test); err != nil {
+		test.Fatal(err)
+	}
+	if harness.store.row.State != "failed" || harness.store.row.LastErrorCode.String != "provider_error" {
+		test.Fatalf("row = %+v", harness.store.row)
+	}
+}
+
+func TestRefusalDoesNotPersistProviderSecrets(test *testing.T) {
+	for _, secret := range []string{"opaque-credential", "Bearer arbitraryCredential", "https://user:password@example.com/repo", "github_pat_unrecognizedFormat"} {
+		test.Run(secret, func(test *testing.T) {
+			harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{id: "github", refusal: &publish.Refusal{Code: publish.ReasonCredentialsRejected, Message: secret}})
+			if err := harness.handle(test); err != nil {
+				test.Fatal(err)
+			}
+			if strings.Contains(harness.store.row.LastErrorMessage.String, secret) {
+				test.Fatal("secret stored in row")
+			}
+			for _, payload := range harness.store.eventPayloads {
+				if strings.Contains(string(payload), secret) {
+					test.Fatal("secret stored in event")
+				}
+			}
+		})
+	}
+}
+
+func TestLateAttemptDoesNotEmitOutcomeOrEvidence(test *testing.T) {
+	for _, refusal := range []*publish.Refusal{nil, {Code: publish.ReasonProviderError, Message: "late error"}} {
+		harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{})
+		publisher := scriptedPublisher{id: "github", result: publish.Result{BranchPushed: true, PullRequest: 1}, refusal: refusal,
+			onPublish: func(publish.Delivery) {
+				harness.store.row.Attempts++
+				harness.store.row.LeaseOwner = sql.NullString{String: "new-worker", Valid: true}
+				harness.store.row.State = "published"
+				harness.store.row.PrNumber = sql.NullInt32{Int32: 42, Valid: true}
+			},
+		}
+		harness.service.registry = scriptedRegistry{publisher: publisher}
+		if err := harness.handle(test); err != nil {
+			test.Fatal(err)
+		}
+		if harness.store.row.State != "published" || harness.store.row.PrNumber.Int32 != 42 {
+			test.Fatal("late attempt replaced newer outcome")
+		}
+		if harness.store.eventCount(EvPublished) != 0 || harness.store.eventCount(EvPublicationFailed) != 0 || len(harness.mfst.added) != 0 {
+			test.Fatal("late attempt emitted outcome evidence")
+		}
+	}
+}
+
+func TestQueuedJobsCannotRetryRecordedRefusal(test *testing.T) {
+	for _, reason := range []publish.ReasonCode{publish.ReasonProviderError, publish.ReasonPushRejected} {
+		harness := newCoordinatorHarness(test, passingChecks(), scriptedPublisher{id: "github", refusal: &publish.Refusal{Code: reason}})
+		if err := harness.handle(test); err != nil {
+			test.Fatal(err)
+		}
+		if err := harness.handle(test); err != nil {
+			test.Fatal(err)
+		}
+		if harness.store.row.Attempts != 1 {
+			test.Fatal("queued duplicate retried refusal")
+		}
+		harness.store.row.RequestID++
+		harness.store.row.State = "pending"
+		if err := harness.handle(test); err != nil {
+			test.Fatal(err)
+		}
+		if harness.store.row.Attempts != 1 {
+			test.Fatal("old job consumed new request")
+		}
+		if err := harness.service.Handle(test.Context(), sqlc.Job{ID: 8, TenantID: coordinatorTestTenant, RunID: coordinatorTestRun, Payload: []byte(`{"request_id":1}`)}); err != nil {
+			test.Fatal(err)
+		}
+		if harness.store.row.Attempts != 2 {
+			test.Fatal("explicit request was not processed")
+		}
 	}
 }

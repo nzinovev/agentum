@@ -196,7 +196,8 @@ func (rec *Reconciler) requeueLostPublications(ctx context.Context) error {
 	for _, publication := range lost {
 		if _, enqueueErr := rec.publications.EnqueueJob(ctx, sqlc.EnqueueJobParams{
 			TenantID: publication.TenantID, UserID: publication.UserID,
-			RunID: publication.RunID, Kind: "publish", Payload: []byte("{}"),
+			RunID: publication.RunID, Kind: "publish",
+			Payload: []byte(fmt.Sprintf(`{"request_id":%d}`, publication.RequestID)),
 		}); enqueueErr != nil {
 			rec.log.Error("reconcile: requeue publication", "run", publication.RunID, "error", enqueueErr)
 			continue

@@ -177,6 +177,7 @@ type RunPublication struct {
 	LeaseExpiresAt   sql.NullTime   `json:"lease_expires_at"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
+	RequestID        int64          `json:"request_id"`
 }
 
 type StageInvocation struct {

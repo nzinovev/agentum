@@ -8,8 +8,7 @@ import (
 // ReasonCode is why a publication attempt did not complete. The vocabulary is
 // closed because the run-history category "publication error" assigns each
 // reason its own text and its own next action; a free-form string could not
-// carry that. The provider's own message is recorded beside the code, never
-// instead of it.
+// carry that. Durable records use SafeRefusal to replace provider prose.
 type ReasonCode string
 
 const (
@@ -107,7 +106,7 @@ func (code ReasonCode) Retryable() bool {
 
 // Refusal is a publication attempt that did not complete, carrying its reason
 // from the closed vocabulary plus the provider's message. The message is
-// stored beside the code for diagnosis; only the code is a stable identifier.
+// available during the invocation; durable records use SafeRefusal instead.
 type Refusal struct {
 	Code    ReasonCode
 	Message string
@@ -139,7 +138,7 @@ type Result struct {
 
 // Classify maps a provider error onto the reason vocabulary. A *Refusal keeps
 // its own code; anything else is an unnamed provider failure. The coordinator
-// records the returned code and message on the publication row.
+// normalizes the code through SafeRefusal before recording the outcome.
 func Classify(err error) (ReasonCode, string) {
 	var refusal *Refusal
 	if errors.As(err, &refusal) {
@@ -149,4 +148,29 @@ func Classify(err error) (ReasonCode, string) {
 		return ReasonProviderError, ""
 	}
 	return ReasonProviderError, err.Error()
+}
+
+// SafeRefusal returns a closed reason code and a credential-free diagnostic.
+// Provider prose can contain arbitrary secrets, including unrecognizable tokens.
+func SafeRefusal(code ReasonCode) (ReasonCode, string) {
+	messages := map[ReasonCode]string{
+		ReasonCredentialsMissing:  "publication credentials are missing",
+		ReasonCredentialsRejected: "the provider rejected publication credentials",
+		ReasonNetworkUnreachable:  "the publication provider could not be reached",
+		ReasonRemoteUnknown:       "the checkout has no usable publication remote",
+		ReasonBaseBranchUnknown:   "the pull request base branch could not be determined",
+		ReasonNonFastForward:      "the remote branch has diverged",
+		ReasonPushRejected:        "the provider rejected the branch push",
+		ReasonDraftUnsupported:    "the repository does not support draft pull requests",
+		ReasonPullRequestClosed:   "the pull request is closed or merged",
+		ReasonChecksNotPassed:     "mandatory check evidence is missing or failed",
+		ReasonCommitMismatch:      "the result commit is missing or differs from the checked commit",
+		ReasonSecretInDescription: "the pull request description contains credential material",
+		ReasonProviderUnknown:     "the configured publication provider is unknown",
+		ReasonProviderError:       "the publication attempt could not be completed",
+	}
+	if message, exists := messages[code]; exists {
+		return code, message
+	}
+	return ReasonProviderError, messages[ReasonProviderError]
 }

@@ -155,6 +155,7 @@ type fakePublicationStore struct {
 	mu           sync.Mutex
 	stale        []sqlc.RunPublication
 	enqueued     []string
+	payloads     [][]byte
 	findStaleErr error
 }
 
@@ -171,6 +172,7 @@ func (store *fakePublicationStore) EnqueueJob(_ context.Context, arg sqlc.Enqueu
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.enqueued = append(store.enqueued, arg.Kind)
+	store.payloads = append(store.payloads, arg.Payload)
 	return sqlc.Job{Kind: arg.Kind}, nil
 }
 
@@ -182,7 +184,7 @@ func TestReconciler_RequeuesLostPublications(t *testing.T) {
 	t.Parallel()
 	publications := &fakePublicationStore{stale: []sqlc.RunPublication{
 		{ID: "pub-1", TenantID: "tn", UserID: "us", RunID: "T-lost-pending", State: "pending"},
-		{ID: "pub-2", TenantID: "tn", UserID: "us", RunID: "T-lost-publishing", State: "publishing"},
+		{ID: "pub-2", TenantID: "tn", UserID: "us", RunID: "T-lost-publishing", State: "publishing", RequestID: 7},
 	}}
 	reconciler := NewReconciler(ReconcilerDeps{
 		TenantID: "tn", Queue: newFakeQueue(), Runs: &fakeRunStore{},
@@ -196,6 +198,9 @@ func TestReconciler_RequeuesLostPublications(t *testing.T) {
 	defer publications.mu.Unlock()
 	if len(publications.enqueued) != 2 {
 		t.Fatalf("enqueued = %v, want two publish jobs", publications.enqueued)
+	}
+	if string(publications.payloads[0]) != `{"request_id":0}` || string(publications.payloads[1]) != `{"request_id":7}` {
+		t.Fatalf("recovery lost request identity: %q", publications.payloads)
 	}
 	for _, kind := range publications.enqueued {
 		if kind != "publish" {

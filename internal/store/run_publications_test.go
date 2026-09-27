@@ -202,8 +202,9 @@ func TestFindStalePublicationsReturnsLostWorkOnly(t *testing.T) {
 
 	recordedFailure := insertPublicationFixture(t, handle.Store.DB, "stale-failed")
 	ensurePublication(t, handle.Queries, recordedFailure)
+	failedClaim := claimPublication(t, handle.Queries, recordedFailure, 0, "worker")
 	if _, err := handle.Queries.RecordPublicationFailure(t.Context(), sqlc.RecordPublicationFailureParams{
-		TenantID: publicationTestTenantID, RunID: recordedFailure,
+		TenantID: publicationTestTenantID, RunID: recordedFailure, Attempts: failedClaim.Attempts, LeaseOwner: failedClaim.LeaseOwner,
 		State:         "failed",
 		LastErrorCode: sql.NullString{String: "credentials_missing", Valid: true},
 	}); err != nil {
@@ -212,8 +213,9 @@ func TestFindStalePublicationsReturnsLostWorkOnly(t *testing.T) {
 
 	recordedBlocked := insertPublicationFixture(t, handle.Store.DB, "stale-blocked")
 	ensurePublication(t, handle.Queries, recordedBlocked)
+	blockedClaim := claimPublication(t, handle.Queries, recordedBlocked, 0, "worker")
 	if _, err := handle.Queries.RecordPublicationFailure(t.Context(), sqlc.RecordPublicationFailureParams{
-		TenantID: publicationTestTenantID, RunID: recordedBlocked,
+		TenantID: publicationTestTenantID, RunID: recordedBlocked, Attempts: blockedClaim.Attempts, LeaseOwner: blockedClaim.LeaseOwner,
 		State:         "blocked",
 		LastErrorCode: sql.NullString{String: "checks_not_passed", Valid: true},
 	}); err != nil {
@@ -246,5 +248,129 @@ func TestFindStalePublicationsReturnsLostWorkOnly(t *testing.T) {
 		if returned[refused] {
 			t.Errorf("probe returned a publication it must not touch: %s", refused)
 		}
+	}
+}
+
+func claimPublication(test *testing.T, queries *sqlc.Queries, runID string, requestID int64, owner string) sqlc.RunPublication {
+	test.Helper()
+	claimed, err := queries.ClaimPublication(test.Context(), sqlc.ClaimPublicationParams{
+		TenantID: publicationTestTenantID, RunID: runID, RequestID: requestID,
+		LeaseOwner:     sql.NullString{String: owner, Valid: true},
+		LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil {
+		test.Fatal(err)
+	}
+	return claimed
+}
+
+func TestPublicationOutcomeRequiresCurrentAttempt(test *testing.T) {
+	handle := dbtest.Store(test)
+	runID := insertPublicationFixture(test, handle.Store.DB, "fenced-outcome")
+	ensurePublication(test, handle.Queries, runID)
+	first := claimPublication(test, handle.Queries, runID, 0, "same-worker")
+	if _, err := handle.Store.DB.ExecContext(test.Context(), `UPDATE run_publications SET lease_expires_at = now() - interval '1 second' WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenantID, runID); err != nil {
+		test.Fatal(err)
+	}
+	second := claimPublication(test, handle.Queries, runID, 0, "same-worker")
+	for _, completed := range []bool{false, true} {
+		if completed {
+			if _, err := handle.Queries.RecordPublicationSuccess(test.Context(), sqlc.RecordPublicationSuccessParams{
+				TenantID: publicationTestTenantID, RunID: runID, Attempts: second.Attempts, LeaseOwner: second.LeaseOwner,
+				PrNumber: sql.NullInt32{Int32: 42, Valid: true}, PrUrl: sql.NullString{String: "https://example.com/pull/42", Valid: true},
+			}); err != nil {
+				test.Fatal(err)
+			}
+		}
+		if _, err := handle.Queries.RecordPublicationSuccess(test.Context(), sqlc.RecordPublicationSuccessParams{
+			TenantID: publicationTestTenantID, RunID: runID, Attempts: first.Attempts, LeaseOwner: first.LeaseOwner,
+			PrNumber: sql.NullInt32{Int32: 1, Valid: true},
+		}); !errors.Is(err, sql.ErrNoRows) {
+			test.Fatalf("stale success: %v", err)
+		}
+		if _, err := handle.Queries.RecordPublicationFailure(test.Context(), sqlc.RecordPublicationFailureParams{
+			TenantID: publicationTestTenantID, RunID: runID, Attempts: first.Attempts, LeaseOwner: first.LeaseOwner, State: "failed",
+		}); !errors.Is(err, sql.ErrNoRows) {
+			test.Fatalf("stale failure: %v", err)
+		}
+	}
+	row, err := handle.Queries.GetPublicationForRun(test.Context(), sqlc.GetPublicationForRunParams{TenantID: publicationTestTenantID, RunID: runID})
+	if err != nil {
+		test.Fatal(err)
+	}
+	if row.State != "published" || row.PrNumber.Int32 != 42 || row.PrUrl.String != "https://example.com/pull/42" {
+		test.Fatalf("new outcome changed: %+v", row)
+	}
+}
+
+func TestRecordedPublicationRequiresNewRequest(test *testing.T) {
+	for _, state := range []string{"failed", "blocked", "published"} {
+		test.Run(state, func(test *testing.T) {
+			handle := dbtest.Store(test)
+			runID := insertPublicationFixture(test, handle.Store.DB, "request-"+state)
+			ensurePublication(test, handle.Queries, runID)
+			if _, err := handle.Store.DB.ExecContext(test.Context(), `UPDATE run_publications SET state = $3 WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenantID, runID, state); err != nil {
+				test.Fatal(err)
+			}
+			old := sqlc.ClaimPublicationParams{TenantID: publicationTestTenantID, RunID: runID, LeaseOwner: sql.NullString{String: "old-worker", Valid: true}}
+			if _, err := handle.Queries.ClaimPublication(test.Context(), old); !errors.Is(err, sql.ErrNoRows) {
+				test.Fatalf("duplicate retried outcome: %v", err)
+			}
+			requested, err := handle.Queries.RequestPublication(test.Context(), sqlc.RequestPublicationParams{TenantID: publicationTestTenantID, RunID: runID})
+			if err != nil {
+				test.Fatal(err)
+			}
+			if _, err := handle.Queries.ClaimPublication(test.Context(), old); !errors.Is(err, sql.ErrNoRows) {
+				test.Fatalf("old job consumed new request: %v", err)
+			}
+			claimPublication(test, handle.Queries, runID, requested.RequestID, "new-worker")
+			if _, err := handle.Queries.RequestPublication(test.Context(), sqlc.RequestPublicationParams{TenantID: publicationTestTenantID, RunID: runID}); !errors.Is(err, sql.ErrNoRows) {
+				test.Fatalf("request invalidated live lease: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoveryBoundsFailuresBeforePublicationClaim(test *testing.T) {
+	handle := dbtest.Store(test)
+	runID := insertPublicationFixture(test, handle.Store.DB, "preclaim-failure")
+	ensurePublication(test, handle.Queries, runID)
+	for attempt := 0; attempt <= 3; attempt++ {
+		stale, err := handle.Queries.FindStalePublications(test.Context(), sqlc.FindStalePublicationsParams{TenantID: publicationTestTenantID, Attempts: 3})
+		if err != nil {
+			test.Fatal(err)
+		}
+		found := false
+		for _, row := range stale {
+			if row.RunID == runID {
+				found = true
+				if row.Attempts != 0 {
+					test.Fatal("fixture acquired a lease")
+				}
+			}
+		}
+		if found != (attempt < 3) {
+			test.Fatalf("after %d pre-claim failures: found = %v", attempt, found)
+		}
+		if attempt == 3 {
+			break
+		}
+		job, err := handle.Queries.EnqueueJob(test.Context(), sqlc.EnqueueJobParams{TenantID: publicationTestTenantID, UserID: publicationTestUserID, RunID: runID, Kind: "publish", Payload: []byte("{}")})
+		if err != nil {
+			test.Fatal(err)
+		}
+		if err := handle.Queries.FailJob(test.Context(), sqlc.FailJobParams{ID: job.ID, LastError: sql.NullString{String: "GetRun failed", Valid: true}}); err != nil {
+			test.Fatal(err)
+		}
+	}
+	if _, err := handle.Queries.RequestPublication(test.Context(), sqlc.RequestPublicationParams{TenantID: publicationTestTenantID, RunID: runID}); err != nil {
+		test.Fatal(err)
+	}
+	stale, err := handle.Queries.FindStalePublications(test.Context(), sqlc.FindStalePublicationsParams{TenantID: publicationTestTenantID, Attempts: 3})
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(stale) != 1 || stale[0].RunID != runID {
+		test.Fatal("explicit retry inherited old failed-job budget")
 	}
 }

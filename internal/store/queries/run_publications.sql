@@ -20,17 +20,22 @@ RETURNING *;
 SELECT * FROM run_publications
 WHERE tenant_id = $1 AND run_id = $2;
 
+-- name: RequestPublication :one
+-- RequestPublication starts an explicit retry and invalidates older queued jobs.
+-- A concurrent claim with a live lease refuses the request atomically.
+UPDATE run_publications
+SET state = 'pending', request_id = request_id + 1,
+    lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+WHERE tenant_id = $1 AND run_id = $2
+  AND (state <> 'publishing' OR lease_expires_at IS NULL OR lease_expires_at < now())
+RETURNING *;
+
 -- name: ClaimPublication :one
--- Lease the publication for one attempt: state moves to publishing, attempts
--- increments, and the owner plus expiry are recorded. The WHERE clause is
--- mutual exclusion by lease, not by row lock — the network call that follows
--- must not run inside a transaction, so two workers racing here resolve by
--- the conditional UPDATE, and the loser reads no row. A publishing row whose
--- lease has expired is claimable again: its worker died mid-attempt. A
--- publishing row with a NULL lease is claimable too, matching the recovery
--- probe's predicate — without the explicit IS NULL branch, SQL three-valued
--- logic makes (state <> 'publishing' OR lease_expires_at < now()) evaluate
--- to NULL on such a row, and no claim ever matches it.
+-- ClaimPublication leases pending work or an expired attempt for this request.
+-- Recorded outcomes require RequestPublication before another claim. The
+-- request id prevents older queued jobs from consuming that explicit retry.
+-- The attempt number fences outcome writes even when a job owner is reused.
+-- NULL leases are recoverable because no worker holds a valid lease then.
 UPDATE run_publications
 SET state = 'publishing',
     attempts = attempts + 1,
@@ -38,7 +43,9 @@ SET state = 'publishing',
     lease_expires_at = $4,
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
-  AND (state <> 'publishing' OR lease_expires_at IS NULL OR lease_expires_at < now())
+  AND request_id = $5
+  AND (state = 'pending' OR (state = 'publishing'
+       AND (lease_expires_at IS NULL OR lease_expires_at < now())))
 RETURNING *;
 
 -- name: RecordPublicationSuccess :one
@@ -46,7 +53,8 @@ RETURNING *;
 -- row does not carry one yet — the target is derived once and a later attempt
 -- must not re-derive it against a moved remote), the pull request identity,
 -- and both outcome marks. State published requires branch_pushed_at and
--- published_at together; the lease is released.
+-- published_at together; the lease is released. Only the current attempt
+-- and lease owner can record the outcome.
 UPDATE run_publications
 SET state = 'published',
     target_host = COALESCE(NULLIF(target_host, ''), $3),
@@ -64,15 +72,16 @@ SET state = 'published',
     last_error_message = NULL,
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
+  AND state = 'publishing' AND attempts = $10 AND lease_owner = $11
 RETURNING *;
 
 -- name: RecordPublicationFailure :one
 -- Record a refused publication: the reason code from the closed vocabulary,
--- the provider's message, and the state — failed when a retry can clear the
+-- a safe diagnostic, and the state — failed when a retry can clear the
 -- reason, blocked when it cannot. branch_pushed_at keeps an earlier
 -- successful push: an attempt can push the branch and still fail the pull
 -- request, and the row must keep the half that succeeded. The lease is
--- released.
+-- released. Only the current attempt and lease owner can record the outcome.
 UPDATE run_publications
 SET state = $3,
     last_error_code = $4,
@@ -82,23 +91,33 @@ SET state = $3,
     lease_expires_at = NULL,
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
+  AND state = 'publishing' AND attempts = $7 AND lease_owner = $8
 RETURNING *;
 
 -- name: FindStalePublications :many
 -- Reconciler probe: publications the queue lost or a worker died on —
 -- pending with no live publish job, or publishing with an expired lease.
--- Bounded by attempts ($2, the job poison bound) so recovery cannot loop
--- forever. failed and blocked rows are never returned: the system restores
--- work it did not finish, it does not retry an outcome it recorded.
+-- Bounded by publication attempts and failed job attempts ($2, the poison
+-- bound), including failures before a publication lease could be acquired.
+-- Failed jobs count against their request only. Recorded failed and blocked
+-- outcomes require an explicit retry.
 SELECT publication.* FROM run_publications publication
 WHERE publication.tenant_id = $1
   AND publication.attempts < $2
+  AND (SELECT COALESCE(sum(GREATEST(failed_job.attempts, 1)), 0)
+       FROM jobs failed_job
+       WHERE failed_job.tenant_id = publication.tenant_id
+         AND failed_job.run_id = publication.run_id
+         AND failed_job.kind = 'publish' AND failed_job.status = 'failed'
+         AND COALESCE(failed_job.payload->>'request_id', '0') = publication.request_id::text
+      ) < $2
   AND (
       (publication.state = 'pending' AND NOT EXISTS (
           SELECT 1 FROM jobs liveJob
           WHERE liveJob.run_id = publication.run_id
             AND liveJob.tenant_id = publication.tenant_id
             AND liveJob.kind = 'publish'
+            AND COALESCE(liveJob.payload->>'request_id', '0') = publication.request_id::text
             AND liveJob.status IN ('pending', 'running')
       ))
       OR (

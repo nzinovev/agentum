@@ -2,12 +2,15 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/publication"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -69,7 +72,7 @@ type publicationPullRequestView struct {
 }
 
 // publicationErrorView carries the refusal's reason code from the closed
-// vocabulary plus the provider's message.
+// vocabulary plus a safe diagnostic.
 type publicationErrorView struct {
 	Code    string `json:"code"`
 	Message string `json:"message,omitempty"`
@@ -122,6 +125,21 @@ func (api *API) handlePublishRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body := manifest.Body{}
+	if api.mfst != nil {
+		var manifestErr error
+		body, _, _, manifestErr = api.mfst.Get(r.Context(), run.TenantID, run.ID)
+		if manifestErr != nil && !errors.Is(manifestErr, manifest.ErrNoManifest) {
+			logUnexpected(api.log, manifestErr, "GetManifest(publish)")
+			writeError(w, http.StatusInternalServerError, codeInternal, "could not read publication evidence")
+			return
+		}
+	}
+	if _, message, refused := publication.GateRefusal(body, nullStringOr(run.ResultCommit)); refused {
+		writeError(w, http.StatusConflict, codePublicationNotReady, message)
+		return
+	}
+
 	// The row (created here when missing — the gate may have run while
 	// publication was off) and the job land in one transaction, so an enqueue
 	// failure cannot leave a pending row no job will ever serve. The row's
@@ -136,12 +154,28 @@ func (api *API) handlePublishRun(w http.ResponseWriter, r *http.Request) {
 		}); ensureErr != nil && !errors.Is(ensureErr, sql.ErrNoRows) {
 			return ensureErr
 		}
+		requested, requestErr := qtx.RequestPublication(r.Context(), sqlc.RequestPublicationParams{
+			TenantID: principal.TenantID, RunID: run.ID,
+		})
+		if requestErr != nil {
+			return requestErr
+		}
+		payload, marshalErr := json.Marshal(struct {
+			RequestID int64 `json:"request_id"`
+		}{requested.RequestID})
+		if marshalErr != nil {
+			return marshalErr
+		}
 		_, enqueueErr := qtx.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
 			TenantID: principal.TenantID, UserID: principal.UserID,
-			RunID: run.ID, Kind: jobKindPublish, Payload: []byte("{}"),
+			RunID: run.ID, Kind: jobKindPublish, Payload: payload,
 		})
 		return enqueueErr
 	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusConflict, codeConflict, "a publication attempt is already in flight for this run")
+			return
+		}
 		logUnexpected(api.log, err, "PublishRun tx")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return

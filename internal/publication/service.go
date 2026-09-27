@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
@@ -139,6 +140,14 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 		}
 		return fmt.Errorf("publication: load run: %w", err)
 	}
+	var request struct {
+		RequestID int64 `json:"request_id"`
+	}
+	if len(job.Payload) != 0 {
+		if err := json.Unmarshal(job.Payload, &request); err != nil {
+			return fmt.Errorf("publication: decode request: %w", err)
+		}
+	}
 	row, err := service.loadOrCreateRow(ctx, record)
 	if err != nil {
 		return err
@@ -150,6 +159,7 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 	claimed, err := service.store.ClaimPublication(ctx, sqlc.ClaimPublicationParams{
 		TenantID:       record.TenantID,
 		RunID:          record.ID,
+		RequestID:      request.RequestID,
 		LeaseOwner:     sql.NullString{String: fmt.Sprintf("job-%d", job.ID), Valid: true},
 		LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(service.leaseTTL), Valid: true},
 	})
@@ -174,29 +184,36 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 	// and "nothing recorded".
 	body, sealInfo, manifestErr := service.readManifest(ctx, record)
 	if manifestErr != nil {
-		return service.recordRefusal(ctx, record, publish.ReasonProviderError, manifestErr.Error(), publish.Result{}, nil)
+		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderError, publish.Result{}, nil)
 	}
-	if refusalCode, refusalMessage, refused := gateRefusal(body, nullStringOr(record.ResultCommit)); refused {
-		return service.recordRefusal(ctx, record, refusalCode, refusalMessage, publish.Result{}, nil)
+	if refusalCode, _, refused := GateRefusal(body, nullStringOr(record.ResultCommit)); refused {
+		return service.recordRefusal(ctx, record, claimed, refusalCode, publish.Result{}, nil)
 	}
 
 	provider, resolveErr := service.registry.Resolve(publish.ProviderID(row.Provider))
 	if resolveErr != nil {
 		// The row's provider is frozen; a retry with the configuration
-		// unfixed resolves the same nothing. Blocked, with the registry's own
-		// message naming the id and the known ones.
-		return service.recordRefusal(ctx, record, publish.ReasonProviderUnknown, resolveErr.Error(), publish.Result{}, nil)
+		// unfixed cannot resolve it either.
+		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderUnknown, publish.Result{}, nil)
 	}
 
-	delivery := service.assembleDelivery(ctx, record, row, body, sealInfo)
+	delivery, deliveryErr := service.assembleDelivery(ctx, record, row, body, sealInfo)
+	if deliveryErr != nil {
+		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderError, publish.Result{}, nil)
+	}
 	result, publishErr := provider.Publish(ctx, delivery)
 	if publishErr != nil {
-		code, message := publish.Classify(publishErr)
-		return service.recordRefusal(ctx, record, code, message, result, provider)
+		code, _ := publish.Classify(publishErr)
+		return service.recordRefusal(ctx, record, claimed, code, result, provider)
+	}
+
+	if !result.BranchPushed || result.PullRequest <= 0 || int64(result.PullRequest) > math.MaxInt32 {
+		return service.recordRefusal(ctx, record, claimed, publish.ReasonProviderError, result, provider)
 	}
 
 	updated, err := service.store.RecordPublicationSuccess(ctx, sqlc.RecordPublicationSuccessParams{
 		TenantID: record.TenantID, RunID: record.ID,
+		Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
 		TargetHost:       delivery.Target.Host,
 		TargetOwner:      delivery.Target.Owner,
 		TargetRepository: delivery.Target.Repository,
@@ -205,6 +222,9 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 		PrUrl:            sql.NullString{String: result.PullRequestURL, Valid: result.PullRequestURL != ""},
 		PrState:          sql.NullString{String: result.PullRequestState, Valid: result.PullRequestState != ""},
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("publication: record success: %w", err)
 	}
@@ -273,14 +293,14 @@ func (service *Service) readManifest(ctx context.Context, record sqlc.Run) (mani
 	return body, sealInfo, nil
 }
 
-// gateRefusal enforces the delivery gate: a publication leaves the host only
+// GateRefusal enforces the delivery gate: a publication leaves the host only
 // for a commit the mandatory checks verified. Three facts must hold — the
 // manifest carries a checks section, its mandatory set passed, and the commit
 // it verified is the run's pinned result commit. A project that declares no
 // checks passes (an empty mandatory set does not fail); the pull request body
 // carries a line saying so, so the reader does not mistake silence for a
 // cleared gate.
-func gateRefusal(body manifest.Body, resultCommit string) (publish.ReasonCode, string, bool) {
+func GateRefusal(body manifest.Body, resultCommit string) (publish.ReasonCode, string, bool) {
 	if body.Checks == nil {
 		return publish.ReasonChecksNotPassed, "the manifest carries no checks section", true
 	}
@@ -302,7 +322,7 @@ func gateRefusal(body manifest.Body, resultCommit string) (publish.ReasonCode, s
 // value is a scalar or a hash the provider re-reads from nothing. The plan
 // and verdict references fill in when the pull request body is rendered; no
 // provider reads them before that.
-func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, row sqlc.RunPublication, body manifest.Body, sealInfo manifest.SealInfo) publish.Delivery {
+func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, row sqlc.RunPublication, body manifest.Body, sealInfo manifest.SealInfo) (publish.Delivery, error) {
 	delivery := publish.Delivery{
 		Run: publish.RunRef{
 			ID: record.ID, TenantID: record.TenantID, CreatorUserID: record.UserID,
@@ -333,18 +353,15 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 		ID: record.ProjectID, TenantID: record.TenantID,
 	})
 	if projectErr != nil {
-		// The delivery continues without the project reference rather than
-		// failing the attempt: the push path in the provider reads the
-		// checkout from the run row, and a missing project identity degrades
-		// the pull request body, not the delivery itself. Logged because an
-		// empty CheckoutPath in a delivery is otherwise invisible.
-		service.log.Warn("publication: load project for delivery",
-			"run", record.ID, "error", projectErr)
-	} else {
-		delivery.Project = publish.ProjectRef{
-			ID: project.ID, RepoIdentity: project.RepoIdentity, CheckoutPath: record.CheckoutPath,
-		}
+		return publish.Delivery{}, fmt.Errorf("load project: %w", projectErr)
 	}
+	if record.CheckoutPath == "" {
+		return publish.Delivery{}, errors.New("run has no pinned checkout path")
+	}
+	delivery.Project = publish.ProjectRef{
+		ID: project.ID, RepoIdentity: project.RepoIdentity, CheckoutPath: record.CheckoutPath,
+	}
+
 	if body.Checks != nil {
 		seal := publish.ChecksSeal{
 			Ran:              body.Checks.Ran,
@@ -362,28 +379,33 @@ func (service *Service) assembleDelivery(ctx context.Context, record sqlc.Run, r
 		delivery.Checks = seal
 	}
 	delivery.Review = publish.ReviewRef{FixCycles: maxInvocationCycle(body)}
-	return delivery
+	return delivery, nil
 }
 
 // recordRefusal writes a refused attempt: the row gets the reason code, the
-// provider's message, and the state — failed when a retry can clear the
+// safe diagnostic, and the state — failed when a retry can clear the
 // reason, blocked when it cannot. The event and the manifest evidence say
 // the same thing, and the evidence carries the boundary label of the
 // provider the attempt reached (nil when none was resolved — a gate refusal,
 // an unresolved registry id). A pushed branch is kept: an attempt can push
 // and still fail the pull request.
-func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, code publish.ReasonCode, message string, result publish.Result, provider publish.Publisher) error {
+func (service *Service) recordRefusal(ctx context.Context, record sqlc.Run, claimed sqlc.RunPublication, code publish.ReasonCode, result publish.Result, provider publish.Publisher) error {
+	code, message := publish.SafeRefusal(code)
 	state := "blocked"
 	if code.Retryable() {
 		state = "failed"
 	}
 	updated, err := service.store.RecordPublicationFailure(ctx, sqlc.RecordPublicationFailureParams{
 		TenantID: record.TenantID, RunID: record.ID,
+		Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
 		State:            state,
 		LastErrorCode:    sql.NullString{String: string(code), Valid: true},
 		LastErrorMessage: sql.NullString{String: message, Valid: message != ""},
 		BranchPushedAt:   sql.NullTime{Time: time.Now().UTC(), Valid: result.BranchPushed},
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("publication: record failure: %w", err)
 	}

@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"log/slog"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/dbtest"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -40,7 +42,7 @@ func newPublicationHarness(t *testing.T, enabled bool) *publicationHarness {
 	handle := dbtest.Store(t)
 	return &publicationHarness{
 		api: New(handle.Store.DB, handle.Queries, slog.New(slog.DiscardHandler), nil,
-			WithPublicationConfig(enabled, "noop")),
+			WithPublicationConfig(enabled, "noop"), WithManifestService(manifest.New(manifest.Deps{DB: handle.Store.DB, Queries: handle.Queries}))),
 		queries: handle.Queries,
 		db:      handle.Store.DB,
 	}
@@ -68,6 +70,15 @@ func (harness *publicationHarness) insertPublicationRun(t *testing.T, state stri
 	if err := harness.db.QueryRowContext(context.Background(), insertProjectAndRun,
 		publicationTestTenant, publicationTestUser, state, state).Scan(&runID); err != nil {
 		t.Fatalf("insert run fixture: %v", err)
+	}
+	if _, err := harness.db.ExecContext(t.Context(), `UPDATE runs SET result_commit = 'abc123' WHERE tenant_id = $1 AND id = $2`, publicationTestTenant, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.api.mfst.Init(t.Context(), publicationTestTenant, publicationTestUser, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.api.mfst.AddEvidence(t.Context(), publicationTestTenant, runID, manifest.Body{Checks: &manifest.CheckEvidence{MandatoryPassed: true, Commit: "abc123"}}); err != nil {
+		t.Fatal(err)
 	}
 	return runID
 }
@@ -141,8 +152,9 @@ func TestGetPublicationAnswersEveryAbsenceExplicitly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure publication: %v", err)
 	}
+	claimed := enabledHarness.claimPublication(t, enabledRunID)
 	if _, failErr := enabledHarness.queries.RecordPublicationFailure(context.Background(), sqlc.RecordPublicationFailureParams{
-		TenantID: publicationTestTenant, RunID: enabledRunID, State: "failed",
+		TenantID: publicationTestTenant, RunID: enabledRunID, State: "failed", Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
 		LastErrorCode: sql.NullString{String: "credentials_missing", Valid: true},
 	}); failErr != nil {
 		t.Fatalf("record failure: %v", failErr)
@@ -177,8 +189,9 @@ func TestGetPublicationShowsAnExistingRowWhileDisabled(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ensure publication: %v", err)
 	}
+	claimed := enabledHarness.claimPublication(t, runID)
 	if _, err := enabledHarness.queries.RecordPublicationSuccess(context.Background(), sqlc.RecordPublicationSuccessParams{
-		TenantID: publicationTestTenant, RunID: runID,
+		TenantID: publicationTestTenant, RunID: runID, Attempts: claimed.Attempts, LeaseOwner: claimed.LeaseOwner,
 		TargetHost: "github.com", TargetOwner: "example", TargetRepository: "repo", BaseBranch: "main",
 		PrNumber: sql.NullInt32{Int32: 12, Valid: true},
 		PrUrl:    sql.NullString{String: "https://github.com/example/repo/pull/12", Valid: true},
@@ -380,4 +393,90 @@ func decodeErrorCode(t *testing.T, recorder *httptest.ResponseRecorder) string {
 		t.Fatalf("decode error body %q: %v", recorder.Body.String(), err)
 	}
 	return body.Error.Code
+}
+
+func (harness *publicationHarness) claimPublication(test *testing.T, runID string) sqlc.RunPublication {
+	test.Helper()
+	claimed, err := harness.queries.ClaimPublication(test.Context(), sqlc.ClaimPublicationParams{
+		TenantID: publicationTestTenant, RunID: runID,
+		LeaseOwner: sql.NullString{String: "test-worker", Valid: true}, LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil {
+		test.Fatal(err)
+	}
+	return claimed
+}
+
+func TestPublishRejectsIncompleteGateEvidence(test *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		checks      *manifest.CheckEvidence
+		emptyCommit bool
+		wantStatus  int
+	}{
+		{name: "missing checks", wantStatus: http.StatusConflict},
+		{name: "failed checks", checks: &manifest.CheckEvidence{Commit: "abc123"}, wantStatus: http.StatusConflict},
+		{name: "commit mismatch", checks: &manifest.CheckEvidence{MandatoryPassed: true, Commit: "other"}, wantStatus: http.StatusConflict},
+		{name: "empty result", checks: &manifest.CheckEvidence{MandatoryPassed: true, Commit: "abc123"}, emptyCommit: true, wantStatus: http.StatusConflict},
+		{name: "no declared checks", checks: &manifest.CheckEvidence{MandatoryPassed: true, Commit: "abc123", Ran: false}, wantStatus: http.StatusAccepted},
+		{name: "passed checks", checks: &manifest.CheckEvidence{MandatoryPassed: true, Commit: "abc123", Ran: true}, wantStatus: http.StatusAccepted},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			harness := newPublicationHarness(test, true)
+			runID := harness.insertPublicationRun(test, "awaiting_final_review")
+			body, err := json.Marshal(manifest.Body{Checks: scenario.checks})
+			if err != nil {
+				test.Fatal(err)
+			}
+			if _, err := harness.db.ExecContext(test.Context(), `UPDATE run_manifests SET body = $3 WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenant, runID, body); err != nil {
+				test.Fatal(err)
+			}
+			if scenario.emptyCommit {
+				if _, err := harness.db.ExecContext(test.Context(), `UPDATE runs SET result_commit = NULL WHERE tenant_id = $1 AND id = $2`, publicationTestTenant, runID); err != nil {
+					test.Fatal(err)
+				}
+			}
+			response := harness.callPublication(test, http.MethodPost, "/api/v1/runs/"+runID+"/publish", runID)
+			if response.Code != scenario.wantStatus {
+				test.Fatalf("status %d: %s", response.Code, response.Body.String())
+			}
+			if scenario.wantStatus == http.StatusConflict {
+				if decodeErrorCode(test, response) != "publication_not_ready" {
+					test.Fatal(response.Body.String())
+				}
+				var count int
+				if err := harness.db.QueryRowContext(test.Context(), `SELECT count(*) FROM jobs WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenant, runID).Scan(&count); err != nil {
+					test.Fatal(err)
+				}
+				if count != 0 {
+					test.Fatal("refused request enqueued a job")
+				}
+			}
+		})
+	}
+}
+
+func TestPublishRetryBindsJobToNewRequest(test *testing.T) {
+	harness := newPublicationHarness(test, true)
+	runID := harness.insertPublicationRun(test, "done")
+	for _, state := range []string{"failed", "blocked"} {
+		response := harness.callPublication(test, http.MethodPost, "/api/v1/runs/"+runID+"/publish", runID)
+		if response.Code != http.StatusAccepted {
+			test.Fatal(response.Body.String())
+		}
+		row, err := harness.queries.GetPublicationForRun(test.Context(), sqlc.GetPublicationForRunParams{TenantID: publicationTestTenant, RunID: runID})
+		if err != nil {
+			test.Fatal(err)
+		}
+		var requestID int64
+		if err := harness.db.QueryRowContext(test.Context(), `SELECT (payload->>'request_id')::bigint FROM jobs WHERE tenant_id = $1 AND run_id = $2 ORDER BY id DESC LIMIT 1`, publicationTestTenant, runID).Scan(&requestID); err != nil {
+			test.Fatal(err)
+		}
+		if requestID == 0 || requestID != row.RequestID {
+			test.Fatalf("job request %d, row request %d", requestID, row.RequestID)
+		}
+		if _, err := harness.db.ExecContext(test.Context(), `UPDATE run_publications SET state = $3 WHERE tenant_id = $1 AND run_id = $2`, publicationTestTenant, runID, state); err != nil {
+			test.Fatal(err)
+		}
+	}
 }
