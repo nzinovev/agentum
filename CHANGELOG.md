@@ -10,6 +10,22 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Explicit recovery for a run whose worktree holds uncommitted work.** A
+  resumed run that finds uncommitted changes no longer wipes them
+  automatically: it pauses with `worktree_uncommitted_changes` (the
+  `run.worktree_recovery_required` event carries the HEAD, the restore target,
+  and the dirty paths) and records the pause. To resume, call
+  `POST /runs/{id}/worktree/reconcile` with `resume_session` over the tree as
+  it stands, `keep_as_checkpoint`, or `discard_to_checkpoint` (which requires
+  `confirm_uncommitted_loss: true`); every decision names the `expected_head`
+  it applies to and is audited.
+- **`POST /runs/{id}/worktree/discard` removes a stopped or terminal run's
+  working tree — the tree only, never the branch.** The explicit, audited
+  counterpart to keeping failed runs' worktrees: it requires the run's current
+  HEAD, `discard_uncommitted: true` when the tree is dirty, and no active job;
+  the runner re-verifies every precondition before removing anything.
+  `cleanup` remains the branch-deleting verb.
+
 - **Runs at final review can publish their checked commit and a draft GitHub PR.**
   Operators can enable publication with `AGENTUM_PUBLISH_ENABLED=true` and a
   provider token; existing installations remain disabled. Final review exposes
@@ -29,6 +45,12 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Fixed
+- **A failed run keeps its worktree.** Before this, a run moving to `failed`
+  enqueued a teardown job that ran `git worktree remove --force`, destroying
+  any uncommitted agent work exactly when a person would want to inspect it.
+  `failed` runs now keep the tree, branch, and checkpoints; nothing to do —
+  remove such a tree with the discard action above. `done` and `cancelled`
+  keep their teardown.
 - **A `text` on `POST .../continue` now reaches the resumed invocation.**
   Before this, the endpoint answered `200` and stored the request body in the
   continue job's payload, but the runner never read it, so an answer to an

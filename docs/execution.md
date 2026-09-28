@@ -84,8 +84,10 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | `run` | fresh run, first stage | `POST /runs/{id}/start` |
 | `continue` | resume after `open_questions` / `user_stop`, same session | `POST .../continue` |
 | `advance` | next stage, fresh session | `POST .../advance` |
+| `reconcile` | apply a human recovery decision over uncommitted work, then resume the session | `POST /runs/{id}/worktree/reconcile` |
+| `discard_worktree` | remove a stopped/terminal run's working tree (tree only, branch survives) | `POST /runs/{id}/worktree/discard` |
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
-| `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failRun` |
+| `teardown` | remove worktree after a human-terminal state | enqueued by `approve` / `cancel` / `reject` |
 
 A `continue` job's payload carries the user's continuation text
 (`{"text": …}`; `{}` when the continue carried none). The runner decodes it
@@ -302,6 +304,8 @@ that can't enqueue rolls back the transition):
 | `POST /runs/{id}/start` | `created → running` | `run` |
 | `POST .../continue` | `paused_*→ running` | `continue` |
 | `POST .../advance` | `paused_gate → running` | `advance` |
+| `POST /runs/{id}/worktree/reconcile` | `paused_user_stop → running` | `reconcile` |
+| `POST /runs/{id}/worktree/discard` | none (tree disposal, no state change) | `discard_worktree` |
 | `POST .../approve` | `awaiting_final_review → done` | `teardown` |
 | `POST /runs/{id}/cancel` | `*→ cancelled` | `teardown` |
 
@@ -334,21 +338,29 @@ re-running a stage with no record.
 
 ## Worktree teardown
 
-Worktrees are torn down by Agentum on **terminal state** — `done`, `cancelled`,
-or `failed` — not by a TTL and not manually. Teardown is a runner
-job (`kind=teardown`) that runs `git worktree remove --force` **only**. The
-`agentum/<run-id>` branch and its commits are NOT deleted at teardown — they
-are the durable delivery output that survives for review and later handoff.
-Branch deletion is a separate, explicit `cleanup` action (below). It is
-enqueued by:
+Worktrees are torn down by Agentum after a **human-terminal state** — `done`
+(approve) or `cancelled` (cancel/reject) — not by a TTL and not manually.
+Teardown is a runner job (`kind=teardown`) that runs `git worktree remove
+--force` **only**. The `agentum/<run-id>` branch and its commits are NOT
+deleted at teardown — they are the durable delivery output that survives for
+review and later handoff. Branch deletion is a separate, explicit `cleanup`
+action (below). Teardown is enqueued by:
 
 - `handleInvocationApprove` — after the run moves to `done`.
-- `handleCancelRun` — after the run moves to `cancelled`.
-- `failRun` (best-effort) — when a run moves to `failed`.
+- `handleCancelRun` / `handleRejectRun` — after the run moves to `cancelled`.
+
+**A failure never enqueues teardown.** `failed` keeps the working tree, the
+branch, and the checkpoints exactly as the error left them: the uncommitted
+files may be the only copy of a partially executed stage's work, and `failed`
+is terminal — an automatic teardown was destroying exactly what a person would
+want to inspect and salvage. A failed run is not resumable; a human reviews
+and extracts what is useful, then starts a new run from a chosen commit.
+Removing a failed (or stopped) run's working tree afterwards is the explicit,
+audited discard action below.
 
 Before removing the worktree, the teardown job captures the tip of
 `agentum/<run-id>` as `result_commit` on the run's row — the immutable record of
-what was delivered (done) or recovered (cancelled/failed). The branch survives
+what was delivered (done) or recovered (cancelled). The branch survives
 teardown, so `result_commit` is always resolvable after the fact; the
 `base_commit..result_commit` range is the review/handoff surface.
 
@@ -360,6 +372,35 @@ Artifact *files* are durable independently of the worktree —
 `artifact_revisions` rows + the content-addressed blob store survive teardown.
 The parsed `result.json` is still on `stage_invocations.result`; the revisions
 store adds the bytes and the immutable edit chain.
+
+## Uncommitted work: pause, decide, discard
+
+The reconciler never wipes a dirty tree on its own. When a resumed run's
+worktree holds uncommitted changes, the runner pauses with stop reason
+`worktree_uncommitted_changes` (event `run.worktree_recovery_required`
+carrying the HEAD, the restore target, and a capped list of dirty paths) and
+waits for an explicit human decision — `POST /runs/{id}/worktree/reconcile`
+with one of three modes:
+
+- `resume_session` — the tree stands as the captured session left it; the
+  session resumes over it.
+- `keep_as_checkpoint` — the orchestrator commits the tree on the run branch
+  (`checkpoint` label `reconcile-keep`), then the session resumes.
+- `discard_to_checkpoint` — the tree resets to the last checkpoint (requires
+  `confirm_uncommitted_loss: true`), then the session resumes.
+
+Every decision names the `expected_head` it applies to; the runner refuses one
+whose HEAD no longer matches (event `run.worktree_reconcile_refused`), so a
+choice can never act on bytes it was not made about. Applied decisions are
+audited (`run.worktree_reconcile_decided`) and recorded as human gate
+decisions in the manifest.
+
+`POST /runs/{id}/worktree/discard` is the explicit disposal of a stopped or
+terminal run's working tree — tree only, never the branch (`cleanup` remains
+the branch-deleting verb). It requires the run's current HEAD and
+`discard_uncommitted: true` whenever the tree is dirty, re-verifies state,
+competing jobs, and HEAD at execution time, and is audited
+(`run.worktree_discarded` / `run.worktree_discard_refused`).
 
 ## Publication
 
@@ -597,13 +638,16 @@ classified as one of:
 |---|---|---|
 | `clean` | HEAD at base_commit (or last checkpoint), tree clean | proceed |
 | `resumable` | committed work beyond base, tree clean | proceed from HEAD |
-| `restorable` | uncommitted changes | `Restore` to last checkpoint (or base), then proceed |
+| `restorable` | uncommitted changes | pause with `worktree_uncommitted_changes`; a human decides via the reconcile endpoint |
 | `needs_attention` | worktree missing, or HEAD in an unexpected lineage | fail the run — surface for a human |
 
-A side-effectful stage is never blindly replayed against a half-modified tree.
-`Restore` is `git reset --hard <checkpoint>` + `git clean -fd`, so the
-post-restore tree is byte-identical to the checkpoint (untracked agent-written
-files from the crashed run are discarded).
+A side-effectful stage is never blindly replayed against a half-modified tree —
+and never silently wiped either: the old automatic `Restore` (`git reset --hard
+<checkpoint>` + `git clean -fd`) destroyed the only copy of the crashed
+stage's uncommitted work. The pause carries the HEAD, the restore target, and
+the dirty paths; the human's explicit decision (resume over the tree, commit
+it as a checkpoint, or discard it to the checkpoint with confirmation) is then
+applied and audited. See [Uncommitted work: pause, decide, discard](#uncommitted-work-pause-decide-discard).
 
 ### Transactional outbox + periodic reconciler
 

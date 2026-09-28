@@ -198,6 +198,13 @@ func (api *API) Register(mux interface {
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", api.handleCancelRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupRun)
+
+	// Worktree recovery and disposal: the human actions over a tree the runner
+	// refused to decide on itself (uncommitted work found at a crash, or a
+	// stopped run's working copy). Distinct from cleanup, which deletes the
+	// branch of an already-terminal run.
+	mux.HandleFunc("POST /api/v1/runs/{id}/worktree/reconcile", api.handleWorktreeReconcile)
+	mux.HandleFunc("POST /api/v1/runs/{id}/worktree/discard", api.handleWorktreeDiscard)
 	mux.HandleFunc("GET /api/v1/runs/{id}/final-review", api.handleFinalReview)
 
 	// Publication surface: the delivery state (always answerable for an

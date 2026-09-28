@@ -115,6 +115,8 @@ one of the two counters is non-zero on any given registration.
 | `GET` | `/runs/{id}/publication` | ✅ | → `200 Publication`; requires `run:read`. See [Publication](#publication). |
 | `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
 | `POST` | `/runs/{id}/cleanup` | ✅ | terminal run → branch deleted (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) |
+| `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
+| `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:discard-worktree`. |
 
 `base_ref` is the git ref the run builds against (branch / tag / SHA / `HEAD`).
 It is resolved once to an immutable `base_commit` before the worktree is
@@ -135,6 +137,35 @@ is torn down, but the `agentum/<run-id>` branch and any committed recovery work
 survive for review. `cleanup` is the **explicit, post-terminal disposal** that
 deletes the branch; it is a distinct verb because cancel and cleanup must not be
 ambiguous with each other or with pause.
+
+A **failure never tears the worktree down**. `failed` keeps the working tree,
+the branch, and the checkpoints exactly as the error left them — the uncommitted
+files may be the only copy of a partially executed stage's work, and a person
+decides what to salvage. Removing that tree afterwards is the explicit,
+audited `POST /runs/{id}/worktree/discard` (tree only; the branch survives;
+`cleanup` remains the branch-deleting verb). The endpoint requires a terminal
+or explicitly stopped run with no active job, the worktree's current HEAD
+(`expected_head`), and — when the tree is dirty — an explicit
+`discard_uncommitted: true`; the runner re-verifies every precondition at
+execution time and refuses (with a diagnostic event) rather than remove a tree
+the request does not describe.
+
+A run resumed over a worktree holding **uncommitted changes** does not get its
+tree wiped: the runner pauses with stop reason `worktree_uncommitted_changes`
+(the `run.worktree_recovery_required` event carries the HEAD, the restore
+target, and the dirty paths) and waits for an explicit decision via
+`POST /runs/{id}/worktree/reconcile`:
+
+- `resume_session` — leave the tree as the captured session left it and resume
+  that session;
+- `keep_as_checkpoint` — commit the tree on the run branch as an
+  orchestrator-authored checkpoint, then resume;
+- `discard_to_checkpoint` — reset the tree back to the last checkpoint
+  (requires `confirm_uncommitted_loss: true`).
+
+Every decision names the `expected_head` it applies to; the runner refuses a
+decision whose HEAD no longer matches. The transition, the driving job, and the
+human-decision evidence commit atomically, exactly as a `continue` does.
 
 `reject` is a **terminal reject at a human gate** — the plan gate
 (`paused_gate`) or the final gate (`awaiting_final_review`). It reuses `cancel`'s

@@ -1,7 +1,9 @@
 // Package worktree manages the per-run git worktrees off a project's repo
 // (C5). The runner creates one worktree per run at <repo>/.agentum/worktrees/
 // <run-id>/ on branch agentum/<run-id>, reuses it across stages and resumes,
-// and tears it down when the run reaches a terminal state.
+// and tears it down when the run reaches a human-terminal state (done /
+// cancelled). A failed run keeps its tree: the uncommitted work may be the
+// only copy, and disposal is a separate audited human action.
 //
 // F.6.1 splits teardown into two distinct actions:
 //   - RemoveWorktree disposes of the per-run working tree at terminal state.
@@ -276,6 +278,35 @@ func (manager *Manager) IsClean(ctx context.Context, wtRoot string) (bool, error
 		return false, fmt.Errorf("git status: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return len(strings.TrimSpace(string(out))) == 0, nil
+}
+
+// DirtySummary lists the uncommitted paths (each porcelain entry's full
+// "XY path" line, renames as "old -> new"), capped at limit entries. It feeds
+// the worktree-uncommitted-changes diagnostic: the human choosing a recovery
+// mode reads which files are at stake before deciding. A read failure returns
+// nil — the diagnosis degrades to "dirty, paths unreadable" rather than
+// blocking the pause that carries it.
+func (manager *Manager) DirtySummary(ctx context.Context, wtRoot string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	out, err := git(ctx, wtRoot, "status", "--porcelain")
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == "" {
+			continue
+		}
+		entries = append(entries, trimmed)
+		if len(entries) == limit {
+			break
+		}
+	}
+	return entries
 }
 
 // Diff runs `git diff [--stat] from..to` in the worktree and returns the raw

@@ -121,6 +121,20 @@ const (
 	// already-terminal run — destructive, so it is not folded into cancel.
 	ActionRunCleanup = "run:cleanup"
 
+	// ActionRunReconcile resolves a worktree the runner paused on because it
+	// held uncommitted changes: resume the session over it, commit it as a
+	// checkpoint, or discard it to a named checkpoint. Its own verb because
+	// two of the three modes destroy or bless work a human has not seen, and
+	// the continue right (which never touches the tree) must not carry them.
+	ActionRunReconcile = "run:reconcile"
+
+	// ActionRunDiscardWorktree removes a stopped or terminal run's working
+	// tree (never the branch) after explicit HEAD and uncommitted-loss
+	// confirmation. The most destructive non-terminal action on a run's
+	// files, kept separate from cleanup (which deletes the branch) and from
+	// cancel (which ends the run).
+	ActionRunDiscardWorktree = "run:discard-worktree"
+
 	// ActionProjectCreate and its read/list siblings mirror the run actions.
 	// A project is the repository a run runs against.
 	ActionProjectCreate = "project:create"

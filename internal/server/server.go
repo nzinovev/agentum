@@ -136,13 +136,15 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	// and the publication coordinator are peers here — neither imports the
 	// other, and this table is the whole connection between them.
 	handlerMux := jobs.NewMux(map[string]jobs.Handler{
-		"run":      jobs.HandlerFunc(runnerInst.HandleRun),
-		"continue": jobs.HandlerFunc(runnerInst.HandleContinue),
-		"advance":  jobs.HandlerFunc(runnerInst.HandleAdvance),
-		"teardown": jobs.HandlerFunc(runnerInst.HandleTeardown),
-		"cleanup":  jobs.HandlerFunc(runnerInst.HandleCleanup),
-		"cancel":   jobs.HandlerFunc(func(context.Context, sqlc.Job) error { return nil }),
-		"publish":  publicationService,
+		"run":              jobs.HandlerFunc(runnerInst.HandleRun),
+		"continue":         jobs.HandlerFunc(runnerInst.HandleContinue),
+		"advance":          jobs.HandlerFunc(runnerInst.HandleAdvance),
+		"teardown":         jobs.HandlerFunc(runnerInst.HandleTeardown),
+		"cleanup":          jobs.HandlerFunc(runnerInst.HandleCleanup),
+		"reconcile":        jobs.HandlerFunc(runnerInst.HandleReconcile),
+		"discard_worktree": jobs.HandlerFunc(runnerInst.HandleDiscardWorktree),
+		"cancel":           jobs.HandlerFunc(func(context.Context, sqlc.Job) error { return nil }),
+		"publish":          publicationService,
 	})
 
 	worker := jobs.New(jobs.Deps{
