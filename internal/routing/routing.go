@@ -39,6 +39,14 @@ type Block struct {
 	Title       string
 	Description string
 
+	// Continuation is the user's new text for THIS continuation only: the
+	// answer or extra context sent with the continue request that resumed the
+	// session. Rendered inside the Task section, after the original request,
+	// between explicit markers; empty renders nothing. The runner clears it
+	// after the first resumed invocation, so it never reaches the fresh
+	// sessions of later stages.
+	Continuation string
+
 	// PriorStages are earlier stages' result.json paths, for cross-stage
 	// reference (filesystem-as-bus, C1). Empty for the first stage.
 	PriorStages []PriorStage

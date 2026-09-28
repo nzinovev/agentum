@@ -93,6 +93,13 @@ const (
 	// ActionRunStart moves a fresh run into the running pipeline.
 	ActionRunStart = "run:start"
 
+	// ActionRunContinue resumes a paused run (open_questions / user_stop),
+	// optionally carrying new user text to the resumed session. Its own verb,
+	// not half of run:advance: resuming the same session and passing a gate are
+	// different rights, and the carried text reaches a model, which no read
+	// verb does.
+	ActionRunContinue = "run:continue"
+
 	// ActionRunAdvance and its approve/reject/cancel siblings are the
 	// human-gate verbs. Each is its own action rather than one collapsed
 	// "run:write": approving a result, rejecting it, and aborting a run are
