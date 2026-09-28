@@ -2,7 +2,9 @@
 // behaviour (title + description) and the run overrides, which have different
 // audiences. The request reaches the model through the routing block's Task
 // section; the overrides reach the orchestrator only and are never rendered to
-// the agent.
+// the agent. The continuation — the optional text a continue request carries to
+// a resumed session — lives here for the same reason: one typed shape on both
+// sides of the job queue.
 //
 // The package is standard-library-only by design, like internal/instructions:
 // the mapping from Overrides onto checks.Request stays with the runner (its

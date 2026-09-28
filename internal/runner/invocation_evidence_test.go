@@ -264,7 +264,7 @@ func TestInvokeStage_MissingExecutionPlanEntryRefuses(t *testing.T) {
 		worktree:      &worktree.Worktree{Root: t.TempDir()},
 		executionPlan: map[string]models.Selection{},
 	}
-	outcome := runner.invokeStage(t.Context(), run, "spec", runPack.Stages["spec"], "", stageTransition{})
+	outcome := runner.invokeStage(t.Context(), run, "spec", runPack.Stages["spec"], "", "", stageTransition{})
 
 	if !outcome.adapterErr {
 		t.Errorf("outcome = %+v; want an adapter error rather than a run on an unresolved model", outcome)

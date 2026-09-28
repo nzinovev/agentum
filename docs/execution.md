@@ -82,10 +82,22 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | Job kind | Entry point | Triggered by |
 |---|---|---|
 | `run` | fresh run, first stage | `POST /runs/{id}/start` |
-| `continue` | resume after `open_questions` / `user_stop` | `POST .../continue` |
+| `continue` | resume after `open_questions` / `user_stop`, same session | `POST .../continue` |
 | `advance` | next stage, fresh session | `POST .../advance` |
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
 | `teardown` | remove worktree at terminal state | enqueued by `approve` / `cancel` / `failRun` |
+
+A `continue` job's payload carries the user's continuation text
+(`{"text": …}`; `{}` when the continue carried none). The runner decodes it
+before any invocation and renders it inside the routing block's Task section,
+after the original request. The text applies to the first invocation the job
+resumes and to nothing after it: once that invocation finishes, the loop
+carries no text into the next stage's fresh session. A payload the runner
+cannot deliver — an unreadable shape, or text with no captured session id —
+stops the run in `paused_user_stop` with the stop reason
+(`continue_payload_unreadable` / `resume_session_missing`) instead of invoking
+the agent without the user's text. `run` and `advance` payloads are never
+interpreted as user text.
 
 `run` / `continue` / `advance` enter the shared **stage loop**:
 
@@ -93,8 +105,9 @@ calls `Runner.Handle`, which dispatches by `kind`:
    def (gate, prompt, tier).
 2. **Prepare the worktree** — created once per run; reused thereafter.
 3. **Render the routing block** (`internal/routing.Render`) with role/stage/gate
-   context, the artifact-dir, the result.json preamble, and memory/capability
-   stubs (inert until those subsystems land).
+   context, the task request (`runs.title` + `runs.description`), any
+   continuation text a continue job carried, the artifact-dir, the result.json
+   preamble, and memory/capability stubs (inert until those subsystems land).
 4. **Resolve the model** via `internal/models.Resolve(cfg, agent, tier)` and
    pass as `Invocation.Model` (`docs/models.md`).
 5. **Invoke the adapter** (`agent.Invoke(ctx, inv)`), forwarding stream chunks

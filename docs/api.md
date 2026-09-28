@@ -300,7 +300,7 @@ The three gate **actions** from §3.4:
 
 | Method | Path | Status | Action |
 |---|---|---|---|
-| `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job) |
+| `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job). Optional body `{"text": …}` carries new user text to the resumed session — see [Continue request](#continue-request) |
 | `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
 | `POST` | `/runs/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → run done + memory commits. Pins `result_commit` at the gate. Idempotent. |
 | `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
@@ -311,6 +311,34 @@ The three gate **actions** from §3.4:
 > invocation id: they enqueue a job that drives the runner. The `{iid}` path
 > parameter is accepted for contract stability but the runner resumes from the
 > run's current state. `cancel` is `POST /runs/{id}/cancel`.
+
+#### Continue request
+
+```json
+{ "text": "Используем PostgreSQL 17. Новую таблицу создавать не нужно." }
+```
+
+The body is optional in full: an empty body, `{}`, `null`, and an absent or
+whitespace-only `text` all continue without new text, exactly as a
+pre-text continue did. The text is the user's answer to an open question or
+extra context. It is rendered verbatim inside the routing block's Task section,
+after the original request, between explicit markers, and it reaches only the
+first invocation the continue job resumes — never the fresh sessions of later
+stages. It grants no capability, approves no plan, and changes no checks.
+
+| Input or state | Status | Code |
+|---|---|---|
+| `paused_open_questions` / `paused_user_stop`, non-empty `text` | `200` | run resumes; the `continue` job stores `{"text": …}` |
+| empty body, `{}`, `null`, absent or whitespace-only `text` | `200` | run resumes; the job payload is `{}` |
+| any other run state | `409` | `illegal_transition` |
+| malformed JSON, unknown field, non-string `text` (null included), a second JSON object | `400` | `bad_input`; no state change, no enqueue |
+| invalid UTF-8, or `text` over 32 KiB (decoded) or body over 256 KiB | `400` | `bad_input`; no truncation |
+| credential-shaped `text` (scanner reject) | `422` | `bad_input`; the text is not stored |
+| non-empty `text` with no captured session on the latest invocation | `409` | `illegal_transition`; no enqueue |
+
+The text is not trimmed or rewritten on the way to the model; only the
+emptiness check trims. `jobs.payload` keeps the accepted text across a process
+restart, so delivery does not depend on the HTTP process that accepted it.
 
 ## Artifacts
 

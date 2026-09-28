@@ -88,8 +88,6 @@ func requireRunRead(w http.ResponseWriter, r *http.Request) (authz.Principal, st
 //
 // A store error that is not a missing row is logged under where before the 400,
 // because nothing downstream reports it: the caller sees only the status.
-// handleInvocationContinue deliberately keeps its own preamble — it checks no
-// action and answers a missing run with a different code.
 func (api *API) requireRunForAction(w http.ResponseWriter, r *http.Request, action, where string) (authz.Principal, sqlc.Run, bool) {
 	runID := r.PathValue("id")
 	principal, ok := requireAccess(w, r, action, runID)

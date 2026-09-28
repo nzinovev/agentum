@@ -103,6 +103,33 @@ type runCreateRequest struct {
 // is too long.
 const maxRunCreateBytes = 6*taskinput.MaxDescriptionBytes + (16 << 10)
 
+// readRequestBody reads the whole request body under cap. MaxBytesReader, not
+// io.LimitReader: LimitReader reports EOF at the cap with no error, so an
+// oversized body arrives truncated and fails as "invalid JSON" — a message
+// that sends the author looking for a syntax error that is not there.
+// MaxBytesReader returns a real error instead.
+//
+// The wrapper is deliberately not closed: its Close forwards to r.Body.Close
+// and nothing else, and net/http closes the request body itself once the
+// handler returns. It holds no descriptor or buffer of its own, so the leak
+// inspection is suppressed rather than answered with a Close that would imply
+// an ownership this handler does not have.
+// noinspection GoResourceLeak
+func readRequestBody(w http.ResponseWriter, r *http.Request, limitBytes int64) ([]byte, bool) {
+	bodyBytes, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, limitBytes))
+	if readErr != nil {
+		var toolarge *http.MaxBytesError
+		if errors.As(readErr, &toolarge) {
+			writeError(w, http.StatusBadRequest, codeBadInput,
+				fmt.Sprintf("request body exceeds %d bytes", toolarge.Limit))
+			return nil, false
+		}
+		writeError(w, http.StatusBadRequest, codeBadInput, "could not read request body: "+readErr.Error())
+		return nil, false
+	}
+	return bodyBytes, true
+}
+
 // parseRunCreate turns the raw body into the typed, validated request. Pure
 // (no DB, no HTTP): every validation rule of the boundary is exercisable
 // without a database. The secret scan runs here so a credential-shaped
@@ -163,11 +190,12 @@ func scanRequestForCredentials(request taskinput.Request) error {
 	return nil
 }
 
-// writeRunCreateError maps parseRunCreate failures onto the boundary's HTTP
-// contract: everything malformed or over-budget is a 400; a detected
-// credential is a 422 bad_input, the same mapping artifact_edit.go uses for
-// ErrSecretDetected (do not invent a new code).
-func writeRunCreateError(w http.ResponseWriter, err error) {
+// writeRequestBodyError maps a request-body parse or scan failure onto the
+// boundary's HTTP contract: everything malformed or over-budget is a 400; a
+// detected credential is a 422 bad_input, the same mapping artifact_edit.go
+// uses for ErrSecretDetected (do not invent a new code). Shared by the
+// create-run and continue handlers, whose bodies face the same failure set.
+func writeRequestBodyError(w http.ResponseWriter, err error) {
 	if errors.Is(err, artifacts.ErrSecretDetected) {
 		writeError(w, http.StatusUnprocessableEntity, codeBadInput, err.Error())
 		return
@@ -186,31 +214,13 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// MaxBytesReader, not io.LimitReader: LimitReader reports EOF at the cap
-	// with no error, so an oversized body arrives truncated and fails
-	// as "invalid JSON" — a message that sends the author looking for a syntax
-	// error that is not there. MaxBytesReader returns a real error instead.
-	//
-	// The wrapper is deliberately not closed: its Close forwards to
-	// r.Body.Close and nothing else, and net/http closes the request body
-	// itself once the handler returns. It holds no descriptor or buffer of its
-	// own, so the leak inspection is suppressed rather than answered with a
-	// Close that would imply an ownership this handler does not have.
-	//noinspection GoResourceLeak
-	bodyBytes, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRunCreateBytes))
-	if readErr != nil {
-		var toolarge *http.MaxBytesError
-		if errors.As(readErr, &toolarge) {
-			writeError(w, http.StatusBadRequest, codeBadInput,
-				fmt.Sprintf("request body exceeds %d bytes", toolarge.Limit))
-			return
-		}
-		writeError(w, http.StatusBadRequest, codeBadInput, "could not read request body: "+readErr.Error())
+	bodyBytes, read := readRequestBody(w, r, maxRunCreateBytes)
+	if !read {
 		return
 	}
 	req, typed, parseErr := parseRunCreate(bodyBytes)
 	if parseErr != nil {
-		writeRunCreateError(w, parseErr)
+		writeRequestBodyError(w, parseErr)
 		return
 	}
 	// title is deliberately absent here: parseRunCreate already rejected a

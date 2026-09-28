@@ -28,6 +28,7 @@ import (
 	"github.com/nzinovev/agentum/internal/repoid"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/taskinput"
 	"github.com/nzinovev/agentum/internal/worktree"
 )
 
@@ -649,8 +650,39 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	runner.recordGitEvidence(ctx, record)
 
+	// The continue job's payload is the user's continuation text — the answer
+	// or extra context the resume request carried. It is decoded BEFORE the
+	// entry point so its delivery checks apply even when the run has no
+	// invocation row: entryPoint's missing-invocation error would otherwise
+	// fail the run before the text was ever considered. Only the continue kind
+	// is decoded; a run or advance payload is never user text.
+	continuation, decodeFault := decodeContinuation(job)
+	if decodeFault != nil {
+		pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, decodeFault)
+		if pauseErr != nil {
+			return runner.failRun(ctx, record, pauseErr)
+		}
+		return nil
+	}
+
 	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, record, runPack)
 	if err != nil {
+		// A text-carrying continue job on a run with no invocation row has no
+		// session and never had one — the same undeliverable-text pause as a
+		// present-but-sessionless invocation, not a run failure (the run did
+		// nothing wrong, and cancel stays the exit). The textless continue
+		// keeps its pre-existing failure: no text was accepted, so none can be
+		// silently dropped.
+		if continuation.Text != "" && errors.Is(err, sql.ErrNoRows) {
+			pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, &continuationFault{
+				stopReason: "resume_session_missing",
+				cause:      fmt.Errorf("no stage invocation exists to resume: %w", err),
+			})
+			if pauseErr != nil {
+				return runner.failRun(ctx, record, pauseErr)
+			}
+			return nil
+		}
 		return runner.failRun(ctx, record, err)
 	}
 	// A halt (budget exhausted / verdict unreadable on the advance path) is a
@@ -658,6 +690,13 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// loop. This must not flow through err, which drive turns into failRun.
 	if halt != nil {
 		return runner.applyPauseDecision(ctx, record, halt.decision, halt.stageID)
+	}
+	if sessionFault := continuationSessionFault(continuation, resumeSession); sessionFault != nil {
+		pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, sessionFault)
+		if pauseErr != nil {
+			return runner.failRun(ctx, record, pauseErr)
+		}
+		return nil
 	}
 
 	// Register a cancel for this run so the cancel handler can abort the
@@ -689,7 +728,62 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// worktree so the agent starts from the same content the prior invocation
 	// produced. No-op for a fresh run (no revisions yet).
 	runner.syncRevisionsIntoWorktree(ctx, run, startStage)
-	return runner.runLoop(runCtx, run, startStage, resumeSession)
+	return runner.runLoop(runCtx, run, startStage, resumeSession, continuation.Text)
+}
+
+// continuationFault names why a continue job's user text cannot be delivered:
+// the stored payload is not a decodable continuation, or the text has no
+// captured session to resume. stopReason lands on the pause record; cause
+// carries the diagnosis to the log.
+type continuationFault struct {
+	stopReason string
+	cause      error
+}
+
+// decodeContinuation decodes the user text off a continue job's payload. Jobs
+// of every other kind carry no user text — their payloads are {} and stay
+// uninterpreted. A job whose payload is empty, {}, or null continues without
+// text, exactly as a pre-payload job row did; a non-empty payload of an
+// unknown shape is an error, not a dropped key, so an old job written by other
+// code cannot silently change meaning.
+func decodeContinuation(job sqlc.Job) (taskinput.Continuation, *continuationFault) {
+	if job.Kind != "continue" {
+		return taskinput.Continuation{}, nil
+	}
+	continuation, parseErr := taskinput.ParseContinuation(job.Payload)
+	if parseErr != nil {
+		return taskinput.Continuation{}, &continuationFault{stopReason: "continue_payload_unreadable", cause: parseErr}
+	}
+	return continuation, nil
+}
+
+// continuationSessionFault reports why the decoded continuation cannot ride the
+// resolved session: text with no session has no delivery target. nil when
+// there is nothing to deliver or a session to deliver it on.
+func continuationSessionFault(continuation taskinput.Continuation, resumeSession string) *continuationFault {
+	if continuation.Text == "" || resumeSession != "" {
+		return nil
+	}
+	return &continuationFault{
+		stopReason: "resume_session_missing",
+		cause:      errors.New("the latest stage invocation captured no session id, so the continuation text has no session to resume"),
+	}
+}
+
+// pauseForUndeliverableContinuation stops the run in paused_user_stop with the
+// fault's stop_reason, without invoking the agent. The API refuses a text
+// continue with no session before enqueueing; this is the runner's re-check for
+// the window between the two (a job that sat in the queue across a schema or
+// writer change). paused_user_stop keeps continue/cancel as the exits and the
+// stop_reason on the state-change event is the diagnosis.
+func (runner *Runner) pauseForUndeliverableContinuation(ctx context.Context, record sqlc.Run, runPack *pack.Pack, fault *continuationFault) error {
+	runner.log.Warn("continue payload undeliverable; pausing before any invocation",
+		"run", record.ID, "stop_reason", fault.stopReason, "error", fault.cause)
+	return runner.applyPauseDecision(ctx, record, Decision{
+		Action:     ActionPause,
+		FSMEvent:   engine.EventStopUser,
+		StopReason: fault.stopReason,
+	}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
 }
 
 // resolveExecutionPlan resolves the model selection for every stage the pack
@@ -1206,16 +1300,18 @@ func (runner *Runner) latestStoredResult(ctx context.Context, record sqlc.Run) *
 
 // runLoop walks the pack's stages from startStage, invoking the adapter per
 // stage and applying the evaluator's decision, until a pause point or terminal
-// state. resumeSession applies only to the first iteration. The per-stage body
-// lives in processStage; runLoop stays a flat claim-retry loop.
-func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, resumeSession string) error {
+// state. resumeSession and continuationText apply only to the first iteration:
+// the session resumes once and the user's new text belongs to that resumed
+// invocation alone. The per-stage body lives in processStage; runLoop stays a
+// flat claim-retry loop.
+func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, resumeSession, continuationText string) error {
 	stageID := startStage
 	transition := stageTransition{} // empty for the entry stage
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		outcome, err := runner.processStage(ctx, run, stageID, resumeSession, transition)
+		outcome, err := runner.processStage(ctx, run, stageID, resumeSession, continuationText, transition)
 		if err != nil {
 			return err
 		}
@@ -1224,7 +1320,8 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 		}
 		stageID = outcome.nextStage
 		transition = outcome.transition
-		resumeSession = "" // only the first iteration resumes
+		resumeSession = ""    // only the first iteration resumes
+		continuationText = "" // and only it carries the user's new text
 	}
 }
 
@@ -1414,9 +1511,10 @@ func (runner *Runner) priorStageRefs(ctx context.Context, run stageRun, currentS
 // vs adapter invocation), evaluate the outcome, and apply the resulting
 // decision. transitionIn is the edge that brought the run to stageID (empty for
 // the entry stage), threaded so invokeStage can render the reviewer-findings
-// hand-off without re-reading the artifact. The caller owns loop control
-// (continue / stop) via stageOutcome.
-func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession string, transitionIn stageTransition) (stageOutcome, error) {
+// hand-off without re-reading the artifact. continuationText is the user's new
+// text for a resumed invocation; it is empty for every non-first iteration. The
+// caller owns loop control (continue / stop) via stageOutcome.
+func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, resumeSession, continuationText string, transitionIn stageTransition) (stageOutcome, error) {
 	stage, ok := run.runPack.Stages[stageID]
 	if !ok {
 		return stageOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("pack stage %q not found", stageID))
@@ -1486,7 +1584,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		run.diff = runner.produceDiff(ctx, run, stageID)
 	}
 
-	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, transitionIn)
+	outcome := runner.invokeStage(ctx, run, stageID, stage, resumeSession, continuationText, transitionIn)
 
 	// If the run was cancelled (the cancel handler aborts it via the registry),
 	// bow out without touching the FSM — the handler owns the transition to
@@ -1743,7 +1841,7 @@ type invocationOutcome struct {
 // run (a failed attempt is when "which runtime, which model" matters most).
 // The CLOSE half — telemetry and stop reason — lands on every terminal path
 // after the drain.
-func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession string, transitionIn stageTransition) invocationOutcome {
+func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID string, stage pack.Stage, resumeSession, continuationText string, transitionIn stageTransition) invocationOutcome {
 	artifactDir := worktree.ArtifactDir(run.worktree.Root, run.record.ID, stageID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		runner.log.Error("create artifact dir", "dir", artifactDir, "error", err)
@@ -1787,14 +1885,17 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// fixer is pointed at the predecessor's findings artifact rather than a log.
 	// Both render nothing when unset. Title/Description carry the run request
 	// into the block's first section — the ONLY delivery path from
-	// runs.title/description to any agent prompt. There is deliberately no
-	// Overrides on this literal: the overrides are orchestrator-only, and the
-	// resolved Checks below already render the effective set.
+	// runs.title/description to any agent prompt. Continuation carries the
+	// user's new text for this resume into the same Task section, after the
+	// request. There is deliberately no Overrides on this literal: the overrides
+	// are orchestrator-only, and the resolved Checks below already render the
+	// effective set.
 	routingBlock := routing.Block{
 		RunID: run.record.ID, ProjectName: run.project.Name, Stage: stageID,
 		Gate: string(stage.Gate), ArtifactDir: artifactDir,
 		Title:        run.record.Title,
 		Description:  run.record.Description,
+		Continuation: continuationText,
 		Capabilities: profileTokens(profile),
 		Checks:       run.resolvedChecks,
 	}

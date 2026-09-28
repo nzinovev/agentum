@@ -3,35 +3,30 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
 // handleInvocationContinue POST /api/v1/runs/{id}/invocations/{iid}/continue
-// Resume after open_questions / user_stop (session-id resume). The body carries
-// optional answers/context appended to the resumed session.
+// Resume after open_questions / user_stop (session-id resume). The body is an
+// optional continuation: {"text": "..."} carries the user's answer or extra
+// context to the resumed session, rendered inside the routing block's Task
+// section; an empty body, {}, or null continues without new text. Every body
+// rule — strict shape, UTF-8, byte budgets, the credentials scan — is checked
+// before the FSM transition, so a refused body leaves the run untouched.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
-	principal, ok := requirePrincipal(w, r)
+	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunContinue, "GetRun(continue)")
 	if !ok {
 		return
 	}
 	// Continue is valid from either open-questions or user-stop pause.
-	id := r.PathValue("id")
-	run, err := api.queries.GetRun(r.Context(), sqlc.GetRunParams{ID: id, TenantID: principalTenant(r)})
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, sql.ErrNoRows) {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, codeBadInput, err.Error())
-		return
-	}
 	var event engine.RunEvent
 	var gate string
 	switch engine.RunState(run.State) {
@@ -46,10 +41,45 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 			"continue requires paused_open_questions or paused_user_stop; run is "+run.State)
 		return
 	}
-	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body) // optional; ignored at MVP
-	payload, _ := json.Marshal(body)
-
+	bodyBytes, read := readRequestBody(w, r, taskinput.MaxContinueBodyBytes)
+	if !read {
+		return
+	}
+	continuation, parseErr := parseContinueBody(bodyBytes)
+	if parseErr != nil {
+		writeRequestBodyError(w, parseErr)
+		return
+	}
+	// Text rides the captured session: with no session there is no delivery,
+	// and the request is refused before the transition commits rather than
+	// accepted onto a job the runner would have to drop. A read FAILURE is not
+	// an answer about the session — the session may exist while the read could
+	// not see it — so it is a logged 500, never a 409 claiming absence.
+	if continuation.Text != "" {
+		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
+			RunID: run.ID, TenantID: run.TenantID,
+		})
+		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
+			logUnexpected(api.log, latestErr, "LatestStageForRun(continue)")
+			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
+			return
+		}
+		// sql.ErrNoRows means the run has no invocation at all; a NULL or empty
+		// session id means the latest one captured no session. Both leave the
+		// text without a target.
+		if errors.Is(latestErr, sql.ErrNoRows) || !latest.SessionID.Valid || latest.SessionID.String == "" {
+			writeError(w, http.StatusConflict, codeIllegalTransition,
+				"continue with text requires a captured session to resume; the latest invocation has none")
+			return
+		}
+	}
+	payload, marshalErr := continuation.Marshal()
+	if marshalErr != nil {
+		// Unreachable for this shape; a 500 keeps an invariant break from
+		// being reported as the author's fault.
+		writeError(w, http.StatusInternalServerError, codeInternal, marshalErr.Error())
+		return
+	}
 	updated, err := api.applyResume(r, run, event, "continue", payload,
 		gateDecisionPatch(run, principal, gate, decisionContinued), planApproval{}, principal)
 	if err != nil {
@@ -62,6 +92,35 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))
+}
+
+// parseContinueBody turns the raw continue body into the typed, validated
+// continuation. Pure (no DB, no HTTP), like parseRunCreate: every boundary
+// rule is exercisable without a database. The secret scan runs here so
+// credential-shaped text is refused before the job row exists;
+// ErrSecretDetected flows out for the handler to map.
+func parseContinueBody(body []byte) (taskinput.Continuation, error) {
+	continuation, parseErr := taskinput.ParseContinuation(body)
+	if parseErr != nil {
+		return taskinput.Continuation{}, parseErr
+	}
+	if scanErr := scanContinuationForCredentials(continuation.Text); scanErr != nil {
+		return taskinput.Continuation{}, scanErr
+	}
+	return continuation, nil
+}
+
+// scanContinuationForCredentials is the containment guard for the continue
+// text: the same prose scanner and reject policy the run request fields get,
+// because the text reaches a model verbatim through the routing block's Task
+// section exactly as a description does. An empty text scans nothing.
+func scanContinuationForCredentials(text string) error {
+	if text == "" {
+		return nil
+	}
+	scanner := artifacts.NewProseScanner(artifacts.PolicyReject)
+	_, scanErr := scanner.Scan("text", "continue_request", []byte(text))
+	return scanErr
 }
 
 // approvalNameFinalReview is the orchestrator-owned approval name for the final

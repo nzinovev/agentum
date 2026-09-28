@@ -135,13 +135,13 @@ func TestWriteTaskCreateError_SecretMapsTo422(t *testing.T) {
 		`"Paste ghp_0123456789abcdefghijklmnopqrstuvwxyz0123456789 into the config."`, 1))
 
 	secretRecorder := httptest.NewRecorder()
-	writeRunCreateError(secretRecorder, secretErr)
+	writeRequestBodyError(secretRecorder, secretErr)
 	if secretRecorder.Code != 422 {
 		t.Errorf("secret status = %d, want 422", secretRecorder.Code)
 	}
 
 	badInputRecorder := httptest.NewRecorder()
-	writeRunCreateError(badInputRecorder, errors.New("description is required"))
+	writeRequestBodyError(badInputRecorder, errors.New("description is required"))
 	if badInputRecorder.Code != 400 {
 		t.Errorf("plain validation status = %d, want 400", badInputRecorder.Code)
 	}
