@@ -2,15 +2,23 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/checks"
+	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/instructions"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/routing"
+	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
@@ -32,6 +40,13 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 		// file is not — loadRegistryAtBaseCommit returns (nil, nil) for that, so
 		// this branch is a genuine malformed-config failure.
 		return fmt.Errorf("project context: load registry: %w", registryErr)
+	}
+	// Record the absence of a registry in evidence: "no checks defined" is a
+	// fact about the project at base_commit, and a manifest that states it
+	// cannot be confused with one that never looked.
+	if registry == nil {
+		runner.recordEvidenceGap(ctx, run.record, "context.registry", "",
+			errors.New("the project defines no .agentum.yaml at base_commit; the check registry is empty"))
 	}
 
 	// Resolve the check set ONCE for rendering. enforceProjectChecks keeps its
@@ -313,4 +328,97 @@ func contextPinnedPayload(stageID string, run stageRun) map[string]any {
 // could not answer.
 func (runner *Runner) autoInstructionBaseline() []string {
 	return runner.adapter.Describe().AutoInstructions
+}
+
+// configDriftChange names how the source checkout's .agentum.yaml differs
+// from the one pinned at base_commit. Absence is a value, not a failure: a
+// config can be added or removed, and "absent on both sides" is the project's
+// empty-registry configuration.
+type configDriftChange string
+
+const (
+	configDriftAdded    configDriftChange = "added"
+	configDriftRemoved  configDriftChange = "removed"
+	configDriftModified configDriftChange = "modified"
+)
+
+// pauseOnProjectConfigDrift compares .agentum.yaml in the source checkout
+// with the run's pinned base_commit version and stops the run in
+// paused_user_stop (stop_reason=project_config_drift) when they differ —
+// before any agent invocation and before the worktree is touched. Returns
+// true when the pause was applied.
+//
+// The comparison is by hash and change kind only; file contents never reach
+// an event payload. Uncommitted changes to OTHER files of the checkout do
+// not participate: the run never reads them, and a dirty checkout is not a
+// broken one. Both sides absent is not a drift — the project simply defines
+// no checks at this base, which prepareProjectContext records in evidence.
+//
+// The pause is the resumable refusal the plan names for this condition: the
+// run's config cannot be silently replaced with the working copy's version,
+// and the pinned base_commit of an existing run is never rewritten. A human
+// who wants the new config commits it and starts a new run from the new
+// commit; continuing this run re-checks the precondition, so the pause lifts
+// only when the checkout matches the anchor again.
+func (runner *Runner) pauseOnProjectConfigDrift(ctx context.Context, record sqlc.Run, runPack *pack.Pack, checkoutPath, baseCommit string) bool {
+	onDisk, diskReadErr := os.ReadFile(filepath.Join(checkoutPath, checks.ConfigFile))
+	diskPresent := diskReadErr == nil
+	if diskReadErr != nil && !errors.Is(diskReadErr, fs.ErrNotExist) {
+		// The checkout probe in resolveRunCheckout already paused for a
+		// missing/unusable copy; a read error on this one file that is not
+		// absence is an IO failure the run cannot reason about.
+		runner.log.Warn("project config drift check: read checkout copy", "run", record.ID, "error", diskReadErr)
+	}
+	atCommit, commitReadErr := runner.wt.FileAtCommit(ctx, checkoutPath, baseCommit, checks.ConfigFile)
+	commitPresent := commitReadErr == nil
+	if commitReadErr != nil && !errors.Is(commitReadErr, os.ErrNotExist) {
+		// The registry load in prepareProjectContext will surface this as a
+		// malformed/failed config read; failing here too would duplicate the
+		// diagnosis before the richer one exists.
+		return false
+	}
+
+	var change configDriftChange
+	switch {
+	case diskPresent && !commitPresent:
+		change = configDriftAdded
+	case !diskPresent && commitPresent:
+		change = configDriftRemoved
+	case diskPresent && commitPresent:
+		if sha256.Sum256(onDisk) == sha256.Sum256(atCommit) {
+			return false
+		}
+		change = configDriftModified
+	default:
+		// Absent on both sides: the empty-registry configuration.
+		return false
+	}
+
+	runner.log.Warn("project config drift; pausing before any invocation",
+		"run", record.ID, "file", checks.ConfigFile, "change", string(change), "base_commit", baseCommit,
+		"diagnosis", fmt.Sprintf("%s differs between the source checkout and the pinned base_commit %s (%s); the run keeps the base_commit version — commit the config and start a new run to adopt it, or restore the checkout to match the anchor",
+			checks.ConfigFile, baseCommit, change))
+	runner.emit(ctx, record, EvProjectConfigDrift, map[string]any{
+		"file":        checks.ConfigFile,
+		"base_commit": baseCommit,
+		"change":      string(change),
+		"disk_hash":   contentHash(onDisk),
+		"base_hash":   contentHash(atCommit),
+	})
+	pauseErr := runner.applyPauseDecision(ctx, record, Decision{
+		Action:     ActionPause,
+		FSMEvent:   engine.EventStopUser,
+		StopReason: "project_config_drift",
+	}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
+	if pauseErr != nil {
+		runner.failRun(ctx, record, pauseErr)
+	}
+	return true
+}
+
+// contentHash renders the sha256 of config bytes for event payloads — the
+// drift comparison material that is safe to record (no file contents).
+func contentHash(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }

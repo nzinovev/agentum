@@ -63,6 +63,22 @@ somewhere else; a repository that moved is re-linked with `git worktree
 repair` before the run continues. Created by `internal/worktree` on the first
 stage of a run; reused across stages and resumes; torn down at terminal state.
 
+On every start and continuation the runner also compares `.agentum.yaml` in
+the source checkout against the run's pinned `base_commit` version — by
+content hash, with absence as a value (`run.project_config_drift` carries the
+file, the base, the change kind, and the hashes; never the contents). A
+difference pauses the run (`stop_reason = project_config_drift`) before any
+invocation: the run keeps the `base_commit` version and never substitutes the
+working copy's config, and the pinned base of an existing run is never
+rewritten — a human who wants the new config commits it and starts a new run
+from the new commit; continuing this run re-checks the precondition and
+proceeds once the checkout matches the anchor again. Uncommitted changes to
+other files of the checkout do not participate in the check, and the local
+uncommitted edits of the checkout are never part of a new run's base: the
+worktree builds from the base commit, not the working copy. A project with
+no `.agentum.yaml` on either side runs with an empty registry, recorded in
+evidence.
+
 - **Location:** `<repo>/.agentum/worktrees/<run-id>/`
 - **Branch:** `agentum/<run-id>` (off the repo's current HEAD)
 - **Artifacts:** `<worktree>/.agentum/<run-id>/.ag-artifacts/<stage>/result.json`
@@ -168,6 +184,8 @@ happened.
 | a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_gate` | `paused_gate` (pinned to the **approval stage**, not the refused stage) | `plan_not_approved` |
 | the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
+| the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
+| `.agentum.yaml` in the source checkout differs from the run's pinned `base_commit` version (added, removed, or modified; absence on both sides is the empty registry, not a drift) | `stop_user` | `paused_user_stop` | `project_config_drift` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
 ### Conditional transitions and the fix loop

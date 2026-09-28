@@ -870,6 +870,17 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	baseCommit := record.BaseCommit.String
 
+	// The project config the run pins (.agentum.yaml at base_commit) must
+	// still be what the source checkout shows: a config that was created or
+	// edited after the run pinned its base means the run's checks and the
+	// operator's intent have diverged, and silently substituting the working
+	// copy's version would run commands the run never anchored. Pause for a
+	// human; on continue the precondition is re-checked. Absence on both
+	// sides is the "empty registry" configuration, not a drift.
+	if driftPause := runner.pauseOnProjectConfigDrift(ctx, record, runPack, checkoutPath, baseCommit); driftPause {
+		return nil
+	}
+
 	// A repository that moved on disk carries its worktrees with it (they
 	// live inside the repo), but git links them with absolute paths, which
 	// are now stale — before Create mistakes the moved worktree for an
@@ -2627,6 +2638,13 @@ const (
 	// path, the action, and the tampered hash — the tamper and its reversal both
 	// land in the git lineage via the next checkpoint commit.
 	EvInstructionsRestored = "run.instructions_restored"
+	// EvProjectConfigDrift records that the run paused because .agentum.yaml
+	// differs between the source checkout and the run's pinned base_commit
+	// (stop_reason project_config_drift). Carries the file, the base_commit,
+	// the change kind (added | removed | modified), and content hashes —
+	// never the file's contents. The run keeps the base_commit version; the
+	// pause lifts only when the checkout matches the anchor again.
+	EvProjectConfigDrift = "run.project_config_drift"
 	// EvWorktreeRecoveryRequired records that the runner paused because the
 	// crashed run's worktree holds uncommitted changes (stop_reason
 	// worktree_uncommitted_changes). Carries the HEAD, the checkpoint the tree

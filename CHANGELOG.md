@@ -48,6 +48,17 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Fixed
+- **A `.agentum.yaml` that exists only in the working copy reads as absence,
+  and a config drift now pauses the run instead of failing it.** Before this,
+  `FileAtCommit` detected a missing path by matching git's English "does not
+  exist" text, so git's "exists on disk, but not in ..." answer surfaced as a
+  hard git failure and failed the run. Absence is now decided by the commit's
+  tree (`ls-tree`, exit-code based, locale- and working-copy-independent). On
+  top of that, every start and continuation compares the checkout's
+  `.agentum.yaml` with the pinned `base_commit` version by hash and stops with
+  `project_config_drift` before any invocation — the run never substitutes
+  the working copy's config; commit it and start a new run to adopt it.
+  Nothing to do for projects whose checkout matches their base.
 - **A failed run keeps its worktree.** Before this, a run moving to `failed`
   enqueued a teardown job that ran `git worktree remove --force`, destroying
   any uncommitted agent work exactly when a person would want to inspect it.
