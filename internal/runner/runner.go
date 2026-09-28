@@ -281,6 +281,16 @@ func (runner *Runner) HandleContinue(ctx context.Context, job sqlc.Job) error {
 	return runner.drive(ctx, job)
 }
 
+// HandleAskToEdit serves the "ask_to_edit" job kind: re-enter the approval
+// stage with the human's remarks. The job's payload is the same typed
+// Continuation shape a continue job carries, so the remarks ride the same
+// Task-section channel — delivered to the resumed planner session alone,
+// never to the stages after it. A revised plan is a new revision needing its
+// own approval; nothing here grants or presumes one.
+func (runner *Runner) HandleAskToEdit(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
 // HandleAdvance serves the "advance" job kind: re-enter the loop past a gate
 // by resolving the current stage's transition.
 func (runner *Runner) HandleAdvance(ctx context.Context, job sqlc.Job) error {
@@ -1063,14 +1073,16 @@ type continuationFault struct {
 	cause      error
 }
 
-// decodeContinuation decodes the user text off a continue job's payload. Jobs
-// of every other kind carry no user text — their payloads are {} and stay
-// uninterpreted. A job whose payload is empty, {}, or null continues without
-// text, exactly as a pre-payload job row did; a non-empty payload of an
-// unknown shape is an error, not a dropped key, so an old job written by other
-// code cannot silently change meaning.
+// decodeContinuation decodes the user text off a continue or ask_to_edit
+// job's payload. Jobs of every other kind carry no user text — their payloads
+// are {} and stay uninterpreted. A job whose payload is empty, {}, or null
+// continues without text, exactly as a pre-payload job row did; a non-empty
+// payload of an unknown shape is an error, not a dropped key, so an old job
+// written by other code cannot silently change meaning. For ask_to_edit the
+// empty form is unreachable in practice (the API refuses a blank text), and
+// the run simply resumes the planner without remarks if it ever arrives.
 func decodeContinuation(job sqlc.Job) (taskinput.Continuation, *continuationFault) {
-	if job.Kind != "continue" {
+	if job.Kind != "continue" && job.Kind != "ask_to_edit" {
 		return taskinput.Continuation{}, nil
 	}
 	continuation, parseErr := taskinput.ParseContinuation(job.Payload)
@@ -1555,11 +1567,14 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 			return record.CurrentStage.String, "", nil, nil
 		}
 		return runPack.Entry, "", nil, nil
-	case "continue", "reconcile":
+	case "continue", "reconcile", "ask_to_edit":
 		// Resume the current stage from its captured session id
 		// (non-destructive). The reconcile job enters here too: the human's
 		// recovery decision named the tree state, and the resume continues
-		// from whatever the decision left in place.
+		// from whatever the decision left in place. The ask_to_edit job
+		// resumes the PLANNER's session — the run sits at the approval
+		// stage, so "the current stage" is the planner by construction, and
+		// the remarks ride the continuation channel to it alone.
 		latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
 			RunID: record.ID, TenantID: record.TenantID,
 		})

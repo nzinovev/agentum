@@ -10,6 +10,17 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **`ask-to-edit` answers a plan gate with Request changes.** Before this, a
+  remark on a plan had nowhere to go: `continue` refuses `paused_gate`, so
+  the only answers were approve or reject. `POST .../ask-to-edit` with
+  `{"text": remarks}` re-runs the planner's session with the remarks in its
+  Task section; the revised plan is a new revision that needs its own
+  approval, and nothing else about the request (title, description,
+  overrides) changes. Valid only at the pack's plan approval stage before the
+  first `source_write` grant; bounded by `budgets.ask_to_edit` (the shipped
+  backend-development pack now allows 3 per run; set 0 to disable). A spent
+  budget answers `409 edit_budget_exhausted`, and the new action rides
+  `run:ask-to-edit`.
 - **Explicit recovery for a run whose worktree holds uncommitted work.** A
   resumed run that finds uncommitted changes no longer wipes them
   automatically: it pauses with `worktree_uncommitted_changes` (the

@@ -63,3 +63,13 @@ SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running';
 SELECT count(*)::int
 FROM jobs
 WHERE run_id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') AND id <> $3;
+
+-- name: CountJobsOfKindForRun :one
+-- How many jobs of one kind a run has ever been given. Backs the ask-to-edit
+-- budget: every accepted request changes enqueues exactly one job of its kind
+-- inside the accepting transaction, so the job count IS the spent budget —
+-- durable, restart-safe, and immune to double-counting a retried HTTP call
+-- (a refused request enqueues nothing).
+SELECT count(*)::int
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND kind = $3;

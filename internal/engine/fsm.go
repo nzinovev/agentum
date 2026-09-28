@@ -43,8 +43,9 @@ const (
 	EventStopOpenQ      RunEvent = "stop_open_questions"
 	EventStopGate       RunEvent = "stop_gate"
 	EventStopUser       RunEvent = "stop_user"
-	EventContinue       RunEvent = "continue" // resume an open-questions or user-stop pause
-	EventAdvance        RunEvent = "advance"  // pass a gate → next stage runs
+	EventContinue       RunEvent = "continue"    // resume an open-questions or user-stop pause
+	EventAdvance        RunEvent = "advance"     // pass a gate → next stage runs
+	EventAskToEdit      RunEvent = "ask_to_edit" // request changes at a plan gate → the planner re-runs with the remarks
 	EventReachFinalGate RunEvent = "reach_final_gate"
 	EventApprove        RunEvent = "approve" // final approval → commit memory, then done
 	EventFail           RunEvent = "fail"
@@ -75,8 +76,9 @@ var transitions = map[RunState]map[RunEvent]RunState{
 		EventCancel:   StateCancelled,
 	},
 	StatePausedGate: {
-		EventAdvance: StateRunning, // next stage is a fresh invocation
-		EventCancel:  StateCancelled,
+		EventAdvance:   StateRunning, // next stage is a fresh invocation
+		EventAskToEdit: StateRunning, // request changes: the approval stage re-runs with the remarks
+		EventCancel:    StateCancelled,
 	},
 	StateAwaitingFinalReview: {
 		EventApprove: StateDone, // memory commits at run-done

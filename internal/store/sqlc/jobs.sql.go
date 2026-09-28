@@ -71,6 +71,30 @@ func (q *Queries) CompleteJob(ctx context.Context, id int64) error {
 	return err
 }
 
+const countJobsOfKindForRun = `-- name: CountJobsOfKindForRun :one
+SELECT count(*)::int
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND kind = $3
+`
+
+type CountJobsOfKindForRunParams struct {
+	RunID    string `json:"run_id"`
+	TenantID string `json:"tenant_id"`
+	Kind     string `json:"kind"`
+}
+
+// How many jobs of one kind a run has ever been given. Backs the ask-to-edit
+// budget: every accepted request changes enqueues exactly one job of its kind
+// inside the accepting transaction, so the job count IS the spent budget —
+// durable, restart-safe, and immune to double-counting a retried HTTP call
+// (a refused request enqueues nothing).
+func (q *Queries) CountJobsOfKindForRun(ctx context.Context, arg CountJobsOfKindForRunParams) (int32, error) {
+	row := q.db.QueryRowContext(ctx, countJobsOfKindForRun, arg.RunID, arg.TenantID, arg.Kind)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countRunningJobsForRun = `-- name: CountRunningJobsForRun :one
 SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running'
 `
