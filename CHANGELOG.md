@@ -29,6 +29,14 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Fixed
+- **A `text` on `POST .../continue` now reaches the resumed invocation.**
+  Before this, the endpoint answered `200` and stored the request body in the
+  continue job's payload, but the runner never read it, so an answer to an
+  open question never reached the agent. The body is optional: an empty body,
+  `{}`, `null`, or a whitespace-only `text` continues exactly as before, and
+  existing callers do nothing. A malformed or over-budget body is a `400`, a
+  credential-shaped `text` a `422`, and a `text` with no captured session a
+  `409`. (#44)
 - **The model-check registry is tenant-scoped.** Before this, keys were keyed
   by the bare header and check reads by the bare id, so a second tenant could
   hit a foreign key's `409`, receive a foreign check on a same-body replay,

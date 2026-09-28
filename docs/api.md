@@ -315,7 +315,7 @@ The three gate **actions** from §3.4:
 #### Continue request
 
 ```json
-{ "text": "Используем PostgreSQL 17. Новую таблицу создавать не нужно." }
+{ "text": "Use PostgreSQL 17. No new table is needed." }
 ```
 
 The body is optional in full: an empty body, `{}`, `null`, and an absent or
