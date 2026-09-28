@@ -186,6 +186,9 @@ happened.
 | the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
+| `base_ref` does not resolve to a commit in the pinned checkout | `stop_user` | `paused_user_stop` | `base_ref_unresolvable` |
+| a publishable run's base could not be verified against the publication target branch (no configured branch and a non-branch `base_ref`, or the remote-tracking comparison point is missing) | `stop_user` | `paused_user_stop` | `base_target_unverifiable` |
+| a publishable run's base carries commits the publication target branch does not have (e.g. a developer branch's unpushed commits) | `stop_user` | `paused_user_stop` | `base_not_on_target` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
 ### Conditional transitions and the fix loop
@@ -493,8 +496,21 @@ helpers, fsmonitor, redirects, and recursive pushes during delivery.
 
 The destination is frozen before push. Retries retain the same provider,
 repository, base branch, and `agentum/<run-id>` remote branch even if the local
-remote changes. Git verifies the full result SHA and pushes that SHA with a
-fixed refspec. No force push or merge operation is available.
+remote changes — the base branch never changes independently of the run's
+pinned base without passing the ancestry check below. Git verifies the full
+result SHA and pushes that SHA with a fixed refspec. No force push or merge
+operation is available.
+
+Before the push, the publisher reads the target base branch's current head
+from the provider and verifies the result commit contains it. A head the
+result does not contain means the pull request would carry foreign commits or
+reverse the branch's newer work: the attempt is refused `base_diverged`
+(blocked — a person starts a new run from the moved branch), and the run and
+its result are untouched. A head the local checkout cannot compare (never
+fetched) refuses `base_unverifiable` (retryable after a fetch). At run start
+the runner makes the same check against the remote-tracking ref, so an
+off-target base stops the run before the worktree exists (`base_not_on_target`
+and its siblings in the stop table above).
 
 ### Description and retries
 
@@ -559,8 +575,9 @@ cleanup is post-terminal disposal.
 Every run records its git lineage explicitly:
 
 - **`base_ref`** (input): the ref the run builds against — branch / tag / SHA /
-  `HEAD`. Set at `POST /runs`, defaults to `HEAD`. The input record is
-  reproducible from this.
+  `HEAD` as an explicit choice. Set at `POST /runs`, required: an absent value
+  is a `400 bad_input`, and nothing defaults silently to the checkout's
+  current branch. The input record is reproducible from this.
 - **`base_commit`** (anchor): the full SHA `base_ref` resolved to, captured
   **once** before the worktree is created (`SetBaseCommit` is a `WHERE
   base_commit IS NULL` no-op after the first capture). The worktree branches

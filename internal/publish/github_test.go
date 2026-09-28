@@ -6,16 +6,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strings"
 	"testing"
 )
 
 func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher, Delivery) {
+	return githubFixtureWithBranch(test, handler, strings.Repeat("a", 40))
+}
+
+// githubFixtureWithBranch is githubFixture with the base-branch head the
+// publisher's pre-push lookup reports; the default is the delivery's own
+// result commit, which short-circuits the ancestry comparison.
+func githubFixtureWithBranch(test *testing.T, handler http.HandlerFunc, branchHead string) (*githubPublisher, Delivery) {
 	test.Helper()
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewTLSServer(routeBaseBranchAnswers(handler, branchHead))
 	test.Cleanup(server.Close)
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -39,6 +48,23 @@ func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher,
 	digest := sha256.Sum256(body)
 	delivery.Description = DescriptionRef{Text: string(body), RevisionID: "stored-description", ContentHash: hex.EncodeToString(digest[:])}
 	return publisher, delivery
+}
+
+// routeBaseBranchAnswers wraps a test handler so the base-branch head lookup
+// the publisher performs before pushing answers with branchHead, without
+// every scenario handler growing a branch route. Only the delivery's own
+// base branch (main) is intercepted: ResolveTarget probes candidate branches
+// through the same operation, and those must reach the scenario handler. A
+// branchHead equal to the delivery's result commit short-circuits the
+// ancestry comparison.
+func routeBaseBranchAnswers(handler http.HandlerFunc, branchHead string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.EscapedPath() == "/repos/owner/repo/branches/main" {
+			_, _ = w.Write([]byte(`{"commit":{"sha":"` + branchHead + `"}}`))
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func writePullRequest(w http.ResponseWriter, state string, draft bool) {
@@ -477,4 +503,150 @@ func TestGitHubDraftRejectionPersistsUntilDraftObserved(test *testing.T) {
 	if creates != 1 || updates != 2 {
 		test.Fatalf("writes creates=%d updates=%d", creates, updates)
 	}
+}
+
+// TestGitHubBaseVerification pins the pre-push base check: the pull request
+// never leaves the host when the target branch's current head is not part of
+// the result's history. A diverged branch refuses blocked (a person decides),
+// an unverifiable comparison refuses retryable (fetch and retry), a missing
+// branch keeps its own reason, and a contained head publishes.
+func TestGitHubBaseVerification(test *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		// branchHead the provider reports; empty means 404.
+		branchHead string
+		// ancestry: verified / unverifiable flags returned by the scripted
+		// comparator; skip runs no comparator and relies on the short-circuit.
+		runComparator bool
+		verified      bool
+		unverifiable  bool
+		wantCode      ReasonCode
+		wantPushed    bool
+	}{
+		{name: "branch head equals result", branchHead: strings.Repeat("a", 40), wantCode: "", wantPushed: true},
+		{name: "branch head contained in result", branchHead: strings.Repeat("c", 40), runComparator: true, verified: true, wantCode: "", wantPushed: true},
+		{name: "branch diverged from result", branchHead: strings.Repeat("c", 40), runComparator: true, wantCode: ReasonBaseDiverged},
+		{name: "comparison unverifiable locally", branchHead: strings.Repeat("c", 40), runComparator: true, unverifiable: true, wantCode: ReasonBaseUnverifiable},
+		{name: "base branch missing at provider", branchHead: "", wantCode: ReasonBaseBranchUnknown},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			pushes := 0
+			// Minimal PR flow for the scenarios that pass the base check.
+			publisher, delivery := githubFixtureWithBranch(test, func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					_, _ = w.Write([]byte("[]"))
+				case http.MethodPost:
+					w.WriteHeader(http.StatusCreated)
+					writePullRequest(w, "open", true)
+				}
+			}, scenario.branchHead)
+			if scenario.branchHead == "" {
+				// githubFixtureWithBranch always answers 200; replace the
+				// whole client routing with a 404 for the branch lookup.
+				publisher.client = &http.Client{Transport: notFoundBranches{}}
+			}
+			publisher.push = func(context.Context, Delivery, string) error { pushes++; return nil }
+			if scenario.runComparator {
+				verified, unverifiable := scenario.verified, scenario.unverifiable
+				publisher.compareAncestry = func(context.Context, string, string, string) (bool, bool, error) {
+					return verified, unverifiable, nil
+				}
+			}
+			_, err := publisher.Publish(test.Context(), delivery)
+			if scenario.wantCode == "" {
+				if err != nil || pushes != 1 {
+					test.Fatalf("err=%v pushes=%d", err, pushes)
+				}
+				return
+			}
+			if code, _ := Classify(err); code != scenario.wantCode {
+				test.Fatalf("code=%s want=%s err=%v", code, scenario.wantCode, err)
+			}
+			if pushes != 0 {
+				test.Fatal("a refused base verification still pushed")
+			}
+		})
+	}
+}
+
+// notFoundBranches answers every request with 404, standing in for a
+// provider whose base branch is gone.
+type notFoundBranches struct{}
+
+func (transport notFoundBranches) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found",
+		Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+}
+
+// TestCheckoutAncestryRealGit drives the real git comparator against a
+// throwaway repository: contained commits verify, divergent ones do not, and
+// an object the checkout never saw reports unverifiable rather than guessing.
+func TestCheckoutAncestryRealGit(test *testing.T) {
+	repo := test.TempDir()
+	if err := initBareRepoWithCommit(test, repo); err != nil {
+		test.Fatal(err)
+	}
+	base := gitHead(test, repo)
+	// A child commit on top of base.
+	if err := gitRun(test, repo, "commit", "--allow-empty", "-m", "child"); err != nil {
+		test.Fatal(err)
+	}
+	child := gitHead(test, repo)
+	// A sibling line: reset back and commit a different child.
+	if err := gitRun(test, repo, "reset", "--hard", base); err != nil {
+		test.Fatal(err)
+	}
+	if err := gitRun(test, repo, "commit", "--allow-empty", "-m", "sibling"); err != nil {
+		test.Fatal(err)
+	}
+	sibling := gitHead(test, repo)
+
+	verified, unverifiable, err := checkoutAncestry(test.Context(), repo, base, child)
+	if err != nil || unverifiable || !verified {
+		test.Fatalf("base→child: verified=%v unverifiable=%v err=%v", verified, unverifiable, err)
+	}
+	verified, unverifiable, err = checkoutAncestry(test.Context(), repo, sibling, child)
+	if err != nil || unverifiable || verified {
+		test.Fatalf("sibling→child must be a clean no: verified=%v unverifiable=%v err=%v", verified, unverifiable, err)
+	}
+	unknown := strings.Repeat("7", 40)
+	_, unverifiable, err = checkoutAncestry(test.Context(), repo, unknown, child)
+	if err == nil || !unverifiable {
+		test.Fatalf("unknown object must report unverifiable: unverifiable=%v err=%v", unverifiable, err)
+	}
+}
+
+// initBareRepoWithCommit creates a git repository with one commit and the
+// test identity configured, reusing the repo directory as the checkout.
+func initBareRepoWithCommit(test *testing.T, dir string) error {
+	test.Helper()
+	if err := gitRun(test, dir, "init", "--quiet"); err != nil {
+		return err
+	}
+	if err := gitRun(test, dir, "config", "user.email", "t@example.com"); err != nil {
+		return err
+	}
+	if err := gitRun(test, dir, "config", "user.name", "t"); err != nil {
+		return err
+	}
+	return gitRun(test, dir, "commit", "--allow-empty", "-m", "base")
+}
+
+func gitRun(test *testing.T, dir string, args ...string) error {
+	test.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %s: %v (%s)", args[0], err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func gitHead(test *testing.T, dir string) string {
+	test.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		test.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }

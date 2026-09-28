@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +49,9 @@ type githubPublisher struct {
 	client        *http.Client
 	push          func(context.Context, Delivery, string) error
 	checkCheckout func(context.Context, string) error
+	// compareAncestry answers whether ancestor is reachable from descendant
+	// in the run's checkout. Seam-injected so tests script the git outcome.
+	compareAncestry func(ctx context.Context, checkout, ancestor, descendant string) (verified bool, unverifiable bool, err error)
 }
 
 func newGitHubPublisher(options RegistryOptions) *githubPublisher {
@@ -55,9 +61,10 @@ func newGitHubPublisher(options RegistryOptions) *githubPublisher {
 	}
 	return &githubPublisher{
 		credential: options.Credential, probeTarget: options.ProbeTarget, apiBase: strings.TrimRight(apiBase, "/"),
-		client:        &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		push:          gitPush,
-		checkCheckout: checkRepositoryConfig,
+		client:          &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		push:            gitPush,
+		checkCheckout:   checkRepositoryConfig,
+		compareAncestry: checkoutAncestry,
 	}
 }
 
@@ -219,6 +226,14 @@ func (publisher *githubPublisher) Publish(ctx context.Context, delivery Delivery
 	if err != nil {
 		return result, err
 	}
+	// Re-verify the base against the provider's CURRENT branch head before
+	// anything leaves the host: the run pinned its base at start, and the
+	// target branch may have moved since. A pull request whose result does
+	// not contain the branch head would carry foreign commits or reverse the
+	// branch's newer work — a diagnostic refusal, never a published PR.
+	if err := publisher.verifyBaseCurrent(ctx, delivery, token); err != nil {
+		return result, err
+	}
 	if err := publisher.push(ctx, delivery, token); err != nil {
 		return result, err
 	}
@@ -263,6 +278,71 @@ func (publisher *githubPublisher) Publish(ctx context.Context, delivery Delivery
 		return result, refuse(ReasonDraftUnsupported)
 	}
 	return result, nil
+}
+
+// verifyBaseCurrent reads the target base branch's current head from the
+// provider and verifies the result commit contains it, so the pull request
+// adds the run's commits on top of the branch as it stands now — not on top
+// of a stale snapshot with the branch's newer work silently reversed. The
+// run and its result are untouched on refusal; the attempt is recorded and
+// the diagnostic names the action.
+func (publisher *githubPublisher) verifyBaseCurrent(ctx context.Context, delivery Delivery, token string) error {
+	status, response, requestErr := publisher.request(ctx, opBranch, delivery.Target, delivery.Target.BaseBranch, nil, nil, token)
+	if requestErr != nil {
+		return requestErr
+	}
+	if status == http.StatusNotFound {
+		return refuse(ReasonBaseBranchUnknown)
+	}
+	if status != http.StatusOK {
+		return responseRefusal(status, response)
+	}
+	var branch struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if json.Unmarshal(response, &branch) != nil || !commitSHA.MatchString(branch.Commit.SHA) {
+		return refuse(ReasonBaseBranchUnknown)
+	}
+	if branch.Commit.SHA == delivery.ResultCommit {
+		// The branch already sits at the result (a previous push of this very
+		// delivery): nothing foreign can ride along.
+		return nil
+	}
+	verified, unverifiable, ancestryErr := publisher.compareAncestry(ctx, delivery.Project.CheckoutPath, branch.Commit.SHA, delivery.ResultCommit)
+	if ancestryErr != nil {
+		return refuse(ReasonBaseUnverifiable)
+	}
+	if unverifiable {
+		return refuse(ReasonBaseUnverifiable)
+	}
+	if !verified {
+		return refuse(ReasonBaseDiverged)
+	}
+	return nil
+}
+
+// checkoutAncestry answers, from the run's pinned checkout, whether ancestor
+// is reachable from descendant. unverifiable=true marks the case where the
+// comparison could not RUN (the ancestor object was never fetched locally) —
+// a fetch and a retry clear it, unlike a disproven ancestry.
+func checkoutAncestry(ctx context.Context, checkout, ancestor, descendant string) (verified bool, unverifiable bool, err error) {
+	command := exec.CommandContext(ctx, "git", "-C", checkout, "merge-base", "--is-ancestor", ancestor, descendant)
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1"}
+	output, runErr := command.CombinedOutput()
+	if runErr == nil {
+		return true, false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
+		// A clean "no": both objects resolved, ancestry disproven.
+		return false, false, nil
+	}
+	// Any other failure — most commonly the branch head being an object this
+	// checkout never fetched. Not a divergence verdict; not a silent pass.
+	return false, true, fmt.Errorf("git merge-base --is-ancestor %s %s: %v (%s)",
+		ancestor, descendant, runErr, strings.TrimSpace(string(output)))
 }
 
 func (publisher *githubPublisher) findPullRequest(ctx context.Context, delivery Delivery, token string) (githubPullRequest, bool, error) {

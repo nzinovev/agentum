@@ -56,6 +56,17 @@ const (
 	// ReasonCommitMismatch: the commit the checks verified is not the commit
 	// pinned as the run's result, or no result commit is pinned at all.
 	ReasonCommitMismatch ReasonCode = "commit_mismatch"
+	// ReasonBaseDiverged: the publication target branch's current head is not
+	// part of the run's result history, so the pull request would carry
+	// foreign commits or reverse the target branch's newer work. A person
+	// decides: rebase onto the moved branch with a new run, or move the
+	// target. Retrying the same result reproduces the divergence.
+	ReasonBaseDiverged ReasonCode = "base_diverged"
+	// ReasonBaseUnverifiable: the target branch's head is known, but the
+	// local checkout cannot compare it against the result commit (the head
+	// object was never fetched). A fetch in the checkout and a retry clear
+	// it, so the attempt is re-runnable, not reconfigured.
+	ReasonBaseUnverifiable ReasonCode = "base_unverifiable"
 	// ReasonSecretInDescription: the rendered pull request body tripped the
 	// secret scanner under the reject policy.
 	ReasonSecretInDescription ReasonCode = "secret_in_description"
@@ -96,6 +107,8 @@ var allReasonCodes = []ReasonCode{
 	ReasonPullRequestClosed,
 	ReasonChecksNotPassed,
 	ReasonCommitMismatch,
+	ReasonBaseDiverged,
+	ReasonBaseUnverifiable,
 	ReasonSecretInDescription,
 	ReasonProviderUnknown,
 	ReasonProviderError,
@@ -116,6 +129,7 @@ func (code ReasonCode) Retryable() bool {
 		ReasonCredentialsMissing,
 		ReasonCredentialsRejected,
 		ReasonNetworkUnreachable,
+		ReasonBaseUnverifiable,
 		ReasonProviderError:
 		return true
 	default:
@@ -192,6 +206,8 @@ func SafeRefusal(code ReasonCode) (ReasonCode, string) {
 		ReasonPullRequestClosed:    "the pull request is closed or merged",
 		ReasonChecksNotPassed:      "mandatory check evidence is missing or failed",
 		ReasonCommitMismatch:       "the result commit is missing or differs from the checked commit",
+		ReasonBaseDiverged:         "the publication target branch has moved beyond the run's result history; the pull request would carry foreign commits",
+		ReasonBaseUnverifiable:     "the publication target branch's head could not be compared locally; fetch the target branch and retry",
 		ReasonSecretInDescription:  "the pull request description contains credential material",
 		ReasonProviderUnknown:      "the configured publication provider is unknown",
 		ReasonProviderError:        "the publication attempt could not be completed",

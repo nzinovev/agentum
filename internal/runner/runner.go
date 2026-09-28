@@ -249,6 +249,14 @@ type PublicationHook struct {
 	// defers the choice to the registry's default entry at attempt time —
 	// the same id an enabled-but-unconfigured gate ends up publishing under.
 	Provider string
+	// Remote is the git remote whose tracking ref is the start-time
+	// comparison point for the publication target branch (default "origin").
+	Remote string
+	// BaseBranch is the configured publication target branch. Empty defers
+	// the choice to the provider's default-branch resolution at attempt
+	// time; for the start-time ancestry check the run's own base_ref names
+	// the candidate when it is a plain branch name.
+	BaseBranch string
 }
 
 // The per-kind job entries. Dispatch lives in the queue's kind table, not
@@ -866,7 +874,24 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// the fact.
 	record, err = runner.resolveBaseCommit(ctx, record, checkoutPath)
 	if err != nil {
-		return runner.failRun(ctx, record, err)
+		// An unresolvable base_ref is a liftable condition — the branch was
+		// never fetched, or the name is wrong — not a run defect. Pause it:
+		// fixing the checkout and continuing re-attempts the resolution;
+		// failing here would strand a run whose only fault is the operator's
+		// fetch state.
+		runner.log.Warn("run base_ref unresolvable; pausing", "run", record.ID, "error", err)
+		runner.emit(ctx, record, EvRunBaseOffTarget, map[string]any{
+			"cause": "base_ref_unresolvable", "base_ref": record.BaseRef, "reason": err.Error(),
+		})
+		pauseErr := runner.applyPauseDecision(ctx, record, Decision{
+			Action:     ActionPause,
+			FSMEvent:   engine.EventStopUser,
+			StopReason: "base_ref_unresolvable",
+		}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
+		if pauseErr != nil {
+			return runner.failRun(ctx, record, pauseErr)
+		}
+		return nil
 	}
 	baseCommit := record.BaseCommit.String
 
@@ -876,6 +901,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// always applies the base_commit version.
 	if !worktree.DirPresent(worktree.PathFor(checkoutPath, record.ID)) {
 		runner.recordProjectConfigAtStart(ctx, record, checkoutPath, baseCommit)
+	}
+
+	// A publishable run's base must belong to the publication target
+	// branch's history, checked against the last verifiable comparison point
+	// (the remote-tracking ref). Without it, a run started on a developer's
+	// local branch silently carried that branch's unpushed commits into the
+	// eventual pull request. Unverifiable or off-branch stops the run before
+	// the worktree is created — never a silent fallback to HEAD.
+	if basePause := runner.pauseOnOffTargetBase(ctx, record, runPack, checkoutPath, baseCommit); basePause {
+		return nil
 	}
 
 	// A repository that moved on disk carries its worktrees with it (they
@@ -2642,6 +2677,16 @@ const (
 	// The run does not stop: it applies the base_commit version, and the
 	// manifest's context.project_config records the same comparison.
 	EvProjectConfigDrift = "run.project_config_drift"
+	// EvRunBaseOffTarget records that the run paused because its base could
+	// not be verified against the publication target branch: the base_ref
+	// did not resolve, the comparison point (remote-tracking ref) is
+	// missing, or the base carries commits the target branch does not
+	// (stop_reason base_ref_unresolvable / base_target_unverifiable /
+	// base_not_on_target). Carries the cause, the ref or base_commit it
+	// names, and the action that lifts the pause. A run's pull request must
+	// carry only its own commits, so the check runs before the worktree is
+	// created and again on every continuation.
+	EvRunBaseOffTarget = "run.base_off_target"
 	// EvWorktreeRecoveryRequired records that the runner paused because the
 	// crashed run's worktree holds uncommitted changes (stop_reason
 	// worktree_uncommitted_changes). Carries the HEAD, the checkpoint the tree

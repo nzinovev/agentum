@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
@@ -146,6 +147,16 @@ func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
 	if err != nil {
 		return runCreateRequest{}, taskinput.Request{}, err
 	}
+	// base_ref is required and explicit. The old silent default to HEAD made
+	// every run start from whatever the operator's checkout happened to be
+	// on — a developer branch's unpushed commits rode into the run's lineage
+	// and later into its pull request. "HEAD" itself stays a legal EXPLICIT
+	// choice (run from the current local branch); only the silent one is
+	// gone. The column default remains as a backstop for non-API writers.
+	if strings.TrimSpace(req.BaseRef) == "" {
+		return runCreateRequest{}, taskinput.Request{}, errors.New(
+			"base_ref is required: name the target branch the run builds on (e.g. refs/remotes/origin/main) or the commit it starts from; HEAD only as an explicit choice to run from the current local branch")
+	}
 	typed := taskinput.Request{
 		Title:       req.Title,
 		Description: req.Description,
@@ -225,16 +236,11 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// title is deliberately absent here: parseRunCreate already rejected a
 	// blank one through taskinput.Validate, with a message naming the field.
+	// base_ref is likewise already required by parseRunCreate — the rule
+	// lives with the other pure body rules, testable without a database.
 	if req.ProjectID == "" || req.PipelinePack == "" {
 		writeError(w, http.StatusBadRequest, codeBadInput, "project_id and pipeline_pack are required")
 		return
-	}
-	// base_ref defaults to HEAD at the call site so the SQL stays
-	// inference-clean (sqlc emits a plain string param). The column default is
-	// the backstop; this makes the intent explicit and the recorded input
-	// reproducible.
-	if req.BaseRef == "" {
-		req.BaseRef = "HEAD"
 	}
 	canonicalOverrides, marshalErr := typed.Overrides.Marshal()
 	if marshalErr != nil {
