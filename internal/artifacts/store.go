@@ -186,6 +186,14 @@ func (sqlStore *SQLStore) commitRevision(
 	defer func() { _ = tx.Rollback() }()
 
 	qtx := sqlStore.queries.WithTx(tx)
+	// Serialize against a gate answer on the same run: it updates the run row
+	// before reading the revision it binds to, so this write lands wholly
+	// before that read or after the answer commits — never in between.
+	if lockErr := qtx.LockRunForArtifactWrite(ctx, sqlc.LockRunForArtifactWriteParams{
+		ID: params.RunID, TenantID: params.TenantID,
+	}); lockErr != nil {
+		return Revision{}, fmt.Errorf("artifacts: lock run: %w", lockErr)
+	}
 	prior, hasPrior, priorErr := lockCurrent(ctx, qtx, params)
 	if priorErr != nil {
 		return Revision{}, priorErr

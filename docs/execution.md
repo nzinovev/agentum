@@ -183,7 +183,7 @@ happened.
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
 | resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
 | a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_gate` | `paused_gate` (pinned to the **approval stage**, not the refused stage) | `plan_not_approved` |
-| the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
+| the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval, or the approval bound no revision and a plan revision exists now) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
 | `base_ref` does not resolve to a commit in the pinned checkout | `stop_user` | `paused_user_stop` | `base_ref_unresolvable` |

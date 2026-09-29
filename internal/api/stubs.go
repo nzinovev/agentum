@@ -25,19 +25,14 @@ const (
 // --- Gate actions (§3.2 stop conditions → continue semantics) ---
 //
 // continue / advance / cancel / approve are implemented in lifecycle.go (the
-// runner's flow controls). The remaining gate actions land with Epic 2.
+// runner's flow controls), and ask-to-edit — the plan-gate Request changes —
+// in ask_to_edit.go. The remaining gate action lands with Epic 2.
 
 // POST /api/v1/runs/{id}/invocations/{iid}/edit
 // Edit-and-approve: the human edits the artifact directly; the edit IS the
 // approval.
 func (api *API) handleInvocationEdit(w http.ResponseWriter, r *http.Request) {
 	notImplemented(w, epicGateActions, "POST /runs/{id}/invocations/{iid}/edit")
-}
-
-// POST /api/v1/runs/{id}/invocations/{iid}/ask-to-edit
-// Scoped agent-mediated edit; re-stops for review (recursive stop point).
-func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicGateActions, "POST /runs/{id}/invocations/{iid}/ask-to-edit")
 }
 
 // POST /api/v1/runs/{id}/invocations/{iid}/add-context

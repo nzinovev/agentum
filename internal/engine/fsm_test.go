@@ -33,6 +33,7 @@ func TestNext_LegalTransitions(t *testing.T) {
 		{StatePausedUserStop, EventCancel, StateCancelled},
 
 		{StatePausedGate, EventAdvance, StateRunning},
+		{StatePausedGate, EventAskToEdit, StateRunning},
 		{StatePausedGate, EventCancel, StateCancelled},
 
 		{StateAwaitingFinalReview, EventApprove, StateDone},

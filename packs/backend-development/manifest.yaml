@@ -13,7 +13,7 @@ pack:
     project-check list).
 memory: {reads: [project], writes: false}
 capabilities: [fs.read, fs.write, git.read, git.write, exec.bash]
-budgets: {fix_cycles: 2, ask_to_edit: 0}
+budgets: {fix_cycles: 2, ask_to_edit: 3}
 tiers: {default: strong}
 checks: {}
 entry: plan

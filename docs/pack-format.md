@@ -90,7 +90,7 @@ stages:
 | `memory.writes` | bool | Whether the pack's agents may emit memory entries. |
 | `capabilities` | list | Pack-wide MCP capability declarations. A stage narrows to the pack∩stage subset (enforcement comes later). |
 | `budgets.fix_cycles` | int | Per-pipeline fix-loop cap, ≥ 0. Replaces a hardcoded cycle count. |
-| `budgets.ask_to_edit` | int | Per-pipeline scoped-edit recursion cap, ≥ 0. |
+| `budgets.ask_to_edit` | int | Per-run plan-revision cap, ≥ 0: how many `ask-to-edit` (Request changes) requests a run accepts at its plan gate. `0` disables revision. Each accepted request re-runs the planner with the remarks; the revised plan needs its own approval. |
 | `tiers.default` | string | Fallback tier name. Resolves through the BYO-models config to a model id and an optional variant (`docs/models.md`). |
 | `checks` | object | Optional. Adds project checks to every run of this pack **by name only** — `required` makes a check mandatory (failure blocks delivery), `optional` runs it without blocking. Names must exist in the project registry (`.agentum.yaml`); `checks.Resolve` rejects unknown names at run time. A pack can never supply a command, remove a baseline check, or weaken an already-mandatory check. |
 | `entry` | string | The stage the run starts at. Must be defined in `stages`. |

@@ -61,6 +61,10 @@ const (
 	// publication can deliver — the review gate with its pinned result
 	// commit, or the done state after approval.
 	codePublicationNotReady = "publication_not_ready"
+	// codeEditBudgetExhausted: the run's plan-revision budget (the pack's
+	// budgets.ask_to_edit) is spent; further remarks need a new run. 409 —
+	// the run exists and the answer names the exhausted resource.
+	codeEditBudgetExhausted = "edit_budget_exhausted"
 )
 
 // writeError emits a structured error response.

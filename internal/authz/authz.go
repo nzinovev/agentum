@@ -100,6 +100,13 @@ const (
 	// verb does.
 	ActionRunContinue = "run:continue"
 
+	// ActionRunAskToEdit requests changes at a plan gate: the remarks ride
+	// the planner's next attempt, and the revised plan needs its own
+	// approval. Separate from continue (which never re-runs a stage) and
+	// from advance (which approves): the text reaches a model and spends a
+	// per-run budget.
+	ActionRunAskToEdit = "run:ask-to-edit"
+
 	// ActionRunAdvance and its approve/reject/cancel siblings are the
 	// human-gate verbs. Each is its own action rather than one collapsed
 	// "run:write": approving a result, rejecting it, and aborting a run are

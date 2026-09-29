@@ -395,3 +395,24 @@ func (q *Queries) LockCurrentArtifactRevisionForName(ctx context.Context, arg Lo
 	)
 	return i, err
 }
+
+const lockRunForArtifactWrite = `-- name: LockRunForArtifactWrite :exec
+SELECT id FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE
+`
+
+type LockRunForArtifactWriteParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// Take a share lock on the run row before writing one of its artifact
+// revisions. A gate answer updates the run row before it reads the plan
+// revision it binds to, so a concurrent write either commits before that read
+// (the answer sees it) or waits until the answer commits. Without it a first
+// create has no revision row to lock and can land between the read and the
+// commit. Share locks do not block each other: concurrent revision writes
+// serialize only on their own (run_id, name).
+func (q *Queries) LockRunForArtifactWrite(ctx context.Context, arg LockRunForArtifactWriteParams) error {
+	_, err := q.db.ExecContext(ctx, lockRunForArtifactWrite, arg.ID, arg.TenantID)
+	return err
+}

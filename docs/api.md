@@ -350,10 +350,10 @@ The three gate **actions** from §3.4:
 | Method | Path | Status | Action |
 |---|---|---|---|
 | `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job). Optional body `{"text": …}` carries new user text to the resumed session — see [Continue request](#continue-request) |
-| `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job) |
+| `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job). At the pack's plan approval stage the advance IS the approval and takes `{"expected_revision_id": "<plan revision>"}` (the `X-Revision-Id` of the plan the human read): omitted while the plan has a revision → `428 precondition_missing`; no longer current → `409 conflict`; either way nothing is enqueued or approved. Elsewhere the body is optional. |
 | `POST` | `/runs/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → run done + memory commits. Pins `result_commit` at the gate. Idempotent. |
 | `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
-| `POST` | `/runs/{id}/invocations/{iid}/ask-to-edit` | stub | scoped agent-mediated edit; re-stops for review. Epic 2 |
+| `POST` | `/runs/{id}/invocations/{iid}/ask-to-edit` | ✅ | **Request changes at the plan gate**: body `{"text": "remarks", "target_revision_id": "<plan revision>"}` — `text` required, ≤ 32 KiB, credential-scanned → `422`; `target_revision_id` follows the same `428`/`409` rule as `advance` at the plan gate. Valid only at `paused_gate` on the pack's `source_write` approval stage before the first grant. The planner's session re-runs with the remarks in its Task section, the revised plan becomes a new revision needing its own approval, and the run pauses at the gate again. Bounded by the pack's `budgets.ask_to_edit`; a spent budget is `409 edit_budget_exhausted`. Requires `run:ask-to-edit`. |
 | `POST` | `/runs/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
 
 > `continue` / `advance` are implemented but operate on the **run**, not the
