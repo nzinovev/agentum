@@ -205,6 +205,16 @@ func (stale staleRevisionError) Error() string {
 		", the current revision is " + stale.current + "; read the current plan and answer again"
 }
 
+// revisionPreconditionMissingError is the in-tx form of the 428: the plan
+// gained a revision after the handler's read, and the request names none.
+type revisionPreconditionMissingError struct {
+	current string
+}
+
+func (missing revisionPreconditionMissingError) Error() string {
+	return "the plan revision is required at the plan gate (expected_revision_id on advance, target_revision_id on ask-to-edit); current: " + missing.current
+}
+
 // maxGateAnswerBodyBytes caps the advance body: one revision id. The cap is
 // transport hygiene only.
 const maxGateAnswerBodyBytes = 4096
@@ -251,7 +261,7 @@ func (api *API) requirePlanRevisionPrecondition(w http.ResponseWriter, r *http.R
 	}
 	if current.Valid {
 		writeError(w, http.StatusPreconditionRequired, codePreconditionMissing,
-			"the plan revision is required at the plan gate (expected_revision_id on advance, target_revision_id on ask-to-edit); current: "+current.String)
+			revisionPreconditionMissingError{current: current.String}.Error())
 		return false
 	}
 	return true
@@ -669,9 +679,14 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 			if revErr != nil {
 				return revErr
 			}
-			// Compared inside the tx: a revision written between the
-			// handler's read and this point (a human edit at the gate) must
-			// not receive an answer given to the one before it.
+			// Compared inside the tx, after applyTransition updated the run
+			// row: an artifact write takes a share lock on that row, so any
+			// plan revision either committed before this read or waits for
+			// this tx. The answer therefore binds to the revision current at
+			// commit — the handler's earlier read only picked 428 vs. 409.
+			if approval.expectedRevisionID == "" && revisionID.Valid {
+				return revisionPreconditionMissingError{current: revisionID.String}
+			}
 			if approval.expectedRevisionID != "" && revisionID.String != approval.expectedRevisionID {
 				return staleRevisionError{expected: approval.expectedRevisionID, current: revisionID.String}
 			}
@@ -750,6 +765,11 @@ func statusForTransition(w http.ResponseWriter, err error) {
 	var stale staleRevisionError
 	if errors.As(err, &stale) {
 		writeError(w, http.StatusConflict, codeConflict, stale.Error())
+		return
+	}
+	var missing revisionPreconditionMissingError
+	if errors.As(err, &missing) {
+		writeError(w, http.StatusPreconditionRequired, codePreconditionMissing, missing.Error())
 		return
 	}
 	var illegalErr *engine.ErrIllegalTransition

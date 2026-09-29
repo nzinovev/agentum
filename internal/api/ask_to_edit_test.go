@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +14,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"log/slog"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/dbtest"
+	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -405,4 +408,89 @@ func TestPlanGate_AnswersBindToTheirRevision(t *testing.T) {
 	if approval.ArtifactRevisionID.String != secondRevision {
 		t.Fatalf("approval bound to %q, want the revision the human named %q", approval.ArtifactRevisionID.String, secondRevision)
 	}
+}
+
+// TestPlanGate_RevisionWriteWaitsForGateAnswer pins the serialization a gate
+// answer relies on: while a transaction holds the run row — as the answer's
+// transition update does before it reads the plan revision — a plan write
+// waits, even a first create that has no revision row to lock. It lands only
+// after that transaction ends, never between the answer's read and commit.
+func TestPlanGate_RevisionWriteWaitsForGateAnswer(t *testing.T) {
+	t.Parallel()
+	harness := newAskToEditHarness(t, 3)
+	runID := harness.insertPlanGateRun(t, "paused_gate")
+
+	gateTx, err := harness.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gateTx.Rollback() }()
+	if _, err := gateTx.ExecContext(t.Context(), `UPDATE runs SET state = state WHERE id = $1`, runID); err != nil {
+		t.Fatalf("hold the run row: %v", err)
+	}
+
+	written := make(chan error, 1)
+	go func() {
+		_, putErr := harness.art.Put(context.Background(), artifacts.PutParams{
+			TenantID: continueTestTenant, UserID: continueTestUser, RunID: runID,
+			Name: "plan/plan.md", Kind: "file", Bytes: []byte("plan v1"), Actor: artifacts.ActorSystem,
+		})
+		written <- putErr
+	}()
+	select {
+	case putErr := <-written:
+		t.Fatalf("the plan write landed while the run row was held (err=%v)", putErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := gateTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case putErr := <-written:
+		if putErr != nil {
+			t.Fatalf("plan write after the gate transaction: %v", putErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the plan write never completed after the gate transaction ended")
+	}
+}
+
+// TestPlanGate_InTransactionPreconditionRefuses pins the in-transaction half of
+// the 428: a plan revision that appeared after the handler's own read (which
+// found none, so it let a request without a revision id through) is caught
+// inside the answer's transaction — no job, no approval, the gate unchanged.
+func TestPlanGate_InTransactionPreconditionRefuses(t *testing.T) {
+	t.Parallel()
+	harness := newAskToEditHarness(t, 3)
+	runID := harness.insertPlanGateRun(t, "paused_gate")
+	harness.putPlanRevision(t, runID, "plan written after the handler's read", "")
+
+	run, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := authz.Principal{TenantID: continueTestTenant, UserID: continueTestUser}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+runID+"/invocations/inv-fixture/advance", nil)
+	request = request.WithContext(authz.WithPrincipal(request.Context(), principal))
+	approval := planApproval{name: "plan", stage: "plan", artifact: "plan.md"}
+	_, resumeErr := harness.api.applyResume(request, run, engine.EventAdvance, "advance", nil,
+		gateDecisionPatch(run, principal, gateAdvance, decisionApproved), approval, principal)
+	var missing revisionPreconditionMissingError
+	if !errors.As(resumeErr, &missing) {
+		t.Fatalf("applyResume err = %v, want the in-transaction precondition refusal", resumeErr)
+	}
+	recorder := httptest.NewRecorder()
+	statusForTransition(recorder, resumeErr)
+	if recorder.Code != http.StatusPreconditionRequired {
+		t.Fatalf("status = %d, want 428", recorder.Code)
+	}
+	if count := harness.countJobsOfKind(t, runID, "advance"); count != 0 {
+		t.Fatalf("a refused answer enqueued %d advance job(s)", count)
+	}
+	if _, approvalErr := harness.queries.GetApproval(t.Context(), sqlc.GetApprovalParams{
+		TenantID: continueTestTenant, RunID: runID, Name: "plan",
+	}); approvalErr == nil {
+		t.Fatal("a refused answer recorded an approval")
+	}
+	harness.requireRunState(t, runID, "paused_gate")
 }

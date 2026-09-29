@@ -26,10 +26,13 @@ Once tagged releases begin, this project adheres to
   `target_revision_id` — the `X-Revision-Id` of the plan the human read.
   While the plan has a revision, omitting it is `428 precondition_missing`
   and naming a superseded one is `409 conflict`, with no job enqueued and no
-  approval written; the check repeats inside the transition's transaction. A
-  client still showing the plan from before a Request changes can no longer
-  approve the revised plan unseen, and the approval row binds to the revision
-  named.
+  approval written; the check repeats inside the transition's transaction,
+  and every artifact write takes a share lock on the run row, so a plan
+  revision cannot land between that check and the commit. A client still
+  showing the plan from before a Request changes can no longer approve the
+  revised plan unseen, and the approval row binds to the revision named. An
+  approval bound to no revision no longer covers a plan written afterwards:
+  the runner treats it as `plan_revision_drift`.
 - **Explicit recovery for a run whose worktree holds uncommitted work.** A
   resumed run that finds uncommitted changes no longer wipes them
   automatically: it pauses with `worktree_uncommitted_changes` (the

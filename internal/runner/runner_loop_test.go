@@ -553,6 +553,42 @@ func TestRunner_PlanRevisionDriftAdvanceDoesNotSkip(t *testing.T) {
 	}
 }
 
+// TestRunner_UnboundApprovalWithPlanIsDrift: an approval recorded while the
+// plan had no revision binds to none. A plan revision that exists afterwards —
+// a first write that committed just after the gate answer — was never
+// approved, so the implementer is refused with plan_revision_drift instead of
+// working within it.
+func TestRunner_UnboundApprovalWithPlanIsDrift(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	record := sqlc.Run{ID: "Tub", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "test@0.1.0"}
+	store := newFakeStore(record, sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"})
+	store.approvals = map[string]sqlc.RunApproval{
+		approvalKey("Tub", "plan"): {RunID: "Tub", TenantID: "tn", Name: "plan", Decision: "approved"},
+	}
+	store.artifactRevisions = map[string]sqlc.ArtifactRevision{
+		"plan/plan.md": {ID: "rev-written-after-approval", Name: "plan/plan.md", Kind: "plan_md"},
+	}
+	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{
+		"plan":      {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "plan done"},
+		"implement": {SchemaVersion: "1", Status: agent.StatusComplete, Summary: "impl done"},
+	}}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: approvalGatePack()}, Adapter: adapter})
+
+	if err := runner.HandleRun(t.Context(), job("run", "Tub", "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := store.taskState(); got != "paused_gate" {
+		t.Fatalf("state = %q, want paused_gate (plan_revision_drift)", got)
+	}
+	if count := len(store.invocations); count != 1 {
+		t.Fatalf("invocations = %d, want 1 (the implementer must not run under an unbound approval)", count)
+	}
+}
+
 // approvalGatePack is the F9 fixture: a plan stage with gate:auto (so the loop
 // reaches the implementer without a human pause — isolating the refusal) and a
 // declared source_write approval the test seeds or leaves absent.

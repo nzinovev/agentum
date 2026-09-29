@@ -1812,9 +1812,6 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 // feature, or the artifact has no current revision).
 func (runner *Runner) detectPlanRevisionDrift(ctx context.Context, run stageRun) bool {
 	approved := run.sourceWriteUnlock.ApprovedRevisionID
-	if approved == "" {
-		return false
-	}
 	approval, hasApproval := run.runPack.SourceWriteApproval()
 	if !hasApproval {
 		return false
@@ -1830,6 +1827,8 @@ func (runner *Runner) detectPlanRevisionDrift(ctx context.Context, run stageRun)
 		// the approval gate, not here.
 		return false
 	}
+	// An approval bound to no revision was given while the plan had none; a
+	// plan that exists now was never approved, so it is drift too.
 	return current.ID != approved
 }
 
