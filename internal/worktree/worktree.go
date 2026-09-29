@@ -1,7 +1,9 @@
 // Package worktree manages the per-run git worktrees off a project's repo
 // (C5). The runner creates one worktree per run at <repo>/.agentum/worktrees/
 // <run-id>/ on branch agentum/<run-id>, reuses it across stages and resumes,
-// and tears it down when the run reaches a terminal state.
+// and tears it down when the run reaches a human-terminal state (done /
+// cancelled). A failed run keeps its tree: the uncommitted work may be the
+// only copy, and disposal is a separate audited human action.
 //
 // F.6.1 splits teardown into two distinct actions:
 //   - RemoveWorktree disposes of the per-run working tree at terminal state.
@@ -72,7 +74,9 @@ func New() *Manager { return &Manager{} }
 // baseCommit (a resolved full SHA) is used as the branch start-point so the
 // run's lineage is pinned to exactly what base_ref pointed at when the runner
 // resolved it; an empty baseCommit falls back to the repo's current HEAD (used
-// by tests and the pre-F.6.1 path). It ensures the repo ignores its own
+// by tests and the pre-F.6.1 path). When the branch already exists without a
+// worktree (a discarded tree of a resumable run), the branch is checked out at
+// its tip and baseCommit is not used. It ensures the repo ignores its own
 // .agentum/ dir so worktrees and artifacts do not pollute the user's working
 // tree as untracked files.
 func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit string) (*Worktree, error) {
@@ -109,14 +113,22 @@ func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit 
 		return nil, fmt.Errorf("create worktree parent dir: %w", err)
 	}
 
-	// Create the worktree on a new branch off baseCommit (or HEAD). -b names the
-	// branch; the branch is created off the start-point and checked out in the
-	// new working tree. Pinning to baseCommit is what makes base_commit an
-	// immutable lineage anchor — a later move of base_ref cannot change it
-	// after the fact.
-	args := []string{"worktree", "add", "-b", branch, wtPath}
-	if baseCommit != "" {
-		args = append(args, baseCommit)
+	// A surviving branch with no worktree is a run whose tree was discarded
+	// while the run stayed resumable (RemoveWorktree keeps the branch). Check
+	// the branch out again at its own tip: the run's committed work is the
+	// lineage now, and re-creating it off baseCommit would drop it — while
+	// `-b` on an existing branch fails outright and strands the run.
+	args := []string{"worktree", "add", wtPath, branch}
+	if _, branchErr := git(ctx, repoAbs, revParseCmd, "--verify", "--quiet", "refs/heads/"+branch); branchErr != nil {
+		// Create the worktree on a new branch off baseCommit (or HEAD). -b
+		// names the branch; the branch is created off the start-point and
+		// checked out in the new working tree. Pinning to baseCommit is what
+		// makes base_commit an immutable lineage anchor — a later move of
+		// base_ref cannot change it after the fact.
+		args = []string{"worktree", "add", "-b", branch, wtPath}
+		if baseCommit != "" {
+			args = append(args, baseCommit)
+		}
 	}
 	if out, err := git(ctx, repoAbs, args...); err != nil {
 		return nil, fmt.Errorf("git worktree add: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -276,6 +288,35 @@ func (manager *Manager) IsClean(ctx context.Context, wtRoot string) (bool, error
 		return false, fmt.Errorf("git status: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return len(strings.TrimSpace(string(out))) == 0, nil
+}
+
+// DirtySummary lists the uncommitted paths (each porcelain entry's full
+// "XY path" line, renames as "old -> new"), capped at limit entries. It feeds
+// the worktree-uncommitted-changes diagnostic: the human choosing a recovery
+// mode reads which files are at stake before deciding. A read failure returns
+// nil — the diagnosis degrades to "dirty, paths unreadable" rather than
+// blocking the pause that carries it.
+func (manager *Manager) DirtySummary(ctx context.Context, wtRoot string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	out, err := git(ctx, wtRoot, "status", "--porcelain")
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == "" {
+			continue
+		}
+		entries = append(entries, trimmed)
+		if len(entries) == limit {
+			break
+		}
+	}
+	return entries
 }
 
 // Diff runs `git diff [--stat] from..to` in the worktree and returns the raw

@@ -39,6 +39,10 @@ type fakeStore struct {
 	// publications records the publication rows the final gate created, so a
 	// test can assert the hook without a database.
 	publications []sqlc.RunPublication
+	// unfinishedJobs scripts CountUnfinishedJobsForRunExcluding: how many
+	// other pending/running jobs the run appears to have. The discard-worktree
+	// guard reads it; zero means "no competing job".
+	unfinishedJobs int32
 	// publicationErr / enqueueErr script the final-gate hook's two
 	// best-effort writes failing.
 	publicationErr error
@@ -230,6 +234,12 @@ func (store *fakeStore) EnsurePublication(_ context.Context, arg sqlc.EnsurePubl
 
 // approvalKey is the map key for fakeStore.approvals: runID + "/" + name.
 func approvalKey(runID, name string) string { return runID + "/" + name }
+
+func (store *fakeStore) CountUnfinishedJobsForRunExcluding(_ context.Context, _ sqlc.CountUnfinishedJobsForRunExcludingParams) (int32, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.unfinishedJobs, nil
+}
 
 func (store *fakeStore) GetApproval(_ context.Context, arg sqlc.GetApprovalParams) (sqlc.RunApproval, error) {
 	store.mu.Lock()

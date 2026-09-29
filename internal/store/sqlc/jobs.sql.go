@@ -84,6 +84,29 @@ func (q *Queries) CountRunningJobsForRun(ctx context.Context, runID string) (int
 	return column_1, err
 }
 
+const countUnfinishedJobsForRunExcluding = `-- name: CountUnfinishedJobsForRunExcluding :one
+SELECT count(*)::int
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') AND id <> $3
+`
+
+type CountUnfinishedJobsForRunExcludingParams struct {
+	RunID    string `json:"run_id"`
+	TenantID string `json:"tenant_id"`
+	ID       int64  `json:"id"`
+}
+
+// How many pending-or-running jobs a run has besides the excluded one. The
+// discard-worktree guard: removing a working tree while another job may still
+// claim and execute against it is the race this count exists to exclude. The
+// caller passes its own job id so the guard never counts itself.
+func (q *Queries) CountUnfinishedJobsForRunExcluding(ctx context.Context, arg CountUnfinishedJobsForRunExcludingParams) (int32, error) {
+	row := q.db.QueryRowContext(ctx, countUnfinishedJobsForRunExcluding, arg.RunID, arg.TenantID, arg.ID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const enqueueJob = `-- name: EnqueueJob :one
 INSERT INTO jobs (tenant_id, user_id, run_id, kind, payload)
 VALUES ($1, $2, $3, $4, $5)

@@ -77,6 +77,11 @@ type Store interface {
 	// unique index making a second call a no-op. Called at the final gate;
 	// the publish job carries the attempt.
 	EnsurePublication(ctx context.Context, arg sqlc.EnsurePublicationParams) (sqlc.RunPublication, error)
+	// CountUnfinishedJobsForRunExcluding backs the discard-worktree guard:
+	// how many pending-or-running jobs the run has besides the caller's own.
+	// Discarding a worktree while a driving job may still execute against it
+	// is the race the count exists to exclude.
+	CountUnfinishedJobsForRunExcluding(ctx context.Context, arg sqlc.CountUnfinishedJobsForRunExcludingParams) (int32, error)
 }
 
 // Sink forwards a live stream chunk to subscribers (e.g. an in-memory SSE broker).
@@ -282,6 +287,265 @@ func (runner *Runner) HandleTeardown(ctx context.Context, job sqlc.Job) error {
 // HandleCleanup serves the "cleanup" job kind.
 func (runner *Runner) HandleCleanup(ctx context.Context, job sqlc.Job) error {
 	return runner.cleanup(ctx, job)
+}
+
+// jobKindReconcile is the job the worktree-reconcile endpoint enqueues after a
+// human resolves a worktree_uncommitted_changes pause. Its payload is the typed
+// taskinput.ReconcileDecision (mode + expected_head + confirmation).
+const jobKindReconcile = "reconcile"
+
+// jobKindDiscardWorktree is the job the discard-worktree endpoint enqueues: the
+// audited, human-confirmed removal of a run's working tree. It removes the
+// worktree only; the branch survives (F.6.1), and its payload carries the HEAD
+// the human confirmed plus the uncommitted-loss confirmation.
+const jobKindDiscardWorktree = "discard_worktree"
+
+// discardWorktreeRequest is the discard-worktree job's payload. A separate
+// local shape (not taskinput) because it is not a user-text contract: the API
+// validated the strict HTTP body, stored this canonical form, and the runner
+// re-checks every field against the tree it is about to remove.
+type discardWorktreeRequest struct {
+	ExpectedHead       string `json:"expected_head"`
+	DiscardUncommitted bool   `json:"discard_uncommitted"`
+}
+
+// HandleReconcile serves the "reconcile" job kind: apply the human's recovery
+// decision to the paused run's worktree, then drive the run exactly as a
+// continue would (the API already transitioned paused_user_stop → running and
+// recorded the human decision in the same transaction). A failed precondition
+// (HEAD moved, worktree missing, discard without confirmation) returns an
+// error so the queue retries and eventually parks the job; the run is left in
+// running with no live job, which the orphan probe repairs back to
+// paused_user_stop — the human re-reads the state and decides again. Nothing
+// destructive happens on those refusals.
+func (runner *Runner) HandleReconcile(ctx context.Context, job sqlc.Job) error {
+	decision, decodeErr := taskinput.ParseReconcileDecision(job.Payload)
+	if decodeErr != nil {
+		// A payload the API never writes: an invariant break, not a human
+		// input problem. Failing the job records it; there is no tree state
+		// this payload could legitimately describe.
+		return fmt.Errorf("reconcile: decode decision: %w", decodeErr)
+	}
+	if applyErr := runner.applyReconcileDecision(ctx, job, decision); applyErr != nil {
+		return applyErr
+	}
+	return runner.drive(ctx, job)
+}
+
+// applyReconcileDecision performs the git action the chosen mode names, after
+// verifying the worktree is still the tree the decision was made about. Every
+// applied decision is emitted as an event; the human-decision evidence itself
+// was recorded transactionally by the API handler that accepted the request.
+func (runner *Runner) applyReconcileDecision(ctx context.Context, job sqlc.Job, decision taskinput.ReconcileDecision) error {
+	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
+	if err != nil {
+		return fmt.Errorf("reconcile: load run: %w", err)
+	}
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
+	if err != nil {
+		return fmt.Errorf("reconcile: load project: %w", err)
+	}
+	checkoutPath := checkoutPathOf(record, project)
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
+		return fmt.Errorf("reconcile: relink worktree: %w", repairErr)
+	}
+	wtRoot := worktree.PathFor(checkoutPath, record.ID)
+	if !worktree.DirPresent(wtRoot) {
+		return fmt.Errorf("reconcile: worktree is missing at %s; the decision has no tree to apply to", wtRoot)
+	}
+	head, headErr := runner.wt.HeadCommit(ctx, wtRoot)
+	if headErr != nil {
+		return fmt.Errorf("reconcile: read worktree HEAD: %w", headErr)
+	}
+	if head != decision.ExpectedHead {
+		runner.emit(ctx, record, EvWorktreeReconcileRefused, map[string]any{
+			"reason": "head_moved", "expected": decision.ExpectedHead, "actual": head, "mode": decision.Mode,
+		})
+		return fmt.Errorf(
+			"reconcile: worktree HEAD is %s, but the decision was made about %s; re-read the state and decide again",
+			head, decision.ExpectedHead)
+	}
+
+	switch decision.Mode {
+	case taskinput.ReconcileResumeSession:
+		runner.emit(ctx, record, EvWorktreeReconcileDecided, map[string]any{
+			"mode": decision.Mode, "head": head,
+		})
+		return nil
+	case taskinput.ReconcileKeepAsCheckpoint:
+		commit, _, commitErr := runner.wt.Commit(ctx, wtRoot, "agentum: checkpoint from human recovery decision")
+		if commitErr != nil {
+			return fmt.Errorf("reconcile: commit working tree: %w", commitErr)
+		}
+		runner.recordCheckpoint(ctx, record, "reconcile-keep", commit)
+		runner.emit(ctx, record, EvWorktreeReconcileDecided, map[string]any{
+			"mode": decision.Mode, "head": head, "checkpoint": commit,
+		})
+		return nil
+	case taskinput.ReconcileDiscardToCheckpoint:
+		target := ""
+		if cp, cpErr := runner.store.LatestCheckpointForRun(ctx, sqlc.LatestCheckpointForRunParams{
+			RunID: record.ID, TenantID: record.TenantID,
+		}); cpErr == nil {
+			target = cp.CommitSha
+		} else if !errors.Is(cpErr, sql.ErrNoRows) {
+			return fmt.Errorf("reconcile: load checkpoint: %w", cpErr)
+		}
+		if target == "" {
+			target = record.BaseCommit.String
+		}
+		if target == "" {
+			return errors.New("reconcile: no checkpoint or base_commit to discard to")
+		}
+		if restoreErr := runner.wt.Restore(ctx, wtRoot, target); restoreErr != nil {
+			return fmt.Errorf("reconcile: restore worktree: %w", restoreErr)
+		}
+		runner.emit(ctx, record, EvWorktreeReconcileDecided, map[string]any{
+			"mode": decision.Mode, "head": head, "restored_to": target,
+		})
+		return nil
+	}
+	return fmt.Errorf("reconcile: unknown mode %q", decision.Mode)
+}
+
+// discardWorktree removes a run's working tree after every human precondition
+// held: the run is terminal or paused with no other unfinished job, the HEAD is
+// the one the human confirmed, and a dirty tree carried an explicit
+// discard_uncommitted confirmation. The branch and every commit survive
+// (RemoveWorktree's contract); only the working tree — and any uncommitted
+// files in it — go. Audited via EvWorktreeDiscarded.
+func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
+	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
+	if err != nil {
+		return fmt.Errorf("discard worktree: load run: %w", err)
+	}
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
+	if err != nil {
+		return fmt.Errorf("discard worktree: load project: %w", err)
+	}
+	var request discardWorktreeRequest
+	if len(job.Payload) != 0 {
+		if decodeErr := json.Unmarshal(job.Payload, &request); decodeErr != nil {
+			return fmt.Errorf("discard worktree: decode request: %w", decodeErr)
+		}
+	}
+	// Authoritative eligibility re-check at execution time. The API checked
+	// under a row lock before enqueueing; between then and now a lifecycle
+	// handler may have transitioned the run and enqueued a driving job, and
+	// removing the tree under a live runner is exactly the race this exists
+	// to prevent.
+	state := engine.RunState(record.State)
+	if !engine.IsTerminal(state) && !engine.IsPaused(state) {
+		runner.emit(ctx, record, EvWorktreeDiscardRefused, map[string]any{
+			"reason": "state", "state": record.State,
+		})
+		return fmt.Errorf("discard worktree: run is %s; requires a terminal or paused run", record.State)
+	}
+	unfinished, countErr := runner.store.CountUnfinishedJobsForRunExcluding(ctx, sqlc.CountUnfinishedJobsForRunExcludingParams{
+		RunID: record.ID, TenantID: record.TenantID, ID: job.ID,
+	})
+	if countErr != nil {
+		return fmt.Errorf("discard worktree: count jobs: %w", countErr)
+	}
+	if unfinished > 0 {
+		runner.emit(ctx, record, EvWorktreeDiscardRefused, map[string]any{
+			"reason": "jobs_in_flight", "count": int(unfinished),
+		})
+		return fmt.Errorf("discard worktree: %d unfinished job(s) for the run; let them finish or fail first", unfinished)
+	}
+
+	checkoutPath := checkoutPathOf(record, project)
+	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
+		return fmt.Errorf("discard worktree: relink worktree: %w", repairErr)
+	}
+	wtRoot := worktree.PathFor(checkoutPath, record.ID)
+	if !worktree.DirPresent(wtRoot) {
+		// Idempotent: a worktree that is already gone has nothing to discard.
+		runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{"already_absent": true})
+		return nil
+	}
+	head, headErr := runner.wt.HeadCommit(ctx, wtRoot)
+	if headErr != nil {
+		return fmt.Errorf("discard worktree: read worktree HEAD: %w", headErr)
+	}
+	if head != request.ExpectedHead {
+		runner.emit(ctx, record, EvWorktreeDiscardRefused, map[string]any{
+			"reason": "head_moved", "expected": request.ExpectedHead, "actual": head,
+		})
+		return fmt.Errorf(
+			"discard worktree: worktree HEAD is %s, but the request confirmed %s; re-read the state and re-request",
+			head, request.ExpectedHead)
+	}
+	dirty := !runner.isClean(checkoutPath, record.ID)
+	if dirty && !request.DiscardUncommitted {
+		runner.emit(ctx, record, EvWorktreeDiscardRefused, map[string]any{
+			"reason": "uncommitted_unconfirmed", "head": head,
+			"dirty_entries": runner.wt.DirtySummary(ctx, wtRoot, dirtySummaryLimit),
+		})
+		return errors.New("discard worktree: the tree holds uncommitted files and the request did not confirm their loss (discard_uncommitted: true)")
+	}
+	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
+		return fmt.Errorf("discard worktree: %w", err)
+	}
+	// The confirmed HEAD is the only tip a later resume may check out again;
+	// pauseOnUnconfirmedBranchTip compares the surviving branch against it.
+	runner.recordCheckpoint(ctx, record, checkpointLabelDiscarded, head)
+	runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{
+		"head": head, "had_uncommitted": dirty, "branch": worktree.BranchFor(record.ID),
+	})
+	return nil
+}
+
+// checkpointLabelDiscarded labels the branch tip a human confirmed when
+// discarding the run's worktree.
+const checkpointLabelDiscarded = "worktree-discarded"
+
+// pauseOnUnconfirmedBranchTip guards the resume of a run whose worktree is
+// gone. With no run branch there is nothing to resume onto (a fresh run), and
+// Create builds the branch from base_commit. With a branch, its tip must be
+// the HEAD the human confirmed at discard: a commit added to the branch since
+// — by hand, by another tool — would otherwise become the run's lineage
+// without anyone deciding so, and Reconcile accepts any descendant of
+// base_commit. A branch with no confirmed tip (its tree vanished without a
+// discard) pauses the same way. Continue re-checks; the pause lifts when the
+// branch is back at the confirmed tip.
+func (runner *Runner) pauseOnUnconfirmedBranchTip(ctx context.Context, record sqlc.Run, checkoutPath, fallbackStage string) (bool, error) {
+	branch := worktree.BranchFor(record.ID)
+	tip, tipErr := runner.wt.ResolveRef(ctx, checkoutPath, "refs/heads/"+branch)
+	if tipErr != nil {
+		return false, nil
+	}
+	checkpoints, listErr := runner.store.ListCheckpointsForRun(ctx, sqlc.ListCheckpointsForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
+	})
+	if listErr != nil {
+		return false, fmt.Errorf("load checkpoints: %w", listErr)
+	}
+	confirmed := ""
+	for _, checkpoint := range checkpoints {
+		if checkpoint.Label == checkpointLabelDiscarded {
+			confirmed = checkpoint.CommitSha
+		}
+	}
+	if confirmed == tip {
+		return false, nil
+	}
+	runner.log.Warn("run branch tip is not the one confirmed at discard; pausing",
+		"run", record.ID, "branch", branch, "confirmed", confirmed, "tip", tip)
+	runner.emit(ctx, record, EvWorktreeBranchUnconfirmed, map[string]any{
+		"branch": branch, "confirmed_tip": confirmed, "tip": tip,
+	})
+	pauseErr := runner.applyPauseDecision(ctx, record, Decision{
+		Action:     ActionPause,
+		FSMEvent:   engine.EventStopUser,
+		StopReason: "worktree_branch_unconfirmed",
+	}, currentStageOrFallback(record.CurrentStage, fallbackStage))
+	return pauseErr == nil, pauseErr
+}
+
+// HandleDiscardWorktree serves the "discard_worktree" job kind.
+func (runner *Runner) HandleDiscardWorktree(ctx context.Context, job sqlc.Job) error {
+	return runner.discardWorktree(ctx, job)
 }
 
 // teardown removes the run's worktree once it has reached a terminal state
@@ -621,6 +885,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return nil
 	}
 
+	// A missing worktree over a surviving run branch is a discarded tree.
+	// Create would check the branch out at whatever its tip is now; resume
+	// only onto the tip the human confirmed when discarding.
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, record.ID)) {
+		paused, pauseErr := runner.pauseOnUnconfirmedBranchTip(ctx, record, checkoutPath, runPack.Entry)
+		if pauseErr != nil || paused {
+			return pauseErr
+		}
+	}
+
 	runWorktree, err := runner.wt.Create(ctx, checkoutPath, record.ID, baseCommit)
 	if err != nil {
 		return runner.failRun(ctx, record, fmt.Errorf("create worktree: %w", err))
@@ -631,10 +905,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	runner.recordCheckpoint(ctx, record, "base", baseCommit)
 
 	// Reconcile before driving a side-effectful stage. A crashed worktree may be
-	// clean, safely resumable, restorable to the last checkpoint, or in a state
-	// that needs a human — never blindly replayed.
-	if err := runner.reconcileWorktree(ctx, record, checkoutPath, baseCommit, runWorktree.Root); err != nil {
-		return err
+	// clean, safely resumable, or in a state that needs a human — never blindly
+	// replayed, and never silently wiped: a dirty tree pauses for an explicit
+	// recovery decision instead. paused=true ends the job here, exactly as the
+	// checkout pause does: the stop IS the outcome of this driving attempt.
+	pausedByReconcile, reconcileErr := runner.reconcileWorktree(ctx, record, job, checkoutPath, baseCommit, runWorktree.Root, runPack.Entry)
+	if reconcileErr != nil {
+		return reconcileErr
+	}
+	if pausedByReconcile {
+		return nil
 	}
 	runner.emit(ctx, record, EvWorktreeCreated, map[string]any{
 		"base_commit": baseCommit, "branch": worktree.BranchFor(record.ID),
@@ -1035,11 +1315,28 @@ func checkoutPathOf(record sqlc.Run, project sqlc.Project) string {
 }
 
 // reconcileWorktree enforces the F.6.1 "never blindly replay a side-effectful
-// stage" invariant. The worktree is classified; restorable trees are restored
-// to the last checkpoint (so the next stage starts from a known-good commit),
-// needs-attention trees fail the run rather than guessing, and clean/resumable
-// trees proceed as-is.
-func (runner *Runner) reconcileWorktree(ctx context.Context, record sqlc.Run, repoPath, baseCommit, wtRoot string) error {
+// stage" invariant. The worktree is classified; clean/resumable trees proceed
+// as-is and needs-attention trees fail the run rather than guessing.
+//
+// A DIRTY tree (ClassRestorable) is no longer restored automatically. The old
+// reset --hard + clean -fd silently destroyed the only copy of a partially
+// executed stage's work; now the runner stops in paused_user_stop with
+// stop_reason=worktree_uncommitted_changes and a diagnostic naming the HEAD,
+// the restore target, and the dirty paths. A human then resolves it explicitly
+// through the reconcile endpoint: resume the captured session over the tree as
+// it stands, commit the tree as a checkpoint, or discard it to the named
+// checkpoint (each recorded as evidence). Until that choice arrives, no new
+// invocation runs over an undecided tree.
+//
+// The one exception is the reconcile job itself: its payload IS the recorded
+// human decision for exactly this tree state (the runner verified the HEAD it
+// was made about), so drive() re-entering this function on that job must not
+// re-pause — the loop would never close otherwise.
+//
+// paused=true means this call applied a pause; the caller ends the driving
+// job there (the stop is the outcome of this attempt), exactly as the
+// checkout-unavailable pause does.
+func (runner *Runner) reconcileWorktree(ctx context.Context, record sqlc.Run, job sqlc.Job, repoPath, baseCommit, wtRoot, fallbackStage string) (paused bool, err error) {
 	lastCheckpoint := ""
 	if cp, err := runner.store.LatestCheckpointForRun(ctx, sqlc.LatestCheckpointForRunParams{
 		RunID: record.ID, TenantID: record.TenantID,
@@ -1051,28 +1348,49 @@ func (runner *Runner) reconcileWorktree(ctx context.Context, record sqlc.Run, re
 
 	state, err := runner.wt.Reconcile(ctx, repoPath, record.ID, baseCommit, lastCheckpoint)
 	if err != nil {
-		return runner.failRun(ctx, record, fmt.Errorf("reconcile worktree: %w", err))
+		return false, runner.failRun(ctx, record, fmt.Errorf("reconcile worktree: %w", err))
 	}
 	switch state.Class {
 	case worktree.ClassClean, worktree.ClassResumable:
 		runner.emit(ctx, record, EvWorktreeReconciled, map[string]any{
 			"class": state.Class.String(), "head": state.HeadCommit,
 		})
-		return nil
+		return false, nil
 	case worktree.ClassRestorable:
-		// Restore to the checkpoint before the stage runs — uncommitted work from
-		// a crashed run must not bleed into the retry.
-		if err := runner.wt.Restore(ctx, wtRoot, state.CheckpointCommit); err != nil {
-			return runner.failRun(ctx, record, fmt.Errorf("restore worktree to checkpoint: %w", err))
+		if job.Kind == jobKindReconcile {
+			// The human's recorded decision for this exact tree state; the
+			// git action it named already ran in applyReconcileDecision (or
+			// was "leave it alone"). Proceed without re-pausing.
+			runner.emit(ctx, record, EvWorktreeReconciled, map[string]any{
+				"class": state.Class.String(), "head": state.HeadCommit,
+				"by": "human_decision",
+			})
+			return false, nil
 		}
-		runner.emit(ctx, record, EvWorktreeReconciled, map[string]any{
-			"class": state.Class.String(), "restored_to": state.CheckpointCommit,
+		dirty := runner.wt.DirtySummary(ctx, wtRoot, dirtySummaryLimit)
+		runner.log.Warn("worktree holds uncommitted changes; pausing for an explicit human decision",
+			"run", record.ID, "head", state.HeadCommit, "restore_target", state.CheckpointCommit,
+			"dirty_entries", len(dirty))
+		runner.emit(ctx, record, EvWorktreeRecoveryRequired, map[string]any{
+			"head":           state.HeadCommit,
+			"restore_target": state.CheckpointCommit,
+			"dirty_entries":  dirty,
 		})
-		return nil
+		pauseErr := runner.applyPauseDecision(ctx, record, Decision{
+			Action:     ActionPause,
+			FSMEvent:   engine.EventStopUser,
+			StopReason: "worktree_uncommitted_changes",
+		}, currentStageOrFallback(record.CurrentStage, fallbackStage))
+		return pauseErr == nil, pauseErr
 	default:
-		return runner.failRun(ctx, record, fmt.Errorf("worktree needs human attention (class=%s)", state.Class))
+		return false, runner.failRun(ctx, record, fmt.Errorf("worktree needs human attention (class=%s)", state.Class))
 	}
 }
+
+// dirtySummaryLimit caps how many dirty paths the recovery diagnostic carries.
+// The event is a diagnosis, not an inventory: enough entries to recognize the
+// work, with the count saying whether the list was cut off.
+const dirtySummaryLimit = 25
 
 // recordCheckpoint captures an orchestrator-owned boundary SHA. Idempotent per
 // label — a retry after a crash that re-crosses the same boundary upserts
@@ -1194,8 +1512,11 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 			return record.CurrentStage.String, "", nil, nil
 		}
 		return runPack.Entry, "", nil, nil
-	case "continue":
-		// Resume the current stage from its captured session id (non-destructive).
+	case "continue", "reconcile":
+		// Resume the current stage from its captured session id
+		// (non-destructive). The reconcile job enters here too: the human's
+		// recovery decision named the tree state, and the resume continues
+		// from whatever the decision left in place.
 		latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
 			RunID: record.ID, TenantID: record.TenantID,
 		})
@@ -2153,6 +2474,16 @@ func (runner *Runner) nextCycleForStage(ctx context.Context, record sqlc.Run, st
 // failRun transitions the run to failed and emits the reason. Used when the
 // runner cannot proceed (bad pack, missing stage, evaluator error) — these are
 // genuine failures, not retryable pause points.
+//
+// A failure never schedules worktree teardown. The failed run's tree may hold
+// the only copy of uncommitted agent work, and `failed` is terminal with no
+// resume edge — a teardown job that ran `git worktree remove --force` here was
+// destroying exactly the work a person would want to inspect and salvage. The
+// tree, the branch, and the checkpoints survive the failure; removing the
+// worktree afterwards is the separate, audited human action (the
+// discard-worktree job). The explicit cancel/approve paths keep their teardown:
+// there a human decided the run is over, which is a different claim than a
+// system error making that decision for them.
 func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error) error {
 	runner.log.Error("runner failing run", "run", record.ID, "error", cause)
 	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
@@ -2162,19 +2493,10 @@ func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error)
 	}
 	runner.emit(ctx, record, EvRunStateChanged, map[string]any{"from": record.State, "to": string(engine.StateFailed), "error": cause.Error()})
 	// Seal the manifest with reason=failed so the partial evidence is still
-	// the immutable record of what was attempted. The teardown job will run
-	// the git-evidence + seal again; the seal is idempotent.
+	// the immutable record of what was attempted.
 	failedRecord, refreshErr := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
 	if refreshErr == nil {
 		runner.sealManifestAtTerminal(ctx, failedRecord)
-	}
-	// Best-effort: schedule worktree teardown. A failed run's worktree is not
-	// needed for recovery (the session, if any, is gone); remove it. Enqueuing
-	// (not removing inline) serializes with the still-running driving job.
-	if _, teardownErr := runner.store.EnqueueJob(ctx, sqlc.EnqueueJobParams{
-		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID, Kind: "teardown", Payload: []byte("{}"),
-	}); teardownErr != nil {
-		runner.log.Warn("enqueue teardown for failed run", "run", record.ID, "error", teardownErr)
 	}
 	return cause
 }
@@ -2305,6 +2627,36 @@ const (
 	// path, the action, and the tampered hash — the tamper and its reversal both
 	// land in the git lineage via the next checkpoint commit.
 	EvInstructionsRestored = "run.instructions_restored"
+	// EvWorktreeRecoveryRequired records that the runner paused because the
+	// crashed run's worktree holds uncommitted changes (stop_reason
+	// worktree_uncommitted_changes). Carries the HEAD, the checkpoint the tree
+	// could be restored to, and a capped list of the dirty paths — the
+	// diagnosis a human reads to choose a recovery mode. The tree itself is
+	// never touched until that choice arrives.
+	EvWorktreeRecoveryRequired = "run.worktree_recovery_required"
+	// EvWorktreeReconcileDecided records that a human recovery decision was
+	// applied to the worktree: the mode, the verified HEAD it applied to, and
+	// the checkpoint it produced or restored to.
+	EvWorktreeReconcileDecided = "run.worktree_reconcile_decided"
+	// EvWorktreeReconcileRefused records a recovery decision that did NOT
+	// apply: the tree moved away from the HEAD the decision named. The
+	// refusal is the guard against applying a choice to different bytes than
+	// the ones it was made about.
+	EvWorktreeReconcileRefused = "run.worktree_reconcile_refused"
+	// EvWorktreeDiscarded records the audited removal of a run's working tree
+	// by the explicit human action: the HEAD removed, whether it held
+	// uncommitted files, and the surviving branch.
+	EvWorktreeDiscarded = "run.worktree_discarded"
+	// EvWorktreeDiscardRefused records a discard that did not run: the state
+	// or jobs-in-flight precondition failed at execution time, the HEAD
+	// moved, or a dirty tree was not confirmed as losable.
+	EvWorktreeDiscardRefused = "run.worktree_discard_refused"
+	// EvWorktreeBranchUnconfirmed records that a run whose worktree is gone
+	// paused instead of checking its surviving branch out again, because the
+	// branch tip is not the HEAD confirmed at discard (stop_reason
+	// worktree_branch_unconfirmed). Carries the branch, the confirmed tip
+	// (empty when the tree vanished without a discard), and the actual tip.
+	EvWorktreeBranchUnconfirmed = "run.worktree_branch_unconfirmed"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by run id.

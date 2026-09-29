@@ -54,3 +54,12 @@ RETURNING *;
 -- Belt-and-suspenders: how many running jobs a run has. Used to guard against
 -- double-enqueue races (the FSM is the primary guard).
 SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running';
+
+-- name: CountUnfinishedJobsForRunExcluding :one
+-- How many pending-or-running jobs a run has besides the excluded one. The
+-- discard-worktree guard: removing a working tree while another job may still
+-- claim and execute against it is the race this count exists to exclude. The
+-- caller passes its own job id so the guard never counts itself.
+SELECT count(*)::int
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') AND id <> $3;
