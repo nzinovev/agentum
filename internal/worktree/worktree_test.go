@@ -398,6 +398,64 @@ func TestManager_FileAtCommit(t *testing.T) {
 	}
 }
 
+// TestManager_FileAtCommitAbsenceIsTreeDecided pins the acceptance criterion
+// the plan names: absence must be decided by the commit's tree, identically
+// whether the path is missing everywhere or exists only in the working copy
+// (untracked / deleted-from-index). The old text-matching form read git's
+// "exists on disk, but not in ..." as a hard failure instead of absence.
+func TestManager_FileAtCommitAbsenceIsTreeDecided(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	anchor, err := headOf(repo)
+	if err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	manager := New()
+
+	// Untracked file present on disk, absent from the commit: still
+	// os.ErrNotExist — the tree decides, not the working copy.
+	if err := os.WriteFile(filepath.Join(repo, ".agentum.yaml"), []byte("untracked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.FileAtCommit(t.Context(), repo, anchor, ".agentum.yaml"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("untracked-on-disk path: expected os.ErrNotExist, got %v", err)
+	}
+
+	// A tracked-then-deleted-from-worktree path: absent from disk, present at
+	// the commit — the commit's bytes still come back.
+	if err := os.Remove(filepath.Join(repo, "README")); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := manager.FileAtCommit(t.Context(), repo, anchor, "README"); err != nil {
+		t.Fatalf("deleted-from-disk path must read from the commit, got %v", err)
+	} else if len(content) == 0 {
+		t.Fatal("commit content for a tracked path came back empty")
+	}
+}
+
+// TestManager_FileAtCommitInvalidCommitIsItsOwnError pins the other half of
+// the contract: an unresolvable commit is a real failure, never an absence —
+// "no registry" and "broken repository" must not collapse into one answer.
+func TestManager_FileAtCommitInvalidCommitIsItsOwnError(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	manager := New()
+	bogus := strings.Repeat("0", 40)
+	_, err := manager.FileAtCommit(t.Context(), repo, bogus, ".agentum.yaml")
+	if err == nil {
+		t.Fatal("expected an error for an unresolvable commit")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unresolvable commit must not report os.ErrNotExist; got %v", err)
+	}
+}
+
 func gitInRepo(dir string, args ...string) error {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")

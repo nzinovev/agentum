@@ -39,6 +39,30 @@ type ContextEvidence struct {
 	// base_commit. Recorded, not fatal: a project that declares a path that
 	// does not exist yet still runs; the evidence records it.
 	Missing []string `json:"missing,omitempty"`
+	// ProjectConfig records which .agentum.yaml the run's checks come from
+	// and how the source checkout's copy compared at the start of work.
+	// First write wins: the comparison describes what the operator had when
+	// the run began, and a later edit of the checkout changes nothing the
+	// run does.
+	ProjectConfig *ProjectConfigEvidence `json:"project_config,omitempty"`
+}
+
+// ProjectConfigEvidence is the project config the run pinned, and how the
+// source checkout differed from it when the run's worktree was created. A
+// difference is informational: checks and instructions always come from
+// base_commit, so it tells a reviewer that the operator's local config was
+// not the one applied — it never changes what the run executes.
+type ProjectConfigEvidence struct {
+	File string `json:"file"`
+	// PresentAtBase is false when base_commit carries no config: the run's
+	// check registry is empty.
+	PresentAtBase bool   `json:"present_at_base"`
+	BaseHash      string `json:"base_hash,omitempty"`
+	// CheckoutChange is added | removed | modified relative to base_commit,
+	// unreadable when the checkout copy could not be read (no comparison
+	// result), empty when the checkout matched.
+	CheckoutChange string `json:"checkout_change,omitempty"`
+	CheckoutHash   string `json:"checkout_hash,omitempty"`
 }
 
 // InstructionRef is one pinned instruction file's evidence. SourceHash is the
@@ -96,11 +120,15 @@ func mergeContextEvidence(existing, patch *ContextEvidence) *ContextEvidence {
 		return patch
 	}
 	merged := &ContextEvidence{
-		Instructions: appendUniqueInstructionRef(existing.Instructions, patch.Instructions),
-		Restorations: appendUniqueRestoration(existing.Restorations, patch.Restorations),
-		Skills:       appendUniqueSkillRef(existing.Skills, patch.Skills),
-		SkillsProbe:  worstSkillsProbe(existing.SkillsProbe, patch.SkillsProbe),
-		Missing:      appendUniqueString(existing.Missing, patch.Missing),
+		Instructions:  appendUniqueInstructionRef(existing.Instructions, patch.Instructions),
+		Restorations:  appendUniqueRestoration(existing.Restorations, patch.Restorations),
+		Skills:        appendUniqueSkillRef(existing.Skills, patch.Skills),
+		SkillsProbe:   worstSkillsProbe(existing.SkillsProbe, patch.SkillsProbe),
+		Missing:       appendUniqueString(existing.Missing, patch.Missing),
+		ProjectConfig: existing.ProjectConfig,
+	}
+	if merged.ProjectConfig == nil {
+		merged.ProjectConfig = patch.ProjectConfig
 	}
 	return merged
 }

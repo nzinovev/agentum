@@ -2,8 +2,13 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -11,6 +16,7 @@ import (
 	"github.com/nzinovev/agentum/internal/instructions"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/routing"
+	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
@@ -313,4 +319,89 @@ func contextPinnedPayload(stageID string, run stageRun) map[string]any {
 // could not answer.
 func (runner *Runner) autoInstructionBaseline() []string {
 	return runner.adapter.Describe().AutoInstructions
+}
+
+// configDriftChange names how the source checkout's .agentum.yaml differs
+// from the one pinned at base_commit. Absence is a value, not a failure: a
+// config can be added or removed, and "absent on both sides" is the project's
+// empty-registry configuration.
+type configDriftChange string
+
+const (
+	configDriftAdded    configDriftChange = "added"
+	configDriftRemoved  configDriftChange = "removed"
+	configDriftModified configDriftChange = "modified"
+	// configDriftUnreadable: the checkout copy exists or may exist but could
+	// not be read, so the comparison has no result.
+	configDriftUnreadable configDriftChange = "unreadable"
+)
+
+// recordProjectConfigAtStart compares .agentum.yaml in the source checkout
+// with the run's pinned base_commit version when the run's worktree is first
+// created, and records the result in the manifest's context section. A
+// difference is a warning, never a stop: checks and instructions come from
+// base_commit regardless, so the comparison only tells a reviewer that the
+// operator's local config was not the one applied. Pausing on it stopped runs
+// for ordinary situations — a checkout on another branch than the run's base,
+// a config being edited — and on continuations, where the checkout's state no
+// longer bears on a run that pinned its config long before.
+//
+// The comparison is by hash and change kind only; file contents never reach an
+// event payload or the manifest. Absence is a value: absent at base_commit
+// means the run's check registry is empty, which the evidence states plainly.
+func (runner *Runner) recordProjectConfigAtStart(ctx context.Context, record sqlc.Run, checkoutPath, baseCommit string) {
+	atCommit, commitReadErr := runner.wt.FileAtCommit(ctx, checkoutPath, baseCommit, checks.ConfigFile)
+	if commitReadErr != nil && !errors.Is(commitReadErr, os.ErrNotExist) {
+		// The registry load in prepareProjectContext surfaces this as a failed
+		// config read; recording a guess here would contradict it.
+		return
+	}
+	evidence := &manifest.ProjectConfigEvidence{File: checks.ConfigFile, PresentAtBase: commitReadErr == nil}
+	if evidence.PresentAtBase {
+		evidence.BaseHash = contentHash(atCommit)
+	}
+	onDisk, diskReadErr := os.ReadFile(filepath.Join(checkoutPath, checks.ConfigFile))
+	diskPresent := diskReadErr == nil
+	switch {
+	case diskReadErr != nil && !errors.Is(diskReadErr, fs.ErrNotExist):
+		// The file may exist; the comparison has no answer. Recording it as
+		// "removed" would put a false fact into first-write-wins evidence.
+		runner.log.Warn("project config comparison: read checkout copy", "run", record.ID, "error", diskReadErr)
+		evidence.CheckoutChange = string(configDriftUnreadable)
+	case diskPresent && !evidence.PresentAtBase:
+		evidence.CheckoutChange = string(configDriftAdded)
+	case !diskPresent && evidence.PresentAtBase:
+		evidence.CheckoutChange = string(configDriftRemoved)
+	case diskPresent && evidence.PresentAtBase && sha256.Sum256(onDisk) != sha256.Sum256(atCommit):
+		evidence.CheckoutChange = string(configDriftModified)
+	}
+	if diskPresent {
+		evidence.CheckoutHash = contentHash(onDisk)
+	}
+
+	if evidence.CheckoutChange != "" {
+		runner.log.Warn("source checkout config differs from base_commit; the run applies the base_commit version",
+			"run", record.ID, "file", checks.ConfigFile, "change", evidence.CheckoutChange, "base_commit", baseCommit)
+		runner.emit(ctx, record, EvProjectConfigDrift, map[string]any{
+			"file":          checks.ConfigFile,
+			"base_commit":   baseCommit,
+			"change":        evidence.CheckoutChange,
+			"base_hash":     evidence.BaseHash,
+			"checkout_hash": evidence.CheckoutHash,
+		})
+	}
+	if runner.mfst == nil {
+		return
+	}
+	patch := manifest.Body{Context: &manifest.ContextEvidence{ProjectConfig: evidence}}
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil && !errors.Is(err, manifest.ErrSealed) {
+		runner.log.Warn("record project config evidence", "run", record.ID, "error", err)
+	}
+}
+
+// contentHash renders the sha256 of config bytes for event payloads — the
+// drift comparison material that is safe to record (no file contents).
+func contentHash(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }

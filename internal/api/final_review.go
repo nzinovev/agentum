@@ -9,6 +9,7 @@ import (
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -69,9 +70,29 @@ type finalReviewVerdict struct {
 	Findings []agent.Finding `json:"findings,omitempty"`
 }
 
+// finalReviewChecks is what the reviewer needs to judge "checked": the commit
+// the checks ran against, their outcome, and which project config defined
+// them. Config makes an empty registry and an operator's unapplied local
+// config visible at the gate instead of only in the manifest.
 type finalReviewChecks struct {
-	Commit          string `json:"commit,omitempty"`
-	MandatoryPassed bool   `json:"mandatory_passed"`
+	Commit          string                    `json:"commit,omitempty"`
+	Ran             bool                      `json:"ran"`
+	MandatoryPassed bool                      `json:"mandatory_passed"`
+	Results         []finalReviewCheckResult  `json:"results,omitempty"`
+	Config          *finalReviewProjectConfig `json:"config,omitempty"`
+}
+
+type finalReviewCheckResult struct {
+	Name     string `json:"name"`
+	Required bool   `json:"required,omitempty"`
+	Status   string `json:"status"`
+}
+
+type finalReviewProjectConfig struct {
+	File           string `json:"file"`
+	PresentAtBase  bool   `json:"present_at_base"`
+	BaseHash       string `json:"base_hash,omitempty"`
+	CheckoutChange string `json:"checkout_change,omitempty"`
 }
 
 type finalReviewManifest struct {
@@ -128,8 +149,8 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 	response.Stages = api.finalReviewStages(r.Context(), run)
 	// Diff + review verdict: scanned from the current revisions.
 	response.Diff, response.Review = api.finalReviewDiffAndVerdict(r.Context(), run, response.Stages)
-	// Manifest summary (when wired).
-	response.Manifest = api.finalReviewManifest(r.Context(), run)
+	// Manifest summary and the checks block (when wired).
+	response.Manifest, response.Checks = api.finalReviewManifest(r.Context(), run)
 	// Publication block: the same shape GET .../publication answers with.
 	// Assembled from durable rows only — this handler never contacts the
 	// provider, so the review works with a delivery, without one, and while
@@ -305,20 +326,49 @@ func (api *API) finalReviewDiffAndVerdict(ctx context.Context, run sqlc.Run, sta
 
 // finalReviewManifest summarizes the manifest seal/evidence state when the
 // manifest service is wired. Returns nil otherwise.
-func (api *API) finalReviewManifest(ctx context.Context, run sqlc.Run) *finalReviewManifest {
+func (api *API) finalReviewManifest(ctx context.Context, run sqlc.Run) (*finalReviewManifest, *finalReviewChecks) {
 	if api.mfst == nil {
-		return nil
+		return nil, nil
 	}
 	body, sealInfo, _, err := api.mfst.Get(ctx, run.TenantID, run.ID)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	missing := body.MissingSections()
-	return &finalReviewManifest{
+	summary := &finalReviewManifest{
 		Sealed:           sealInfo.SealedAt.Valid,
 		EvidenceComplete: body.IsEvidenceComplete(),
 		Missing:          missing,
 	}
+	return summary, finalReviewChecksFrom(body)
+}
+
+// finalReviewChecksFrom renders the checks block from the manifest's checks
+// and context sections. Nil when neither is recorded yet.
+func finalReviewChecksFrom(body manifest.Body) *finalReviewChecks {
+	var config *manifest.ProjectConfigEvidence
+	if body.Context != nil {
+		config = body.Context.ProjectConfig
+	}
+	if body.Checks == nil && config == nil {
+		return nil
+	}
+	block := &finalReviewChecks{}
+	if body.Checks != nil {
+		block.Commit, block.Ran, block.MandatoryPassed = body.Checks.Commit, body.Checks.Ran, body.Checks.MandatoryPassed
+		for _, result := range body.Checks.Results {
+			block.Results = append(block.Results, finalReviewCheckResult{
+				Name: result.Name, Required: result.Required, Status: result.Status,
+			})
+		}
+	}
+	if config != nil {
+		block.Config = &finalReviewProjectConfig{
+			File: config.File, PresentAtBase: config.PresentAtBase,
+			BaseHash: config.BaseHash, CheckoutChange: config.CheckoutChange,
+		}
+	}
+	return block
 }
 
 // splitStageFile splits "<stage>/<file>" for the stages grouping. Returns

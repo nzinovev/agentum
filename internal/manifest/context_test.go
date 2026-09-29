@@ -87,6 +87,27 @@ func TestMergeContext_WorstSkillsProbeWins(t *testing.T) {
 	}
 }
 
+// TestMergeContext_ProjectConfigFirstWriteWins: the project-config comparison
+// describes the checkout when the run began, so a later patch never replaces
+// it, and a patch without one keeps it.
+func TestMergeContext_ProjectConfigFirstWriteWins(t *testing.T) {
+	t.Parallel()
+	first := &ProjectConfigEvidence{File: ".agentum.yaml", PresentAtBase: false, CheckoutChange: "added"}
+	later := &ProjectConfigEvidence{File: ".agentum.yaml", PresentAtBase: false}
+	merged := mergeContextEvidence(&ContextEvidence{ProjectConfig: first}, &ContextEvidence{ProjectConfig: later})
+	if !reflect.DeepEqual(merged.ProjectConfig, first) {
+		t.Fatalf("project_config = %+v, want the first record %+v", merged.ProjectConfig, first)
+	}
+	merged = mergeContextEvidence(&ContextEvidence{}, &ContextEvidence{ProjectConfig: first})
+	if !reflect.DeepEqual(merged.ProjectConfig, first) {
+		t.Fatalf("project_config = %+v, want it adopted from the patch", merged.ProjectConfig)
+	}
+	merged = mergeContextEvidence(&ContextEvidence{ProjectConfig: first}, &ContextEvidence{SkillsProbe: "ok"})
+	if !reflect.DeepEqual(merged.ProjectConfig, first) {
+		t.Fatalf("project_config = %+v, want it kept by a patch without one", merged.ProjectConfig)
+	}
+}
+
 // TestEvidenceComplete_EmptyContextSectionStillSeals: a context section that is
 // present but empty (a project with no AGENTS.md and no skills) still satisfies
 // evidence completeness — the section is written on every run so absence is

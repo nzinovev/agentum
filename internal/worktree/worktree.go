@@ -251,6 +251,17 @@ func (manager *Manager) HeadCommit(ctx context.Context, wtRoot string) (string, 
 // edits the file inside its worktree cannot weaken the checks that gate its own
 // delivery. A path that does not exist at the commit is reported as
 // os.ErrNotExist; callers treat that as "the project defines no registry."
+//
+// Existence is decided by the COMMIT'S TREE, not by git's error text. The old
+// form ran `git show commit:path` and matched the English "does not exist"
+// message to detect absence — which broke the moment git chose a different
+// wording ("exists on disk, but not in ...", a localized message) and let a
+// file present only in the working copy masquerade as a hard git failure (or
+// the reverse). Here the commit is verified first (an invalid or unknown SHA is
+// its own error, never an absence), then `git ls-tree commit -- path` decides
+// presence: a valid commit plus empty listing means the path is absent from
+// the tree — independent of locale and of the working copy. Only then does
+// `git show` read the bytes; a corrupt object fails there, as a real error.
 func (manager *Manager) FileAtCommit(ctx context.Context, repoPath, commit, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -258,20 +269,26 @@ func (manager *Manager) FileAtCommit(ctx context.Context, repoPath, commit, path
 	if strings.TrimSpace(commit) == "" {
 		return nil, errors.New("worktree: FileAtCommit requires a non-empty commit")
 	}
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("worktree: FileAtCommit requires a non-empty path")
+	}
 	repoAbs, err := filepath.Abs(repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo path: %w", err)
 	}
+	if out, resolveErr := git(ctx, repoAbs, revParseCmd, "--verify", "--quiet", commit+"^{commit}"); resolveErr != nil {
+		return nil, fmt.Errorf("worktree: commit %s does not resolve: %w (%s)", commit, resolveErr, strings.TrimSpace(string(out)))
+	}
+	listing, listErr := git(ctx, repoAbs, "ls-tree", commit, "--", path)
+	if listErr != nil {
+		return nil, fmt.Errorf("git ls-tree %s -- %s: %w (%s)", commit, path, listErr, strings.TrimSpace(string(listing)))
+	}
+	if len(strings.TrimSpace(string(listing))) == 0 {
+		return nil, fmt.Errorf("%w: %s at %s", os.ErrNotExist, path, commit)
+	}
 	out, err := git(ctx, repoAbs, "show", commit+":"+path)
 	if err != nil {
-		message := strings.TrimSpace(string(out))
-		// git exits non-zero with a "does not exist" message when the path is
-		// absent at the commit; surface that as a typed os.ErrNotExist so the
-		// caller can distinguish "no registry" from a real git failure.
-		if strings.Contains(message, "does not exist") {
-			return nil, fmt.Errorf("%w: %s at %s", os.ErrNotExist, path, commit)
-		}
-		return nil, fmt.Errorf("git show %s:%s: %w (%s)", commit, path, err, message)
+		return nil, fmt.Errorf("git show %s:%s: %w (%s)", commit, path, err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
 }
