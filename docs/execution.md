@@ -63,21 +63,22 @@ somewhere else; a repository that moved is re-linked with `git worktree
 repair` before the run continues. Created by `internal/worktree` on the first
 stage of a run; reused across stages and resumes; torn down at terminal state.
 
-On every start and continuation the runner also compares `.agentum.yaml` in
-the source checkout against the run's pinned `base_commit` version — by
-content hash, with absence as a value (`run.project_config_drift` carries the
-file, the base, the change kind, and the hashes; never the contents). A
-difference pauses the run (`stop_reason = project_config_drift`) before any
-invocation: the run keeps the `base_commit` version and never substitutes the
-working copy's config, and the pinned base of an existing run is never
-rewritten — a human who wants the new config commits it and starts a new run
-from the new commit; continuing this run re-checks the precondition and
-proceeds once the checkout matches the anchor again. Uncommitted changes to
-other files of the checkout do not participate in the check, and the local
-uncommitted edits of the checkout are never part of a new run's base: the
-worktree builds from the base commit, not the working copy. A project with
-no `.agentum.yaml` on either side runs with an empty registry, recorded in
-evidence.
+When the run's worktree is first created, the runner records which
+`.agentum.yaml` the run applies and how the source checkout's copy compared
+with it: the manifest's `context.project_config` carries the file, whether
+`base_commit` has it (`present_at_base`; `false` means the check registry is
+empty), its hash, and the checkout's change kind (`added`, `removed`,
+`modified`, or none). A difference also emits the warning event
+`run.project_config_drift` (hashes only, never contents). It does not stop the
+run: checks and instructions always come from `base_commit`, and the working
+copy's config is never substituted. The same comparison appears in the
+`checks.config` block of `GET /runs/{id}/final-review`, next to the check
+results, so the reviewer sees an empty registry or an unapplied local config
+where the decision is made. The comparison is not repeated on continuations —
+the checkout's later state does not change what a run already under way
+applies. To adopt a new config, commit it to the target branch and start a
+new run. The local uncommitted edits of the checkout are never part of a new
+run's base: the worktree builds from the base commit, not the working copy.
 
 - **Location:** `<repo>/.agentum/worktrees/<run-id>/`
 - **Branch:** `agentum/<run-id>` (off the repo's current HEAD)
@@ -185,7 +186,6 @@ happened.
 | the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
-| `.agentum.yaml` in the source checkout differs from the run's pinned `base_commit` version (added, removed, or modified; absence on both sides is the empty registry, not a drift) | `stop_user` | `paused_user_stop` | `project_config_drift` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |
 
 ### Conditional transitions and the fix loop
