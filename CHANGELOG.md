@@ -21,6 +21,15 @@ Once tagged releases begin, this project adheres to
   backend-development pack now allows 3 per run; set 0 to disable). A spent
   budget answers `409 edit_budget_exhausted`, and the new action rides
   `run:ask-to-edit`.
+- **Plan-gate answers name the plan revision they answer.** `advance` at the
+  pack's approval stage takes `expected_revision_id`, and `ask-to-edit` takes
+  `target_revision_id` — the `X-Revision-Id` of the plan the human read.
+  While the plan has a revision, omitting it is `428 precondition_missing`
+  and naming a superseded one is `409 conflict`, with no job enqueued and no
+  approval written; the check repeats inside the transition's transaction. A
+  client still showing the plan from before a Request changes can no longer
+  approve the revised plan unseen, and the approval row binds to the revision
+  named.
 - **Explicit recovery for a run whose worktree holds uncommitted work.** A
   resumed run that finds uncommitted changes no longer wipes them
   automatically: it pauses with `worktree_uncommitted_changes` (the

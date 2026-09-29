@@ -1,9 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
@@ -36,9 +41,11 @@ const (
 const jobKindAskToEdit = "ask_to_edit"
 
 // handleInvocationAskToEdit POST /api/v1/runs/{id}/invocations/{iid}/ask-to-edit
-// Body: {"text": "remarks on this plan revision"} — required, non-blank,
-// ≤ 32 KiB, credential-scanned (422 on a match), like every text that reaches
-// a model. Valid only at the pack's source_write approval gate before the
+// Body: {"text": "remarks on this plan revision", "target_revision_id":
+// "<plan revision>"} — text required, non-blank, ≤ 32 KiB, credential-scanned
+// (422 on a match), like every text that reaches a model; the revision id is
+// required while the plan has a revision (428 without it, 409 when it is no
+// longer current). Valid only at the pack's source_write approval gate before the
 // first grant: after implementation unlocked, remarks are a rework decision
 // this action does not make. The transition, the driving job, and the
 // human-decision evidence commit atomically; a repeat POST after the
@@ -93,7 +100,7 @@ func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request
 	if !read {
 		return
 	}
-	remarks, parseErr := parseContinueBody(bodyBytes)
+	remarks, targetRevisionID, parseErr := parseAskToEditBody(bodyBytes)
 	if parseErr != nil {
 		writeRequestBodyError(w, parseErr)
 		return
@@ -111,8 +118,16 @@ func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// The remarks answer one plan revision. Naming it is required while the
+	// plan has one, and the resume tx re-checks it, so remarks written against
+	// an older revision never re-run the planner over a newer one.
+	approvalPlan.expectedRevisionID = targetRevisionID
+	approvalPlan.verifyOnly = true
+	if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
+		return
+	}
 	decision := gateDecisionPatch(run, principal, gateAskToEdit, decisionRequestedChanges)
-	updated, err := api.applyResume(r, run, engine.EventAskToEdit, jobKindAskToEdit, payload, decision, planApproval{}, principal)
+	updated, err := api.applyResume(r, run, engine.EventAskToEdit, jobKindAskToEdit, payload, decision, approvalPlan, principal)
 	if err != nil {
 		if isHumanDecisionRecordFailure(err) {
 			writeError(w, http.StatusInternalServerError, codeInternal,
@@ -123,6 +138,35 @@ func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))
+}
+
+// parseAskToEditBody strictly decodes {"text", "target_revision_id"}: one
+// JSON object, no other fields. The text goes through the continuation parser
+// unchanged (raw bytes, so its UTF-8, budget, and credential checks see what
+// the client sent), and becomes the job payload a continue would carry.
+func parseAskToEditBody(body []byte) (taskinput.Continuation, string, error) {
+	var fields struct {
+		Text             json.RawMessage `json:"text"`
+		TargetRevisionID string          `json:"target_revision_id"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(body)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fields); err != nil {
+		return taskinput.Continuation{}, "", fmt.Errorf("ask-to-edit: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return taskinput.Continuation{}, "", errors.New("ask-to-edit: request body must contain exactly one JSON object")
+	}
+	textBody := []byte("{}")
+	if len(fields.Text) != 0 {
+		textBody = append(append([]byte(`{"text":`), fields.Text...), '}')
+	}
+	remarks, parseErr := parseContinueBody(textBody)
+	if parseErr != nil {
+		return taskinput.Continuation{}, "", parseErr
+	}
+	return remarks, strings.TrimSpace(fields.TargetRevisionID), nil
 }
 
 // packAskToEditBudget resolves the pack's declared revision budget for the

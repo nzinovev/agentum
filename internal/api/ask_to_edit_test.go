@@ -16,6 +16,7 @@ import (
 
 	"log/slog"
 
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/dbtest"
 	"github.com/nzinovev/agentum/internal/manifest"
@@ -36,6 +37,7 @@ type askToEditHarness struct {
 	api     *API
 	queries *sqlc.Queries
 	db      *sql.DB
+	art     artifacts.Store
 }
 
 func newAskToEditHarness(t *testing.T, askToEditBudget int) *askToEditHarness {
@@ -65,12 +67,17 @@ func newAskToEditHarness(t *testing.T, askToEditBudget int) *askToEditHarness {
 		t.Fatal(err)
 	}
 	handle := dbtest.Store(t)
+	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
+		DB: handle.Store.DB, Queries: handle.Queries, Blobs: artifacts.NewBlobStore(t.TempDir()),
+	})
 	return &askToEditHarness{
 		api: New(handle.Store.DB, handle.Queries, slog.New(slog.DiscardHandler), nil,
 			WithManifestService(manifest.New(manifest.Deps{DB: handle.Store.DB, Queries: handle.Queries})),
-			WithPackSource(pack.NewDirSource(packsRoot))),
+			WithPackSource(pack.NewDirSource(packsRoot)),
+			WithArtifactStore(artifactStore)),
 		queries: handle.Queries,
 		db:      handle.Store.DB,
+		art:     artifactStore,
 	}
 }
 
@@ -263,5 +270,139 @@ func TestAskToEditEndpoint_ZeroBudgetDisablesRevision(t *testing.T) {
 	}
 	if count := harness.countAskToEditJobs(t, runID); count != 0 {
 		t.Fatalf("zero-budget request enqueued %d job(s)", count)
+	}
+}
+
+// putPlanRevision stores a plan revision under the approval's artifact name
+// (plan/plan.md), as the planner's stage does, and returns its id.
+func (harness *askToEditHarness) putPlanRevision(t *testing.T, runID, content, expectedCurrent string) string {
+	t.Helper()
+	revision, err := harness.art.Put(t.Context(), artifacts.PutParams{
+		TenantID: continueTestTenant, UserID: continueTestUser, RunID: runID,
+		Name: "plan/plan.md", Kind: "file", Bytes: []byte(content), Actor: artifacts.ActorSystem,
+		ExpectedCurrentRevision: expectedCurrent,
+	})
+	if err != nil {
+		t.Fatalf("put plan revision: %v", err)
+	}
+	return revision.ID
+}
+
+// callAdvance dispatches the advance handler directly.
+func (harness *askToEditHarness) callAdvance(t *testing.T, runID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/v1/runs/"+runID+"/invocations/inv-fixture/advance", strings.NewReader(body))
+	request.SetPathValue("id", runID)
+	request.SetPathValue("iid", "inv-fixture")
+	request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
+		TenantID: continueTestTenant, UserID: continueTestUser,
+	}))
+	recorder := httptest.NewRecorder()
+	harness.api.handleInvocationAdvance(recorder, request)
+	return recorder
+}
+
+// countJobsOfKind reads how many jobs of kind the run was given.
+func (harness *askToEditHarness) countJobsOfKind(t *testing.T, runID, kind string) int {
+	t.Helper()
+	count, err := harness.queries.CountJobsOfKindForRun(t.Context(), sqlc.CountJobsOfKindForRunParams{
+		RunID: runID, TenantID: continueTestTenant, Kind: kind,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(count)
+}
+
+// requireRunState asserts the run's persisted state.
+func (harness *askToEditHarness) requireRunState(t *testing.T, runID, want string) {
+	t.Helper()
+	run, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.State != want {
+		t.Fatalf("run state = %q, want %q", run.State, want)
+	}
+}
+
+// TestPlanGate_AnswersBindToTheirRevision pins that every plan-gate answer
+// names the revision it was given to. After Request changes produced a new
+// revision, a client still showing the old one can neither approve the new
+// plan unseen nor send it remarks: omitting the revision is 428, naming a
+// superseded one is 409, and neither enqueues a job or records an approval.
+// Only an advance naming the current revision approves — and binds to it.
+func TestPlanGate_AnswersBindToTheirRevision(t *testing.T) {
+	t.Parallel()
+	harness := newAskToEditHarness(t, 3)
+	runID := harness.insertPlanGateRun(t, "paused_gate")
+	firstRevision := harness.putPlanRevision(t, runID, "plan v1", "")
+
+	for _, refusal := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "no revision", body: `{"text":"cover rollback"}`, wantStatus: http.StatusPreconditionRequired},
+		{name: "unknown revision", body: `{"text":"cover rollback","target_revision_id":"00000000-0000-0000-0000-000000000000"}`, wantStatus: http.StatusConflict},
+	} {
+		if recorder := harness.callAskToEdit(t, runID, refusal.body); recorder.Code != refusal.wantStatus {
+			t.Fatalf("ask-to-edit with %s: status = %d, want %d (body %s)", refusal.name, recorder.Code, refusal.wantStatus, recorder.Body.String())
+		}
+	}
+	if count := harness.countJobsOfKind(t, runID, "ask_to_edit"); count != 0 {
+		t.Fatalf("refused remarks enqueued %d ask_to_edit job(s)", count)
+	}
+	harness.requireRunState(t, runID, "paused_gate")
+
+	accepted := harness.callAskToEdit(t, runID, `{"text":"cover rollback","target_revision_id":"`+firstRevision+`"}`)
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("ask-to-edit on the current revision: status = %d, body %s", accepted.Code, accepted.Body.String())
+	}
+
+	// The planner answers with a second revision and the run is back at the gate.
+	secondRevision := harness.putPlanRevision(t, runID, "plan v2", firstRevision)
+	if _, err := harness.queries.UpdateRunState(t.Context(), sqlc.UpdateRunStateParams{
+		ID: runID, TenantID: continueTestTenant, State: "paused_gate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, refusal := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "no body", body: ``, wantStatus: http.StatusPreconditionRequired},
+		{name: "the superseded revision", body: `{"expected_revision_id":"` + firstRevision + `"}`, wantStatus: http.StatusConflict},
+		{name: "an unknown field", body: `{"revision":"` + secondRevision + `"}`, wantStatus: http.StatusBadRequest},
+	} {
+		if recorder := harness.callAdvance(t, runID, refusal.body); recorder.Code != refusal.wantStatus {
+			t.Fatalf("advance with %s: status = %d, want %d (body %s)", refusal.name, recorder.Code, refusal.wantStatus, recorder.Body.String())
+		}
+	}
+	if count := harness.countJobsOfKind(t, runID, "advance"); count != 0 {
+		t.Fatalf("refused advances enqueued %d advance job(s)", count)
+	}
+	if _, err := harness.queries.GetApproval(t.Context(), sqlc.GetApprovalParams{
+		TenantID: continueTestTenant, RunID: runID, Name: "plan",
+	}); err == nil {
+		t.Fatal("a refused advance recorded an approval")
+	}
+	harness.requireRunState(t, runID, "paused_gate")
+
+	approved := harness.callAdvance(t, runID, `{"expected_revision_id":"`+secondRevision+`"}`)
+	if approved.Code != http.StatusOK {
+		t.Fatalf("advance on the current revision: status = %d, body %s", approved.Code, approved.Body.String())
+	}
+	approval, err := harness.queries.GetApproval(t.Context(), sqlc.GetApprovalParams{
+		TenantID: continueTestTenant, RunID: runID, Name: "plan",
+	})
+	if err != nil {
+		t.Fatalf("read approval: %v", err)
+	}
+	if approval.ArtifactRevisionID.String != secondRevision {
+		t.Fatalf("approval bound to %q, want the revision the human named %q", approval.ArtifactRevisionID.String, secondRevision)
 	}
 }

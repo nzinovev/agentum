@@ -1,10 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
@@ -177,6 +182,79 @@ type planApproval struct {
 	name     string
 	stage    string
 	artifact string
+	// expectedRevisionID is the plan revision the human's request names. When
+	// set, the resume tx refuses unless it is still the current revision: an
+	// answer given to one revision must never land on a newer one the human
+	// has not read (ask-to-edit produces exactly such a revision).
+	expectedRevisionID string
+	// verifyOnly checks expectedRevisionID without writing the approval row:
+	// ask-to-edit answers the gate but approves nothing.
+	verifyOnly bool
+}
+
+// staleRevisionError is the in-tx refusal of a gate answer whose
+// expected_revision_id is no longer the current plan revision. Mapped to 409
+// conflict by statusForTransition; the tx rolls back, so no job is enqueued.
+type staleRevisionError struct {
+	expected string
+	current  string
+}
+
+func (stale staleRevisionError) Error() string {
+	return "the plan revision changed: the request names " + stale.expected +
+		", the current revision is " + stale.current + "; read the current plan and answer again"
+}
+
+// maxGateAnswerBodyBytes caps the advance body: one revision id. The cap is
+// transport hygiene only.
+const maxGateAnswerBodyBytes = 4096
+
+// parseAdvanceBody strictly decodes the optional advance body. An empty body
+// (or null, or {}) names no revision; anything but a single object carrying at
+// most expected_revision_id is refused.
+func parseAdvanceBody(body []byte) (string, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	var fields struct {
+		ExpectedRevisionID string `json:"expected_revision_id"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fields); err != nil {
+		return "", fmt.Errorf("advance: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return "", errors.New("advance: request body must contain exactly one JSON object")
+	}
+	return strings.TrimSpace(fields.ExpectedRevisionID), nil
+}
+
+// requirePlanRevisionPrecondition refuses a plan-gate answer that names no
+// revision while the plan has one: 428 precondition_missing, the same rule an
+// artifact PUT follows. Without it a client showing an older revision could
+// approve — or send remarks to — a revision its human never read. The
+// authoritative comparison runs again inside the resume tx; this read only
+// decides whether the precondition was required. Writes the response itself,
+// so false means the handler must return.
+func (api *API) requirePlanRevisionPrecondition(w http.ResponseWriter, r *http.Request, run sqlc.Run, approval planApproval) bool {
+	if approval.expectedRevisionID != "" {
+		return true
+	}
+	current, err := api.resolveApprovalRevisionID(r.Context(), api.queries, run, approval)
+	if err != nil {
+		logUnexpected(api.log, err, "CurrentArtifactRevisionForName(plan gate)")
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return false
+	}
+	if current.Valid {
+		writeError(w, http.StatusPreconditionRequired, codePreconditionMissing,
+			"the plan revision is required at the plan gate (expected_revision_id on advance, target_revision_id on ask-to-edit); current: "+current.String)
+		return false
+	}
+	return true
 }
 
 // decisionIsIdempotent handles a repeat gate decision on a run that has already
@@ -229,9 +307,25 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 			"advance requires paused_gate; run is "+run.State)
 		return
 	}
+	bodyBytes, read := readRequestBody(w, r, maxGateAnswerBodyBytes)
+	if !read {
+		return
+	}
+	expectedRevisionID, parseErr := parseAdvanceBody(bodyBytes)
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, codeBadInput, parseErr.Error())
+		return
+	}
 	decision := gateDecisionPatch(run, principal, gateAdvance, decisionApproved)
-	// Write the run_approvals row only when the run is AT the approval stage.
-	approvalPlan, _ := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	// Write the run_approvals row only when the run is AT the approval stage;
+	// there the advance approves exactly the revision it names.
+	approvalPlan, atApproval := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	if atApproval {
+		approvalPlan.expectedRevisionID = expectedRevisionID
+		if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
+			return
+		}
+	}
 	updated, err := api.applyResume(r, run, engine.EventAdvance, "advance", nil, decision, approvalPlan, principal)
 	if err != nil {
 		if isHumanDecisionRecordFailure(err) {
@@ -575,6 +669,16 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 			if revErr != nil {
 				return revErr
 			}
+			// Compared inside the tx: a revision written between the
+			// handler's read and this point (a human edit at the gate) must
+			// not receive an answer given to the one before it.
+			if approval.expectedRevisionID != "" && revisionID.String != approval.expectedRevisionID {
+				return staleRevisionError{expected: approval.expectedRevisionID, current: revisionID.String}
+			}
+			if approval.verifyOnly {
+				updated = transitioned
+				return nil
+			}
 			if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
 				TenantID: run.TenantID, UserID: principal.UserID, RunID: run.ID, Name: approval.name,
 				Decision: "approved", ArtifactRevisionID: revisionID, Actor: string(authz.ActorHuman),
@@ -643,6 +747,11 @@ func (api *API) handleCleanupRun(w http.ResponseWriter, r *http.Request) {
 
 // statusForTransition maps an engine/transition error to an HTTP response.
 func statusForTransition(w http.ResponseWriter, err error) {
+	var stale staleRevisionError
+	if errors.As(err, &stale) {
+		writeError(w, http.StatusConflict, codeConflict, stale.Error())
+		return
+	}
 	var illegalErr *engine.ErrIllegalTransition
 	if errors.As(err, &illegalErr) {
 		writeError(w, http.StatusConflict, codeIllegalTransition, err.Error())
