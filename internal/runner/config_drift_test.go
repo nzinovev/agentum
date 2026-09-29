@@ -69,8 +69,11 @@ func TestRunner_ProjectConfigComparedAtStart(t *testing.T) {
 		onDisk        string
 		removeOnDisk  bool
 		unrelatedDirt bool
-		wantPresent   bool
-		wantChange    string
+		// unreadableOnDisk puts a directory where the config file goes: it
+		// exists, but reading it fails with an error other than absence.
+		unreadableOnDisk bool
+		wantPresent      bool
+		wantChange       string
 	}{
 		{name: "no config anywhere", wantPresent: false, wantChange: ""},
 		{name: "untracked config on disk", onDisk: driftTestConfig, wantPresent: false, wantChange: "added"},
@@ -78,6 +81,7 @@ func TestRunner_ProjectConfigComparedAtStart(t *testing.T) {
 		{name: "committed config removed on disk", committed: driftTestConfig, removeOnDisk: true, wantPresent: true, wantChange: "removed"},
 		{name: "committed config unchanged", committed: driftTestConfig, wantPresent: true, wantChange: ""},
 		{name: "unrelated dirty file", unrelatedDirt: true, wantPresent: false, wantChange: ""},
+		{name: "unreadable checkout copy", committed: driftTestConfig, unreadableOnDisk: true, wantPresent: true, wantChange: "unreadable"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Parallel()
@@ -98,6 +102,14 @@ func TestRunner_ProjectConfigComparedAtStart(t *testing.T) {
 			}
 			if scenario.removeOnDisk {
 				if err := os.Remove(configPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario.unreadableOnDisk {
+				if err := os.Remove(configPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(configPath, 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}

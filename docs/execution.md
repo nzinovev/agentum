@@ -68,7 +68,7 @@ When the run's worktree is first created, the runner records which
 with it: the manifest's `context.project_config` carries the file, whether
 `base_commit` has it (`present_at_base`; `false` means the check registry is
 empty), its hash, and the checkout's change kind (`added`, `removed`,
-`modified`, or none). A difference also emits the warning event
+`modified`, `unreadable` when the checkout copy could not be read, or none). A difference also emits the warning event
 `run.project_config_drift` (hashes only, never contents). It does not stop the
 run: checks and instructions always come from `base_commit`, and the working
 copy's config is never substituted. The same comparison appears in the

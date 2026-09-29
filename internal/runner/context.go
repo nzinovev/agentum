@@ -331,6 +331,9 @@ const (
 	configDriftAdded    configDriftChange = "added"
 	configDriftRemoved  configDriftChange = "removed"
 	configDriftModified configDriftChange = "modified"
+	// configDriftUnreadable: the checkout copy exists or may exist but could
+	// not be read, so the comparison has no result.
+	configDriftUnreadable configDriftChange = "unreadable"
 )
 
 // recordProjectConfigAtStart compares .agentum.yaml in the source checkout
@@ -359,11 +362,12 @@ func (runner *Runner) recordProjectConfigAtStart(ctx context.Context, record sql
 	}
 	onDisk, diskReadErr := os.ReadFile(filepath.Join(checkoutPath, checks.ConfigFile))
 	diskPresent := diskReadErr == nil
-	if diskReadErr != nil && !errors.Is(diskReadErr, fs.ErrNotExist) {
-		runner.log.Warn("project config comparison: read checkout copy", "run", record.ID, "error", diskReadErr)
-		diskPresent = false
-	}
 	switch {
+	case diskReadErr != nil && !errors.Is(diskReadErr, fs.ErrNotExist):
+		// The file may exist; the comparison has no answer. Recording it as
+		// "removed" would put a false fact into first-write-wins evidence.
+		runner.log.Warn("project config comparison: read checkout copy", "run", record.ID, "error", diskReadErr)
+		evidence.CheckoutChange = string(configDriftUnreadable)
 	case diskPresent && !evidence.PresentAtBase:
 		evidence.CheckoutChange = string(configDriftAdded)
 	case !diskPresent && evidence.PresentAtBase:

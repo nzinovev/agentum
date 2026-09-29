@@ -59,7 +59,8 @@ type ProjectConfigEvidence struct {
 	PresentAtBase bool   `json:"present_at_base"`
 	BaseHash      string `json:"base_hash,omitempty"`
 	// CheckoutChange is added | removed | modified relative to base_commit,
-	// empty when the checkout matched.
+	// unreadable when the checkout copy could not be read (no comparison
+	// result), empty when the checkout matched.
 	CheckoutChange string `json:"checkout_change,omitempty"`
 	CheckoutHash   string `json:"checkout_hash,omitempty"`
 }
