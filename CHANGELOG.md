@@ -60,8 +60,11 @@ Once tagged releases begin, this project adheres to
   against the remote-tracking ref and stops with `base_not_on_target` /
   `base_target_unverifiable` / `base_ref_unresolvable` instead of building a
   worktree whose PR would carry foreign commits; before push the publisher
-  re-checks the result against the provider's current branch head and refuses
-  `base_diverged` (blocked) or `base_unverifiable` (retryable after a fetch).
+  re-checks that the base lies in the provider's current branch history and
+  refuses `base_diverged` (blocked) or `base_unverifiable` (retryable after a
+  fetch). A target branch that merely moved forward does not block the PR.
+  `main`, `refs/heads/main`, `origin/main`, and `refs/remotes/origin/main` all
+  name the target branch `main`, for the start check and the publisher alike.
   Set `AGENTUM_PUBLISH_BASE_BRANCH` or start runs from the target ref; runs
   already pinned keep their recorded `base_ref`/`base_commit`.
 

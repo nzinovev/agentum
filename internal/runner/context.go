@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -18,6 +17,7 @@ import (
 	"github.com/nzinovev/agentum/internal/instructions"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/publish"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
@@ -416,10 +416,12 @@ func contentHash(content []byte) string {
 //
 // The target branch is the configured publication base branch; when none is
 // configured (the provider resolves the default branch at attempt time), the
-// run's own base_ref names the candidate — but only when it is a plain
-// branch name. A base_ref of HEAD or a bare SHA names no target branch, so
-// the comparison point cannot be established and the run stops asking for an
-// explicit ref or a configured base, never a silent HEAD.
+// run's own base_ref names the candidate through publish.BaseBranchFromRef —
+// the same rule the publisher resolves its destination with, so
+// `refs/remotes/origin/main` and `main` name the same target. A base_ref of
+// HEAD, a bare SHA, or a tag names no target branch, so the comparison point
+// cannot be established and the run stops asking for an explicit ref or a
+// configured base, never a silent HEAD.
 //
 // Both stop reasons are the resumable shape: after `git fetch` (refreshing
 // the tracking ref) or after re-creating the run from the proper target ref,
@@ -429,23 +431,23 @@ func (runner *Runner) pauseOnOffTargetBase(ctx context.Context, record sqlc.Run,
 	if !runner.publication.Enabled {
 		return false
 	}
+	remote := runner.publication.Remote
+	if remote == "" {
+		remote = "origin"
+	}
 	targetBranch := runner.publication.BaseBranch
 	if targetBranch == "" {
-		candidate := strings.TrimPrefix(record.BaseRef, "refs/heads/")
-		if !plainBranchName(candidate) {
+		candidate, named := publish.BaseBranchFromRef(record.BaseRef, remote)
+		if !named {
 			runner.log.Warn("publication base target unverifiable from base_ref; pausing",
 				"run", record.ID, "base_ref", record.BaseRef)
 			runner.emit(ctx, record, EvRunBaseOffTarget, map[string]any{
 				"cause": "target_unverifiable", "base_ref": record.BaseRef,
-				"hint": "set AGENTUM_PUBLISH_BASE_BRANCH or start the run from an explicit target ref (e.g. refs/remotes/origin/main)",
+				"hint": "set AGENTUM_PUBLISH_BASE_BRANCH or start the run from the target branch (e.g. refs/remotes/" + remote + "/main)",
 			})
 			return runner.applyStop(ctx, record, runPack, "base_target_unverifiable")
 		}
 		targetBranch = candidate
-	}
-	remote := runner.publication.Remote
-	if remote == "" {
-		remote = "origin"
 	}
 	trackingRef := "refs/remotes/" + remote + "/" + targetBranch
 	tip, tipErr := runner.wt.ResolveRef(ctx, checkoutPath, trackingRef)
@@ -495,22 +497,6 @@ func (runner *Runner) applyStop(ctx context.Context, record sqlc.Run, runPack *p
 	}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
 	if pauseErr != nil {
 		runner.failRun(ctx, record, pauseErr)
-	}
-	return true
-}
-
-// plainBranchName reports whether ref names a plain branch (a publishable
-// comparison-point candidate): no ref prefix, no SHA shape, no HEAD, and the
-// same characters git accepts in a branch component chain.
-func plainBranchName(ref string) bool {
-	if ref == "" || ref == "HEAD" || strings.HasPrefix(ref, "refs/") ||
-		taskinput.IsFullCommitSHA(ref) || strings.ContainsAny(ref, " ~^:?*[\\") || strings.Contains(ref, "..") {
-		return false
-	}
-	for _, part := range strings.Split(ref, "/") {
-		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
-			return false
-		}
 	}
 	return true
 }

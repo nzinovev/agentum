@@ -244,7 +244,14 @@ func (service *Service) Handle(ctx context.Context, job sqlc.Job) error {
 			return service.recordRefusal(ctx, record, claimed, publish.ReasonRemoteUnknown, publish.Result{}, provider)
 		}
 		target.Provider, target.RemoteBranch = provider.ID(), claimed.RemoteBranch
-		target, targetErr = resolver.ResolveTarget(attemptCtx, target, record.BaseRef, service.baseBranch)
+		// A base_ref naming the target through the remote-tracking ref
+		// (refs/remotes/origin/main) resolves to that branch here too, not to
+		// the default branch: the runner verified the base against it.
+		baseRef := record.BaseRef
+		if branch, named := publish.BaseBranchFromRef(record.BaseRef, service.remote); named {
+			baseRef = branch
+		}
+		target, targetErr = resolver.ResolveTarget(attemptCtx, target, baseRef, service.baseBranch)
 		if targetErr != nil {
 			code, _ := publish.Classify(targetErr)
 			return service.recordRefusal(ctx, record, claimed, code, publish.Result{}, provider)

@@ -112,6 +112,36 @@ func TestRunner_DeveloperBranchBasePauses(t *testing.T) {
 	}
 }
 
+// TestRunner_TrackingRefBaseWithoutConfiguredBranchProceeds: with no
+// configured publication base branch, a base_ref spelled as the remote-tracking
+// ref (the form the API docs and the error message recommend) names its target
+// branch and proceeds; the same ref spelled `origin/main` does too.
+func TestRunner_TrackingRefBaseWithoutConfiguredBranchProceeds(t *testing.T) {
+	t.Parallel()
+	for _, baseRef := range []string{"refs/remotes/origin/main", "origin/main"} {
+		t.Run(baseRef, func(t *testing.T) {
+			t.Parallel()
+			fixture := newRecoveryFixture(t, "running")
+			fixture.runner.publication = publicationHookForTest("origin", "")
+			head, headErr := execGit(fixture.repo, "rev-parse", "HEAD")
+			if headErr != nil {
+				t.Fatal(headErr)
+			}
+			if _, refErr := execGit(fixture.repo, "update-ref", "refs/remotes/origin/main", head); refErr != nil {
+				t.Fatal(refErr)
+			}
+			fixture.store.record = sqlc.Run{ID: fixture.runID, TenantID: "tn", UserID: "us", ProjectID: "P1",
+				State: "running", PipelinePack: "test@0.1.0", BaseRef: baseRef}
+			fixture.driveToGate(t)
+			for _, event := range fixture.store.events {
+				if event.Type == EvRunBaseOffTarget {
+					t.Fatalf("a tracking-ref base on its target produced an off-target event: %s", event.Payload)
+				}
+			}
+		})
+	}
+}
+
 // TestRunner_MissingComparisonPointPauses: publication enabled, but the
 // remote-tracking ref does not exist — the run stops asking for a fetch or a
 // configured base, never silently continuing.

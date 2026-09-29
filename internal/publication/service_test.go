@@ -769,10 +769,12 @@ func TestQueuedJobsCannotRetryRecordedRefusal(test *testing.T) {
 type resolvingPublisher struct {
 	scriptedPublisher
 	resolutions int
+	baseRefs    []string
 }
 
-func (publisher *resolvingPublisher) ResolveTarget(_ context.Context, target publish.Target, _, override string) (publish.Target, error) {
+func (publisher *resolvingPublisher) ResolveTarget(_ context.Context, target publish.Target, baseRef, override string) (publish.Target, error) {
 	publisher.resolutions++
+	publisher.baseRefs = append(publisher.baseRefs, baseRef)
 	target.BaseBranch = "main"
 	if override != "" {
 		target.BaseBranch = override
@@ -815,6 +817,33 @@ func TestTargetFrozenBeforePartialFailureAndReusedOnRetry(test *testing.T) {
 	}
 	if remoteReads != 1 || provider.resolutions != 1 || harness.store.row.State != "published" {
 		test.Fatalf("reads=%d resolutions=%d state=%s", remoteReads, provider.resolutions, harness.store.row.State)
+	}
+}
+
+// TestTargetResolvesTrackingRefBaseToItsBranch pins that a run based on the
+// remote-tracking ref asks the provider about the branch it names, the same
+// branch the runner verified the base against — not the default branch.
+func TestTargetResolvesTrackingRefBaseToItsBranch(test *testing.T) {
+	for _, scenario := range []struct {
+		baseRef     string
+		wantBaseRef string
+	}{
+		{baseRef: "refs/remotes/origin/release", wantBaseRef: "release"},
+		{baseRef: "refs/heads/release", wantBaseRef: "release"},
+		{baseRef: "HEAD", wantBaseRef: "HEAD"},
+	} {
+		provider := &resolvingPublisher{scriptedPublisher: scriptedPublisher{id: "test", result: publish.Result{BranchPushed: true, PullRequest: 42, PullRequestState: "open"}}}
+		harness := newCoordinatorHarness(test, passingChecks(), provider)
+		harness.store.run.BaseRef = scenario.baseRef
+		harness.service.readRemote = func(context.Context, string, string) (string, error) {
+			return "git@github.com:owner/repository.git", nil
+		}
+		if err := harness.handle(test); err != nil {
+			test.Fatal(err)
+		}
+		if len(provider.baseRefs) != 1 || provider.baseRefs[0] != scenario.wantBaseRef {
+			test.Fatalf("base_ref %q reached the provider as %v, want %q", scenario.baseRef, provider.baseRefs, scenario.wantBaseRef)
+		}
 	}
 }
 

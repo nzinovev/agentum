@@ -55,6 +55,35 @@ func validRepositoryPart(value string) bool {
 	return repositoryPart.MatchString(value) && value != "." && value != ".."
 }
 
+// BaseBranchFromRef names the publication target branch a run's base_ref
+// points at, for the given remote: `main`, `refs/heads/main`,
+// `refs/remotes/<remote>/main`, and `<remote>/main` all name `main`. HEAD, a
+// commit SHA, a tag, and another remote's tracking ref name no target branch
+// (false). The run-start ancestry check and the publisher's destination
+// resolution share this rule, so a base_ref cannot pass one and resolve to a
+// different branch in the other. `<remote>/main` is read as the tracking ref,
+// as git does unless a local branch carries that literal name.
+func BaseBranchFromRef(baseRef, remote string) (string, bool) {
+	branch := strings.TrimSpace(baseRef)
+	if branch == "HEAD" || commitSHA.MatchString(branch) {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(branch, "refs/heads/"):
+		branch = strings.TrimPrefix(branch, "refs/heads/")
+	case strings.HasPrefix(branch, "refs/remotes/"+remote+"/"):
+		branch = strings.TrimPrefix(branch, "refs/remotes/"+remote+"/")
+	case strings.HasPrefix(branch, "refs/"):
+		return "", false
+	case strings.HasPrefix(branch, remote+"/"):
+		branch = strings.TrimPrefix(branch, remote+"/")
+	}
+	if branch == "HEAD" || !validBranch(branch) {
+		return "", false
+	}
+	return branch, true
+}
+
 func validBranch(branch string) bool {
 	if branch == "" || branch == "@" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, " ~^:?*[\\\x00\r\n\t\x7f") || strings.Contains(branch, "..") || strings.Contains(branch, "@{") {
 		return false

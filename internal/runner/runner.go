@@ -255,7 +255,7 @@ type PublicationHook struct {
 	// BaseBranch is the configured publication target branch. Empty defers
 	// the choice to the provider's default-branch resolution at attempt
 	// time; for the start-time ancestry check the run's own base_ref names
-	// the candidate when it is a plain branch name.
+	// the candidate when it names a branch (publish.BaseBranchFromRef).
 	BaseBranch string
 }
 

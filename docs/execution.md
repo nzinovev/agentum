@@ -489,7 +489,7 @@ helpers, fsmonitor, redirects, and recursive pushes during delivery.
 | Destination input | Resolution |
 |---|---|
 | Explicit base branch | Use `AGENTUM_PUBLISH_BASE_BRANCH`. |
-| `base_ref` names an existing remote branch | Use that branch, removing a leading `refs/heads/`. |
+| `base_ref` names an existing remote branch | Use that branch: `main`, `refs/heads/main`, `origin/main`, and `refs/remotes/origin/main` all name `main` (`origin` being the configured remote). |
 | `base_ref` is a SHA, tag, or absent branch | Use the repository's default branch. |
 | Remote does not identify an accessible repository | Record `remote_unknown`. |
 | Remote host differs from configured API host | Refuse before sending credentials; `api.github.com` maps to `github.com`. |
@@ -502,12 +502,15 @@ result SHA and pushes that SHA with a fixed refspec. No force push or merge
 operation is available.
 
 Before the push, the publisher reads the target base branch's current head
-from the provider and verifies the result commit contains it. A head the
-result does not contain means the pull request would carry foreign commits or
-reverse the branch's newer work: the attempt is refused `base_diverged`
-(blocked — a person starts a new run from the moved branch), and the run and
-its result are untouched. A head the local checkout cannot compare (never
-fetched) refuses `base_unverifiable` (retryable after a fetch). At run start
+from the provider and verifies the run's `base_commit` is part of its history.
+Then everything the result adds beyond the branch lies in
+`base_commit..result_commit` — the run's own commits. A base outside that
+history means the pull request would carry foreign commits: the attempt is
+refused `base_diverged` (blocked — publish the base's commits first or start a
+new run from the target branch), and the run and its result are untouched. A
+branch that moved forward since the run started is not a refusal. A head the
+local checkout cannot compare (never fetched) refuses `base_unverifiable`
+(retryable after a fetch). At run start
 the runner makes the same check against the remote-tracking ref, so an
 off-target base stops the run before the worktree exists (`base_not_on_target`
 and its siblings in the stop table above).

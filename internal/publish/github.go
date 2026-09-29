@@ -281,12 +281,19 @@ func (publisher *githubPublisher) Publish(ctx context.Context, delivery Delivery
 }
 
 // verifyBaseCurrent reads the target base branch's current head from the
-// provider and verifies the result commit contains it, so the pull request
-// adds the run's commits on top of the branch as it stands now — not on top
-// of a stale snapshot with the branch's newer work silently reversed. The
-// run and its result are untouched on refusal; the attempt is recorded and
-// the diagnostic names the action.
+// provider and verifies the run's base_commit is part of that branch's
+// history. That is the condition under which the pull request carries only
+// the run's own commits: everything the result holds beyond the branch head
+// then lies in base_commit..result_commit. A base built on commits the branch
+// does not have — a developer branch's unpushed work — is refused, while a
+// branch that merely moved forward since the run started is not: the pull
+// request shows the run's commits against the merge base as usual. The run
+// and its result are untouched on refusal; the attempt is recorded and the
+// diagnostic names the action.
 func (publisher *githubPublisher) verifyBaseCurrent(ctx context.Context, delivery Delivery, token string) error {
+	if !commitSHA.MatchString(delivery.BaseCommit) {
+		return refuse(ReasonBaseUnverifiable)
+	}
 	status, response, requestErr := publisher.request(ctx, opBranch, delivery.Target, delivery.Target.BaseBranch, nil, nil, token)
 	if requestErr != nil {
 		return requestErr
@@ -305,16 +312,8 @@ func (publisher *githubPublisher) verifyBaseCurrent(ctx context.Context, deliver
 	if json.Unmarshal(response, &branch) != nil || !commitSHA.MatchString(branch.Commit.SHA) {
 		return refuse(ReasonBaseBranchUnknown)
 	}
-	if branch.Commit.SHA == delivery.ResultCommit {
-		// The branch already sits at the result (a previous push of this very
-		// delivery): nothing foreign can ride along.
-		return nil
-	}
-	verified, unverifiable, ancestryErr := publisher.compareAncestry(ctx, delivery.Project.CheckoutPath, branch.Commit.SHA, delivery.ResultCommit)
-	if ancestryErr != nil {
-		return refuse(ReasonBaseUnverifiable)
-	}
-	if unverifiable {
+	verified, unverifiable, ancestryErr := publisher.compareAncestry(ctx, delivery.Project.CheckoutPath, delivery.BaseCommit, branch.Commit.SHA)
+	if ancestryErr != nil || unverifiable {
 		return refuse(ReasonBaseUnverifiable)
 	}
 	if !verified {

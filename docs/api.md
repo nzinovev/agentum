@@ -132,7 +132,7 @@ verifies that the base belongs to the publication target branch's history
 against the remote-tracking ref (`run.base_off_target` events carry the
 cause; stop reasons `base_ref_unresolvable`, `base_target_unverifiable`,
 `base_not_on_target`). Before push and PR creation the publisher re-verifies
-the result against the provider's current branch head (`base_diverged`,
+that the base lies in the provider's current branch history (`base_diverged`,
 `base_unverifiable`). See `docs/execution.md` § "Safe lifecycle,
 checkpoints, and code egress" for the full lineage / abort / cleanup model.
 
@@ -298,8 +298,8 @@ state. The closed `last_error.code` vocabulary is:
 | `remote_unknown` | `blocked` | Configure an accessible publication repository. |
 | `base_branch_unknown` | `blocked` | Supply a valid base branch. |
 | `non_fast_forward` | `blocked` | A human must resolve the remote branch divergence. |
-| `base_diverged` | `blocked` | The target branch moved beyond the run's result history; the PR would carry foreign commits — start a new run from the moved branch. |
-| `base_unverifiable` | `failed` | The target branch's head could not be compared locally; `git fetch` in the checkout and retry. |
+| `base_diverged` | `blocked` | The run's base is not in the target branch's history; the PR would carry foreign commits — publish the base's commits first or start a new run from the target branch. |
+| `base_unverifiable` | `failed` | The target branch's head could not be compared with the run's base locally; `git fetch` in the checkout and retry. |
 | `push_rejected` | `blocked` | Resolve the provider's push restriction. |
 | `draft_unsupported` | `blocked` | The provider must support draft PRs; no ordinary PR fallback is accepted. |
 | `pull_request_closed` | `blocked` | The PR was closed or merged; it is neither reopened nor replaced. |
