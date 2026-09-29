@@ -86,6 +86,51 @@ func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	}
 }
 
+// TestManager_Create_ReattachesSurvivingBranch pins the resume path after a
+// discarded tree: RemoveWorktree keeps agentum/<run-id>, so the next Create
+// must check that branch out at its own tip. `worktree add -b` on the existing
+// branch fails, and re-creating it off baseCommit would drop the run's commits.
+func TestManager_Create_ReattachesSurvivingBranch(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	baseCommit := strings.TrimSpace(mustGit(t, repo, "rev-parse", "HEAD"))
+	manager := New()
+	runID := "run-reattach"
+	created, err := manager.Create(t.Context(), repo, runID, baseCommit)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if writeErr := os.WriteFile(filepath.Join(created.Root, "work.txt"), []byte("committed run work"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	runCommit, _, err := manager.Commit(t.Context(), created.Root, "run work")
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := manager.RemoveWorktree(t.Context(), repo, runID); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+
+	reattached, err := manager.Create(t.Context(), repo, runID, baseCommit)
+	if err != nil {
+		t.Fatalf("Create over a surviving branch: %v", err)
+	}
+	assertBranchCheckedOut(t, reattached.Root, BranchFor(runID))
+	head, err := manager.HeadCommit(t.Context(), reattached.Root)
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
+	if head != runCommit {
+		t.Fatalf("reattached HEAD = %s, want the branch tip %s (not base %s)", head, runCommit, baseCommit)
+	}
+	if _, statErr := os.Stat(filepath.Join(reattached.Root, "work.txt")); statErr != nil {
+		t.Fatalf("committed run work missing after reattach: %v", statErr)
+	}
+}
+
 // TestWorktree_MoveBreaksLinkAndRepairRestores pins the recovery path for a
 // repository that moved on disk: git writes absolute paths into both halves of
 // the worktree linkage, so after the move the worktree directory is fully

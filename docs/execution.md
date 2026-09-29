@@ -400,7 +400,10 @@ terminal run's working tree — tree only, never the branch (`cleanup` remains
 the branch-deleting verb). It requires the run's current HEAD and
 `discard_uncommitted: true` whenever the tree is dirty, re-verifies state,
 competing jobs, and HEAD at execution time, and is audited
-(`run.worktree_discarded` / `run.worktree_discard_refused`).
+(`run.worktree_discarded` / `run.worktree_discard_refused`). A stopped run
+stays resumable after a discard: the next continue or advance checks the
+surviving branch out again at its tip, so committed work returns and only the
+uncommitted files are gone.
 
 ## Publication
 

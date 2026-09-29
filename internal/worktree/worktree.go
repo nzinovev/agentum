@@ -74,7 +74,9 @@ func New() *Manager { return &Manager{} }
 // baseCommit (a resolved full SHA) is used as the branch start-point so the
 // run's lineage is pinned to exactly what base_ref pointed at when the runner
 // resolved it; an empty baseCommit falls back to the repo's current HEAD (used
-// by tests and the pre-F.6.1 path). It ensures the repo ignores its own
+// by tests and the pre-F.6.1 path). When the branch already exists without a
+// worktree (a discarded tree of a resumable run), the branch is checked out at
+// its tip and baseCommit is not used. It ensures the repo ignores its own
 // .agentum/ dir so worktrees and artifacts do not pollute the user's working
 // tree as untracked files.
 func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit string) (*Worktree, error) {
@@ -111,14 +113,22 @@ func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit 
 		return nil, fmt.Errorf("create worktree parent dir: %w", err)
 	}
 
-	// Create the worktree on a new branch off baseCommit (or HEAD). -b names the
-	// branch; the branch is created off the start-point and checked out in the
-	// new working tree. Pinning to baseCommit is what makes base_commit an
-	// immutable lineage anchor — a later move of base_ref cannot change it
-	// after the fact.
-	args := []string{"worktree", "add", "-b", branch, wtPath}
-	if baseCommit != "" {
-		args = append(args, baseCommit)
+	// A surviving branch with no worktree is a run whose tree was discarded
+	// while the run stayed resumable (RemoveWorktree keeps the branch). Check
+	// the branch out again at its own tip: the run's committed work is the
+	// lineage now, and re-creating it off baseCommit would drop it — while
+	// `-b` on an existing branch fails outright and strands the run.
+	args := []string{"worktree", "add", wtPath, branch}
+	if _, branchErr := git(ctx, repoAbs, revParseCmd, "--verify", "--quiet", "refs/heads/"+branch); branchErr != nil {
+		// Create the worktree on a new branch off baseCommit (or HEAD). -b
+		// names the branch; the branch is created off the start-point and
+		// checked out in the new working tree. Pinning to baseCommit is what
+		// makes base_commit an immutable lineage anchor — a later move of
+		// base_ref cannot change it after the fact.
+		args = []string{"worktree", "add", "-b", branch, wtPath}
+		if baseCommit != "" {
+			args = append(args, baseCommit)
+		}
 	}
 	if out, err := git(ctx, repoAbs, args...); err != nil {
 		return nil, fmt.Errorf("git worktree add: %w (%s)", err, strings.TrimSpace(string(out)))

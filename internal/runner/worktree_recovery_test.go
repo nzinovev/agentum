@@ -379,6 +379,49 @@ func TestRunner_DiscardWorktreeGuardsAndRemoval(t *testing.T) {
 	requireRecoveryEvent(t, fixture.store, EvWorktreeDiscarded)
 }
 
+// TestRunner_DiscardedPausedRunResumesFromItsBranch pins that discarding a
+// paused run's tree does not strand the run: the branch survives the discard,
+// so the next driving job checks it out again at its tip and carries on —
+// with the committed work — instead of failing on `worktree add -b`.
+func TestRunner_DiscardedPausedRunResumesFromItsBranch(t *testing.T) {
+	t.Parallel()
+	fixture := newRecoveryFixture(t, "running")
+	fixture.driveToGate(t)
+
+	wtRoot := fixture.worktreeRoot()
+	if err := os.WriteFile(filepath.Join(wtRoot, "kept.txt"), []byte("committed before the discard"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "kept.txt"}, {"commit", "--quiet", "-m", "run work"}} {
+		if _, gitErr := execGit(wtRoot, args...); gitErr != nil {
+			t.Fatalf("git %v: %v", args, gitErr)
+		}
+	}
+	head, headErr := execGit(wtRoot, "rev-parse", "HEAD")
+	if headErr != nil {
+		t.Fatalf("read worktree head: %v", headErr)
+	}
+	discardJob := sqlc.Job{ID: 13, TenantID: "tn", UserID: "us", RunID: fixture.runID, Kind: "discard_worktree",
+		Payload: []byte(`{"expected_head":"` + head + `","discard_uncommitted":false}`)}
+	if err := fixture.runner.HandleDiscardWorktree(context.Background(), discardJob); err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+	if worktree.DirPresent(wtRoot) {
+		t.Fatal("worktree still present after the discard")
+	}
+
+	fixture.resumeAsRunning(t)
+	if err := fixture.runner.HandleAdvance(context.Background(), job("advance", fixture.runID, "tn", "us")); err != nil {
+		t.Fatalf("advance after discard: %v", err)
+	}
+	if state := fixture.store.taskState(); state == "failed" {
+		t.Fatal("run failed resuming after a discard; the surviving branch must be checked out again")
+	}
+	if _, statErr := os.Stat(filepath.Join(wtRoot, "kept.txt")); statErr != nil {
+		t.Fatalf("committed run work missing from the re-created tree: %v", statErr)
+	}
+}
+
 // TestRunner_DiscardWorktreeRefusesLiveRun pins the state guard on the runner
 // side: a run the API let through (say it raced a start) is refused at
 // execution time when its state says running.

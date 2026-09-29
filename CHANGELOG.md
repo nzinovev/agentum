@@ -24,7 +24,8 @@ Once tagged releases begin, this project adheres to
   counterpart to keeping failed runs' worktrees: it requires the run's current
   HEAD, `discard_uncommitted: true` when the tree is dirty, and no active job;
   the runner re-verifies every precondition before removing anything.
-  `cleanup` remains the branch-deleting verb.
+  `cleanup` remains the branch-deleting verb. A stopped run stays resumable
+  after a discard: the next driving job checks the branch out again at its tip.
 
 - **Runs at final review can publish their checked commit and a draft GitHub PR.**
   Operators can enable publication with `AGENTUM_PUBLISH_ENABLED=true` and a
