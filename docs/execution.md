@@ -490,7 +490,8 @@ helpers, fsmonitor, redirects, and recursive pushes during delivery.
 |---|---|
 | Explicit base branch | Use `AGENTUM_PUBLISH_BASE_BRANCH`. |
 | `base_ref` names an existing remote branch | Use that branch: `main`, `refs/heads/main`, `origin/main`, and `refs/remotes/origin/main` all name `main` (`origin` being the configured remote). |
-| `base_ref` is a SHA, tag, or absent branch | Use the repository's default branch. |
+| `base_ref` names a branch the provider does not have | Refuse `base_branch_unknown`; never fall back to the default branch, which the run's base was not verified against. |
+| `base_ref` is a SHA or a tag ref | Use the repository's default branch. |
 | Remote does not identify an accessible repository | Record `remote_unknown`. |
 | Remote host differs from configured API host | Refuse before sending credentials; `api.github.com` maps to `github.com`. |
 

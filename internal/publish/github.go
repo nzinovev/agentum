@@ -168,9 +168,14 @@ func (publisher *githubPublisher) ResolveTarget(ctx context.Context, target Targ
 			target.BaseBranch = candidate
 			return target, nil
 		}
-		if status != http.StatusNotFound {
-			return Target{}, responseRefusal(status, nil)
+		if status == http.StatusNotFound {
+			// A base_ref that names a branch is the target the run verified
+			// its base against at start. The default branch may well contain
+			// base_commit too, so falling back to it would pass the ancestry
+			// check and open the pull request against a branch nobody chose.
+			return Target{}, refuse(ReasonBaseBranchUnknown)
 		}
+		return Target{}, responseRefusal(status, nil)
 	}
 	status, response, err := publisher.request(ctx, opRepository, target, "", nil, nil, token)
 	if err != nil {

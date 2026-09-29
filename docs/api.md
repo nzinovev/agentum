@@ -296,7 +296,7 @@ state. The closed `last_error.code` vocabulary is:
 | `provider_error` | `failed` | An unclassified provider or local storage/execution failure prevented completion. |
 | `unsafe_git_config` | `blocked` | Remove the local Git setting named by the diagnostic. |
 | `remote_unknown` | `blocked` | Configure an accessible publication repository. |
-| `base_branch_unknown` | `blocked` | Supply a valid base branch. |
+| `base_branch_unknown` | `blocked` | The target branch (configured, or named by `base_ref`) does not exist at the provider; restore it, or configure `AGENTUM_PUBLISH_BASE_BRANCH` and start a new run. |
 | `non_fast_forward` | `blocked` | A human must resolve the remote branch divergence. |
 | `base_diverged` | `blocked` | The run's base is not in the target branch's history; the PR would carry foreign commits — publish the base's commits first or start a new run from the target branch. |
 | `base_unverifiable` | `failed` | The target branch's head could not be compared with the run's base locally; `git fetch` in the checkout and retry. |

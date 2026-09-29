@@ -64,7 +64,9 @@ Once tagged releases begin, this project adheres to
   refuses `base_diverged` (blocked) or `base_unverifiable` (retryable after a
   fetch). A target branch that merely moved forward does not block the PR.
   `main`, `refs/heads/main`, `origin/main`, and `refs/remotes/origin/main` all
-  name the target branch `main`, for the start check and the publisher alike.
+  name the target branch `main`, for the start check and the publisher alike;
+  a named branch missing at the provider refuses `base_branch_unknown` instead
+  of falling back to the default branch.
   Set `AGENTUM_PUBLISH_BASE_BRANCH` or start runs from the target ref; runs
   already pinned keep their recorded `base_ref`/`base_commit`.
 

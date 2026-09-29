@@ -225,14 +225,17 @@ func TestGitHubTargetResolution(test *testing.T) {
 	for _, scenario := range []struct {
 		name, ref, override, want string
 		branchStatus              int
+		// wantCode is the refusal for a named branch the provider does not
+		// have: it never falls back to the default branch.
+		wantCode ReasonCode
 	}{
-		{"override", "feature", "release", "release", 404},
-		{"branch", "feature", "", "feature", 200},
-		{"slash", "release/1.2", "", "release/1.2", 200},
-		{"qualified", "refs/heads/feature", "", "feature", 200},
-		{"default", "missing", "", "main", 404},
-		{"commit", strings.Repeat("a", 40), "", "main", 404},
-		{"tag", "refs/tags/v1", "", "main", 404},
+		{"override", "feature", "release", "release", 404, ""},
+		{"branch", "feature", "", "feature", 200, ""},
+		{"slash", "release/1.2", "", "release/1.2", 200, ""},
+		{"qualified", "refs/heads/feature", "", "feature", 200, ""},
+		{"named branch missing", "missing", "", "", 404, ReasonBaseBranchUnknown},
+		{"commit", strings.Repeat("a", 40), "", "main", 404, ""},
+		{"tag", "refs/tags/v1", "", "main", 404, ""},
 	} {
 		test.Run(scenario.name, func(test *testing.T) {
 			calls := 0
@@ -249,6 +252,12 @@ func TestGitHubTargetResolution(test *testing.T) {
 				_, _ = w.Write([]byte(`{"default_branch":"main"}`))
 			})
 			target, err := publisher.ResolveTarget(test.Context(), delivery.Target, scenario.ref, scenario.override)
+			if scenario.wantCode != "" {
+				if code, _ := Classify(err); code != scenario.wantCode {
+					test.Fatalf("code=%s want=%s err=%v target=%+v", code, scenario.wantCode, err, target)
+				}
+				return
+			}
 			if err != nil || target.BaseBranch != scenario.want {
 				test.Fatalf("target=%+v err=%v", target, err)
 			}
