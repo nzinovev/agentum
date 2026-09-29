@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -527,6 +528,59 @@ func lineageDiverged(ctx context.Context, repoAbs, baseCommit, head string) bool
 	}
 	out, err := git(ctx, repoAbs, "merge-base", "--is-ancestor", baseCommit, head)
 	return err != nil && strings.TrimSpace(string(out)) == ""
+}
+
+// IsAncestor reports whether ancestor is reachable from descendant in the
+// repo at repoPath. Used by the base-ancestry checks (run start and
+// publication): the run's base must lie in the publication target branch's
+// history, so the eventual pull request carries the run's commits and no
+// one else's. Exit-status based — no error text is matched.
+func (manager *Manager) IsAncestor(ctx context.Context, repoPath, ancestor, descendant string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(ancestor) == "" || strings.TrimSpace(descendant) == "" {
+		return false, errors.New("worktree: IsAncestor requires non-empty commits")
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return false, fmt.Errorf("resolve repo path: %w", err)
+	}
+	// --is-ancestor exits 0 when true, 1 when false; any other failure (an
+	// unknown object among other causes) surfaces as its own error.
+	cmd := exec.CommandContext(ctx, "git", "-C", repoAbs, "merge-base", "--is-ancestor", ancestor, descendant)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w (%s)",
+		ancestor, descendant, err, strings.TrimSpace(string(out)))
+}
+
+// CountAhead runs `git rev-list --count from..to` in the repo at repoPath:
+// how many commits to has beyond from. Used for the base-ancestry diagnosis
+// (how many unpublished commits a local base rides on top of the target
+// branch's comparison point).
+func (manager *Manager) CountAhead(ctx context.Context, repoPath, from, to string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return 0, fmt.Errorf("resolve repo path: %w", err)
+	}
+	out, err := git(ctx, repoAbs, "rev-list", "--count", from+".."+to)
+	if err != nil {
+		return 0, fmt.Errorf("git rev-list --count %s..%s: %w (%s)", from, to, err, strings.TrimSpace(string(out)))
+	}
+	count, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse rev-list count %q: %w", strings.TrimSpace(string(out)), parseErr)
+	}
+	return count, nil
 }
 
 // RemoveWorktree removes only the per-run working tree. The agentum/<run-id>

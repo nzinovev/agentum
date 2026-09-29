@@ -35,6 +35,29 @@ func TestParseTaskCreate(t *testing.T) {
 			body: func() string { return validCreateBody },
 		},
 		{
+			name: "explicit remote-tracking base_ref parses",
+			body: func() string {
+				return strings.Replace(validCreateBody, `"base_ref": "HEAD"`,
+					`"base_ref": "refs/remotes/origin/main"`, 1)
+			},
+		},
+		{
+			name: "absent base_ref rejected — no silent HEAD default",
+			body: func() string {
+				return strings.Replace(validCreateBody, ",\n  \"base_ref\": \"HEAD\"", "", 1)
+			},
+			wantErr:   true,
+			errSubstr: "base_ref is required",
+		},
+		{
+			name: "blank base_ref rejected",
+			body: func() string {
+				return strings.Replace(validCreateBody, `"base_ref": "HEAD"`, `"base_ref": "   "`, 1)
+			},
+			wantErr:   true,
+			errSubstr: "base_ref is required",
+		},
+		{
 			name: "overrides by name parse",
 			body: func() string {
 				return strings.Replace(validCreateBody, `"base_ref": "HEAD"`,

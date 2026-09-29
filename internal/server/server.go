@@ -111,7 +111,10 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		HardTimeout: time.Duration(cfg.HardTimeoutSeconds) * time.Second,
 		IdleTimeout: time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
 		Log:         log,
-		Publication: runner.PublicationHook{Enabled: cfg.PublishEnabled, Provider: string(publicationProvider.ID())},
+		Publication: runner.PublicationHook{
+			Enabled: cfg.PublishEnabled, Provider: string(publicationProvider.ID()),
+			Remote: cfg.PublishRemote, BaseBranch: cfg.PublishBaseBranch,
+		},
 	})
 
 	// The publication coordinator serves the "publish" kind. It is wired

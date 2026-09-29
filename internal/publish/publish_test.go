@@ -127,6 +127,7 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 		ReasonCredentialsMissing,
 		ReasonCredentialsRejected,
 		ReasonNetworkUnreachable,
+		ReasonBaseUnverifiable,
 		ReasonProviderError,
 	}
 	blocking := []ReasonCode{
@@ -135,6 +136,7 @@ func TestReasonVocabularyPartitionedByRetry(t *testing.T) {
 		ReasonRemoteUnknown,
 		ReasonBaseBranchUnknown,
 		ReasonNonFastForward,
+		ReasonBaseDiverged,
 		ReasonPushRejected,
 		ReasonDraftUnsupported,
 		ReasonPullRequestClosed,

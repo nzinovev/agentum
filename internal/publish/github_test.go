@@ -6,16 +6,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strings"
 	"testing"
 )
 
 func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher, Delivery) {
+	return githubFixtureWithBranch(test, handler, strings.Repeat("a", 40))
+}
+
+// githubFixtureWithBranch is githubFixture with the base-branch head the
+// publisher's pre-push lookup reports; the default is the delivery's own
+// result commit, which short-circuits the ancestry comparison.
+func githubFixtureWithBranch(test *testing.T, handler http.HandlerFunc, branchHead string) (*githubPublisher, Delivery) {
 	test.Helper()
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewTLSServer(routeBaseBranchAnswers(handler, branchHead))
 	test.Cleanup(server.Close)
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -26,6 +35,9 @@ func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher,
 	publisher.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	publisher.checkCheckout = func(context.Context, string) error { return nil }
 	publisher.push = func(context.Context, Delivery, string) error { return nil }
+	// The base lies on the target branch unless a scenario says otherwise;
+	// TestGitHubBaseVerification owns the base check itself.
+	publisher.compareAncestry = func(context.Context, string, string, string) (bool, bool, error) { return true, false, nil }
 	delivery := Delivery{
 		Run:        RunRef{ID: "run-one"},
 		Target:     Target{Provider: ProviderGitHub, Host: parsed.Host, Owner: "owner", Repository: "repo", RemoteBranch: "agentum/run-one", BaseBranch: "main"},
@@ -39,6 +51,21 @@ func githubFixture(test *testing.T, handler http.HandlerFunc) (*githubPublisher,
 	digest := sha256.Sum256(body)
 	delivery.Description = DescriptionRef{Text: string(body), RevisionID: "stored-description", ContentHash: hex.EncodeToString(digest[:])}
 	return publisher, delivery
+}
+
+// routeBaseBranchAnswers wraps a test handler so the base-branch head lookup
+// the publisher performs before pushing answers with branchHead, without
+// every scenario handler growing a branch route. Only the delivery's own
+// base branch (main) is intercepted: ResolveTarget probes candidate branches
+// through the same operation, and those must reach the scenario handler.
+func routeBaseBranchAnswers(handler http.HandlerFunc, branchHead string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.EscapedPath() == "/repos/owner/repo/branches/main" {
+			_, _ = w.Write([]byte(`{"commit":{"sha":"` + branchHead + `"}}`))
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func writePullRequest(w http.ResponseWriter, state string, draft bool) {
@@ -198,14 +225,17 @@ func TestGitHubTargetResolution(test *testing.T) {
 	for _, scenario := range []struct {
 		name, ref, override, want string
 		branchStatus              int
+		// wantCode is the refusal for a named branch the provider does not
+		// have: it never falls back to the default branch.
+		wantCode ReasonCode
 	}{
-		{"override", "feature", "release", "release", 404},
-		{"branch", "feature", "", "feature", 200},
-		{"slash", "release/1.2", "", "release/1.2", 200},
-		{"qualified", "refs/heads/feature", "", "feature", 200},
-		{"default", "missing", "", "main", 404},
-		{"commit", strings.Repeat("a", 40), "", "main", 404},
-		{"tag", "refs/tags/v1", "", "main", 404},
+		{"override", "feature", "release", "release", 404, ""},
+		{"branch", "feature", "", "feature", 200, ""},
+		{"slash", "release/1.2", "", "release/1.2", 200, ""},
+		{"qualified", "refs/heads/feature", "", "feature", 200, ""},
+		{"named branch missing", "missing", "", "", 404, ReasonBaseBranchUnknown},
+		{"commit", strings.Repeat("a", 40), "", "main", 404, ""},
+		{"tag", "refs/tags/v1", "", "main", 404, ""},
 	} {
 		test.Run(scenario.name, func(test *testing.T) {
 			calls := 0
@@ -222,6 +252,12 @@ func TestGitHubTargetResolution(test *testing.T) {
 				_, _ = w.Write([]byte(`{"default_branch":"main"}`))
 			})
 			target, err := publisher.ResolveTarget(test.Context(), delivery.Target, scenario.ref, scenario.override)
+			if scenario.wantCode != "" {
+				if code, _ := Classify(err); code != scenario.wantCode {
+					test.Fatalf("code=%s want=%s err=%v target=%+v", code, scenario.wantCode, err, target)
+				}
+				return
+			}
 			if err != nil || target.BaseBranch != scenario.want {
 				test.Fatalf("target=%+v err=%v", target, err)
 			}
@@ -477,4 +513,261 @@ func TestGitHubDraftRejectionPersistsUntilDraftObserved(test *testing.T) {
 	if creates != 1 || updates != 2 {
 		test.Fatalf("writes creates=%d updates=%d", creates, updates)
 	}
+}
+
+// TestGitHubBaseVerification pins the pre-push base check: the pull request
+// never leaves the host unless the run's base_commit lies in the target
+// branch's current history. The comparator is asked exactly that — base as
+// ancestor, branch head as descendant. A base off the branch refuses blocked
+// (a person decides), an unverifiable comparison refuses retryable (fetch and
+// retry), a missing branch keeps its own reason, and a base on the branch
+// publishes.
+func TestGitHubBaseVerification(test *testing.T) {
+	branchHead := strings.Repeat("c", 40)
+	for _, scenario := range []struct {
+		name string
+		// branchHead the provider reports; empty means 404.
+		branchHead   string
+		verified     bool
+		unverifiable bool
+		wantCode     ReasonCode
+	}{
+		{name: "base on the target branch", branchHead: branchHead, verified: true},
+		{name: "base off the target branch", branchHead: branchHead, wantCode: ReasonBaseDiverged},
+		{name: "comparison unverifiable locally", branchHead: branchHead, unverifiable: true, wantCode: ReasonBaseUnverifiable},
+		{name: "base branch missing at provider", branchHead: "", wantCode: ReasonBaseBranchUnknown},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			pushes := 0
+			// Minimal PR flow for the scenarios that pass the base check.
+			publisher, delivery := githubFixtureWithBranch(test, func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					_, _ = w.Write([]byte("[]"))
+				case http.MethodPost:
+					w.WriteHeader(http.StatusCreated)
+					writePullRequest(w, "open", true)
+				}
+			}, scenario.branchHead)
+			if scenario.branchHead == "" {
+				// githubFixtureWithBranch always answers 200; replace the
+				// whole client routing with a 404 for the branch lookup.
+				publisher.client = &http.Client{Transport: notFoundBranches{}}
+			}
+			publisher.push = func(context.Context, Delivery, string) error { pushes++; return nil }
+			verified, unverifiable := scenario.verified, scenario.unverifiable
+			publisher.compareAncestry = func(_ context.Context, _, ancestor, descendant string) (bool, bool, error) {
+				if ancestor != delivery.BaseCommit || descendant != branchHead {
+					test.Errorf("compared %s→%s, want base_commit %s → branch head %s", ancestor, descendant, delivery.BaseCommit, branchHead)
+				}
+				return verified, unverifiable, nil
+			}
+			_, err := publisher.Publish(test.Context(), delivery)
+			if scenario.wantCode == "" {
+				if err != nil || pushes != 1 {
+					test.Fatalf("err=%v pushes=%d", err, pushes)
+				}
+				return
+			}
+			if code, _ := Classify(err); code != scenario.wantCode {
+				test.Fatalf("code=%s want=%s err=%v", code, scenario.wantCode, err)
+			}
+			if pushes != 0 {
+				test.Fatal("a refused base verification still pushed")
+			}
+		})
+	}
+}
+
+// TestGitHubBaseVerificationRealHistory drives the base check over real git
+// history with a main and a developer branch. A run based on the developer
+// branch would carry its unpushed commit into the pull request and is refused
+// even though main never moved; a run based on main still publishes after main
+// moved forward, because the pull request carries only the run's commits.
+func TestGitHubBaseVerificationRealHistory(test *testing.T) {
+	repo := test.TempDir()
+	if err := initBareRepoWithCommit(test, repo); err != nil {
+		test.Fatal(err)
+	}
+	mainBase := gitHead(test, repo)
+	for _, args := range [][]string{
+		{"checkout", "--quiet", "-b", "developer"},
+		{"commit", "--allow-empty", "-m", "unpushed developer work"},
+	} {
+		if err := gitRun(test, repo, args...); err != nil {
+			test.Fatal(err)
+		}
+	}
+	developerBase := gitHead(test, repo)
+	if err := gitRun(test, repo, "commit", "--allow-empty", "-m", "run result on developer"); err != nil {
+		test.Fatal(err)
+	}
+	developerResult := gitHead(test, repo)
+	for _, args := range [][]string{
+		{"checkout", "--quiet", "-b", "run-on-main", mainBase},
+		{"commit", "--allow-empty", "-m", "run result on main"},
+	} {
+		if err := gitRun(test, repo, args...); err != nil {
+			test.Fatal(err)
+		}
+	}
+	mainResult := gitHead(test, repo)
+	for _, args := range [][]string{
+		{"checkout", "--quiet", "-b", "main-moved", mainBase},
+		{"commit", "--allow-empty", "-m", "someone else merged to main"},
+	} {
+		if err := gitRun(test, repo, args...); err != nil {
+			test.Fatal(err)
+		}
+	}
+	mainMoved := gitHead(test, repo)
+
+	for _, scenario := range []struct {
+		name       string
+		baseCommit string
+		result     string
+		branchHead string
+		wantCode   ReasonCode
+	}{
+		{name: "developer base, main unmoved", baseCommit: developerBase, result: developerResult, branchHead: mainBase, wantCode: ReasonBaseDiverged},
+		{name: "main base, main unmoved", baseCommit: mainBase, result: mainResult, branchHead: mainBase},
+		{name: "main base, main moved forward", baseCommit: mainBase, result: mainResult, branchHead: mainMoved},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			pushes := 0
+			publisher, delivery := githubFixtureWithBranch(test, func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					_, _ = w.Write([]byte("[]"))
+				case http.MethodPost:
+					w.WriteHeader(http.StatusCreated)
+					writePullRequest(w, "open", true)
+				}
+			}, scenario.branchHead)
+			publisher.compareAncestry = checkoutAncestry
+			publisher.push = func(context.Context, Delivery, string) error { pushes++; return nil }
+			delivery.Project.CheckoutPath = repo
+			delivery.BaseCommit, delivery.ResultCommit, delivery.Checks.Commit = scenario.baseCommit, scenario.result, scenario.result
+			_, err := publisher.Publish(test.Context(), delivery)
+			if scenario.wantCode == "" {
+				if err != nil || pushes != 1 {
+					test.Fatalf("err=%v pushes=%d", err, pushes)
+				}
+				return
+			}
+			if code, _ := Classify(err); code != scenario.wantCode || pushes != 0 {
+				test.Fatalf("code=%s pushes=%d, want %s and no push (err=%v)", code, pushes, scenario.wantCode, err)
+			}
+		})
+	}
+}
+
+// TestBaseBranchFromRef pins the shared rule that turns a run's base_ref into
+// the publication target branch: every spelling of the same branch names it,
+// and refs that name no branch of the remote do not.
+func TestBaseBranchFromRef(test *testing.T) {
+	for _, scenario := range []struct {
+		baseRef    string
+		wantBranch string
+		wantNamed  bool
+	}{
+		{baseRef: "main", wantBranch: "main", wantNamed: true},
+		{baseRef: "refs/heads/main", wantBranch: "main", wantNamed: true},
+		{baseRef: "refs/remotes/origin/main", wantBranch: "main", wantNamed: true},
+		{baseRef: "origin/main", wantBranch: "main", wantNamed: true},
+		{baseRef: "refs/remotes/origin/release/1.2", wantBranch: "release/1.2", wantNamed: true},
+		{baseRef: "HEAD", wantNamed: false},
+		{baseRef: "refs/remotes/origin/HEAD", wantNamed: false},
+		{baseRef: strings.Repeat("a", 40), wantNamed: false},
+		{baseRef: "refs/tags/v1.0", wantNamed: false},
+		{baseRef: "refs/remotes/upstream/main", wantNamed: false},
+		{baseRef: "", wantNamed: false},
+	} {
+		branch, named := BaseBranchFromRef(scenario.baseRef, "origin")
+		if branch != scenario.wantBranch || named != scenario.wantNamed {
+			test.Errorf("BaseBranchFromRef(%q) = (%q, %v), want (%q, %v)",
+				scenario.baseRef, branch, named, scenario.wantBranch, scenario.wantNamed)
+		}
+	}
+}
+
+// notFoundBranches answers every request with 404, standing in for a
+// provider whose base branch is gone.
+type notFoundBranches struct{}
+
+func (transport notFoundBranches) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found",
+		Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+}
+
+// TestCheckoutAncestryRealGit drives the real git comparator against a
+// throwaway repository: contained commits verify, divergent ones do not, and
+// an object the checkout never saw reports unverifiable rather than guessing.
+func TestCheckoutAncestryRealGit(test *testing.T) {
+	repo := test.TempDir()
+	if err := initBareRepoWithCommit(test, repo); err != nil {
+		test.Fatal(err)
+	}
+	base := gitHead(test, repo)
+	// A child commit on top of base.
+	if err := gitRun(test, repo, "commit", "--allow-empty", "-m", "child"); err != nil {
+		test.Fatal(err)
+	}
+	child := gitHead(test, repo)
+	// A sibling line: reset back and commit a different child.
+	if err := gitRun(test, repo, "reset", "--hard", base); err != nil {
+		test.Fatal(err)
+	}
+	if err := gitRun(test, repo, "commit", "--allow-empty", "-m", "sibling"); err != nil {
+		test.Fatal(err)
+	}
+	sibling := gitHead(test, repo)
+
+	verified, unverifiable, err := checkoutAncestry(test.Context(), repo, base, child)
+	if err != nil || unverifiable || !verified {
+		test.Fatalf("base→child: verified=%v unverifiable=%v err=%v", verified, unverifiable, err)
+	}
+	verified, unverifiable, err = checkoutAncestry(test.Context(), repo, sibling, child)
+	if err != nil || unverifiable || verified {
+		test.Fatalf("sibling→child must be a clean no: verified=%v unverifiable=%v err=%v", verified, unverifiable, err)
+	}
+	unknown := strings.Repeat("7", 40)
+	_, unverifiable, err = checkoutAncestry(test.Context(), repo, unknown, child)
+	if err == nil || !unverifiable {
+		test.Fatalf("unknown object must report unverifiable: unverifiable=%v err=%v", unverifiable, err)
+	}
+}
+
+// initBareRepoWithCommit creates a git repository with one commit and the
+// test identity configured, reusing the repo directory as the checkout.
+func initBareRepoWithCommit(test *testing.T, dir string) error {
+	test.Helper()
+	if err := gitRun(test, dir, "init", "--quiet"); err != nil {
+		return err
+	}
+	if err := gitRun(test, dir, "config", "user.email", "t@example.com"); err != nil {
+		return err
+	}
+	if err := gitRun(test, dir, "config", "user.name", "t"); err != nil {
+		return err
+	}
+	return gitRun(test, dir, "commit", "--allow-empty", "-m", "base")
+}
+
+func gitRun(test *testing.T, dir string, args ...string) error {
+	test.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %s: %v (%s)", args[0], err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func gitHead(test *testing.T, dir string) string {
+	test.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		test.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }

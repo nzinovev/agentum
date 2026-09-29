@@ -105,7 +105,7 @@ one of the two counters is non-zero on any given registration.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref?}` → `201 Run`. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref}` → `201 Run`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]` |
 | `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found` |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
@@ -118,9 +118,22 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
 | `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:discard-worktree`. |
 
-`base_ref` is the git ref the run builds against (branch / tag / SHA / `HEAD`).
-It is resolved once to an immutable `base_commit` before the worktree is
-created; omitted defaults to `HEAD`. See `docs/execution.md` § "Safe lifecycle,
+`base_ref` is the git ref the run builds against — **required and explicit**;
+an absent or blank value is a `400 bad_input`. Name the target branch of the
+remote repository (e.g. `refs/remotes/origin/main`, resolvable after
+`git fetch origin`), a commit from its history, a local branch, or `HEAD` as
+an explicit choice to run from the current local branch (its history —
+including any unpushed commits — becomes the run's lineage, so a publishable
+run started there stops with `base_not_on_target`). Local uncommitted edits
+of the checkout are never part of a new run's base: the worktree builds from
+`base_commit`, not the working copy. The ref is resolved once to an immutable
+`base_commit` before the worktree is created; a publishable run additionally
+verifies that the base belongs to the publication target branch's history
+against the remote-tracking ref (`run.base_off_target` events carry the
+cause; stop reasons `base_ref_unresolvable`, `base_target_unverifiable`,
+`base_not_on_target`). Before push and PR creation the publisher re-verifies
+that the base lies in the provider's current branch history (`base_diverged`,
+`base_unverifiable`). See `docs/execution.md` § "Safe lifecycle,
 checkpoints, and code egress" for the full lineage / abort / cleanup model.
 
 A run executes in the working copy it pinned at first start (the project's
@@ -283,8 +296,10 @@ state. The closed `last_error.code` vocabulary is:
 | `provider_error` | `failed` | An unclassified provider or local storage/execution failure prevented completion. |
 | `unsafe_git_config` | `blocked` | Remove the local Git setting named by the diagnostic. |
 | `remote_unknown` | `blocked` | Configure an accessible publication repository. |
-| `base_branch_unknown` | `blocked` | Supply a valid base branch. |
+| `base_branch_unknown` | `blocked` | The target branch (configured, or named by `base_ref`) does not exist at the provider; restore it, or configure `AGENTUM_PUBLISH_BASE_BRANCH` and start a new run. |
 | `non_fast_forward` | `blocked` | A human must resolve the remote branch divergence. |
+| `base_diverged` | `blocked` | The run's base is not in the target branch's history; the PR would carry foreign commits — publish the base's commits first or start a new run from the target branch. |
+| `base_unverifiable` | `failed` | The target branch's head could not be compared with the run's base locally; `git fetch` in the checkout and retry. |
 | `push_rejected` | `blocked` | Resolve the provider's push restriction. |
 | `draft_unsupported` | `blocked` | The provider must support draft PRs; no ordinary PR fallback is accepted. |
 | `pull_request_closed` | `blocked` | The PR was closed or merged; it is neither reopened nor replaced. |

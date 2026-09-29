@@ -47,6 +47,29 @@ Once tagged releases begin, this project adheres to
   do unless you want the setting: tiers without a `variant` run exactly as
   before.
 
+### Changed
+- **`base_ref` is required at `POST /runs`; nothing defaults to `HEAD`
+  silently.** Before this, an omitted `base_ref` made the run start from
+  whatever the operator's checkout happened to be on, so a developer branch's
+  unpushed commits rode into the run's lineage and later its pull request.
+  Send the target branch's remote ref (e.g. `refs/remotes/origin/main`), a
+  commit from its history, or an explicit `HEAD` to run from the current
+  local branch; an absent value is now `400 bad_input`.
+- **A publishable run's base is verified against the publication target
+  branch.** At start (and on every continuation) the runner checks the base
+  against the remote-tracking ref and stops with `base_not_on_target` /
+  `base_target_unverifiable` / `base_ref_unresolvable` instead of building a
+  worktree whose PR would carry foreign commits; before push the publisher
+  re-checks that the base lies in the provider's current branch history and
+  refuses `base_diverged` (blocked) or `base_unverifiable` (retryable after a
+  fetch). A target branch that merely moved forward does not block the PR.
+  `main`, `refs/heads/main`, `origin/main`, and `refs/remotes/origin/main` all
+  name the target branch `main`, for the start check and the publisher alike;
+  a named branch missing at the provider refuses `base_branch_unknown` instead
+  of falling back to the default branch.
+  Set `AGENTUM_PUBLISH_BASE_BRANCH` or start runs from the target ref; runs
+  already pinned keep their recorded `base_ref`/`base_commit`.
+
 ### Fixed
 - **A `.agentum.yaml` that exists only in the working copy reads as absence
   instead of failing the run.** Before this, `FileAtCommit` detected a
