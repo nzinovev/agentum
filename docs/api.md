@@ -149,7 +149,9 @@ or explicitly stopped run with no active job, the worktree's current HEAD
 `discard_uncommitted: true`; the runner re-verifies every precondition at
 execution time and refuses (with a diagnostic event) rather than remove a tree
 the request does not describe. A discarded stopped run can still be continued
-or advanced: the runner checks the surviving branch out again at its tip.
+or advanced: the runner checks the surviving branch out again, but only while
+its tip is the HEAD the discard confirmed — otherwise the run pauses with
+`worktree_branch_unconfirmed`.
 
 A run resumed over a worktree holding **uncommitted changes** does not get its
 tree wiped: the runner pauses with stop reason `worktree_uncommitted_changes`

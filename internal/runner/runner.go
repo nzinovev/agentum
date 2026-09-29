@@ -487,10 +487,60 @@ func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
 	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
 		return fmt.Errorf("discard worktree: %w", err)
 	}
+	// The confirmed HEAD is the only tip a later resume may check out again;
+	// pauseOnUnconfirmedBranchTip compares the surviving branch against it.
+	runner.recordCheckpoint(ctx, record, checkpointLabelDiscarded, head)
 	runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{
 		"head": head, "had_uncommitted": dirty, "branch": worktree.BranchFor(record.ID),
 	})
 	return nil
+}
+
+// checkpointLabelDiscarded labels the branch tip a human confirmed when
+// discarding the run's worktree.
+const checkpointLabelDiscarded = "worktree-discarded"
+
+// pauseOnUnconfirmedBranchTip guards the resume of a run whose worktree is
+// gone. With no run branch there is nothing to resume onto (a fresh run), and
+// Create builds the branch from base_commit. With a branch, its tip must be
+// the HEAD the human confirmed at discard: a commit added to the branch since
+// — by hand, by another tool — would otherwise become the run's lineage
+// without anyone deciding so, and Reconcile accepts any descendant of
+// base_commit. A branch with no confirmed tip (its tree vanished without a
+// discard) pauses the same way. Continue re-checks; the pause lifts when the
+// branch is back at the confirmed tip.
+func (runner *Runner) pauseOnUnconfirmedBranchTip(ctx context.Context, record sqlc.Run, checkoutPath, fallbackStage string) (bool, error) {
+	branch := worktree.BranchFor(record.ID)
+	tip, tipErr := runner.wt.ResolveRef(ctx, checkoutPath, "refs/heads/"+branch)
+	if tipErr != nil {
+		return false, nil
+	}
+	checkpoints, listErr := runner.store.ListCheckpointsForRun(ctx, sqlc.ListCheckpointsForRunParams{
+		RunID: record.ID, TenantID: record.TenantID,
+	})
+	if listErr != nil {
+		return false, fmt.Errorf("load checkpoints: %w", listErr)
+	}
+	confirmed := ""
+	for _, checkpoint := range checkpoints {
+		if checkpoint.Label == checkpointLabelDiscarded {
+			confirmed = checkpoint.CommitSha
+		}
+	}
+	if confirmed == tip {
+		return false, nil
+	}
+	runner.log.Warn("run branch tip is not the one confirmed at discard; pausing",
+		"run", record.ID, "branch", branch, "confirmed", confirmed, "tip", tip)
+	runner.emit(ctx, record, EvWorktreeBranchUnconfirmed, map[string]any{
+		"branch": branch, "confirmed_tip": confirmed, "tip": tip,
+	})
+	pauseErr := runner.applyPauseDecision(ctx, record, Decision{
+		Action:     ActionPause,
+		FSMEvent:   engine.EventStopUser,
+		StopReason: "worktree_branch_unconfirmed",
+	}, currentStageOrFallback(record.CurrentStage, fallbackStage))
+	return pauseErr == nil, pauseErr
 }
 
 // HandleDiscardWorktree serves the "discard_worktree" job kind.
@@ -833,6 +883,16 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 			return runner.failRun(ctx, record, pauseErr)
 		}
 		return nil
+	}
+
+	// A missing worktree over a surviving run branch is a discarded tree.
+	// Create would check the branch out at whatever its tip is now; resume
+	// only onto the tip the human confirmed when discarding.
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, record.ID)) {
+		paused, pauseErr := runner.pauseOnUnconfirmedBranchTip(ctx, record, checkoutPath, runPack.Entry)
+		if pauseErr != nil || paused {
+			return pauseErr
+		}
 	}
 
 	runWorktree, err := runner.wt.Create(ctx, checkoutPath, record.ID, baseCommit)
@@ -2591,6 +2651,12 @@ const (
 	// or jobs-in-flight precondition failed at execution time, the HEAD
 	// moved, or a dirty tree was not confirmed as losable.
 	EvWorktreeDiscardRefused = "run.worktree_discard_refused"
+	// EvWorktreeBranchUnconfirmed records that a run whose worktree is gone
+	// paused instead of checking its surviving branch out again, because the
+	// branch tip is not the HEAD confirmed at discard (stop_reason
+	// worktree_branch_unconfirmed). Carries the branch, the confirmed tip
+	// (empty when the tree vanished without a discard), and the actual tip.
+	EvWorktreeBranchUnconfirmed = "run.worktree_branch_unconfirmed"
 )
 
 // CancelRegistry lets the cancel HTTP handler abort an in-flight run by run id.

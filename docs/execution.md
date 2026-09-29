@@ -401,9 +401,13 @@ the branch-deleting verb). It requires the run's current HEAD and
 `discard_uncommitted: true` whenever the tree is dirty, re-verifies state,
 competing jobs, and HEAD at execution time, and is audited
 (`run.worktree_discarded` / `run.worktree_discard_refused`). A stopped run
-stays resumable after a discard: the next continue or advance checks the
-surviving branch out again at its tip, so committed work returns and only the
-uncommitted files are gone.
+stays resumable after a discard: the discard records the confirmed HEAD as the
+`worktree-discarded` checkpoint, and the next continue or advance checks the
+surviving branch out again only when its tip is still that commit — committed
+work returns and only the uncommitted files are gone. A branch that moved since
+(or a missing tree with no confirmed tip) pauses with
+`worktree_branch_unconfirmed` (`run.worktree_branch_unconfirmed` names both
+tips); moving the branch back to the confirmed tip and continuing lifts it.
 
 ## Publication
 

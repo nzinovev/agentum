@@ -422,6 +422,64 @@ func TestRunner_DiscardedPausedRunResumesFromItsBranch(t *testing.T) {
 	}
 }
 
+// TestRunner_DiscardedRunPausesWhenBranchMoved pins that a discarded run
+// resumes only onto the tip the human confirmed at discard: a commit added to
+// the surviving branch since pauses the run (worktree_branch_unconfirmed)
+// without re-creating the tree, and moving the branch back lifts the pause.
+func TestRunner_DiscardedRunPausesWhenBranchMoved(t *testing.T) {
+	t.Parallel()
+	fixture := newRecoveryFixture(t, "running")
+	fixture.driveToGate(t)
+
+	wtRoot := fixture.worktreeRoot()
+	confirmed, headErr := execGit(wtRoot, "rev-parse", "HEAD")
+	if headErr != nil {
+		t.Fatalf("read worktree head: %v", headErr)
+	}
+	discardJob := sqlc.Job{ID: 14, TenantID: "tn", UserID: "us", RunID: fixture.runID, Kind: "discard_worktree",
+		Payload: []byte(`{"expected_head":"` + confirmed + `","discard_uncommitted":false}`)}
+	if err := fixture.runner.HandleDiscardWorktree(context.Background(), discardJob); err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+
+	// Someone commits onto the surviving branch after the discard.
+	branchRef := "refs/heads/" + worktree.BranchFor(fixture.runID)
+	foreign, commitErr := execGit(fixture.repo, "commit-tree", confirmed+"^{tree}", "-p", confirmed, "-m", "added after discard")
+	if commitErr != nil {
+		t.Fatalf("commit-tree: %v", commitErr)
+	}
+	if _, refErr := execGit(fixture.repo, "update-ref", branchRef, foreign); refErr != nil {
+		t.Fatalf("move branch: %v", refErr)
+	}
+
+	fixture.resumeAsRunning(t)
+	if err := fixture.runner.HandleAdvance(context.Background(), job("advance", fixture.runID, "tn", "us")); err != nil {
+		t.Fatalf("advance over a moved branch: %v", err)
+	}
+	if state := fixture.store.taskState(); state != "paused_user_stop" {
+		t.Fatalf("state = %q, want paused_user_stop (worktree_branch_unconfirmed)", state)
+	}
+	requireRecoveryEvent(t, fixture.store, EvWorktreeBranchUnconfirmed)
+	if worktree.DirPresent(wtRoot) {
+		t.Fatal("the worktree was re-created over an unconfirmed branch tip")
+	}
+
+	// The branch goes back to the confirmed tip; the next resume proceeds.
+	if _, refErr := execGit(fixture.repo, "update-ref", branchRef, confirmed); refErr != nil {
+		t.Fatalf("restore branch: %v", refErr)
+	}
+	fixture.resumeAsRunning(t)
+	if err := fixture.runner.HandleAdvance(context.Background(), job("advance", fixture.runID, "tn", "us")); err != nil {
+		t.Fatalf("advance after restoring the branch: %v", err)
+	}
+	if state := fixture.store.taskState(); state == "paused_user_stop" || state == "failed" {
+		t.Fatalf("state = %q; the confirmed tip must resume", state)
+	}
+	if !worktree.DirPresent(wtRoot) {
+		t.Fatal("the worktree was not re-created at the confirmed tip")
+	}
+}
+
 // TestRunner_DiscardWorktreeRefusesLiveRun pins the state guard on the runner
 // side: a run the API let through (say it raced a start) is refused at
 // execution time when its state says running.
