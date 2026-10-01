@@ -15,6 +15,7 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
 )
@@ -132,47 +133,86 @@ func scanContinuationForCredentials(text string) error {
 // gate. The plan gate's name is pack-declared (resolved via planApprovalName).
 const approvalNameFinalReview = "final_review"
 
+// resolveRunPack resolves the run's effective pack — the project layer at the
+// run's pinned base_commit over the builtin source — the same resolution the
+// runner executes. base_commit and checkout_path are pinned, so the result is
+// deterministic; an error is a real failure and handlers surface it (500),
+// never a silent builtin fallback: the gate handlers write run_approvals
+// under the pack-declared approval name, and a fallback could write the
+// builtin's name while the runner reads the project pack's, leaving
+// source-write locked for the rest of the run. A run that never started has
+// no pinned commit to read a project layer from, so it resolves the builtin
+// of the name — or (nil, nil) when even that fails, the pre-start shape
+// callers already understand.
+func (api *API) resolveRunPack(ctx context.Context, run sqlc.Run) (*pack.Pack, error) {
+	if api.packs == nil {
+		return nil, nil
+	}
+	if !run.BaseCommit.Valid || run.BaseCommit.String == "" || run.CheckoutPath == "" {
+		// The pin order guarantees both are set once a run has started; empty
+		// values mean the run never started, and without a pinned commit
+		// there is no project layer to read — the builtin of the name is the
+		// only resolvable pack. A failure here returns (nil, nil), the
+		// pre-start shape every helper already understands.
+		resolved, err := api.packs.ResolveBuiltin(ctx, run.PipelinePack)
+		if err != nil {
+			return nil, nil
+		}
+		return resolved.Pack, nil
+	}
+	resolved, err := api.packs.ResolveForCommit(ctx, run.PipelinePack, run.CheckoutPath, run.BaseCommit.String)
+	if err != nil {
+		return nil, fmt.Errorf("resolve pack %q at %s: %w", run.PipelinePack, run.BaseCommit.String, err)
+	}
+	return resolved.Pack, nil
+}
+
 // planApprovalName resolves the pack-declared plan-approval name for a run,
 // independent of the run's current stage (the runner may have already advanced
-// past the approval stage, so keying on current_stage is a race). Returns "" if
-// the pack declares no source_write approval. This is the durable key the
-// run_approvals row is written under; reject and the plan-gate idempotency
-// check key on it so a reject never collides with an approve.
-func (api *API) planApprovalName(ctx context.Context, run sqlc.Run) string {
-	if api.packs == nil {
-		return ""
-	}
-	runPack, err := api.packs.Resolve(ctx, run.PipelinePack)
+// past the approval stage, so keying on current_stage is a race). Returns ""
+// if the pack declares no source_write approval (or the run never started, so
+// no pack is pinned). This is the durable key the run_approvals row is written
+// under; reject and the plan-gate idempotency check key on it so a reject
+// never collides with an approve.
+func (api *API) planApprovalName(ctx context.Context, run sqlc.Run) (string, error) {
+	runPack, err := api.resolveRunPack(ctx, run)
 	if err != nil {
-		return ""
+		return "", err
+	}
+	if runPack == nil {
+		return "", nil
 	}
 	approval, hasApproval := runPack.SourceWriteApproval()
 	if !hasApproval {
-		return ""
+		return "", nil
 	}
-	return approval.Name
+	return approval.Name, nil
 }
 
 // planApprovalForStage resolves the pack-declared source_write approval when the
 // given stage is its approval stage. Used by the advance handler to decide
 // whether to write a run_approvals row in the transition tx (only when the
 // run is AT the approval stage). Returns the approval and true then; false
-// otherwise (no approval block, or a different stage).
-func (api *API) planApprovalForStage(ctx context.Context, run sqlc.Run, currentStage string) (planApproval, bool) {
-	if api.packs == nil || currentStage == "" {
-		return planApproval{}, false
+// otherwise (no approval block, a different stage, or a run that never
+// started).
+func (api *API) planApprovalForStage(ctx context.Context, run sqlc.Run, currentStage string) (planApproval, bool, error) {
+	if currentStage == "" {
+		return planApproval{}, false, nil
 	}
-	runPack, err := api.packs.Resolve(ctx, run.PipelinePack)
+	runPack, err := api.resolveRunPack(ctx, run)
 	if err != nil {
-		return planApproval{}, false
+		return planApproval{}, false, err
+	}
+	if runPack == nil {
+		return planApproval{}, false, nil
 	}
 	approval, hasApproval := runPack.SourceWriteApproval()
 	if !hasApproval || approval.Stage != currentStage {
-		return planApproval{}, false
+		return planApproval{}, false, nil
 	}
 	return planApproval{
 		name: approval.Name, stage: approval.Stage, artifact: approval.Artifact,
-	}, true
+	}, true, nil
 }
 
 // planApproval carries the resolved approval declaration into the resume tx, so
@@ -304,7 +344,12 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	planName := api.planApprovalName(r.Context(), run)
+	planName, nameErr := api.planApprovalName(r.Context(), run)
+	if nameErr != nil {
+		logUnexpected(api.log, nameErr, "resolveRunPack(advance)")
+		writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
+		return
+	}
 	if engine.RunState(run.State) != engine.StatePausedGate {
 		// Idempotency: if the plan gate was already decided approved, a repeat
 		// advance returns the current run without re-transitioning. Keyed on the
@@ -329,7 +374,12 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	decision := gateDecisionPatch(run, principal, gateAdvance, decisionApproved)
 	// Write the run_approvals row only when the run is AT the approval stage;
 	// there the advance approves exactly the revision it names.
-	approvalPlan, atApproval := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	approvalPlan, atApproval, approvalErr := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	if approvalErr != nil {
+		logUnexpected(api.log, approvalErr, "resolveRunPack(advance approval)")
+		writeError(w, http.StatusInternalServerError, codeInternal, approvalErr.Error())
+		return
+	}
 	if atApproval {
 		approvalPlan.expectedRevisionID = expectedRevisionID
 		if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
@@ -377,7 +427,12 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// ON CONFLICT DO NOTHING would discard the reject). The same name
 	// keys the idempotency check, so a repeat reject after any gate reject
 	// returns 200 regardless of which gate fired first.
-	planName := api.planApprovalName(r.Context(), run)
+	planName, nameErr := api.planApprovalName(r.Context(), run)
+	if nameErr != nil {
+		logUnexpected(api.log, nameErr, "resolveRunPack(reject)")
+		writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
+		return
+	}
 	rejectName := approvalNameFinalReview
 	if atPlanGate {
 		rejectName = planName

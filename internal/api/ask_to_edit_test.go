@@ -76,7 +76,7 @@ func newAskToEditHarness(t *testing.T, askToEditBudget int) *askToEditHarness {
 	return &askToEditHarness{
 		api: New(handle.Store.DB, handle.Queries, slog.New(slog.DiscardHandler), nil,
 			WithManifestService(manifest.New(manifest.Deps{DB: handle.Store.DB, Queries: handle.Queries})),
-			WithPackSource(pack.NewDirSource(packsRoot)),
+			WithPackCatalog(pack.NewProjectSource(pack.NewDirSource(packsRoot), nil)),
 			WithArtifactStore(artifactStore)),
 		queries: handle.Queries,
 		db:      handle.Store.DB,

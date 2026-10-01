@@ -64,7 +64,12 @@ func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request
 	// before the first grant: an approval row with decision "approved" means
 	// implementation unlocked, and remarks after that are a different
 	// (future) rework decision, not a plan revision.
-	approvalPlan, atApproval := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	approvalPlan, atApproval, approvalErr := api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+	if approvalErr != nil {
+		logUnexpected(api.log, approvalErr, "resolveRunPack(ask-to-edit)")
+		writeError(w, http.StatusInternalServerError, codeInternal, approvalErr.Error())
+		return
+	}
 	if !atApproval {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
 			"ask-to-edit applies to the pack's plan approval stage; current stage is "+currentStageOr(run.CurrentStage, ""))
@@ -81,7 +86,12 @@ func (api *API) handleInvocationAskToEdit(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, codeInternal, getErr.Error())
 		return
 	}
-	budget := api.packAskToEditBudget(r, run)
+	budget, budgetResolveErr := api.packAskToEditBudget(r, run)
+	if budgetResolveErr != nil {
+		logUnexpected(api.log, budgetResolveErr, "resolveRunPack(ask-to-edit budget)")
+		writeError(w, http.StatusInternalServerError, codeInternal, budgetResolveErr.Error())
+		return
+	}
 	spent, budgetErr := api.queries.CountJobsOfKindForRun(r.Context(), sqlc.CountJobsOfKindForRunParams{
 		RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
 	})
@@ -170,15 +180,16 @@ func parseAskToEditBody(body []byte) (taskinput.Continuation, string, error) {
 }
 
 // packAskToEditBudget resolves the pack's declared revision budget for the
-// run. A pack that cannot be resolved reports 0 — the same fail-closed
-// default planApprovalName uses for its name.
-func (api *API) packAskToEditBudget(r *http.Request, run sqlc.Run) int {
-	if api.packs == nil {
-		return 0
-	}
-	runPack, err := api.packs.Resolve(r.Context(), run.PipelinePack)
+// run. A run that never started (no pinned pack) reports 0; a resolution
+// failure is the caller's 500 — the budget decides whether an edit is still
+// accepted, and a silent 0 would refuse every edit over a readable error.
+func (api *API) packAskToEditBudget(r *http.Request, run sqlc.Run) (int, error) {
+	runPack, err := api.resolveRunPack(r.Context(), run)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return runPack.Budgets.AskToEdit
+	if runPack == nil {
+		return 0, nil
+	}
+	return runPack.Budgets.AskToEdit, nil
 }

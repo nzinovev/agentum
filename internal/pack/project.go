@@ -64,6 +64,11 @@ var (
 	// directory's name. The directory name is the pack's identity — the ref
 	// grammar, replacement semantics, and the listing all key on it.
 	ErrPackNameMismatch = errors.New("project pack manifest name does not match its directory")
+	// ErrPackNotFound: the ref names no builtin pack and the project ships no
+	// pack under the name. The listing and detail surfaces map it to their
+	// not-found answers; every other resolution failure is a configuration
+	// error.
+	ErrPackNotFound = errors.New("pack not found")
 )
 
 // TreeEntry is one file of a commit-tree listing, as the reader below returns
@@ -155,7 +160,7 @@ func (source *ProjectSource) ResolveForFloor(ctx context.Context, ref, repoPath,
 		// ref resolves builtin (the partially wired server and test shape).
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, baseErr
+			return nil, fmt.Errorf("project pack %q: %w: %w", name, ErrPackNotFound, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
@@ -165,10 +170,12 @@ func (source *ProjectSource) ResolveForFloor(ctx context.Context, ref, repoPath,
 		return nil, fmt.Errorf("project pack %q: list %s at %s: %w", name, packDir, baseCommit, err)
 	}
 	if len(entries) == 0 {
-		// No project pack under this name: the builtin source answers.
+		// No project pack under this name: the builtin source answers. Its
+		// not-found failure wraps ErrPackNotFound so the catalog surfaces can
+		// tell "no such pack" from a configuration error.
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, baseErr
+			return nil, fmt.Errorf("project pack %q: %w: %w", name, ErrPackNotFound, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
@@ -395,6 +402,22 @@ func materializePack(ctx context.Context, reader CommitTree, repoPath, baseCommi
 		}
 	}
 	return tempDir, nil
+}
+
+// ResolveBuiltin resolves ref against the builtin source alone — the catalog
+// surface for callers not bound to a project. The origin is always builtin.
+func (source *ProjectSource) ResolveBuiltin(ctx context.Context, ref string) (*Resolved, error) {
+	base, err := source.Builtin.Resolve(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrPackNotFound, err)
+	}
+	return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
+}
+
+// ListBuiltin lists the builtin source's packs (the catalog surface without a
+// project).
+func (source *ProjectSource) ListBuiltin(ctx context.Context) ([]Meta, error) {
+	return source.Builtin.List(ctx)
 }
 
 // ProjectPackEntry is one project pack the commit tree advertises, for the

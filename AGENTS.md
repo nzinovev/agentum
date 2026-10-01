@@ -93,6 +93,20 @@ instead of skipping — a skipped database test there would be a lost check.
   implementer/fixer stages, and detects `plan_revision_drift`. The shipped
   `packs/backend-development` pack is the worked example: plan → human approval
   → implement → review ⇄ fix → final human review.
+- **The run's pack resolves from its pinned base_commit.** A project ships
+  packs under `.agentum/packs/<name>/` (`manifest.yaml` replacing the builtin
+  of the same name, or `overrides.yaml` inheriting from one); resolution in
+  `pack.ProjectSource` reads that layer from the run's `base_commit` over the
+  builtin source, so an agent cannot change the pack its own run executes.
+  Every surface that names a run's pack names its `Origin` (`builtin`,
+  `project`, `project+builtin`); gate handlers resolve the SAME effective pack
+  (500 on failure — a builtin fallback would write `run_approvals` under the
+  wrong name). Project packs with uncommitted changes in the checkout pause
+  the run (`project_pack_drift`). Assembled packs with a project layer pass
+  the policy floor (`internal/policy`) before the run starts; builtin packs
+  pass it at boot. The floor's host capability set is
+  `AGENTUM_HOST_CAPS` (default `adapter.Supported()`) and that one set feeds
+  both the floor and the runtime intersection in `computeProfile`.
 - **Orchestrator-owned project checks.** The project ships a versioned registry
   of named checks (`.agentum.yaml`, tracked in the repo). Commands live ONLY in
   that registry (an arg vector; no shell injection). Packs and task input add

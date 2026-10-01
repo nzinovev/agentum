@@ -30,19 +30,23 @@ import (
 // recorded tip at terminal teardown, and branch the resolvable delivery ref
 // that survives worktree teardown.
 type runResponse struct {
-	ID           string          `json:"id"`
-	ProjectID    string          `json:"project_id"`
-	PipelinePack string          `json:"pipeline_pack"`
-	Title        string          `json:"title"`
-	Description  string          `json:"description"`
-	Overrides    json.RawMessage `json:"overrides"`
-	State        string          `json:"state"`
-	BaseRef      string          `json:"base_ref"`
-	BaseCommit   string          `json:"base_commit"`
-	ResultCommit string          `json:"result_commit"`
-	Branch       string          `json:"branch"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
+	ID           string `json:"id"`
+	ProjectID    string `json:"project_id"`
+	PipelinePack string `json:"pipeline_pack"`
+	// PipelinePackOrigin says where the executed pack's bytes came from —
+	// builtin, project, or project+builtin — pinned with the base_commit the
+	// pack was read from. Empty until the run starts and resolves its pack.
+	PipelinePackOrigin string          `json:"pipeline_pack_origin"`
+	Title              string          `json:"title"`
+	Description        string          `json:"description"`
+	Overrides          json.RawMessage `json:"overrides"`
+	State              string          `json:"state"`
+	BaseRef            string          `json:"base_ref"`
+	BaseCommit         string          `json:"base_commit"`
+	ResultCommit       string          `json:"result_commit"`
+	Branch             string          `json:"branch"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
 }
 
 func toRunResponse(run sqlc.Run) runResponse {
@@ -51,19 +55,20 @@ func toRunResponse(run sqlc.Run) runResponse {
 		overrides = json.RawMessage("{}")
 	}
 	return runResponse{
-		ID:           run.ID,
-		ProjectID:    run.ProjectID,
-		PipelinePack: run.PipelinePack,
-		Title:        run.Title,
-		Description:  run.Description,
-		Overrides:    overrides,
-		State:        run.State,
-		BaseRef:      run.BaseRef,
-		BaseCommit:   nullStringOr(run.BaseCommit),
-		ResultCommit: nullStringOr(run.ResultCommit),
-		Branch:       worktree.BranchFor(run.ID),
-		CreatedAt:    run.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:    run.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		ID:                 run.ID,
+		ProjectID:          run.ProjectID,
+		PipelinePack:       run.PipelinePack,
+		PipelinePackOrigin: nullStringOr(run.PipelinePackOrigin),
+		Title:              run.Title,
+		Description:        run.Description,
+		Overrides:          overrides,
+		State:              run.State,
+		BaseRef:            run.BaseRef,
+		BaseCommit:         nullStringOr(run.BaseCommit),
+		ResultCommit:       nullStringOr(run.ResultCommit),
+		Branch:             worktree.BranchFor(run.ID),
+		CreatedAt:          run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:          run.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

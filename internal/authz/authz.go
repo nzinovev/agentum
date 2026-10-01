@@ -148,6 +148,14 @@ const (
 	ActionProjectRead   = "project:read"
 	ActionProjectList   = "project:list"
 
+	// ActionPackList is the right to read the pack catalog: builtin packs,
+	// and — with project:read on the project — the project's packs at a ref.
+	// Tenant-scoped: the builtin set is process-wide.
+	ActionPackList = "pack:list"
+	// ActionPackRead is the right to read one pack's manifest, gates,
+	// budgets, and field origins. Tenant-scoped for the same reason.
+	ActionPackRead = "pack:read"
+
 	// ActionModelRead is the right to read the model configuration and the
 	// runtime catalog status, and to watch the state of a model check.
 	// Tenant-scoped: the tier set is process-wide, not per-resource.
