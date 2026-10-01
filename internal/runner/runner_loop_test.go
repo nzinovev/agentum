@@ -100,6 +100,14 @@ func (store *fakeStore) SetCheckoutPath(_ context.Context, arg sqlc.SetCheckoutP
 	}
 	return store.record, nil
 }
+func (store *fakeStore) SetPipelinePackOrigin(_ context.Context, arg sqlc.SetPipelinePackOriginParams) (sqlc.Run, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !store.record.PipelinePackOrigin.Valid || store.record.PipelinePackOrigin.String == "" {
+		store.record.PipelinePackOrigin = arg.PipelinePackOrigin
+	}
+	return store.record, nil
+}
 func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -677,11 +685,19 @@ func job(kind, runID, tenant, user string) sqlc.Job {
 	return sqlc.Job{Kind: kind, RunID: runID, TenantID: tenant, UserID: user}
 }
 
-// staticSource serves a single fixed pack for any ref.
+// staticSource serves a single fixed pack for any ref. ResolveForFloor
+// reports it as builtin-origin, so the per-run policy floor is skipped for
+// fixture packs exactly as it is skipped for real builtin packs (which the
+// boot check covers); tests that exercise the floor build their own resolved
+// packs.
 type staticSource struct{ pk *pack.Pack }
 
 func (src *staticSource) Resolve(_ context.Context, _ string) (*pack.Pack, error) {
 	return src.pk, nil
+}
+
+func (src *staticSource) ResolveForFloor(_ context.Context, _ string, _ string, _ string) (*pack.Resolved, error) {
+	return &pack.Resolved{Pack: src.pk, Origin: pack.OriginBuiltin}, nil
 }
 
 // slowAdapter emits its result only after a release signal; used to test cancel.

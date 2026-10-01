@@ -405,11 +405,13 @@ func TestRunner_ContinueTextWithNoInvocationPausesWithoutInvoking(t *testing.T) 
 	}
 }
 
-// TestRunner_ContinueWithoutTextOrInvocationStillFails pins the pre-existing
-// half of the same shape: a textless continue on a run with no invocation row
-// keeps failing the run. No text was accepted, so none can be silently
-// dropped — the failure path, not the text-delivery pause, stays correct here.
-func TestRunner_ContinueWithoutTextOrInvocationStillFails(t *testing.T) {
+// TestRunner_ContinueWithoutInvocationStartsFirstStage pins the fixed shape:
+// a textless continue on a run paused before its first stage (an unresolvable
+// base_ref, a drifted pack directory) starts the run at the pack entry
+// instead of failing it. Before the fix this path failed the run through
+// LatestStageForRun's sql.ErrNoRows, which made every pre-execution pause a
+// dead end only cancel could exit.
+func TestRunner_ContinueWithoutInvocationStartsFirstStage(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
@@ -422,18 +424,21 @@ func TestRunner_ContinueWithoutTextOrInvocationStillFails(t *testing.T) {
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
 	store := newFakeStore(record, proj)
 	adapter := &sequenceAdapter{results: []agent.ResultJSON{
-		{SchemaVersion: "1", Status: agent.StatusComplete, Summary: "never reached"},
+		{SchemaVersion: "1", Status: agent.StatusComplete, Summary: "first stage ran"},
 	}}
 	src := &staticSource{pk: scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
 		"done": {},
 	})}
 	textlessJob := sqlc.Job{Kind: "continue", RunID: "Tnf", TenantID: "tn", UserID: "us", Payload: json.RawMessage(`{}`)}
-	if err := New(Deps{Store: store, Packs: src, Adapter: adapter}).HandleContinue(t.Context(), textlessJob); err == nil {
-		t.Fatal("a textless continue with no invocation row must keep its pre-existing failure")
+	if err := New(Deps{Store: store, Packs: src, Adapter: adapter}).HandleContinue(t.Context(), textlessJob); err != nil {
+		t.Fatalf("a textless continue with no invocation row must start the first stage: %v", err)
 	}
-	if got := store.taskState(); got != "failed" {
-		t.Fatalf("state = %q, want failed (the pre-existing behavior for a textless resume with no session)", got)
+	if got := len(store.invocations); got != 1 {
+		t.Fatalf("invocations = %d, want 1 (the entry stage must run)", got)
+	}
+	if got := store.taskState(); got == "failed" {
+		t.Fatal("the run must drive forward, not fail on the textless resume")
 	}
 }
 

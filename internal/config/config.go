@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/publish"
 )
 
@@ -82,6 +83,15 @@ type Config struct {
 	// the fail-closed choice, and the only one that stops a credential inside a
 	// binary artifact, which cannot be rewritten without corrupting it.
 	ArtifactScanPolicy string
+
+	// HostCaps is the host's configured capability set
+	// (AGENTUM_HOST_CAPS, comma-separated category names). It feeds the policy
+	// floor AND the runtime's capability intersection — one configured set,
+	// not a floor that disagrees with what profiles actually carry. Empty
+	// means "the adapter's declared set" (adapter.Supported(), resolved at
+	// boot). Narrowing below a builtin pack's declaration stops the server at
+	// the boot floor check; widening past the adapter is refused at boot.
+	HostCaps []caps.Category
 }
 
 // retiredBinaryEnv is the retired name for the runtime binary override. It is
@@ -161,7 +171,39 @@ func Load() (Config, error) {
 		// "fail" expecting rejection must not get redaction instead.
 		return cfg, fmt.Errorf("AGENTUM_ARTIFACT_SCAN_POLICY must be \"redact\" or \"reject\", got %q", cfg.ArtifactScanPolicy)
 	}
+	hostCaps, capsErr := parseHostCaps(os.Getenv("AGENTUM_HOST_CAPS"))
+	if capsErr != nil {
+		return cfg, capsErr
+	}
+	cfg.HostCaps = hostCaps
 	return cfg, nil
+}
+
+// parseHostCaps parses the comma-separated AGENTUM_HOST_CAPS value. Empty (or
+// unset) yields nil — the adapter's declared set, resolved at boot. An unknown
+// name fails the load with the vocabulary listed, so a typo narrows nothing
+// silently.
+func parseHostCaps(raw string) ([]caps.Category, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var categories []caps.Category
+	for _, name := range strings.Split(trimmed, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		category, known := caps.ParseCategory(name)
+		if !known {
+			return nil, fmt.Errorf("AGENTUM_HOST_CAPS: unknown category %q; known: fs.read fs.write artifact.write exec.bash git.read git.write git.delivery net.fetch skill secret mcp", name)
+		}
+		categories = append(categories, category)
+	}
+	if len(categories) == 0 {
+		return nil, nil
+	}
+	return categories, nil
 }
 
 func getenv(key, fallback string) string {

@@ -186,13 +186,22 @@ type ProjectEvidence struct {
 }
 
 // PackEvidence records the resolved pack: the ref the caller passed, the
-// version + content hash the source resolved to, and whether it was forked.
+// version + content hash the source resolved to, whether it was forked, and
+// where its bytes came from.
 type PackEvidence struct {
 	Ref         string `json:"ref"`
 	Name        string `json:"name"`
 	Version     string `json:"version"`
 	ContentHash string `json:"content_hash"`
 	Forked      bool   `json:"forked,omitempty"`
+	// Origin names where the pack's bytes came from: builtin, project (a
+	// replacement or new-name manifest), or project+builtin (inheritance).
+	// Assigned by the resolver, never read from project YAML.
+	Origin string `json:"origin,omitempty"`
+	// BaseRef is the builtin ref an inherited pack resolved against
+	// (project+builtin only); with ContentHash covering the project layer, it
+	// is what identifies the builtin side.
+	BaseRef string `json:"base_ref,omitempty"`
 }
 
 // PromptRevision is one prompt the adapter saw. Hash is the sha256 of the

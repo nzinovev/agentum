@@ -121,6 +121,24 @@ var SourceWriteCategories = []Category{CatFsWrite, CatGitWrite, CatExecBash}
 // (env scrub / mcp config) rather than per-entity support.
 func CategoryOf(token Token) Category { return enforcementCategory(token) }
 
+// knownCategories is every name CategoryOf can return: the declared constants
+// plus the secret/mcp meta-categories, which have no constant of their own.
+var knownCategories = map[Category]bool{
+	CatFsRead: true, CatFsWrite: true, CatArtifactWrite: true, CatExecBash: true,
+	CatGitRead: true, CatGitWrite: true, CatGitDelivery: true, CatNetFetch: true,
+	CatSkill: true, "secret": true, "mcp": true,
+}
+
+// ParseCategory converts a category name into a Category, reporting whether
+// the name is part of the vocabulary. It accepts every name CategoryOf can
+// return, the secret/mcp meta-categories included, so a host configuration
+// naming them (AGENTUM_HOST_CAPS=...,secret) loads instead of failing on a
+// category the adapter's Supported set legitimately contains.
+func ParseCategory(name string) (Category, bool) {
+	category := Category(name)
+	return category, knownCategories[category]
+}
+
 // Profile is the effective capability set granted to one invocation, plus the
 // resource limits the runtime enforces for it. The zero value grants nothing
 // and imposes no limits — a safe deny-by-default baseline.

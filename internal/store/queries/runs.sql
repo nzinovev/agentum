@@ -49,6 +49,17 @@ UPDATE runs SET checkout_path = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND checkout_path = ''
 RETURNING *;
 
+-- name: SetPipelinePackOrigin :one
+-- Resolve-once, like SetBaseCommit: the run records where its pack's bytes
+-- came from (builtin / project / project+builtin) at the first effective
+-- resolution. The WHERE keeps it a no-op afterwards, so a later commit that
+-- changes the project's packs cannot rewrite what a running record says it
+-- executed. When the origin is already pinned the UPDATE matches nothing and
+-- returns NO row (sql.ErrNoRows): the caller reads that as "already pinned".
+UPDATE runs SET pipeline_pack_origin = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND pipeline_pack_origin IS NULL
+RETURNING *;
+
 -- name: RebindActiveCheckouts :many
 -- The repository moved: the previous path no longer holds this repository, so
 -- the working copy is one and it relocated. Only non-terminal runs — a
