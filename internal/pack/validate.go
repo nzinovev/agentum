@@ -554,47 +554,25 @@ func (p *Pack) validateApprovals() []string {
 	return problems
 }
 
-// validateApprovalReachability enforces ADR 0003 D3 layer 3: when a
-// source_write approval exists, every path from entry to a source-writing stage
-// (implementer or fixer role) must pass through the approval stage. This is a
-// static, advisory check that catches authoring mistakes at load time — the
-// real guarantee is the capability withholding in computeProfile, which holds
-// even if this rule is wrong. It runs only after the graph is known well-formed
-// (every stage reachable, no dangling refs).
+// validateApprovalReachability enforces the static approval-reachability rule:
+// when a source_write approval exists, every path from entry to a
+// source-writing stage (implementer or fixer role) must pass through the
+// approval stage. This catches authoring mistakes at load time — the real
+// guarantee is the capability withholding in computeProfile, which holds even
+// if this rule is wrong. It runs only after the graph is known well-formed
+// (every stage reachable, no dangling refs). The walk itself lives in
+// SourceWriteGateLeaks so the policy floor evaluates the identical rule.
 func validateApprovalReachability(p *Pack) []string {
 	sourceApproval, hasSourceApproval := p.SourceWriteApproval()
 	if !hasSourceApproval {
 		return nil
 	}
-	sourceStages := p.SourceWritingStages()
-	if len(sourceStages) == 0 {
+	if len(p.SourceWritingStages()) == 0 {
 		return nil // nothing to protect; the withholding would be a no-op
 	}
-	// Walk from entry; a stage is "reachable without approval" if there is a
-	// path from entry to it that never traverses the approval stage. The
-	// approval stage itself is the gate, so we stop expanding through it.
-	approvalStage := sourceApproval.Stage
-	reachableWithoutApproval := map[string]bool{}
-	var walk func(stageID string)
-	walk = func(stageID string) {
-		if reachableWithoutApproval[stageID] {
-			return
-		}
-		reachableWithoutApproval[stageID] = true
-		if stageID == approvalStage {
-			return // do not expand through the gate
-		}
-		for _, transition := range p.Stages[stageID].Transitions {
-			walk(transition.To)
-		}
-	}
-	walk(p.Entry)
-
 	var problems []string
-	for _, stageID := range sourceStages {
-		if reachableWithoutApproval[stageID] {
-			problems = append(problems, fmt.Sprintf("source-writing stage %q is reachable from entry %q without passing the approval stage %q", stageID, p.Entry, approvalStage))
-		}
+	for _, stageID := range p.SourceWriteGateLeaks() {
+		problems = append(problems, fmt.Sprintf("source-writing stage %q is reachable from entry %q without passing the approval stage %q", stageID, p.Entry, sourceApproval.Stage))
 	}
 	return problems
 }

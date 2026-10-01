@@ -1,3 +1,3 @@
 # Spec
 
-You are the spec stage. Read the task input and produce a short spec.
+You are the spec stage. Read the task input and write a short spec to spec.md.

@@ -315,6 +315,73 @@ At the dogfooding MVP, a source serves one version per pack, so `^MAJOR`
 checks the single available version against the constraint. A multi-version
 registry (true "latest within major" across many versions per name) is deferred.
 
+## Project packs
+
+A project supplies its own packs inside its repository, under
+`.agentum/packs/<name>/`. Agentum reads them from the run's pinned
+`base_commit` — the same agent-immutability seam as `.agentum.yaml` and the
+instruction files — so an agent cannot change the pack its own run executes,
+and a pack committed later never affects a run started from an earlier commit.
+
+A pack directory carries **exactly one** of:
+
+- `manifest.yaml` — a full pack of the project's own. When the name matches a
+  builtin, the project pack replaces that builtin in this project. The
+  replacement also covers other packs' `base` lookups: a name the project
+  ships is not a base. `pack.name` must equal the directory name, and the run
+  ref's version constraint applies to the manifest's version.
+- `overrides.yaml` — **inheritance** over a builtin base (layers 3–4 of the
+  override document above). The graph — stages, transitions, approvals —
+  comes from the base and cannot be patched; a different graph needs a
+  `manifest.yaml`. `fork` is refused here: a project pack is authored in the
+  project already.
+
+The directory's name is the pack's identity. An heir may carry any name:
+`.agentum/packs/my-flow/` with `base: backend-development@^0` is a new pack
+`my-flow`. Its `version` and `persona` come from the base, and the run ref's
+version constraint applies to the base's version. `base` always resolves
+against the **builtin** source. Chains like project-inherits-project are not
+supported. A `base` naming a pack the project itself ships — a name under
+`.agentum/packs/` other than the heir's own directory — is a configuration
+error: a shadowed name would make "which graph is inherited" depend on
+resolution order.
+
+### Reading rules
+
+- Every entry in the pack tree at the commit must be a regular file: a symlink
+  (git mode `120000`) is a reference outside the pack's control and is
+  rejected before any content is read.
+- Prompt paths resolve only inside the pack directory (`..` escapes are
+  errors, in manifests and overrides alike).
+- Size limits, enforced from the tree listing before reading: 64 KiB per
+  file, 256 KiB total, 128 files.
+
+### Strict decoding
+
+Both `manifest.yaml` and `overrides.yaml` are decoded with unknown fields
+rejected. A `checks:` or `approvals:` block in an overrides document, or a
+`transitions` list inside a stage patch, is an error — not a silently ignored
+key. For overrides this matters beyond hygiene: a dropped `checks:` block is
+indistinguishable from an accepted weakening attempt.
+
+### Distinguishable errors
+
+Every failure to read a project pack wraps one of the sentinel errors in
+`internal/pack/project.go`, distinguishable with `errors.Is`:
+`ErrBothPackFiles` (both documents at once), `ErrNoPackFile` (neither),
+`ErrPromptEscapesDir`, `ErrPackSymlink`, `ErrPackFileTooLarge`,
+`ErrPackTreeTooLarge`, `ErrBaseNotBuiltin` (base names a project pack —
+including a builtin name this project shadows), `ErrBaseBuiltinNotFound`,
+`ErrForkNotAllowed`, `ErrPackNameMismatch`.
+
+### Origin
+
+Resolution reports where the assembled pack's bytes came from — `builtin`,
+`project` (a replacement or new-name manifest), or `project+builtin`
+(inheritance) — and, for inherited packs, which fields the project layer set
+(`stages.<id>.prompt` / `.gate` / `.tier`, `budgets.*`), built from what the
+overrides document declares. API responses and run evidence surface both.
+
 ## Programmatic use
 
 ```go

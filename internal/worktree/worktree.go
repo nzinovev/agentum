@@ -77,9 +77,10 @@ func New() *Manager { return &Manager{} }
 // resolved it; an empty baseCommit falls back to the repo's current HEAD (used
 // by tests and the pre-F.6.1 path). When the branch already exists without a
 // worktree (a discarded tree of a resumable run), the branch is checked out at
-// its tip and baseCommit is not used. It ensures the repo ignores its own
-// .agentum/ dir so worktrees and artifacts do not pollute the user's working
-// tree as untracked files.
+// its tip and baseCommit is not used. It maintains the repo's info/exclude
+// rules for .agentum/ (worktrees and artifacts stay out of the user's commits,
+// .agentum/packs/ stays committable) so worktrees and artifacts do not pollute
+// the user's working tree as untracked files.
 func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit string) (*Worktree, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -103,7 +104,7 @@ func (manager *Manager) Create(ctx context.Context, repoPath, runID, baseCommit 
 		return &Worktree{Root: wtPath, Branch: branch, RepoPath: repoAbs}, nil
 	}
 
-	if err := manager.ensureIgnored(ctx, repoAbs); err != nil {
+	if err := manager.EnsureExcludes(ctx, repoAbs); err != nil {
 		// Non-fatal: a missing exclude entry only means the user sees untracked
 		// .agentum files. Log-worthy at the caller, not a creation blocker.
 		_ = err
@@ -208,10 +209,11 @@ func (manager *Manager) Commit(ctx context.Context, wtRoot, message string) (com
 		}
 		return head, false, nil
 	}
-	// Stage everything tracked under the worktree. .agentum/ is excluded by
-	// ensureIgnored (worktree.go:430), so artifact-dir churn does not enter the
-	// commit — this keeps the checkpoint a snapshot of the work, not of
-	// orchestrator bookkeeping.
+	// Stage everything tracked under the worktree. .agentum/'s children are
+	// excluded by EnsureExcludes (except .agentum/packs/, the project's own
+	// tracked packs), so artifact-dir churn does not enter the commit — this
+	// keeps the checkpoint a snapshot of the work, not of orchestrator
+	// bookkeeping.
 	if out, stageErr := git(ctx, wtRoot, "add", "-A"); stageErr != nil {
 		return "", false, fmt.Errorf("git add -A: %w (%s)", stageErr, strings.TrimSpace(string(out)))
 	}
@@ -292,6 +294,159 @@ func (manager *Manager) FileAtCommit(ctx context.Context, repoPath, commit, path
 		return nil, fmt.Errorf("git show %s:%s: %w (%s)", commit, path, err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// TreeEntry is one entry of a commit's recursive tree listing. Mode is the raw
+// git mode string ("100644", "100755", "120000" for a symlink, "160000" for a
+// submodule) and Size is the blob size in bytes (0 for non-blobs).
+type TreeEntry struct {
+	Path string
+	Mode string
+	Type string
+	Size int64
+}
+
+// ListTreeAtCommit lists every entry under dir exactly as it existed at commit,
+// recursively. A directory absent from the commit's tree is an empty listing,
+// not an error — callers treat that as "the project defines no pack there",
+// mirroring FileAtCommit's absence-by-tree contract. The commit itself is
+// verified first (rev-parse --verify), so an unknown SHA is its own error and
+// never masquerades as absence.
+//
+// The listing is the read side of the agent-immutability seam for project
+// packs: mode and size arrive from the commit's tree, so symlink entries and
+// oversized blobs are rejected before any byte is read. Paths come back raw
+// (-z: no quoting) even when they carry spaces or non-ASCII bytes.
+func (manager *Manager) ListTreeAtCommit(ctx context.Context, repoPath, commit, dir string) ([]TreeEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(commit) == "" {
+		return nil, errors.New("worktree: ListTreeAtCommit requires a non-empty commit")
+	}
+	if strings.TrimSpace(dir) == "" {
+		return nil, errors.New("worktree: ListTreeAtCommit requires a non-empty dir")
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repo path: %w", err)
+	}
+	if out, resolveErr := git(ctx, repoAbs, revParseCmd, "--verify", "--quiet", commit+"^{commit}"); resolveErr != nil {
+		return nil, fmt.Errorf("worktree: commit %s does not resolve: %w (%s)", commit, resolveErr, strings.TrimSpace(string(out)))
+	}
+	out, err := git(ctx, repoAbs, "ls-tree", "-r", "-l", "-z", commit, "--", dir)
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree %s -- %s: %w (%s)", commit, dir, err, strings.TrimSpace(string(out)))
+	}
+	var entries []TreeEntry
+	for _, record := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if record == "" {
+			continue
+		}
+		metadata, path, found := strings.Cut(record, "\t")
+		if !found {
+			return nil, fmt.Errorf("git ls-tree %s: unparseable record %q", commit, record)
+		}
+		fields := strings.Fields(metadata)
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("git ls-tree %s: unparseable metadata %q", commit, metadata)
+		}
+		size := int64(0)
+		if fields[3] != "-" {
+			parsedSize, parseErr := strconv.ParseInt(fields[3], 10, 64)
+			if parseErr != nil {
+				return nil, fmt.Errorf("git ls-tree %s: unparseable size %q: %w", commit, fields[3], parseErr)
+			}
+			size = parsedSize
+		}
+		entries = append(entries, TreeEntry{Path: path, Mode: fields[0], Type: fields[1], Size: size})
+	}
+	return entries, nil
+}
+
+// UncommittedChange is one entry of the porcelain status listing restricted to
+// a path. Code is the two-character XY status ("??" untracked, "!!" ignored,
+// " M" worktree-modified, "M " staged, " D"/"D " deleted, "R " renamed, and
+// combinations). RenamedFrom carries a rename's source path, which porcelain
+// -z emits as a separate NUL-terminated field after the destination.
+type UncommittedChange struct {
+	Code        string
+	Path        string
+	RenamedFrom string
+}
+
+// defaultUncommittedLimit caps the entries UncommittedChanges returns when the
+// caller passes no limit: enough to describe a drifted pack directory many
+// times over, small enough that an event payload stays readable.
+const defaultUncommittedLimit = 200
+
+// UncommittedChanges lists the uncommitted changes under path — untracked
+// files (--untracked-files=all) and ignored files (--ignored=traditional:
+// enumerated individually inside ignored directories, unlike `matching` which
+// would print a whole ignored ancestor such as "!! .agentum/" outside the
+// pathspec) alongside modifications, staged changes, deletions and renames of
+// tracked files. The caller decides which codes pause a run; this method only
+// reports. Paths are raw (-z: no quoting) even with spaces or non-ASCII bytes,
+// and both sides of a rename are kept so a rename out of the directory is not
+// lost. Output is filtered strictly to entries whose path (or rename source)
+// lies under the pathspec directory.
+//
+// A pathspec matching nothing on disk makes git print a "could not open
+// directory" warning and exit 0; that is an empty result, not an error — only
+// a non-zero exit is.
+func (manager *Manager) UncommittedChanges(ctx context.Context, repoPath, path string, limit int) ([]UncommittedChange, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("worktree: UncommittedChanges requires a non-empty path")
+	}
+	if limit <= 0 {
+		limit = defaultUncommittedLimit
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repo path: %w", err)
+	}
+	out, err := git(ctx, repoAbs, "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=traditional", "--", path)
+	if err != nil {
+		return nil, fmt.Errorf("git status --porcelain -- %s: %w (%s)", path, err, strings.TrimSpace(string(out)))
+	}
+	prefix := strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(path)), "/") + "/"
+	tokens := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	var changes []UncommittedChange
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "" {
+			continue
+		}
+		if len(token) < 4 {
+			return nil, fmt.Errorf("git status --porcelain: unparseable record %q", token)
+		}
+		code := token[:2]
+		entryPath := token[3:]
+		renameSource := ""
+		if strings.ContainsAny(code, "RC") {
+			// Porcelain -z emits a rename/copy source as the next NUL-separated
+			// field; today git reports pathspec-limited renames as a plain
+			// deletion instead, but a config or version that does emit R must
+			// not desynchronize this parser — the extra field is consumed and
+			// itself checked against the prefix.
+			if index+1 < len(tokens) {
+				index++
+				renameSource = tokens[index]
+			}
+		}
+		underPrefix := strings.HasPrefix(entryPath, prefix) || strings.HasPrefix(filepath.ToSlash(renameSource), prefix)
+		if !underPrefix {
+			continue
+		}
+		changes = append(changes, UncommittedChange{Code: code, Path: entryPath, RenamedFrom: renameSource})
+		if len(changes) == limit {
+			break
+		}
+	}
+	return changes, nil
 }
 
 // IsClean reports whether the worktree has no uncommitted changes. Exposed so
@@ -634,40 +789,66 @@ func (manager *Manager) DeleteBranch(ctx context.Context, repoPath, runID string
 	return nil
 }
 
-// ensureIgnored appends ".agentum/" to the repo's local excludes file
-// (.git/info/exclude, resolved via git so worktree-shared repos are correct) so
-// the worktrees dir and in-worktree artifact dirs never appear as untracked.
-// Idempotent. This is local-only: it does not touch any tracked .gitignore.
-func (manager *Manager) ensureIgnored(ctx context.Context, repoAbs string) error {
+// excludeLines are the lines Agentum maintains in the repo's info/exclude
+// (.git/info/exclude, resolved via git so worktree-shared repos are correct).
+// The pair ignores every child of .agentum/ (per-run worktrees and the
+// <root>/.agentum/<run-id>/.ag-artifacts/ trees inside run worktrees, which
+// git add -A in checkpoint commits and git clean -fd in Restore must not see)
+// while re-including .agentum/packs/ so a project can commit its own packs
+// without -f. A bare ".agentum/" line cannot do both: it hides the packs too,
+// and because an excluded directory cannot be re-included by a child rule, the
+// negative pattern only works when the parent is matched child-by-child.
+var excludeLines = []string{"/.agentum/*", "!/.agentum/packs/"}
+
+// EnsureExcludes maintains Agentum's exclude lines in the repo's info/exclude:
+// idempotent, and it rewrites a bare ".agentum/" line — whether Agentum's own
+// older form or one added by an operator, since either hides .agentum/packs/
+// and makes project packs uncommittable without -f. Lines Agentum does not own
+// are left untouched. Operators who genuinely want .agentum/ ignored wholesale
+// must move the rule into the repo's .gitignore (which Agentum never edits);
+// the trade-off — packs needing git add -f — is theirs.
+//
+// Non-fatal by design at every call site: a failed write only means the user
+// sees untracked .agentum files (or, for the drift check, the legacy line
+// keeps hiding packs, which the check surfaces as ignored entries).
+func (manager *Manager) EnsureExcludes(ctx context.Context, repoAbs string) error {
 	out, err := git(ctx, repoAbs, revParseCmd, "--git-path", "info/exclude")
 	if err != nil {
 		return fmt.Errorf("locate excludes file: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	excludePath := filepath.Join(repoAbs, strings.TrimSpace(string(out)))
+	excludePath := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(repoAbs, excludePath)
+	}
 	content, _ := os.ReadFile(excludePath)
-	for _, line := range strings.Split(string(content), "\n") {
-		if strings.TrimSpace(line) == ".agentum/" {
-			return nil // already ignored
+	lines := strings.Split(string(content), "\n")
+	managed := map[string]bool{}
+	for _, line := range excludeLines {
+		managed[line] = true
+	}
+	managed[".agentum/"] = true // the legacy form this call replaces
+	var kept []string
+	for _, line := range lines {
+		if !managed[strings.TrimSpace(line)] {
+			kept = append(kept, line)
 		}
 	}
-	excludeEntry := ".agentum/\n"
-	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
-		excludeEntry = "\n" + excludeEntry
+	// Re-append our pair on its own trailing block. Trim a trailing empty
+	// element the Split always produces so the file does not grow a blank
+	// line per call.
+	if len(kept) > 0 && kept[len(kept)-1] == "" {
+		kept = kept[:len(kept)-1]
 	}
-	file, err := os.OpenFile(excludePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return fmt.Errorf("open excludes file: %w", err)
+	desired := strings.Join(kept, "\n")
+	if len(desired) > 0 {
+		desired += "\n"
 	}
-	if _, writeErr := file.WriteString(excludeEntry); writeErr != nil {
-		_ = file.Close()
+	desired += strings.Join(excludeLines, "\n") + "\n"
+	if desired == string(content) {
+		return nil // nothing to do; the file already carries exactly our pair
+	}
+	if writeErr := os.WriteFile(excludePath, []byte(desired), 0o644); writeErr != nil {
 		return fmt.Errorf("write excludes file: %w", writeErr)
-	}
-	// Close is checked, not deferred: this handle is open for output, where a
-	// write can still be buffered, so a full disk or an I/O fault surfaces
-	// here and nowhere else. Discarding it would report a successful append
-	// that never reached the excludes file.
-	if closeErr := file.Close(); closeErr != nil {
-		return fmt.Errorf("close excludes file: %w", closeErr)
 	}
 	return nil
 }

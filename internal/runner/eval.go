@@ -152,16 +152,17 @@ func Evaluate(input StageInput) (Decision, error) {
 		// so surface for review even though the gate would otherwise auto-pass.
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopGate, StopReason: "gate"}, nil
 
-	case pack.GateAutoOnApproval,
-		pack.GateHumanApproval,
-		pack.GateHumanFinal,
-		pack.GateHumanEdit:
+	default:
+		// Every remaining known gate is a human gate — the set lives in
+		// Gate.PausesForHuman (pack), shared with the policy floor's
+		// approval-gate rule so the two cannot drift apart. Anything else is
+		// unknown and must not silently auto-advance.
+		if !input.Stage.Gate.PausesForHuman() {
+			return Decision{}, fmt.Errorf("runner: unknown gate %q on stage %q", input.Stage.Gate, input.StageID)
+		}
 		// All human gates: stop for review. auto_on_approval advances on
 		// explicit continue (the approval), same as the rest.
 		return Decision{Action: ActionPause, FSMEvent: engine.EventStopGate, StopReason: "gate"}, nil
-
-	default:
-		return Decision{}, fmt.Errorf("runner: unknown gate %q on stage %q", input.Stage.Gate, input.StageID)
 	}
 }
 

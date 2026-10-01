@@ -60,6 +60,12 @@ func (s *DirSource) Resolve(ctx context.Context, ref string) (*Pack, error) {
 		return nil, fmt.Errorf("pack source: base pack %s failed validation: %w", name, err)
 	}
 	p.BaseRef = ref
+	p.Origin = OriginBuiltin
+	contentHash, hashErr := DirHash(p.Dir)
+	if hashErr != nil {
+		return nil, fmt.Errorf("pack source: hash pack %s: %w", name, hashErr)
+	}
+	p.ContentHash = contentHash
 	return p, nil
 }
 
