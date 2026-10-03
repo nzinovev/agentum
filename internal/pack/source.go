@@ -2,7 +2,9 @@ package pack
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,8 +38,9 @@ type DirSource struct {
 func NewDirSource(root string) *DirSource { return &DirSource{Root: root} }
 
 // List returns the identity block of every pack under the root, sorted by
-// name — the catalog listing surface. Each directory must carry a loadable
-// manifest.yaml; a pack that fails to load is an error, not a skip: the
+// name — the catalog listing surface. A dot-directory or a directory without
+// a manifest.yaml is not a pack and is skipped; a directory that carries a
+// manifest.yaml and fails to load is an error, not a skip: the
 // listing feeds the boot floor check, and hiding a broken pack from it would
 // hide exactly the pack the check exists to refuse. The result is not
 // validated (Resolve does that per ref); a listing that showed only valid
@@ -58,7 +61,14 @@ func (s *DirSource) List(ctx context.Context) ([]Meta, error) {
 	}
 	var metas []Meta
 	for _, dir := range dirs {
-		if !dir.IsDir() {
+		if !dir.IsDir() || strings.HasPrefix(dir.Name(), ".") {
+			continue
+		}
+		// A directory without a manifest.yaml is not a pack (a .git beside
+		// the packs, lost+found, a scratch folder) and Resolve never reads
+		// it either. Only a directory that claims to be a pack and fails to
+		// load is the error.
+		if _, statErr := os.Stat(filepath.Join(s.Root, dir.Name(), "manifest.yaml")); errors.Is(statErr, fs.ErrNotExist) {
 			continue
 		}
 		p, loadErr := Load(filepath.Join(s.Root, dir.Name()))

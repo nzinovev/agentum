@@ -375,11 +375,6 @@ type UncommittedChange struct {
 	RenamedFrom string
 }
 
-// defaultUncommittedLimit caps the entries UncommittedChanges returns when the
-// caller passes no limit: enough to describe a drifted pack directory many
-// times over, small enough that an event payload stays readable.
-const defaultUncommittedLimit = 200
-
 // UncommittedChanges lists the uncommitted changes under path — untracked
 // files (--untracked-files=all) and ignored files (--ignored=traditional:
 // enumerated individually inside ignored directories, unlike `matching` which
@@ -389,20 +384,20 @@ const defaultUncommittedLimit = 200
 // reports. Paths are raw (-z: no quoting) even with spaces or non-ASCII bytes,
 // and both sides of a rename are kept so a rename out of the directory is not
 // lost. Output is filtered strictly to entries whose path (or rename source)
-// lies under the pathspec directory.
+// lies under the pathspec directory, and never truncated: the caller decides
+// from the whole listing and caps only what it records, because a cap applied
+// here can cut off the one entry that decides (git prints ignored entries
+// last, in path order).
 //
 // A pathspec matching nothing on disk makes git print a "could not open
 // directory" warning and exit 0; that is an empty result, not an error — only
 // a non-zero exit is.
-func (manager *Manager) UncommittedChanges(ctx context.Context, repoPath, path string, limit int) ([]UncommittedChange, error) {
+func (manager *Manager) UncommittedChanges(ctx context.Context, repoPath, path string) ([]UncommittedChange, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("worktree: UncommittedChanges requires a non-empty path")
-	}
-	if limit <= 0 {
-		limit = defaultUncommittedLimit
 	}
 	repoAbs, err := filepath.Abs(repoPath)
 	if err != nil {
@@ -442,9 +437,6 @@ func (manager *Manager) UncommittedChanges(ctx context.Context, repoPath, path s
 			continue
 		}
 		changes = append(changes, UncommittedChange{Code: code, Path: entryPath, RenamedFrom: renameSource})
-		if len(changes) == limit {
-			break
-		}
 	}
 	return changes, nil
 }
@@ -713,6 +705,36 @@ func (manager *Manager) IsAncestor(ctx context.Context, repoPath, ancestor, desc
 	}
 	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w (%s)",
 		ancestor, descendant, err, strings.TrimSpace(string(out)))
+}
+
+// PathDiffersBetween reports whether the tree under path differs between two
+// commits. It answers "did the commits between these two touch this
+// directory", which comparing the commit ids cannot: two different commits
+// routinely carry the same subtree. Exit-status based, like IsAncestor.
+func (manager *Manager) PathDiffersBetween(ctx context.Context, repoPath, fromCommit, toCommit, path string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(fromCommit) == "" || strings.TrimSpace(toCommit) == "" || strings.TrimSpace(path) == "" {
+		return false, errors.New("worktree: PathDiffersBetween requires two commits and a path")
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return false, fmt.Errorf("resolve repo path: %w", err)
+	}
+	// --quiet exits 0 when the trees match under the pathspec, 1 when they
+	// differ; any other status (an unknown object among other causes) is a
+	// failed comparison, not a difference.
+	cmd := exec.CommandContext(ctx, "git", "-C", repoAbs, "diff", "--quiet", fromCommit, toCommit, "--", path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff --quiet %s %s -- %s: %w (%s)",
+		fromCommit, toCommit, path, err, strings.TrimSpace(string(out)))
 }
 
 // CountAhead runs `git rev-list --count from..to` in the repo at repoPath:

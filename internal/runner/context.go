@@ -22,6 +22,7 @@ import (
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // prepareProjectContext wires the project-context channel for the run (ADR
@@ -443,53 +444,87 @@ func (runner *Runner) pauseOnProjectPackDrift(ctx context.Context, record sqlc.R
 	if err := runner.wt.EnsureExcludes(ctx, checkoutPath); err != nil {
 		runner.log.Warn("upgrade .agentum excludes before pack drift check", "run", record.ID, "error", err)
 	}
-	changes, changesErr := runner.wt.UncommittedChanges(ctx, checkoutPath, packDir, maxPackDriftEntries)
+	changes, changesErr := runner.wt.UncommittedChanges(ctx, checkoutPath, packDir)
 	if changesErr != nil {
-		// A failed status read must not fail the run: the pack still comes
-		// from base_commit, so the comparison is advisory. The gap is logged;
-		// no pause is applied on a reading we could not take.
-		runner.log.Warn("read pack dir status", "run", record.ID, "dir", packDir, "error", changesErr)
-		return false
+		// A directory whose state could not be read is not a clean one. The
+		// run would otherwise start over a pack directory nobody compared,
+		// which is the outcome this check exists to prevent. Pause rather than
+		// fail: the usual cause is transient (a concurrent git holding
+		// index.lock), and continue re-runs the comparison. No evidence is
+		// written — it is first-write-wins, and an unread comparison must not
+		// take the place of the one a later attempt makes.
+		runner.log.Warn("pack directory status unreadable; pausing",
+			"run", record.ID, "dir", packDir, "error", changesErr)
+		runner.emit(ctx, record, EvProjectPackDrift, map[string]any{
+			"dir": packDir, "base_commit": baseCommit,
+			"cause": "status_unreadable", "reason": changesErr.Error(),
+			"hint": "make `git status` work in the source checkout, then continue",
+		})
+		return runner.applyStop(ctx, record, runPack, "project_pack_status_unreadable")
 	}
 
-	evidence := &manifest.ProjectPacksEvidence{Dir: packDir}
-	for _, change := range changes {
-		entry := strings.TrimSpace(change.Code + " " + change.Path)
-		if change.Code == "!!" {
-			base := change.Path
-			if index := strings.LastIndexByte(base, '/'); index >= 0 {
-				base = base[index+1:]
-			}
-			if base == "manifest.yaml" || base == "overrides.yaml" {
-				evidence.Uncommitted = append(evidence.Uncommitted, entry)
-			} else {
-				evidence.Ignored = append(evidence.Ignored, entry)
-			}
-			continue
-		}
-		evidence.Uncommitted = append(evidence.Uncommitted, entry)
+	// Decide from the whole listing; the cap applies only to what is recorded.
+	uncommitted, ignored := classifyPackDirChanges(packDir, changes)
+	evidence := &manifest.ProjectPacksEvidence{
+		Dir:         packDir,
+		Uncommitted: capPackDriftEntries(uncommitted),
+		Ignored:     capPackDriftEntries(ignored),
 	}
 	if head, headErr := runner.wt.HeadCommit(ctx, checkoutPath); headErr != nil {
 		runner.log.Warn("read checkout HEAD for pack drift evidence", "run", record.ID, "error", headErr)
 	} else if head != baseCommit {
 		// A committed difference is the documented model — the run applies the
-		// base_commit pack — so it is recorded, never a pause.
-		evidence.BaseDiverged = true
+		// base_commit pack — so it is recorded, never a pause. Compared by the
+		// pack directory's tree, not by commit id: a checkout standing on
+		// another commit usually carries the very same pack.
+		differs, diffErr := runner.wt.PathDiffersBetween(ctx, checkoutPath, baseCommit, head, packDir)
+		if diffErr != nil {
+			runner.log.Warn("compare pack dir between base_commit and HEAD", "run", record.ID, "error", diffErr)
+		}
+		evidence.BaseDiverged = differs
 	}
 	runner.recordProjectPacksEvidence(ctx, record, evidence)
 
-	if len(evidence.Uncommitted) == 0 {
+	if len(uncommitted) == 0 {
 		return false
 	}
 	runner.log.Warn("project pack directory has uncommitted changes; the run executes the base_commit version",
 		"run", record.ID, "dir", packDir,
-		"uncommitted", evidence.Uncommitted, "ignored", len(evidence.Ignored))
+		"uncommitted", evidence.Uncommitted, "uncommitted_total", len(uncommitted), "ignored_total", len(ignored))
 	runner.emit(ctx, record, EvProjectPackDrift, map[string]any{
 		"dir": packDir, "base_commit": baseCommit,
 		"uncommitted": evidence.Uncommitted, "ignored": evidence.Ignored,
+		"uncommitted_total": len(uncommitted), "ignored_total": len(ignored),
 		"hint": "commit or revert the pack directory changes, then continue; the run always executes the base_commit version of the pack",
 	})
 	return runner.applyStop(ctx, record, runPack, "project_pack_drift")
+}
+
+// classifyPackDirChanges splits the status listing of a pack directory into
+// the entries that pause a run and the ignored ones that do not. An ignored
+// entry pauses only when it is the pack's own document — manifest.yaml or
+// overrides.yaml directly inside packDir. The comparison is by full path: a
+// nested file that merely shares the name (prompts/manifest.yaml) is an
+// ordinary pack file.
+func classifyPackDirChanges(packDir string, changes []worktree.UncommittedChange) (uncommitted, ignored []string) {
+	for _, change := range changes {
+		entry := strings.TrimSpace(change.Code + " " + change.Path)
+		isPackDocument := change.Path == packDir+"/manifest.yaml" || change.Path == packDir+"/overrides.yaml"
+		if change.Code == "!!" && !isPackDocument {
+			ignored = append(ignored, entry)
+			continue
+		}
+		uncommitted = append(uncommitted, entry)
+	}
+	return uncommitted, ignored
+}
+
+// capPackDriftEntries bounds a recorded listing to maxPackDriftEntries.
+func capPackDriftEntries(entries []string) []string {
+	if len(entries) > maxPackDriftEntries {
+		return entries[:maxPackDriftEntries]
+	}
+	return entries
 }
 
 // recordProjectPacksEvidence writes the pack-directory comparison into the
