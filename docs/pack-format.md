@@ -82,7 +82,7 @@ stages:
 | Field | Type | Notes |
 |---|---|---|
 | `api` | string | Must be `agentum/v1`. |
-| `pack.name` | string | Required. Matches the directory name when served by a `Source`. |
+| `pack.name` | string | Required. Matches the directory name when served by a `Source`. The name is one directory segment, cannot start with `.`, and cannot contain `/` or `\`. Invalid names are refused at resolution, so no runnable builtin pack can be omitted from the boot policy floor. |
 | `pack.version` | semver | `MAJOR.MINOR.PATCH`, no leading zeros, no pre-release tags. Drives lock-major override. |
 | `pack.persona` | string | Free-form metadata tag (e.g. `engineering`). The engine encodes no persona-specific behavior. |
 | `pack.description` | string | Optional. |

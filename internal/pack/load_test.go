@@ -1,6 +1,7 @@
 package pack
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,5 +359,81 @@ func assertValidationError(t *testing.T, err error, wantSubstr string) {
 	}
 	if !strings.Contains(err.Error(), wantSubstr) {
 		t.Fatalf("expected error containing %q, got %q", wantSubstr, err.Error())
+	}
+}
+
+// The packs root is an ordinary directory an operator owns: a .git beside the
+// packs, lost+found, or a scratch folder is not a pack and must not stop the
+// listing (it feeds the boot check). A directory that claims to be a pack —
+// it has a manifest.yaml — and does not load still does.
+func TestDirSource_ListSkipsNonPackDirectories(t *testing.T) {
+	t.Parallel()
+	writeManifest := func(t *testing.T, root, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name, "manifest.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const terminalOnlyPack = "api: agentum/v1\npack: {name: real, version: 1.0.0, persona: engineering}\nentry: done\nstages:\n  done: {}\n"
+
+	t.Run("non-pack directories are skipped", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeManifest(t, root, "real", terminalOnlyPack)
+		// A dot-directory is skipped even when it holds a manifest.yaml.
+		writeManifest(t, root, ".git", "not yaml: [")
+		writeManifest(t, root, ".hidden", strings.Replace(terminalOnlyPack, "name: real", "name: .hidden", 1))
+		if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "linked")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, "lost+found"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metas, err := NewDirSource(root).List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(metas) != 1 || metas[0].Name != "real" {
+			t.Fatalf("listed %+v, want only the pack \"real\"", metas)
+		}
+		for _, ref := range []string{".hidden", "real/../.hidden", `real\hidden`, "linked"} {
+			if _, resolveErr := NewDirSource(root).Resolve(t.Context(), ref); resolveErr == nil {
+				t.Errorf("Resolve(%q) accepted a pack the boot catalog cannot inspect", ref)
+			}
+		}
+		hidden, loadErr := Load(filepath.Join(root, ".hidden"))
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if validateErr := hidden.Validate(); validateErr == nil {
+			t.Error("a hidden pack's manifest name must be invalid too")
+		}
+	})
+
+	t.Run("a broken manifest is still an error", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeManifest(t, root, "broken", "not yaml: [")
+		if _, err := NewDirSource(root).List(t.Context()); err == nil {
+			t.Fatal("a directory with an unloadable manifest.yaml must fail the listing")
+		}
+	})
+}
+
+// TestDirSource_ResolveReadFailureClass: an unreadable source file is a read
+// failure after the pack has passed format validation.
+func TestDirSource_ResolveReadFailureClass(t *testing.T) {
+	t.Parallel()
+	source := builtinSourceWithBasePack(t)
+	brokenLink := filepath.Join(source.Root, "base-pack", "broken-link")
+	if err := os.Symlink("missing-target", brokenLink); err != nil {
+		t.Fatal(err)
+	}
+	_, err := source.Resolve(t.Context(), "base-pack")
+	if !errors.Is(err, ErrPackReadFailed) {
+		t.Fatalf("Resolve error = %v, want ErrPackReadFailed", err)
 	}
 }

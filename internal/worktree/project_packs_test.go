@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		t.Parallel()
 		repo := t.TempDir()
 		commitPack(t, repo)
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x")
 		if err != nil {
 			t.Fatalf("UncommittedChanges: %v", err)
 		}
@@ -166,7 +167,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		if err := os.Remove(filepath.Join(repo, ".agentum", "packs", "x", "prompts", "p.md")); err != nil {
 			t.Fatal(err)
 		}
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x")
 		if err != nil {
 			t.Fatalf("UncommittedChanges: %v", err)
 		}
@@ -200,7 +201,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		if err := gitInRepo(repo, "mv", ".agentum/packs/x/prompts/p.md", "moved-prompt.md"); err != nil {
 			t.Fatal(err)
 		}
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x")
 		if err != nil {
 			t.Fatalf("UncommittedChanges: %v", err)
 		}
@@ -236,7 +237,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		if err := gitInRepo(repo, "commit", "--quiet", "-m", "gitignore"); err != nil {
 			t.Fatal(err)
 		}
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/y", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/y")
 		if err != nil {
 			t.Fatalf("UncommittedChanges: %v", err)
 		}
@@ -251,7 +252,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		repo := t.TempDir()
 		commitPack(t, repo)
 		mustWrite(repo, ".agentum/packs/x/prompts/промпт с пробелом.md", "body\n")
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x")
 		if err != nil {
 			t.Fatalf("UncommittedChanges: %v", err)
 		}
@@ -267,7 +268,7 @@ func TestManager_UncommittedChanges(t *testing.T) {
 		commitPack(t, repo)
 		// git prints a "could not open directory" warning to stderr and exits
 		// 0; only a non-zero exit is an error.
-		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/none", 0)
+		changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/none")
 		if err != nil {
 			t.Fatalf("absent dir must be an empty result, got error: %v", err)
 		}
@@ -387,4 +388,80 @@ func TestManager_EnsureExcludes(t *testing.T) {
 			t.Fatalf("worktrees dir must stay out of plain status:\n%s", plainStatus)
 		}
 	})
+}
+
+// A cap applied while reading status would cut off the entry that decides:
+// git prints ignored entries last and in path order, so a pack directory
+// ignored as a whole lists its manifest.yaml after every file that sorts
+// before it.
+func TestManager_UncommittedChanges_ListsEveryEntry(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatalf("setup repo: %v", err)
+	}
+	mustWrite(repo, ".gitignore", ".agentum/\n")
+	if err := os.MkdirAll(filepath.Join(repo, ".agentum", "packs", "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const junkFiles = 250
+	for index := 0; index < junkFiles; index++ {
+		mustWrite(repo, fmt.Sprintf(".agentum/packs/x/a%03d.swp", index), "junk\n")
+	}
+	mustWrite(repo, ".agentum/packs/x/manifest.yaml", "api: agentum/v1\n")
+
+	changes, err := New().UncommittedChanges(t.Context(), repo, ".agentum/packs/x")
+	if err != nil {
+		t.Fatalf("UncommittedChanges: %v", err)
+	}
+	if len(changes) != junkFiles+1 {
+		t.Fatalf("listed %d entries, want %d (nothing truncated)", len(changes), junkFiles+1)
+	}
+	last := changes[len(changes)-1]
+	if last.Code != "!!" || last.Path != ".agentum/packs/x/manifest.yaml" {
+		t.Errorf("last entry = %q %q, want the ignored manifest.yaml", last.Code, last.Path)
+	}
+}
+
+func TestManager_PathDiffersBetween(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	commitPack(t, repo)
+	packCommit := strings.TrimSpace(mustGit(t, repo, "rev-parse", "HEAD"))
+
+	mustWrite(repo, "unrelated.txt", "outside the pack\n")
+	mustGit(t, repo, "add", "-A")
+	mustGit(t, repo, "commit", "--quiet", "-m", "unrelated")
+	unrelatedCommit := strings.TrimSpace(mustGit(t, repo, "rev-parse", "HEAD"))
+
+	mustWrite(repo, ".agentum/packs/x/manifest.yaml", "api: agentum/v1\nentry: plan\n")
+	mustGit(t, repo, "add", "-A")
+	mustGit(t, repo, "commit", "--quiet", "-m", "edit pack")
+	editedCommit := strings.TrimSpace(mustGit(t, repo, "rev-parse", "HEAD"))
+
+	cases := []struct {
+		name        string
+		from, to    string
+		wantDiffers bool
+	}{
+		{"same commit", packCommit, packCommit, false},
+		{"a commit outside the pack directory", packCommit, unrelatedCommit, false},
+		{"a commit editing the pack", packCommit, editedCommit, true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			differs, err := New().PathDiffersBetween(t.Context(), repo, testCase.from, testCase.to, ".agentum/packs/x")
+			if err != nil {
+				t.Fatalf("PathDiffersBetween: %v", err)
+			}
+			if differs != testCase.wantDiffers {
+				t.Errorf("differs = %v, want %v", differs, testCase.wantDiffers)
+			}
+		})
+	}
+
+	if _, err := New().PathDiffersBetween(t.Context(), repo, packCommit, "0000000000000000000000000000000000000000", ".agentum/packs/x"); err == nil {
+		t.Error("an unknown commit must be a failed comparison, not a difference")
+	}
 }

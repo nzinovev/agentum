@@ -206,6 +206,7 @@ gate".
   "id": "uuid",
   "project_id": "uuid",
   "pipeline_pack": "java-spring@1",
+  "pipeline_pack_origin": "project+builtin | builtin | project — where the executed pack's bytes came from; empty until the run starts and pins its pack with base_commit",
   "title": "Add auth to /settings",
   "description": "Problem. … What to do. …",
   "overrides": {},
@@ -666,8 +667,15 @@ the check exists because a person asked for it through this API.
 
 | Method | Path | Status | Notes |
 |---|---|---|---|
-| `GET` | `/packs` | stub | list available packs. Epic 5.1 |
-| `GET` | `/packs/{name}` | stub | pack manifest. Epic 5.1 |
+| `GET` | `/packs` | ✅ | list available packs. Without `?project_id`: the builtin catalog. With `?project_id=`: builtin ∪ project packs at `?ref=` (required — the same ref the run will build on; a missing `ref` is a `400 bad_input`, no silent HEAD), the response carrying the resolved `commit` it was assembled at. Every entry carries `origin`: `builtin`, `project` (a replacement or new-name manifest), or `project+builtin` (an overrides document over a builtin base). A project pack replaces the builtin of the same name in this project — one row, the project's origin; a project pack that fails to resolve keeps its row with empty metadata (the detail endpoint names the configuration error). |
+| `GET` | `/packs/{name}` | ✅ | one pack: identity, entry, stages (gate, tier, role, prompt path, transitions, capabilities, terminal), budgets, checks, approvals, memory, capabilities, `origin`, and `field_origins` — for an inherited pack, which fields the project layer set (`stages.<id>.prompt|gate|tier`, `budgets.*`). `{name}` may carry a version constraint (`backend-development@^0`). With `?project_id=`: the project layer at the required `?ref=`, the response carrying the resolved `commit` it was read at; without it: the builtin source. Unknown name → `404 not_found`; an error describing the pack or the ref (both documents, a symlinked entry, a `base` naming a project pack, a version constraint the pack does not satisfy, a manifest that does not validate, …) → `400 bad_input` naming it; a failure to read the pack's bytes from the repository → `500 internal`. |
+
+The pack a RUN executes is not chosen here: runs resolve their pack from the
+pinned `base_commit` (`.agentum/packs/` in the project repository), and every
+run response names the origin in `pipeline_pack_origin`. See
+[docs/pack-format.md](pack-format.md#project-packs) for the project-pack format
+and [docs/execution.md](execution.md#project-packs-the-policy-floor-and-pack-drift)
+for the resolution, floor, and drift rules.
 
 ## Events (SSE)
 

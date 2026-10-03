@@ -59,8 +59,9 @@ type ContextEvidence struct {
 // executes the base_commit version regardless); Ignored entries that are not
 // the pack's manifest or overrides document are recorded without pausing
 // (editor junk under global excludes). BaseDiverged marks a checkout whose
-// HEAD is not the run's base_commit: a committed difference is the documented
-// model — the pinned base_commit pack applies — and only a warning.
+// HEAD carries a different pack directory than the run's base_commit: a
+// committed difference is the documented model — the pinned base_commit pack
+// applies — and only a warning.
 type ProjectPacksEvidence struct {
 	Dir string `json:"dir"`
 	// Uncommitted lists the pausing entries with their porcelain codes
@@ -68,10 +69,15 @@ type ProjectPacksEvidence struct {
 	Uncommitted []string `json:"uncommitted,omitempty"`
 	// Ignored lists ignored entries that did not pause (codes "!!"), capped.
 	Ignored []string `json:"ignored,omitempty"`
-	// BaseDiverged is true when the checkout's HEAD is not base_commit. The
-	// run still executes the base_commit pack; the flag tells a reviewer the
-	// comparison ran against a checkout standing elsewhere.
+	// BaseDiverged is true when the pack directory differs between
+	// base_commit and the checkout's HEAD. A HEAD on another commit with the
+	// same pack directory is not a divergence. The run still executes the
+	// base_commit pack; the flag tells a reviewer the checkout's committed
+	// pack was not the one applied.
 	BaseDiverged bool `json:"base_diverged,omitempty"`
+	// BaseComparison is matched, diverged, or unreadable. Unreadable preserves
+	// a failed comparison as unknown because this evidence keeps its first write.
+	BaseComparison string `json:"base_comparison"`
 }
 
 // ProjectConfigEvidence is the project config the run pinned, and how the

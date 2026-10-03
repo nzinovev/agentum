@@ -11,9 +11,8 @@ import "net/http"
 // Epic tags name where each stub's implementation lands. Centralized as
 // constants so a renumber stays a one-line edit.
 const (
-	epicMemory       = "Epic 1"
-	epicGateActions  = "Epic 2"
-	epicCatalogReads = "Epic 5.1"
+	epicMemory      = "Epic 1"
+	epicGateActions = "Epic 2"
 )
 
 // --- Stage invocations (read-only) ---
@@ -52,13 +51,6 @@ func (api *API) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Packs ---
-
-// GET /api/v1/packs
-func (api *API) handleListPacks(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicCatalogReads, "GET /packs")
-}
-
-// GET /api/v1/packs/{name}
-func (api *API) handleGetPack(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, epicCatalogReads, "GET /packs/{name}")
-}
+//
+// GET /packs and GET /packs/{name} are implemented in packs.go (the pack
+// catalog: builtin packs plus the project's layer at an explicit ref).

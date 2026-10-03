@@ -2,7 +2,9 @@ package pack
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,8 +38,9 @@ type DirSource struct {
 func NewDirSource(root string) *DirSource { return &DirSource{Root: root} }
 
 // List returns the identity block of every pack under the root, sorted by
-// name — the catalog listing surface. Each directory must carry a loadable
-// manifest.yaml; a pack that fails to load is an error, not a skip: the
+// name — the catalog listing surface. A dot-directory or a directory without
+// a manifest.yaml is not a pack and is skipped; a directory that carries a
+// manifest.yaml and fails to load is an error, not a skip: the
 // listing feeds the boot floor check, and hiding a broken pack from it would
 // hide exactly the pack the check exists to refuse. The result is not
 // validated (Resolve does that per ref); a listing that showed only valid
@@ -54,12 +57,22 @@ func (s *DirSource) List(ctx context.Context) ([]Meta, error) {
 	}
 	dirs, err := os.ReadDir(s.Root)
 	if err != nil {
-		return nil, fmt.Errorf("pack source: list %s: %w", s.Root, err)
+		return nil, fmt.Errorf("pack source: list %s: %w: %w", s.Root, ErrPackReadFailed, err)
 	}
 	var metas []Meta
 	for _, dir := range dirs {
-		if !dir.IsDir() {
+		if !dir.IsDir() || !validPackName(dir.Name()) {
 			continue
+		}
+		// A directory without a manifest.yaml is not a pack (a .git beside
+		// the packs, lost+found, a scratch folder) and Resolve never reads
+		// it either. Only a directory that claims to be a pack and fails to
+		// load is the error.
+		if _, statErr := os.Stat(filepath.Join(s.Root, dir.Name(), "manifest.yaml")); statErr != nil {
+			if errors.Is(statErr, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("pack source: stat pack %q: %w: %w", dir.Name(), ErrPackReadFailed, statErr)
 		}
 		p, loadErr := Load(filepath.Join(s.Root, dir.Name()))
 		if loadErr != nil {
@@ -83,8 +96,26 @@ func (s *DirSource) Resolve(ctx context.Context, ref string) (*Pack, error) {
 		return nil, err
 	}
 	dir := filepath.Join(s.Root, name)
+	// List skips symlink entries because os.ReadDir does not report them as
+	// directories. Resolve must refuse the same entries or they evade the
+	// builtin policy floor that walks List at boot.
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("pack source: pack %q not found at %s: %w: %w", name, dir, ErrPackNotFound, err)
+		}
+		return nil, fmt.Errorf("pack source: stat pack %q at %s: %w: %w", name, dir, ErrPackReadFailed, err)
+	}
+	if !dirInfo.IsDir() {
+		return nil, fmt.Errorf("pack source: pack %q is not a directory", name)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); err != nil {
-		return nil, fmt.Errorf("pack source: pack %q not found at %s: %w", name, dir, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Only absence is "not found"; a pack that exists and fails the
+			// constraint or validation below is a different answer.
+			return nil, fmt.Errorf("pack source: pack %q not found at %s: %w: %w", name, dir, ErrPackNotFound, err)
+		}
+		return nil, fmt.Errorf("pack source: stat pack %q at %s: %w: %w", name, dir, ErrPackReadFailed, err)
 	}
 	p, err := Load(dir)
 	if err != nil {
@@ -103,7 +134,7 @@ func (s *DirSource) Resolve(ctx context.Context, ref string) (*Pack, error) {
 	p.Origin = OriginBuiltin
 	contentHash, hashErr := DirHash(p.Dir)
 	if hashErr != nil {
-		return nil, fmt.Errorf("pack source: hash pack %s: %w", name, hashErr)
+		return nil, fmt.Errorf("pack source: hash pack %s: %w: %w", name, ErrPackReadFailed, hashErr)
 	}
 	p.ContentHash = contentHash
 	return p, nil
@@ -124,10 +155,19 @@ func parseRef(ref string) (name, constraint string, err error) {
 	if name == "" {
 		return "", "", fmt.Errorf("pack ref %q has empty name", ref)
 	}
+	if !validPackName(name) {
+		return "", "", fmt.Errorf("pack ref %q has invalid name %q: use one directory segment that does not start with a dot", ref, name)
+	}
 	if constraint != "" && !isConstraint(constraint) {
 		return "", "", fmt.Errorf("pack ref %q has malformed constraint %q", ref, constraint)
 	}
 	return name, constraint, nil
+}
+
+// validPackName keeps every resolvable pack visible to the boot catalog.
+// Hidden and nested paths are excluded from List, so Resolve must refuse them too.
+func validPackName(name string) bool {
+	return name != "" && !strings.HasPrefix(name, ".") && !strings.ContainsAny(name, "/\\\x00")
 }
 
 // isConstraint accepts "" (any), "^N" (lock major), or "X.Y.Z" (exact).

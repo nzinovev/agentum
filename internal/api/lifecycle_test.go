@@ -4,12 +4,48 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
+
+// TestHandleRejectRun_RetryAfterGate: a repeated reject returns the cancelled
+// run for either approval name without reading the pack after its gate closes.
+func TestHandleRejectRun_RetryAfterGate(t *testing.T) {
+	harness := newRegistrationHarness(t)
+	repo := t.TempDir()
+	initRegistrationRepo(t, repo, "reject retry")
+	project := harness.registerProject(repo)
+	for _, approvalName := range []string{"spec", approvalNameFinalReview} {
+		t.Run(approvalName, func(t *testing.T) {
+			run := harness.seedRun(project.ID, "created", "")
+			if _, err := harness.queries.CreateApproval(t.Context(), sqlc.CreateApprovalParams{
+				TenantID: testTenantID, UserID: testUserID, RunID: run.ID,
+				Name: approvalName, Decision: "rejected", Actor: string(authz.ActorHuman),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := harness.queries.UpdateRunState(t.Context(), sqlc.UpdateRunStateParams{
+				ID: run.ID, TenantID: testTenantID, State: "cancelled",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+run.ID+"/reject", nil)
+			request.SetPathValue("id", run.ID)
+			request = request.WithContext(authz.WithPrincipal(request.Context(), harness.principal))
+			recorder := httptest.NewRecorder()
+			harness.api.handleRejectRun(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("retry status = %d, body = %s; want 200", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
 
 // TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision pins the
 // humanDecisionPatch mapping the four lifecycle actions rely on. The patch is

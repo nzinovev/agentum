@@ -64,6 +64,15 @@ var (
 	// directory's name. The directory name is the pack's identity — the ref
 	// grammar, replacement semantics, and the listing all key on it.
 	ErrPackNameMismatch = errors.New("project pack manifest name does not match its directory")
+	// ErrPackNotFound: the ref names no builtin pack and the project ships no
+	// pack under the name. The listing and detail surfaces map it to their
+	// not-found answers. A builtin that exists but does not satisfy the ref's
+	// constraint, or fails to load, is not "not found".
+	ErrPackNotFound = errors.New("pack not found")
+	// ErrPackReadFailed: the pack's bytes could not be read — the commit tree
+	// or the scratch directory failed. It says nothing about the pack, so a
+	// caller must not report it as the pack's (or the requester's) fault.
+	ErrPackReadFailed = errors.New("pack could not be read")
 )
 
 // TreeEntry is one file of a commit-tree listing, as the reader below returns
@@ -155,20 +164,22 @@ func (source *ProjectSource) ResolveForFloor(ctx context.Context, ref, repoPath,
 		// ref resolves builtin (the partially wired server and test shape).
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, baseErr
+			return nil, fmt.Errorf("project pack %q: %w", name, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
 	packDir := ProjectPacksDir + "/" + name
 	entries, err := source.Reader.ListTreeAtCommit(ctx, repoPath, baseCommit, packDir)
 	if err != nil {
-		return nil, fmt.Errorf("project pack %q: list %s at %s: %w", name, packDir, baseCommit, err)
+		return nil, fmt.Errorf("project pack %q: list %s at %s: %w: %w", name, packDir, baseCommit, ErrPackReadFailed, err)
 	}
 	if len(entries) == 0 {
-		// No project pack under this name: the builtin source answers.
+		// No project pack under this name: the builtin source answers, and
+		// marks its own "no such pack" with ErrPackNotFound so the catalog
+		// surfaces can tell it from a configuration error.
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, baseErr
+			return nil, fmt.Errorf("project pack %q: %w", name, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
@@ -254,7 +265,7 @@ func (source *ProjectSource) resolveProjectOverrides(ctx context.Context, materi
 		// name belongs to a project pack here and the inheritance is refused.
 		shadowed, shadowErr := source.Reader.ListTreeAtCommit(ctx, repoPath, baseCommit, ProjectPacksDir+"/"+baseName)
 		if shadowErr != nil {
-			return nil, fmt.Errorf("project pack %q: check base %q: %w", name, baseName, shadowErr)
+			return nil, fmt.Errorf("project pack %q: check base %q: %w: %w", name, baseName, ErrPackReadFailed, shadowErr)
 		}
 		if len(shadowed) > 0 {
 			return nil, fmt.Errorf("project pack %q: base %q: %w", name, baseName, ErrBaseNotBuiltin)
@@ -374,27 +385,43 @@ func packFilePresent(entries []TreeEntry, packDir, file string) bool {
 func materializePack(ctx context.Context, reader CommitTree, repoPath, baseCommit, packDir string, entries []TreeEntry) (string, error) {
 	tempDir, err := os.MkdirTemp("", "agentum-project-pack-")
 	if err != nil {
-		return "", fmt.Errorf("project pack %q: materialize: %w", packDir, err)
+		return "", fmt.Errorf("project pack %q: materialize: %w: %w", packDir, ErrPackReadFailed, err)
 	}
 	prefix := packDir + "/"
 	for _, entry := range entries {
 		content, readErr := reader.FileAtCommit(ctx, repoPath, baseCommit, entry.Path)
 		if readErr != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack: read %s at %s: %w", entry.Path, baseCommit, readErr)
+			return "", fmt.Errorf("project pack: read %s at %s: %w: %w", entry.Path, baseCommit, ErrPackReadFailed, readErr)
 		}
 		relativePath := filepath.FromSlash(strings.TrimPrefix(entry.Path, prefix))
 		target := filepath.Join(tempDir, relativePath)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack %q: materialize %s: %w", packDir, entry.Path, err)
+			return "", fmt.Errorf("project pack %q: materialize %s: %w: %w", packDir, entry.Path, ErrPackReadFailed, err)
 		}
 		if err := os.WriteFile(target, content, 0o644); err != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack %q: materialize %s: %w", packDir, entry.Path, err)
+			return "", fmt.Errorf("project pack %q: materialize %s: %w: %w", packDir, entry.Path, ErrPackReadFailed, err)
 		}
 	}
 	return tempDir, nil
+}
+
+// ResolveBuiltin resolves ref against the builtin source alone — the catalog
+// surface for callers not bound to a project. The origin is always builtin.
+func (source *ProjectSource) ResolveBuiltin(ctx context.Context, ref string) (*Resolved, error) {
+	base, err := source.Builtin.Resolve(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
+}
+
+// ListBuiltin lists the builtin source's packs (the catalog surface without a
+// project).
+func (source *ProjectSource) ListBuiltin(ctx context.Context) ([]Meta, error) {
+	return source.Builtin.List(ctx)
 }
 
 // ProjectPackEntry is one project pack the commit tree advertises, for the
@@ -416,7 +443,7 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 	}
 	entries, err := source.Reader.ListTreeAtCommit(ctx, repoPath, commit, ProjectPacksDir)
 	if err != nil {
-		return nil, fmt.Errorf("list %s at %s: %w", ProjectPacksDir, commit, err)
+		return nil, fmt.Errorf("list %s at %s: %w: %w", ProjectPacksDir, commit, ErrPackReadFailed, err)
 	}
 	prefix := ProjectPacksDir + "/"
 	byName := map[string]*ProjectPackEntry{}
@@ -425,8 +452,10 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 		if rest == "" || strings.HasPrefix(rest, "/") {
 			continue
 		}
-		name, _, _ := strings.Cut(rest, "/")
-		if name == "" {
+		// A blob directly under .agentum/packs/ (a README, a stray file) is not
+		// a pack: only a directory names one.
+		name, inside, nested := strings.Cut(rest, "/")
+		if !nested || !validPackName(name) {
 			continue
 		}
 		record, ok := byName[name]
@@ -434,14 +463,17 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 			record = &ProjectPackEntry{Name: name}
 			byName[name] = record
 		}
-		switch {
-		case strings.HasSuffix(rest, "/manifest.yaml"):
+		// Matched against the path inside the pack directory, not by suffix: a
+		// nested prompts/manifest.yaml is an ordinary pack file and must not
+		// change what kind of pack this is.
+		switch inside {
+		case "manifest.yaml":
 			if record.Kind == "overrides" {
 				record.Kind = "invalid"
 			} else {
 				record.Kind = "manifest"
 			}
-		case strings.HasSuffix(rest, "/overrides.yaml"):
+		case "overrides.yaml":
 			if record.Kind == "manifest" {
 				record.Kind = "invalid"
 			} else {

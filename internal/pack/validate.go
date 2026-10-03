@@ -45,6 +45,8 @@ func (p *Pack) validateIdentity() []string {
 	}
 	if strings.TrimSpace(p.Pack.Name) == "" {
 		problems = append(problems, "pack.name is required")
+	} else if !validPackName(p.Pack.Name) {
+		problems = append(problems, "pack.name must be one directory segment that does not start with a dot")
 	}
 	if !isSemver(p.Pack.Version) {
 		problems = append(problems, fmt.Sprintf("pack.version must be semver MAJOR.MINOR.PATCH, got %q", p.Pack.Version))

@@ -135,12 +135,17 @@ func (api *API) handleFinalReview(w http.ResponseWriter, r *http.Request) {
 		ResultCommit: nullStringOr(run.ResultCommit),
 	}
 	// Plan: the pack-declared approval artifact's current revision, plus the
-	// approval row that bound the human decision to it.
-	if api.packs != nil {
-		if runPack, pErr := api.packs.Resolve(r.Context(), run.PipelinePack); pErr == nil {
-			if approval, hasApproval := runPack.SourceWriteApproval(); hasApproval {
-				response.Plan = api.finalReviewPlan(r.Context(), run, approval)
-			}
+	// approval row that bound the human decision to it. The resolution is the
+	// runner's (project layer at the pinned base_commit); a failure is a 500,
+	// not a silently empty plan — an empty plan section would tell the
+	// reviewer "no approval artifact exists" when the truth is "unreadable".
+	if runPack, pErr := api.resolveRunPack(r.Context(), run); pErr != nil {
+		logUnexpected(api.log, pErr, "resolveRunPack(final-review)")
+		writeError(w, http.StatusInternalServerError, codeInternal, pErr.Error())
+		return
+	} else if runPack != nil {
+		if approval, hasApproval := runPack.SourceWriteApproval(); hasApproval {
+			response.Plan = api.finalReviewPlan(r.Context(), run, approval)
 		}
 	}
 	// Decisions: the approval rows, oldest first.

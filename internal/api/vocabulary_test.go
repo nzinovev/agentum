@@ -68,6 +68,8 @@ func TestResponseJSONTagsHaveNoTaskToken(t *testing.T) {
 		sealInfoResponse{},
 		finalReviewResponse{},
 		publicationResponse{},
+		packListResponse{},
+		packDetailResponse{},
 		errorBody{},
 		manifest.Diff{},
 	}

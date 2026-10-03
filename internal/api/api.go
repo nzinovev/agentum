@@ -20,6 +20,24 @@ type RunCanceler interface {
 	Cancel(runID string) bool
 }
 
+// packCatalog is the pack resolution + listing surface the API needs: the
+// effective resolution runs execute (project layer at a commit over the
+// builtin source), the builtin-only resolution for catalog callers bound to
+// no project, and both listing halves. *pack.ProjectSource satisfies it.
+type packCatalog interface {
+	ResolveForCommit(ctx context.Context, ref, repoPath, baseCommit string) (*pack.Resolved, error)
+	ResolveBuiltin(ctx context.Context, ref string) (*pack.Resolved, error)
+	ListProjectPacks(ctx context.Context, repoPath, commit string) ([]pack.ProjectPackEntry, error)
+	ListBuiltin(ctx context.Context) ([]pack.Meta, error)
+}
+
+// gitRefResolver resolves a git ref to a commit inside a repository checkout.
+// Declared here so the API does not import the worktree package;
+// *worktree.Manager satisfies it.
+type gitRefResolver interface {
+	ResolveRef(ctx context.Context, repoPath, ref string) (string, error)
+}
+
 // API wires the sqlc querier behind the HTTP handlers. It is constructed once
 // per process and mounts the v1 surface on the server's mux via Register. The
 // db handle backs the transactional outbox: every FSM transition that carries a
@@ -37,11 +55,19 @@ type API struct {
 	// mfst is the evidence manifest service. Nil when the server did not wire
 	// one; the manifest read handlers 404 then.
 	mfst *manifest.Service
-	// packs resolves pipeline packs by ref. Required for the gate handlers to
-	// detect a pack-declared approval and write the run_approvals row in the
-	// same tx as the advance transition (ADR 0003 D4). Nil when the server did
-	// not wire one; the approval write is skipped then.
-	packs pack.Source
+	// packs resolves pipeline packs the way runs do: the project layer at the
+	// run's pinned base_commit over the builtin source. Required for the gate
+	// handlers to detect a pack-declared approval and write the run_approvals
+	// row in the same tx as the advance transition, and for the pack catalog
+	// endpoints. Nil when the server did not wire one; the approval write is
+	// skipped then and the catalog answers 503.
+	packs packCatalog
+
+	// gitRefs resolves a git ref to a commit inside a project checkout — the
+	// pack catalog's ?ref= contract. Declared here so the API does not import
+	// the worktree package; *worktree.Manager satisfies it. Nil when the
+	// server did not wire one; project-scoped catalog reads answer 503 then.
+	gitRefs gitRefResolver
 
 	// execAdapter is the execution adapter behind the model surface: catalog
 	// status for GET /models, the on-demand check for POST /models/test. Nil
@@ -96,11 +122,19 @@ func WithManifestService(service *manifest.Service) Option {
 	return func(apiInst *API) { apiInst.mfst = service }
 }
 
-// WithPackSource attaches a pipeline-pack resolver to the API (ADR 0003 D4).
-// Required for the gate handlers to detect a pack-declared approval and write
-// the matching run_approvals row in the same tx as the advance transition.
-func WithPackSource(source pack.Source) Option {
-	return func(apiInst *API) { apiInst.packs = source }
+// WithPackCatalog attaches the pack catalog to the API: the project-aware
+// resolution the runner executes plus the listing surfaces. Required for the
+// gate handlers to detect a pack-declared approval and write the matching
+// run_approvals row in the same tx as the advance transition, and for
+// GET /packs.
+func WithPackCatalog(catalog packCatalog) Option {
+	return func(apiInst *API) { apiInst.packs = catalog }
+}
+
+// WithGitRefs attaches the ref resolver the pack catalog resolves ?ref=
+// against. *worktree.Manager satisfies it.
+func WithGitRefs(resolver gitRefResolver) Option {
+	return func(apiInst *API) { apiInst.gitRefs = resolver }
 }
 
 // WithExecutionAdapter attaches the execution adapter the model surface
