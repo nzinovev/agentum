@@ -123,11 +123,15 @@ of committed files, in the worktree or the index. An `!!` entry pauses only
 when it is the pack's `manifest.yaml` or `overrides.yaml` (the pack is
 structurally uncommittable); other ignored entries — editor junk under global
 excludes — are recorded in the manifest's `context.project_packs` without
-pausing. Untracked junk a project does not ignore can still pause; delete it
+pausing. The decision reads the whole listing; only the recorded entries are
+capped (the event carries `uncommitted_total` and `ignored_total`). A status
+that cannot be read pauses the run too
+(`stop_reason = project_pack_status_unreadable`): an uncompared directory is
+not a clean one, and continue re-runs the comparison. Untracked junk a project does not ignore can still pause; delete it
 or ignore it. The pause lifts when the directory is clean against HEAD again —
 revert the edit OR commit it; after a commit the run continues executing the
-pinned `base_commit` pack, and the committed difference is recorded as
-`base_diverged` evidence, never a pause. A textless continue on a run paused
+pinned `base_commit` pack, and a pack directory that differs between
+`base_commit` and HEAD is recorded as `base_diverged` evidence, never a pause. A textless continue on a run paused
 before its first invocation starts the run at the pack entry.
 
 The exclude maintenance behind the comparison: Agentum keeps
@@ -247,6 +251,7 @@ happened.
 | the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
 | `base_ref` does not resolve to a commit in the pinned checkout | `stop_user` | `paused_user_stop` | `base_ref_unresolvable` |
 | the directory of the pack the run executes (`.agentum/packs/<name>/`) carries uncommitted changes in the source checkout | `stop_user` | `paused_user_stop` | `project_pack_drift` |
+| the state of that directory could not be read (`git status` failed in the source checkout) | `stop_user` | `paused_user_stop` | `project_pack_status_unreadable` |
 | the assembled pack violates the policy floor (before the run starts; `run.pack_floor_violation` carries one `{rule, layer, message}` record per violation) | `fail` | `failed` | — |
 | a publishable run's base could not be verified against the publication target branch (no configured branch and a non-branch `base_ref`, or the remote-tracking comparison point is missing) | `stop_user` | `paused_user_stop` | `base_target_unverifiable` |
 | a publishable run's base carries commits the publication target branch does not have (e.g. a developer branch's unpushed commits) | `stop_user` | `paused_user_stop` | `base_not_on_target` |

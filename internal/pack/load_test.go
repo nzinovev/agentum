@@ -360,3 +360,48 @@ func assertValidationError(t *testing.T, err error, wantSubstr string) {
 		t.Fatalf("expected error containing %q, got %q", wantSubstr, err.Error())
 	}
 }
+
+// The packs root is an ordinary directory an operator owns: a .git beside the
+// packs, lost+found, or a scratch folder is not a pack and must not stop the
+// listing (it feeds the boot check). A directory that claims to be a pack —
+// it has a manifest.yaml — and does not load still does.
+func TestDirSource_ListSkipsNonPackDirectories(t *testing.T) {
+	t.Parallel()
+	writeManifest := func(t *testing.T, root, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name, "manifest.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const terminalOnlyPack = "api: agentum/v1\npack: {name: real, version: 1.0.0, persona: engineering}\nentry: done\nstages:\n  done: {}\n"
+
+	t.Run("non-pack directories are skipped", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeManifest(t, root, "real", terminalOnlyPack)
+		// A dot-directory is skipped even when it holds a manifest.yaml.
+		writeManifest(t, root, ".git", "not yaml: [")
+		if err := os.MkdirAll(filepath.Join(root, "lost+found"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metas, err := NewDirSource(root).List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(metas) != 1 || metas[0].Name != "real" {
+			t.Fatalf("listed %+v, want only the pack \"real\"", metas)
+		}
+	})
+
+	t.Run("a broken manifest is still an error", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeManifest(t, root, "broken", "not yaml: [")
+		if _, err := NewDirSource(root).List(t.Context()); err == nil {
+			t.Fatal("a directory with an unloadable manifest.yaml must fail the listing")
+		}
+	})
+}

@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -349,5 +351,98 @@ stages:
 	}
 	if got := len(fixture.store.invocations); got != 0 {
 		t.Fatalf("invocations = %d, want 0 (no stage runs under a floor violation)", got)
+	}
+}
+
+// TestClassifyPackDirChanges: the pause decision reads the whole listing and
+// matches the pack's documents by full path.
+func TestClassifyPackDirChanges(t *testing.T) {
+	t.Parallel()
+	const packDir = ".agentum/packs/probe"
+	manyIgnored := make([]worktree.UncommittedChange, 0, maxPackDriftEntries+2)
+	for index := 0; index <= maxPackDriftEntries; index++ {
+		manyIgnored = append(manyIgnored, worktree.UncommittedChange{
+			Code: "!!", Path: fmt.Sprintf("%s/a%03d.swp", packDir, index),
+		})
+	}
+	manyIgnored = append(manyIgnored, worktree.UncommittedChange{Code: "!!", Path: packDir + "/manifest.yaml"})
+
+	cases := []struct {
+		name            string
+		changes         []worktree.UncommittedChange
+		wantUncommitted []string
+		wantIgnored     int
+	}{
+		{
+			name:    "clean directory",
+			changes: nil,
+		},
+		{
+			name:            "modified committed file pauses",
+			changes:         []worktree.UncommittedChange{{Code: " M", Path: packDir + "/overrides.yaml"}},
+			wantUncommitted: []string{"M " + packDir + "/overrides.yaml"},
+		},
+		{
+			name:        "ignored junk does not pause",
+			changes:     []worktree.UncommittedChange{{Code: "!!", Path: packDir + "/.DS_Store"}},
+			wantIgnored: 1,
+		},
+		{
+			name:            "ignored overrides document pauses",
+			changes:         []worktree.UncommittedChange{{Code: "!!", Path: packDir + "/overrides.yaml"}},
+			wantUncommitted: []string{"!! " + packDir + "/overrides.yaml"},
+		},
+		{
+			// Same file name, but not the pack's document.
+			name:        "ignored nested manifest.yaml does not pause",
+			changes:     []worktree.UncommittedChange{{Code: "!!", Path: packDir + "/prompts/manifest.yaml"}},
+			wantIgnored: 1,
+		},
+		{
+			// git lists ignored entries in path order: the manifest comes
+			// after more junk than the recording cap holds.
+			name:            "ignored manifest behind more junk than the cap",
+			changes:         manyIgnored,
+			wantUncommitted: []string{"!! " + packDir + "/manifest.yaml"},
+			wantIgnored:     maxPackDriftEntries + 1,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			uncommitted, ignored := classifyPackDirChanges(packDir, testCase.changes)
+			if !slices.Equal(uncommitted, testCase.wantUncommitted) {
+				t.Errorf("uncommitted = %q, want %q", uncommitted, testCase.wantUncommitted)
+			}
+			if len(ignored) != testCase.wantIgnored {
+				t.Errorf("ignored = %d entries, want %d", len(ignored), testCase.wantIgnored)
+			}
+			if recorded := capPackDriftEntries(ignored); len(recorded) > maxPackDriftEntries {
+				t.Errorf("recorded %d ignored entries, want at most %d", len(recorded), maxPackDriftEntries)
+			}
+		})
+	}
+}
+
+// TestRunner_ProjectPackStatusUnreadablePauses: a pack directory whose state
+// cannot be read is not a clean one — the run pauses (resumable) instead of
+// starting over a directory nobody compared.
+func TestRunner_ProjectPackStatusUnreadablePauses(t *testing.T) {
+	t.Parallel()
+	fixture := newProjectPackFixture(t, floorPassingProjectPack)
+	// A corrupt index fails `git status` while commit and tree reads, which
+	// the earlier preconditions use, still work.
+	if err := os.WriteFile(filepath.Join(fixture.repo, ".git", "index"), []byte("not an index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.runner.HandleRun(t.Context(), job("run", fixture.runID, "tn", "us")); err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if got := fixture.store.taskState(); got != "paused_user_stop" {
+		t.Fatalf("state = %q, want paused_user_stop (project_pack_status_unreadable)", got)
+	}
+	requireRecoveryEvent(t, fixture.store, EvProjectPackDrift)
+	if got := len(fixture.store.invocations); got != 0 {
+		t.Fatalf("invocations = %d, want 0 (no stage runs over an uncompared pack dir)", got)
 	}
 }
