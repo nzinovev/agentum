@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -35,7 +36,7 @@ import (
 // resolution error, returns an error — drive turns those into failRun. The
 // missing-file case is (nil, nil) from loadRegistryAtBaseCommit, not an error.
 func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, baseCommit string) error {
-	registry, registryErr := runner.loadRegistryAtBaseCommit(ctx, *run)
+	registry, registryErr := runner.loadRegistryAtBaseCommit(ctx, run.record, run.project, checkoutPathOf(run.record, run.project))
 	if registryErr != nil {
 		// A parse error is fatal (the project's config is unreadable). A missing
 		// file is not — loadRegistryAtBaseCommit returns (nil, nil) for that, so
@@ -407,6 +408,100 @@ func (runner *Runner) recordProjectConfigAtStart(ctx context.Context, record sql
 func contentHash(content []byte) string {
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])
+}
+
+// maxPackDriftEntries caps how many pack-directory entries reach the event
+// payload and the evidence: enough to show a whole drifted pack, small enough
+// that a wide untracked tree does not turn the pause record into a listing.
+const maxPackDriftEntries = 20
+
+// pauseOnProjectPackDrift stops the run (stop_reason project_pack_drift) when
+// the directory of the pack the run executes — .agentum/packs/<name>/ —
+// carries uncommitted changes in the source checkout, relative to the
+// checkout's HEAD. Every porcelain code except "!!" pauses: untracked files
+// and all modifications of committed files, in the worktree or the index. An
+// ignored entry pauses only when it is the pack's manifest.yaml or
+// overrides.yaml (the pack is structurally uncommittable); other ignored
+// entries — editor junk under global excludes — are recorded without pausing.
+//
+// The comparison is against HEAD, not base_commit, deliberately: an
+// uncommitted edit is the accident this pause exists for, whatever branch the
+// checkout stands on, and committing the edit (or reverting it) clears it —
+// after a commit the run simply continues executing the pinned base_commit
+// pack, which is also why a committed difference never pauses (recorded as
+// BaseDiverged evidence instead). Unlike the .agentum.yaml comparison, which
+// is a warning: a pack change alters what every stage of the run does, so
+// proceeding silently would apply something the operator visibly did not
+// choose. Returns true when the pause was applied.
+func (runner *Runner) pauseOnProjectPackDrift(ctx context.Context, record sqlc.Run, runPack *pack.Pack, checkoutPath, baseCommit string) bool {
+	packDir := pack.ProjectPacksDir + "/" + runPack.Pack.Name
+	// Upgrade the exclude rules first: a bare ".agentum/" line — the legacy
+	// form or an operator's own — hides the packs directory from status, and
+	// the drift it causes would be invisible exactly when this check exists
+	// to catch it. Non-fatal by design; a failed write leaves the entries
+	// visible as "!!" instead.
+	if err := runner.wt.EnsureExcludes(ctx, checkoutPath); err != nil {
+		runner.log.Warn("upgrade .agentum excludes before pack drift check", "run", record.ID, "error", err)
+	}
+	changes, changesErr := runner.wt.UncommittedChanges(ctx, checkoutPath, packDir, maxPackDriftEntries)
+	if changesErr != nil {
+		// A failed status read must not fail the run: the pack still comes
+		// from base_commit, so the comparison is advisory. The gap is logged;
+		// no pause is applied on a reading we could not take.
+		runner.log.Warn("read pack dir status", "run", record.ID, "dir", packDir, "error", changesErr)
+		return false
+	}
+
+	evidence := &manifest.ProjectPacksEvidence{Dir: packDir}
+	for _, change := range changes {
+		entry := strings.TrimSpace(change.Code + " " + change.Path)
+		if change.Code == "!!" {
+			base := change.Path
+			if index := strings.LastIndexByte(base, '/'); index >= 0 {
+				base = base[index+1:]
+			}
+			if base == "manifest.yaml" || base == "overrides.yaml" {
+				evidence.Uncommitted = append(evidence.Uncommitted, entry)
+			} else {
+				evidence.Ignored = append(evidence.Ignored, entry)
+			}
+			continue
+		}
+		evidence.Uncommitted = append(evidence.Uncommitted, entry)
+	}
+	if head, headErr := runner.wt.HeadCommit(ctx, checkoutPath); headErr != nil {
+		runner.log.Warn("read checkout HEAD for pack drift evidence", "run", record.ID, "error", headErr)
+	} else if head != baseCommit {
+		// A committed difference is the documented model — the run applies the
+		// base_commit pack — so it is recorded, never a pause.
+		evidence.BaseDiverged = true
+	}
+	runner.recordProjectPacksEvidence(ctx, record, evidence)
+
+	if len(evidence.Uncommitted) == 0 {
+		return false
+	}
+	runner.log.Warn("project pack directory has uncommitted changes; the run executes the base_commit version",
+		"run", record.ID, "dir", packDir,
+		"uncommitted", evidence.Uncommitted, "ignored", len(evidence.Ignored))
+	runner.emit(ctx, record, EvProjectPackDrift, map[string]any{
+		"dir": packDir, "base_commit": baseCommit,
+		"uncommitted": evidence.Uncommitted, "ignored": evidence.Ignored,
+		"hint": "commit or revert the pack directory changes, then continue; the run always executes the base_commit version of the pack",
+	})
+	return runner.applyStop(ctx, record, runPack, "project_pack_drift")
+}
+
+// recordProjectPacksEvidence writes the pack-directory comparison into the
+// manifest's context section (first write wins, like the config comparison).
+func (runner *Runner) recordProjectPacksEvidence(ctx context.Context, record sqlc.Run, evidence *manifest.ProjectPacksEvidence) {
+	if runner.mfst == nil || evidence == nil {
+		return
+	}
+	patch := manifest.Body{Context: &manifest.ContextEvidence{ProjectPacks: evidence}}
+	if err := runner.mfst.AddEvidence(ctx, record.TenantID, record.ID, patch); err != nil && !errors.Is(err, manifest.ErrSealed) {
+		runner.log.Warn("record project packs evidence", "run", record.ID, "error", err)
+	}
 }
 
 // pauseOnOffTargetBase verifies that a publishable run's base_commit belongs

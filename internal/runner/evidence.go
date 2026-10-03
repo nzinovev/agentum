@@ -437,9 +437,12 @@ func (runner *Runner) completeStageEvidence(
 
 // adapterEvidence returns the run-level adapter section: the wiring of the
 // process that drove the run — id, OUR adapter implementation's version, the
-// capability categories it declares, the readiness probe outcome, and the
-// model-catalog probe outcome. The runtime VERSION is per invocation, not
-// here: a run resumed in a new process after an upgrade genuinely has two.
+// capability categories the run was allowed to intersect with, the readiness
+// probe outcome, and the model-catalog probe outcome. The runtime VERSION is
+// per invocation, not here: a run resumed in a new process after an upgrade
+// genuinely has two. The categories are the host's configured set, not the
+// adapter's raw declaration: what a profile could carry is what the host
+// admitted, and the evidence says exactly that.
 func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvidence {
 	descriptor := runner.adapter.Describe()
 	readiness := runner.adapter.Probe(ctx)
@@ -450,9 +453,8 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 	if descriptor.EnumeratesModels {
 		catalogLabel = runner.adapter.Catalog(ctx).Label()
 	}
-	declared := runner.adapter.Supported()
-	declaredNames := make([]string, 0, len(declared))
-	for _, category := range declared {
+	declaredNames := make([]string, 0, len(runner.hostCaps))
+	for _, category := range runner.hostCaps {
 		declaredNames = append(declaredNames, string(category))
 	}
 	return &manifest.AdapterEvidence{
@@ -462,6 +464,17 @@ func (runner *Runner) adapterEvidence(ctx context.Context) *manifest.AdapterEvid
 		RuntimeProbe:         readiness.Label(),
 		ModelCatalog:         catalogLabel,
 	}
+}
+
+// baseRefEvidenceOf returns the pack evidence's base_ref: the base builtin
+// ref for an inherited pack (where BaseRef and the requested ref differ),
+// empty otherwise — Ref already carries the requested ref there, and
+// duplicating it would make two fields say one thing.
+func baseRefEvidenceOf(runPack *pack.Pack) string {
+	if runPack.Origin == pack.OriginProjectOverBuiltin {
+		return runPack.BaseRef
+	}
+	return ""
 }
 
 // recordInitialEvidence seeds the manifest with the run / project / pack /
@@ -482,10 +495,11 @@ func (runner *Runner) recordInitialEvidence(
 	if runner.mfst == nil {
 		return nil
 	}
-	packHash := ""
-	if runPack.Dir != "" {
-		// Best-effort hash of the resolved pack. Empty when the pack was built
-		// in memory (override resolver) — the derived `missing` at seal time
+	packHash := runPack.ContentHash
+	if packHash == "" && runPack.Dir != "" {
+		// Packs built by hand (unit-test fixtures) carry no resolver hash;
+		// hashing the directory is the fallback. Empty when the pack was
+		// built in memory with no dir — the derived `missing` at seal time
 		// records the gap if it matters.
 		if hash, err := hashDir(runPack.Dir); err == nil {
 			packHash = hash
@@ -529,6 +543,11 @@ func (runner *Runner) recordInitialEvidence(
 			Version:     runPack.Pack.Version,
 			ContentHash: packHash,
 			Forked:      runPack.Forked,
+			Origin:      string(runPack.Origin),
+			// For an inherited pack the content hash covers the project
+			// layer; BaseRef names the builtin side alongside it. BaseRef
+			// doubles as the requested ref for non-inherited packs.
+			BaseRef: baseRefEvidenceOf(runPack),
 		},
 		Capabilities: &manifest.CapabilityProfile{
 			Declared: runPack.Capabilities,

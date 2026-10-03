@@ -67,7 +67,7 @@ var ErrDirtyTreeAtDeliveryBoundary = errors.New("runner: worktree dirty at deliv
 // recorded checks.commit is the checkpoint SHA, not a pre-run HEAD read that
 // could be stale by the time the checks finish.
 func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (checks.Report, bool, error) {
-	registry, err := runner.loadRegistryAtBaseCommit(ctx, run)
+	registry, err := runner.loadRegistryAtBaseCommit(ctx, run.record, run.project, checkoutPathOf(run.record, run.project))
 	if err != nil {
 		return checks.Report{}, false, fmt.Errorf("load registry: %w", err)
 	}
@@ -139,18 +139,23 @@ func (runner *Runner) enforceProjectChecks(ctx context.Context, run stageRun) (c
 // loadRegistryAtBaseCommit reads .agentum.yaml from the project repo at the
 // run's lineage anchor. A missing file (os.ErrNotExist) is a nil registry —
 // the project defines no checks, which is a real configuration. An absent or
-// empty base_commit is an error, not an early exit: this method runs only at the
-// delivery boundary, so by construction the run has reached exactly the state
-// whose entire purpose is to be anchored. A missing anchor there is a broken
-// invariant, and fail-closed at this boundary is non-negotiable — returning a
-// nil registry would route to an empty set and MandatoryPassed()=true vacuously,
-// which is the mirror image of the fail-open defects PR C and PR D fixed.
-func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, run stageRun) (*checks.Registry, error) {
-	baseCommit := run.record.BaseCommit.String
-	if !run.record.BaseCommit.Valid || baseCommit == "" {
+// empty base_commit is an error, not an early exit: this method runs at the
+// delivery boundary and in the pre-start policy floor, so by construction the
+// run has reached exactly the state whose entire purpose is to be anchored. A
+// missing anchor there is a broken invariant, and fail-closed at this boundary
+// is non-negotiable — returning a nil registry would route to an empty set and
+// MandatoryPassed()=true vacuously, which is the mirror image of the fail-open
+// defects PR C and PR D fixed.
+func (runner *Runner) loadRegistryAtBaseCommit(ctx context.Context, record sqlc.Run, project sqlc.Project, checkoutPath string) (*checks.Registry, error) {
+	baseCommit := record.BaseCommit.String
+	if !record.BaseCommit.Valid || baseCommit == "" {
 		return nil, errors.New("delivery boundary reached without a resolved base_commit; lineage anchor is required to gate delivery")
 	}
-	raw, err := runner.wt.FileAtCommit(ctx, checkoutPathOf(run.record, run.project), baseCommit, checks.ConfigFile)
+	repoPath := checkoutPath
+	if repoPath == "" {
+		repoPath = checkoutPathOf(record, project)
+	}
+	raw, err := runner.wt.FileAtCommit(ctx, repoPath, baseCommit, checks.ConfigFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

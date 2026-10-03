@@ -45,6 +45,33 @@ type ContextEvidence struct {
 	// the run began, and a later edit of the checkout changes nothing the
 	// run does.
 	ProjectConfig *ProjectConfigEvidence `json:"project_config,omitempty"`
+	// ProjectPacks records the pack-directory comparison at the start of
+	// work: which entries were uncommitted (the ones that pause the run) and
+	// which were merely ignored, plus whether the checkout's HEAD had
+	// already diverged from base_commit. First write wins, like
+	// ProjectConfig.
+	ProjectPacks *ProjectPacksEvidence `json:"project_packs,omitempty"`
+}
+
+// ProjectPacksEvidence is the pack-drift comparison for the directory of the
+// pack the run executes (.agentum/packs/<name>/). Uncommitted entries pause
+// the run (the operator is editing the pack the run would apply, and the run
+// executes the base_commit version regardless); Ignored entries that are not
+// the pack's manifest or overrides document are recorded without pausing
+// (editor junk under global excludes). BaseDiverged marks a checkout whose
+// HEAD is not the run's base_commit: a committed difference is the documented
+// model — the pinned base_commit pack applies — and only a warning.
+type ProjectPacksEvidence struct {
+	Dir string `json:"dir"`
+	// Uncommitted lists the pausing entries with their porcelain codes
+	// (" M .agentum/packs/x/overrides.yaml"), capped.
+	Uncommitted []string `json:"uncommitted,omitempty"`
+	// Ignored lists ignored entries that did not pause (codes "!!"), capped.
+	Ignored []string `json:"ignored,omitempty"`
+	// BaseDiverged is true when the checkout's HEAD is not base_commit. The
+	// run still executes the base_commit pack; the flag tells a reviewer the
+	// comparison ran against a checkout standing elsewhere.
+	BaseDiverged bool `json:"base_diverged,omitempty"`
 }
 
 // ProjectConfigEvidence is the project config the run pinned, and how the
@@ -126,9 +153,13 @@ func mergeContextEvidence(existing, patch *ContextEvidence) *ContextEvidence {
 		SkillsProbe:   worstSkillsProbe(existing.SkillsProbe, patch.SkillsProbe),
 		Missing:       appendUniqueString(existing.Missing, patch.Missing),
 		ProjectConfig: existing.ProjectConfig,
+		ProjectPacks:  existing.ProjectPacks,
 	}
 	if merged.ProjectConfig == nil {
 		merged.ProjectConfig = patch.ProjectConfig
+	}
+	if merged.ProjectPacks == nil {
+		merged.ProjectPacks = patch.ProjectPacks
 	}
 	return merged
 }

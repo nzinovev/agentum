@@ -7,22 +7,26 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/api"
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/config"
 	"github.com/nzinovev/agentum/internal/jobs"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/policy"
 	"github.com/nzinovev/agentum/internal/publication"
 	"github.com/nzinovev/agentum/internal/publish"
 	"github.com/nzinovev/agentum/internal/runner"
 	"github.com/nzinovev/agentum/internal/store"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // Server wires the full execution model: the HTTP boundary (api), the runner
@@ -42,6 +46,25 @@ type Server struct {
 	worker     *jobs.Worker
 	reconciler *jobs.Reconciler
 	pool       int
+}
+
+// capsOutside returns the configured categories the enforceable set does not
+// carry, rendered for the boot error. Empty means the configuration is a
+// subset of what the adapter enforces — the only sound direction: the floor
+// may narrow what runs, never widen what the runtime can honor.
+func capsOutside(configured, enforceable []caps.Category) []string {
+	enforced := make(map[caps.Category]bool, len(enforceable))
+	for _, category := range enforceable {
+		enforced[category] = true
+	}
+	var outside []string
+	for _, category := range configured {
+		if !enforced[category] {
+			outside = append(outside, string(category))
+		}
+	}
+	sort.Strings(outside)
+	return outside
 }
 
 // New constructs the server and all execution-model dependencies. The worker
@@ -79,10 +102,59 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	}
 	queries := sqlc.New(dataStore.DB)
 
-	// The execution model: pack source over a configured root, the resolved
-	// execution adapter, per-run worktrees, the artifact revisions store,
-	// the evidence manifest service, and the runner that composes them.
+	// The execution model: a builtin pack source over a configured root, the
+	// project-aware source layered over it (reads .agentum/packs/ from the
+	// run's pinned base_commit), the resolved execution adapter, per-run
+	// worktrees, the artifact revisions store, the evidence manifest service,
+	// and the runner that composes them. One worktree manager serves the
+	// project-pack reader and the runner: it is stateless, and sharing it
+	// keeps every commit-tree read on the same git plumbing.
+	worktreeManager := worktree.New()
 	packs := pack.NewDirSource(cfg.PacksDir)
+	projectPacks := pack.NewProjectSource(packs, commitTreeAdapter{manager: worktreeManager})
+
+	// The host's capability set: the configured AGENTUM_HOST_CAPS, or the
+	// adapter's declared set when nothing is configured. One set feeds the
+	// policy floor AND the runtime capability intersection, so the floor can
+	// never pass a pack the profiles then narrow silently. A configured
+	// category the adapter cannot enforce is refused: the floor would wave
+	// mcp-carrying packs through and the invocation would refuse to start.
+	hostCaps := cfg.HostCaps
+	if len(hostCaps) == 0 {
+		hostCaps = adapter.Supported()
+	} else if excess := capsOutside(hostCaps, adapter.Supported()); len(excess) > 0 {
+		return nil, fmt.Errorf("AGENTUM_HOST_CAPS names categories the execution adapter cannot enforce: %s", strings.Join(excess, ", "))
+	}
+
+	// The boot floor check: every builtin pack is checked against the policy
+	// floor's host-shaped rules (approval-before-source-write, final review,
+	// capabilities within the host set) before the process serves anything.
+	// A shipped pack violating the product's own floor is an installation
+	// defect, the same class as an undeclared model option — the process
+	// refuses to start. Narrowing AGENTUM_HOST_CAPS below a builtin pack's
+	// declaration fails here, naming the pack. Rule 3 (mandatory checks) has
+	// no place at boot: it needs a project registry, and for builtin packs
+	// the monotonic checks.Resolve at run time is the guarantee.
+	bootFloor := policy.NewFloor(hostCaps)
+	builtinPacks, listErr := packs.List(context.Background())
+	if listErr != nil {
+		return nil, fmt.Errorf("boot pack check: %w", listErr)
+	}
+	for _, meta := range builtinPacks {
+		resolved, resolveErr := packs.Resolve(context.Background(), meta.Name)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("boot pack check: %w", resolveErr)
+		}
+		if violations := bootFloor.Check(policy.Target{Pack: resolved, Origin: pack.OriginBuiltin}); len(violations) > 0 {
+			messages := make([]string, 0, len(violations))
+			for _, violation := range violations {
+				messages = append(messages, violation.String())
+			}
+			return nil, fmt.Errorf("boot pack check: builtin pack %q violates the policy floor: %s",
+				meta.Name, strings.Join(messages, "; "))
+		}
+	}
+
 	artifactStore := artifacts.NewSQLStore(artifacts.SQLStoreDeps{
 		DB:         dataStore.DB,
 		Queries:    queries,
@@ -102,9 +174,11 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	})
 	runnerInst := runner.New(runner.Deps{
 		Store:       runnerStore{queries},
-		Packs:       packs,
+		Packs:       projectPacks,
 		Adapter:     adapter,
 		Models:      modelsCfg,
+		Worktrees:   worktreeManager,
+		HostCaps:    hostCaps,
 		Artifacts:   artifactStore,
 		Manifest:    manifestService,
 		CheckExec:   checkExecutor,

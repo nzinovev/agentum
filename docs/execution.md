@@ -80,6 +80,65 @@ applies. To adopt a new config, commit it to the target branch and start a
 new run. The local uncommitted edits of the checkout are never part of a new
 run's base: the worktree builds from the base commit, not the working copy.
 
+## Project packs, the policy floor, and pack drift
+
+A run's pack is resolved from its pinned `base_commit`: the project's layer
+under `.agentum/packs/<name>/` (a `manifest.yaml` replacing the builtin of the
+same name, or an `overrides.yaml` inheriting from one — see
+[docs/pack-format.md](pack-format.md#project-packs)) over the builtin source.
+The origin — `builtin`, `project`, `project+builtin` — is pinned on the run
+row (`runs.pipeline_pack_origin`, resolve-once) and recorded in the manifest's
+pack evidence. A pack committed after the run pinned its base changes nothing
+the run executes.
+
+**Policy floor.** Before a run starts, a pack with a project layer is checked
+against the host's policy floor (`internal/policy`): a source-writing stage
+requires a `source_write` approval that precedes it on every path and sits on
+a gate that stops for a human; the graph must complete through a terminal
+stage; check requests name registered checks and never downgrade one the
+registry holds required; every capability token falls inside the host's set.
+A violation fails the run before any work, naming the rule and the layer the
+offending value came from. Builtin packs are checked against the same rules
+once at server boot; rule 3 for them is guaranteed at run time by the
+monotonic `checks.Resolve`. The floor adds an early refusal — the runtime
+enforcement (capability withholding, monotonic resolution, the final-review
+gate) keeps holding whatever the floor says.
+
+`AGENTUM_HOST_CAPS` (comma-separated category names; empty = the adapter's
+declared set) is the host's capability set for both the floor and the runtime
+intersection — one configured set, so the floor can never pass a pack the
+profiles then narrow silently. A category the adapter cannot enforce refuses
+boot. `mcp.*` and `skill.*` tokens are refused by rule 4 for the same reason
+the adapter refuses them in a profile: no declared enforcement. Narrowing the
+set below a builtin pack's declaration stops the server at the boot check,
+naming the pack.
+
+**Pack drift.** When the run's worktree is first created, the runner compares
+the directory of the pack the run executes against the checkout's HEAD
+(`git status --porcelain -z --untracked-files=all --ignored=traditional`,
+restricted to `.agentum/packs/<name>/`). Every entry except `!!` pauses the
+run (`stop_reason = project_pack_drift`, event
+`run.project_pack_drift`): untracked files and every uncommitted modification
+of committed files, in the worktree or the index. An `!!` entry pauses only
+when it is the pack's `manifest.yaml` or `overrides.yaml` (the pack is
+structurally uncommittable); other ignored entries — editor junk under global
+excludes — are recorded in the manifest's `context.project_packs` without
+pausing. Untracked junk a project does not ignore can still pause; delete it
+or ignore it. The pause lifts when the directory is clean against HEAD again —
+revert the edit OR commit it; after a commit the run continues executing the
+pinned `base_commit` pack, and the committed difference is recorded as
+`base_diverged` evidence, never a pause. A textless continue on a run paused
+before its first invocation starts the run at the pack entry.
+
+The exclude maintenance behind the comparison: Agentum keeps
+`/.agentum/*` + `!/.agentum/packs/` in the repo's `info/exclude`, rewriting
+any bare `.agentum/` line (its own legacy form or an operator's) so packs
+stay committable while worktrees and artifacts stay out of commits. A
+`.gitignore` with `.agentum/` overrides `info/exclude` and keeps packs
+invisible to `git add` without `-f`; such a project must narrow its own rule
+to `.agentum/worktrees/` or accept `git add -f`.
+
+
 - **Location:** `<repo>/.agentum/worktrees/<run-id>/`
 - **Branch:** `agentum/<run-id>` (off the repo's current HEAD)
 - **Artifacts:** `<worktree>/.agentum/<run-id>/.ag-artifacts/<stage>/result.json`
@@ -187,6 +246,8 @@ happened.
 | a verdict-sourcing stage produced no parseable `verdict.json` | `stop_user` | `paused_user_stop` | `verdict_unreadable` |
 | the resumed run's worktree holds uncommitted changes | `stop_user` | `paused_user_stop` | `worktree_uncommitted_changes` |
 | `base_ref` does not resolve to a commit in the pinned checkout | `stop_user` | `paused_user_stop` | `base_ref_unresolvable` |
+| the directory of the pack the run executes (`.agentum/packs/<name>/`) carries uncommitted changes in the source checkout | `stop_user` | `paused_user_stop` | `project_pack_drift` |
+| the assembled pack violates the policy floor (before the run starts; `run.pack_floor_violation` carries one `{rule, layer, message}` record per violation) | `fail` | `failed` | — |
 | a publishable run's base could not be verified against the publication target branch (no configured branch and a non-branch `base_ref`, or the remote-tracking comparison point is missing) | `stop_user` | `paused_user_stop` | `base_target_unverifiable` |
 | a publishable run's base carries commits the publication target branch does not have (e.g. a developer branch's unpushed commits) | `stop_user` | `paused_user_stop` | `base_not_on_target` |
 | ctx cancelled by user | `cancel` | `cancelled` | — |

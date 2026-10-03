@@ -25,6 +25,7 @@ import (
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
+	"github.com/nzinovev/agentum/internal/policy"
 	"github.com/nzinovev/agentum/internal/repoid"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -44,6 +45,11 @@ type Store interface {
 	// like SetBaseCommit: after the first pin the run stays in its copy even
 	// if the project is later re-registered from another clone.
 	SetCheckoutPath(ctx context.Context, arg sqlc.SetCheckoutPathParams) (sqlc.Run, error)
+	// SetPipelinePackOrigin pins where the run's pack bytes came from
+	// (builtin / project / project+builtin), resolve-once like the pins
+	// above: a later commit changing the project's packs cannot rewrite what
+	// a running record says it executed.
+	SetPipelinePackOrigin(ctx context.Context, arg sqlc.SetPipelinePackOriginParams) (sqlc.Run, error)
 	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
@@ -89,18 +95,37 @@ type Store interface {
 // way. The durable event log carries only meaningful events (04 §7.1.5).
 type Sink func(runID, stageID, chunk string)
 
+// EffectivePackSource resolves a run's effective pack: the project's layer at
+// the run's pinned base_commit over the builtin source (a project pack
+// shadowing the builtin of the same name, or the builtin itself when the
+// project ships none). Implemented by pack.ProjectSource; the ResolveForFloor
+// shape defers the project manifest's validation so the policy floor names its
+// rule before the validator names the defect.
+type EffectivePackSource interface {
+	ResolveForFloor(ctx context.Context, ref, repoPath, baseCommit string) (*pack.Resolved, error)
+}
+
 // Runner drives a run through its pack's stages. It implements the job
 // worker's Handler: the worker claims a job and calls Handle, which runs the
 // stage loop (04 §7.2) until a pause point or terminal state.
 type Runner struct {
 	store   Store
-	packs   pack.Source
+	packs   EffectivePackSource
 	adapter agent.Adapter
 	models  *models.Config // operator override (models.yaml); nil → the adapter descriptor's DefaultTiers
 	wt      *worktree.Manager
 	cancels *CancelRegistry
 	sink    Sink
 	log     *slog.Logger
+
+	// hostCaps is the host's capability set (configured AGENTUM_HOST_CAPS, or
+	// the adapter's declared set). It feeds both the policy floor and the
+	// runtime capability intersection — one set, so the floor can never pass a
+	// pack the profiles then narrow silently.
+	hostCaps []caps.Category
+	// floor is the policy floor every project-layer pack is checked against
+	// before the run starts. Never nil: New derives it from hostCaps.
+	floor *policy.Floor
 
 	// hardTimeout / idleTimeout are the per-invocation caps the runner layers
 	// onto every effective capability profile (zero = no cap). Sourced from
@@ -163,13 +188,22 @@ func manifestServiceOrNil(service *manifest.Service) manifestService {
 // separately and never a literal in calling code.
 type Deps struct {
 	Store     Store
-	Packs     pack.Source
+	Packs     EffectivePackSource
 	Adapter   agent.Adapter
 	Models    *models.Config
 	Worktrees *worktree.Manager
 	Cancels   *CancelRegistry
 	Sink      Sink
 	Log       *slog.Logger
+
+	// HostCaps is the host's capability set: the configured
+	// AGENTUM_HOST_CAPS categories, or nil to use the adapter's declared set
+	// (resolved at boot by the server, which knows the adapter). It feeds the
+	// policy floor and replaces adapter.Supported() in the runtime
+	// capability intersection.
+	HostCaps []caps.Category
+	// Floor overrides the derived policy floor; nil builds one from HostCaps.
+	Floor *policy.Floor
 
 	// Artifacts is the durable artifact revisions store. May be nil in unit
 	// tests; capture and sync become no-ops then.
@@ -220,10 +254,26 @@ func New(deps Deps) *Runner {
 			syncer = artifacts.NewSyncer(sqlStore)
 		}
 	}
+	hostCaps := deps.HostCaps
+	if hostCaps == nil && deps.Adapter != nil {
+		// The adapter's declared set is the default; unit tests building a
+		// runner without an adapter keep an empty set (rule 4 is vacuous
+		// there, the graph rules are not).
+		hostCaps = deps.Adapter.Supported()
+	}
+	floor := deps.Floor
+	if floor == nil {
+		// The floor is never nil and never off: a floor the wiring could skip
+		// would be a bypass in production, not a test convenience.
+		floor = policy.NewFloor(hostCaps)
+	}
 	return &Runner{
 		store: deps.Store, packs: deps.Packs, adapter: deps.Adapter, models: deps.Models,
 		wt: worktreeManager, cancels: cancels, sink: deps.Sink, log: log,
-		art: deps.Artifacts, syncer: syncer, mfst: manifestServiceOrNil(deps.Manifest),
+		hostCaps: hostCaps, floor: floor,
+		art:         deps.Artifacts,
+		syncer:      syncer,
+		mfst:        manifestServiceOrNil(deps.Manifest),
 		checkExec:   deps.CheckExec,
 		publication: deps.Publication,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
@@ -845,21 +895,6 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	if err != nil {
 		return fmt.Errorf("load project: %w", err)
 	}
-	runPack, err := runner.packs.Resolve(ctx, record.PipelinePack)
-	if err != nil {
-		return runner.failRun(ctx, record, fmt.Errorf("resolve pack %q: %w", record.PipelinePack, err))
-	}
-
-	// Resolve the execution target for EVERY stage up front: a tier no
-	// configuration defines, an option the selected adapter does not declare,
-	// or a model the runtime's catalog does not contain must fail the run
-	// before the first invocation — not four stages in, after source has been
-	// written. This is also the seam MVP run 13's RunSpec pins: one value,
-	// computed at run start.
-	executionPlan, planErr := runner.resolveExecutionPlan(ctx, runPack)
-	if planErr != nil {
-		return runner.failRun(ctx, record, planErr)
-	}
 
 	// Pin the working copy this run executes in, once, exactly as base_commit
 	// is pinned below. The project's repo_path stopped being a key and became
@@ -867,8 +902,11 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// re-registration from another clone); without the pin, the continuation
 	// would create a fresh worktree in the foreign copy off the same pinned
 	// base — with no error, and the whole commit line left behind in the
-	// original.
-	record, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, record, project, runPack)
+	// original. This runs before pack resolution: the effective pack is read
+	// from the run's base_commit IN this checkout. The pack is not resolved
+	// yet, so the pause fallback is empty — a pre-execution pause pins no
+	// stage, and nullStr("") records that.
+	record, checkoutPath, paused, checkoutErr := runner.resolveRunCheckout(ctx, record, project, "")
 	if checkoutErr != nil {
 		return runner.failRun(ctx, record, checkoutErr)
 	}
@@ -879,9 +917,9 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 
 	// Resolve the lineage anchor once. base_commit is what the worktree branches
-	// from and what checkpoints diff against; recording it immutably before any
-	// work means a later move of base_ref cannot change the run's lineage after
-	// the fact.
+	// from, what checkpoints diff against, and what the effective pack is read
+	// from; recording it immutably before any work means a later move of
+	// base_ref cannot change the run's lineage after the fact.
 	record, err = runner.resolveBaseCommit(ctx, record, checkoutPath)
 	if err != nil {
 		// An unresolvable base_ref is a liftable condition — the branch was
@@ -897,7 +935,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 			Action:     ActionPause,
 			FSMEvent:   engine.EventStopUser,
 			StopReason: "base_ref_unresolvable",
-		}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
+		}, currentStageOrFallback(record.CurrentStage, ""))
 		if pauseErr != nil {
 			return runner.failRun(ctx, record, pauseErr)
 		}
@@ -905,12 +943,64 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	baseCommit := record.BaseCommit.String
 
+	// Resolve the run's EFFECTIVE pack: the project's layer at the pinned
+	// base_commit over the builtin source (a project pack shadowing the
+	// builtin of the same name, or the builtin when the project ships none).
+	// ResolveForFloor defers the project manifest's validation so the policy
+	// floor below names its rule before the validator names the defect.
+	resolved, err := runner.packs.ResolveForFloor(ctx, record.PipelinePack, checkoutPath, baseCommit)
+	if err != nil {
+		return runner.failRun(ctx, record, fmt.Errorf("resolve pack %q: %w", record.PipelinePack, err))
+	}
+	runPack := resolved.Pack
+	runner.pinPipelinePackOrigin(ctx, record, resolved.Origin)
+
+	// The policy floor: every pack with a project layer is checked before the
+	// run starts and before any side effect. Builtin packs are floor-checked
+	// once at server boot instead — here they are the product's own, and the
+	// boot check refuses to start a server whose shipped packs violate its
+	// floor.
+	if resolved.Origin != pack.OriginBuiltin {
+		if halted := runner.enforcePolicyFloor(ctx, record, resolved, project, checkoutPath); halted {
+			return nil
+		}
+	}
+	// The deferred manifest validation, applied only once the floor has spoken.
+	if resolved.ValidateErr != nil {
+		return runner.failRun(ctx, record, resolved.ValidateErr)
+	}
+
+	// Resolve the execution target for EVERY stage up front: a tier no
+	// configuration defines, an option the selected adapter does not declare,
+	// or a model the runtime's catalog does not contain must fail the run
+	// before the first invocation — not four stages in, after source has been
+	// written. This is also the seam MVP run 13's RunSpec pins: one value,
+	// computed at run start.
+	executionPlan, planErr := runner.resolveExecutionPlan(ctx, runPack)
+	if planErr != nil {
+		return runner.failRun(ctx, record, planErr)
+	}
+
 	// Record which project config the run applies, and whether the source
 	// checkout's copy differed, once — when the run's worktree is first
 	// created. A difference is a warning in the evidence, not a stop: the run
 	// always applies the base_commit version.
 	if !worktree.DirPresent(worktree.PathFor(checkoutPath, record.ID)) {
 		runner.recordProjectConfigAtStart(ctx, record, checkoutPath, baseCommit)
+	}
+
+	// A project pack directory with uncommitted changes in the source checkout
+	// pauses the run: the operator is editing the pack the run would execute
+	// (it executes the base_commit version regardless). Checked only while the
+	// worktree does not exist — after that, the run is committed to its pinned
+	// pack and a checkout edit no longer bears on it. Unlike the config
+	// comparison above, this one stops the run: a pack change alters what
+	// every stage of the run does, and proceeding silently would apply
+	// something the operator visibly did not choose.
+	if !worktree.DirPresent(worktree.PathFor(checkoutPath, record.ID)) {
+		if driftPause := runner.pauseOnProjectPackDrift(ctx, record, runPack, checkoutPath, baseCommit); driftPause {
+			return nil
+		}
 	}
 
 	// A publishable run's base must belong to the publication target
@@ -931,7 +1021,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// pruned by gc or by hand) is the same externally-fixable class as a
 	// missing copy: pause, keeping the recovery a failure would destroy.
 	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
-		if pauseErr := runner.pauseForUnavailableCheckout(ctx, record, runPack, checkoutPath,
+		if pauseErr := runner.pauseForUnavailableCheckout(ctx, record, runPack.Entry, checkoutPath,
 			fmt.Errorf("worktree cannot be relinked: %w", repairErr)); pauseErr != nil {
 			return runner.failRun(ctx, record, pauseErr)
 		}
@@ -986,9 +1076,8 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	// The continue job's payload is the user's continuation text — the answer
 	// or extra context the resume request carried. It is decoded BEFORE the
 	// entry point so its delivery checks apply even when the run has no
-	// invocation row: entryPoint's missing-invocation error would otherwise
-	// fail the run before the text was ever considered. Only the continue kind
-	// is decoded; a run or advance payload is never user text.
+	// invocation row. Only the continue kind is decoded; a run or advance
+	// payload is never user text.
 	continuation, decodeFault := decodeContinuation(job)
 	if decodeFault != nil {
 		pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, decodeFault)
@@ -1000,22 +1089,6 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 
 	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, record, runPack)
 	if err != nil {
-		// A text-carrying continue job on a run with no invocation row has no
-		// session and never had one — the same undeliverable-text pause as a
-		// present-but-sessionless invocation, not a run failure (the run did
-		// nothing wrong, and cancel stays the exit). The textless continue
-		// keeps its pre-existing failure: no text was accepted, so none can be
-		// silently dropped.
-		if continuation.Text != "" && errors.Is(err, sql.ErrNoRows) {
-			pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, &continuationFault{
-				stopReason: "resume_session_missing",
-				cause:      fmt.Errorf("no stage invocation exists to resume: %w", err),
-			})
-			if pauseErr != nil {
-				return runner.failRun(ctx, record, pauseErr)
-			}
-			return nil
-		}
 		return runner.failRun(ctx, record, err)
 	}
 	// A halt (budget exhausted / verdict unreadable on the advance path) is a
@@ -1064,6 +1137,66 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	return runner.runLoop(runCtx, run, startStage, resumeSession, continuation.Text)
 }
 
+// pinPipelinePackOrigin records the pack origin on the run row, resolve-once.
+// A write failure is a logged warning, not a run failure: the manifest's pack
+// evidence carries the same origin durably, and the column is a read model for
+// the API — refusing to run because a read model lagged would trade a real
+// execution for a redundant copy.
+func (runner *Runner) pinPipelinePackOrigin(ctx context.Context, record sqlc.Run, origin pack.Origin) {
+	if record.PipelinePackOrigin.Valid && record.PipelinePackOrigin.String != "" {
+		return
+	}
+	if _, err := runner.store.SetPipelinePackOrigin(ctx, sqlc.SetPipelinePackOriginParams{
+		ID: record.ID, TenantID: record.TenantID, PipelinePackOrigin: nullStr(string(origin)),
+	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		runner.log.Warn("pin pipeline_pack_origin", "run", record.ID, "origin", origin, "error", err)
+	}
+}
+
+// enforcePolicyFloor checks the assembled pack against the host's policy floor
+// before the run starts and before the deferred manifest validation, so a
+// violation is reported with its rule id and layer instead of the validator's
+// wording. It runs only for packs with a project layer — the builtin packs
+// were floor-checked at server boot. Floor violations fail the run: the pack
+// is deterministic configuration, and retrying changes nothing until the pack
+// changes. Returns true when the run was halted.
+func (runner *Runner) enforcePolicyFloor(ctx context.Context, record sqlc.Run, resolved *pack.Resolved, project sqlc.Project, checkoutPath string) bool {
+	registry, registryErr := runner.loadRegistryAtBaseCommit(ctx, record, project, checkoutPath)
+	if registryErr != nil {
+		// The same malformed .agentum.yaml prepareProjectContext fails on
+		// later; failing here names it before any side effect.
+		runner.failRun(ctx, record, fmt.Errorf("policy floor: load registry: %w", registryErr))
+		return true
+	}
+	violations := runner.floor.Check(policy.Target{
+		Pack:         resolved.Pack,
+		Origin:       resolved.Origin,
+		FieldOrigins: resolved.FieldOrigins,
+		HostCaps:     runner.hostCaps,
+		Registry:     registry,
+	})
+	if len(violations) == 0 {
+		return false
+	}
+	violationRecords := make([]map[string]string, 0, len(violations))
+	violationMessages := make([]string, 0, len(violations))
+	for _, violation := range violations {
+		violationRecords = append(violationRecords, map[string]string{
+			"rule": violation.Rule, "layer": string(violation.Layer), "message": violation.Message,
+		})
+		violationMessages = append(violationMessages, violation.String())
+	}
+	runner.log.Warn("policy floor rejected the run's pack",
+		"run", record.ID, "origin", resolved.Origin, "violations", violationMessages)
+	runner.emit(ctx, record, EvPackFloorViolated, map[string]any{
+		"origin":     string(resolved.Origin),
+		"violations": violationRecords,
+	})
+	runner.failRun(ctx, record, fmt.Errorf("policy floor: pack %q rejected: %s",
+		record.PipelinePack, strings.Join(violationMessages, "; ")))
+	return true
+}
+
 // continuationFault names why a continue job's user text cannot be delivered:
 // the stored payload is not a decodable continuation, or the text has no
 // captured session to resume. stopReason lands on the pause record; cause
@@ -1101,7 +1234,7 @@ func continuationSessionFault(continuation taskinput.Continuation, resumeSession
 	}
 	return &continuationFault{
 		stopReason: "resume_session_missing",
-		cause:      errors.New("the latest stage invocation captured no session id, so the continuation text has no session to resume"),
+		cause:      errors.New("no stage invocation with a captured session id exists to resume, so the continuation text has nowhere to be delivered"),
 	}
 }
 
@@ -1257,15 +1390,18 @@ func (runner *Runner) resolveBaseCommit(ctx context.Context, record sqlc.Run, re
 // a pause, not a failure and never a rebuild: the condition is lifted from
 // outside (restore the directory, re-register the project), and recreating the
 // worktree in some other copy would lose a commit line with no error — the
-// loss this whole sequence exists to prevent.
-func (runner *Runner) resolveRunCheckout(ctx context.Context, record sqlc.Run, project sqlc.Project, runPack *pack.Pack) (sqlc.Run, string, bool, error) {
+// loss this whole sequence exists to prevent. The pack is resolved after this
+// pin (it is read from the base_commit in this checkout), so the pause fallback
+// is the caller's entryFallback — empty on the pre-resolution path, where a
+// pre-execution pause pins no stage.
+func (runner *Runner) resolveRunCheckout(ctx context.Context, record sqlc.Run, project sqlc.Project, entryFallback string) (sqlc.Run, string, bool, error) {
 	candidatePath := record.CheckoutPath
 	if candidatePath == "" {
 		candidatePath = project.RepoPath
 	}
 	confirmedTopLevel, confirmErr := runner.confirmRunCheckout(ctx, candidatePath, project)
 	if confirmErr != nil {
-		pauseErr := runner.pauseForUnavailableCheckout(ctx, record, runPack, candidatePath, confirmErr)
+		pauseErr := runner.pauseForUnavailableCheckout(ctx, record, entryFallback, candidatePath, confirmErr)
 		return record, candidatePath, pauseErr == nil, pauseErr
 	}
 	if record.CheckoutPath != "" {
@@ -1316,8 +1452,9 @@ func (runner *Runner) confirmRunCheckout(ctx context.Context, path string, proje
 // checkout_unavailable, naming the path. EventStopUser (paused_user_stop) is
 // the retryable shape: the human lifts the condition and presses continue.
 // FailRun would be wrong twice over — the run has done nothing wrong, and a
-// failed run loses the recovery path that a pause keeps.
-func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, record sqlc.Run, runPack *pack.Pack, checkoutPath string, cause error) error {
+// failed run loses the recovery path that a pause keeps. entryFallback is the
+// pack entry once the pack is resolved, empty on the pre-resolution path.
+func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, record sqlc.Run, entryFallback string, checkoutPath string, cause error) error {
 	runner.log.Warn("run working copy unavailable",
 		"run", record.ID, "checkout_path", checkoutPath, "error", cause)
 	runner.emit(ctx, record, EvCheckoutUnavailable, map[string]any{
@@ -1328,7 +1465,7 @@ func (runner *Runner) pauseForUnavailableCheckout(ctx context.Context, record sq
 		Action:     ActionPause,
 		FSMEvent:   engine.EventStopUser,
 		StopReason: "checkout_unavailable",
-	}, currentStageOrFallback(record.CurrentStage, runPack.Entry))
+	}, currentStageOrFallback(record.CurrentStage, entryFallback))
 }
 
 // currentStageOrFallback is currentStageOr for the runner: the run's current
@@ -1579,6 +1716,16 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 			RunID: record.ID, TenantID: record.TenantID,
 		})
 		if latestErr != nil {
+			if errors.Is(latestErr, sql.ErrNoRows) && job.Kind == "continue" {
+				// A run paused before its first invocation (an unresolvable
+				// base_ref, an unavailable checkout, a drifted pack directory)
+				// has no session to resume: a textless continue starts the run
+				// at the pack entry. Reconcile and ask_to_edit genuinely need
+				// a session and keep the error; a continue carrying text never
+				// reaches this branch — the session fault below pauses it
+				// rather than dropping the text on a fresh start.
+				return runPack.Entry, "", nil, nil
+			}
 			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
 		}
 		return record.CurrentStage.String, latest.SessionID.String, nil, nil
@@ -2253,7 +2400,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		withheld = caps.SourceWriteCategories
 		withheldReason = "plan approval not recorded"
 	}
-	profile := runner.computeProfile(run.runPack, stageID, stage, runner.adapter.Supported(),
+	profile := runner.computeProfile(run.runPack, stageID, stage, runner.hostCaps,
 		runner.hardTimeout, runner.idleTimeout, withheld, withheldReason)
 	profileBytes := marshalProfile(profile)
 
@@ -2691,6 +2838,22 @@ const (
 	// The run does not stop: it applies the base_commit version, and the
 	// manifest's context.project_config records the same comparison.
 	EvProjectConfigDrift = "run.project_config_drift"
+	// EvProjectPackDrift records that the run paused because the directory of
+	// the pack it executes (.agentum/packs/<name>/) carries uncommitted
+	// changes in the source checkout (stop_reason project_pack_drift): the
+	// operator is editing the pack the run would apply, and the run executes
+	// the pinned base_commit version regardless. Carries the directory, the
+	// base_commit, the pausing entries (codes and paths, capped), and the
+	// ignored entries that did not pause. The pause lifts when the working
+	// copy is clean again — reverted OR committed.
+	EvProjectPackDrift = "run.project_pack_drift"
+	// EvPackFloorViolated records that the policy floor rejected the run's
+	// assembled pack before the run started. Carries one {rule, layer,
+	// message} record per violation; the layer names the side the offending
+	// value came from (builtin pack / project pack). The run fails without
+	// creating a worktree — the same pre-execution refusal an unresolvable
+	// tier produces.
+	EvPackFloorViolated = "run.pack_floor_violation"
 	// EvRunBaseOffTarget records that the run paused because its base could
 	// not be verified against the publication target branch: the base_ref
 	// did not resolve, the comparison point (remote-tracking ref) is

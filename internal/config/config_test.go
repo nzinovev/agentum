@@ -158,3 +158,38 @@ func TestPublicationTargetConfigurationFailsAtBoot(test *testing.T) {
 		})
 	}
 }
+
+// AGENTUM_HOST_CAPS parses comma-separated category names; the secret/mcp
+// meta-categories belong to the vocabulary (CategoryOf returns them), and an
+// unknown name fails the load naming the env var.
+func TestLoad_HostCaps(test *testing.T) {
+	for _, scenario := range []struct {
+		name    string
+		value   string
+		want    int
+		invalid string
+	}{
+		{name: "unset", value: "", want: 0},
+		{name: "single", value: "fs.read", want: 1},
+		{name: "list with spaces", value: "fs.read, git.write, secret", want: 3},
+		{name: "meta categories", value: "mcp,skill", want: 2},
+		{name: "unknown", value: "fs.read, telepathy", want: 0, invalid: "AGENTUM_HOST_CAPS"},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			test.Setenv("AGENTUM_HOST_CAPS", scenario.value)
+			cfg, err := Load()
+			if scenario.invalid != "" {
+				if err == nil || !strings.Contains(err.Error(), scenario.invalid) {
+					test.Fatalf("err=%v want %s", err, scenario.invalid)
+				}
+				return
+			}
+			if err != nil {
+				test.Fatal(err)
+			}
+			if len(cfg.HostCaps) != scenario.want {
+				test.Fatalf("HostCaps = %v, want %d entries", cfg.HostCaps, scenario.want)
+			}
+		})
+	}
+}

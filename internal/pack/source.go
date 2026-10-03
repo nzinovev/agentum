@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -33,6 +34,45 @@ type DirSource struct {
 // NewDirSource returns a Source rooted at root. The directory is not read until
 // Resolve is called.
 func NewDirSource(root string) *DirSource { return &DirSource{Root: root} }
+
+// List returns the identity block of every pack under the root, sorted by
+// name — the catalog listing surface. Each directory must carry a loadable
+// manifest.yaml; a pack that fails to load is an error, not a skip: the
+// listing feeds the boot floor check, and hiding a broken pack from it would
+// hide exactly the pack the check exists to refuse. The result is not
+// validated (Resolve does that per ref); a listing that showed only valid
+// packs would quietly disagree with what Resolve accepts.
+func (s *DirSource) List(ctx context.Context) ([]Meta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(s.Root) == "" {
+		// An empty root is "no builtin packs configured" (the zero-value
+		// config the boot check tolerates), not a broken directory: a
+		// configured-but-missing root below is the error.
+		return nil, nil
+	}
+	dirs, err := os.ReadDir(s.Root)
+	if err != nil {
+		return nil, fmt.Errorf("pack source: list %s: %w", s.Root, err)
+	}
+	var metas []Meta
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		p, loadErr := Load(filepath.Join(s.Root, dir.Name()))
+		if loadErr != nil {
+			return nil, fmt.Errorf("pack source: pack %q: %w", dir.Name(), loadErr)
+		}
+		if p.Pack.Name != dir.Name() {
+			return nil, fmt.Errorf("pack source: manifest at %s declares name %q, expected %q", dir.Name(), p.Pack.Name, dir.Name())
+		}
+		metas = append(metas, p.Pack)
+	}
+	sort.Slice(metas, func(left, right int) bool { return metas[left].Name < metas[right].Name })
+	return metas, nil
+}
 
 func (s *DirSource) Resolve(ctx context.Context, ref string) (*Pack, error) {
 	if err := ctx.Err(); err != nil {
