@@ -21,6 +21,24 @@ package pack
 // APIVersion is the manifest api: value this build understands.
 const APIVersion = "agentum/v1"
 
+// Origin names where a resolved pack's bytes came from. It is assigned by the
+// resolving source, never decoded from YAML, so a project-supplied pack cannot
+// present itself as builtin. API responses and run evidence surface it so a
+// reviewer always knows which layer executed.
+type Origin string
+
+const (
+	// OriginBuiltin: the pack shipped with the product, resolved from the
+	// host's packs directory.
+	OriginBuiltin Origin = "builtin"
+	// OriginProject: the project's own manifest.yaml — replacing the builtin
+	// of the same name or introducing a new name — in that project only.
+	OriginProject Origin = "project"
+	// OriginProjectOverBuiltin: the project's overrides.yaml layered over a
+	// builtin base (prompts, stage gates/tiers, budgets).
+	OriginProjectOverBuiltin Origin = "project+builtin"
+)
+
 // Gate is the per-stage control vocabulary (carryover C11). The engine and the
 // gate surface agree on these six values.
 type Gate string
@@ -33,6 +51,21 @@ const (
 	GateHumanFinal     Gate = "human_final"
 	GateHumanEdit      Gate = "human_edit"
 )
+
+// PausesForHuman reports whether a completed stage under this gate stops for a
+// human decision before the run may pass it — auto_on_approval included,
+// because its advance IS the human's explicit approval. The evaluator routes
+// on this set and the policy floor requires a source_write approval's stage
+// to carry one of these gates, so both read the same predicate and cannot
+// drift apart.
+func (gate Gate) PausesForHuman() bool {
+	switch gate {
+	case GateAutoOnApproval, GateHumanApproval, GateHumanFinal, GateHumanEdit:
+		return true
+	default:
+		return false
+	}
+}
 
 // MemoryScope is one of the three memory scopes. Only project is wired into
 // retrieval at the dogfooding MVP; user is light, org is inert.
@@ -71,6 +104,19 @@ type Pack struct {
 	// Forked records layer 2 (detach from upstream). It is metadata only at
 	// resolve time — a forked pack is a detached copy, not a different shape.
 	Forked bool `yaml:"-"`
+
+	// Origin records where this pack's bytes came from (builtin, project, or
+	// project+builtin). Set by the resolving source; empty only for packs
+	// assembled by hand (tests).
+	Origin Origin `yaml:"-"`
+
+	// ContentHash is a deterministic digest of the pack's source directory
+	// (sha256 over file contents, one scheme for every origin), computed by
+	// the source at resolve time — before a materialized temp directory is
+	// removed, so evidence never depends on the temp dir's lifetime. For an
+	// inherited pack it covers the project layer; the base is identified by
+	// BaseRef alongside it.
+	ContentHash string `yaml:"-"`
 }
 
 // Meta is the pack identity block.
@@ -269,6 +315,55 @@ func (p *Pack) SourceWriteApproval() (Approval, bool) {
 		}
 	}
 	return Approval{}, false
+}
+
+// SourceWriteGateLeaks returns the ids of source-writing stages reachable from
+// entry WITHOUT passing the declared source_write approval's stage — the
+// stages a run could enter with fs.write / git.write / exec.bash held back
+// only by the runtime lock, never by a human gate. It is the shared core of
+// the validator's approval-reachability rule and the policy floor's
+// approval-precedes-source-write rule. Nil when the pack declares no
+// source_write approval or has no source-writing stages; callers that must
+// distinguish those cases check SourceWriteApproval and SourceWritingStages
+// themselves.
+func (p *Pack) SourceWriteGateLeaks() []string {
+	sourceApproval, hasSourceApproval := p.SourceWriteApproval()
+	if !hasSourceApproval {
+		return nil
+	}
+	sourceStages := p.SourceWritingStages()
+	if len(sourceStages) == 0 {
+		return nil
+	}
+	// Walk from entry; a stage is "reachable without approval" if there is a
+	// path from entry to it that never traverses the approval stage. The
+	// approval stage itself is the gate, so the walk does not expand through
+	// it. Unknown transition targets are simply not expanded — this runs on
+	// assembled packs that may not have passed Validate yet.
+	approvalStage := sourceApproval.Stage
+	reachableWithoutApproval := map[string]bool{}
+	var walk func(stageID string)
+	walk = func(stageID string) {
+		if reachableWithoutApproval[stageID] {
+			return
+		}
+		reachableWithoutApproval[stageID] = true
+		if stageID == approvalStage {
+			return // do not expand through the gate
+		}
+		for _, transition := range p.Stages[stageID].Transitions {
+			walk(transition.To)
+		}
+	}
+	walk(p.Entry)
+
+	var leaks []string
+	for _, stageID := range sourceStages {
+		if reachableWithoutApproval[stageID] {
+			leaks = append(leaks, stageID)
+		}
+	}
+	return leaks
 }
 
 // SourceWritingStages returns the ids of stages whose effective role is

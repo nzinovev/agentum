@@ -16,6 +16,8 @@ budgets:
 tiers:
   default: fast
 entry: spec
+approvals:
+  - {name: spec, stage: spec, artifact: spec.md, unlocks: source_write}
 stages:
   spec:
     gate: human_approval

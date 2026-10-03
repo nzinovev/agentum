@@ -2612,7 +2612,7 @@ func (runner *Runner) emit(ctx context.Context, record sqlc.Run, eventType strin
 // ignored .agentum/ artifact tree. Drives the auto_if_clean gate. Approximation
 // for MVP: any porcelain entry ⇒ not clean (conservative — surfaces for review
 // rather than wrongly auto-advancing). result.json lives under .agentum/, which
-// ensureIgnored excludes, so it does not count as a change.
+// EnsureExcludes excludes, so it does not count as a change.
 func (runner *Runner) isClean(repoPath, runID string) bool {
 	wtPath := worktree.PathFor(repoPath, runID)
 	out, err := execGit(wtPath, "status", "--porcelain")

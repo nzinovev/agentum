@@ -25,7 +25,7 @@ func LoadOverrides(dir string) (*Overrides, error) {
 		return nil, fmt.Errorf("overrides: read overrides.yaml: %w", err)
 	}
 	var ov Overrides
-	if err := yaml.Unmarshal(raw, &ov); err != nil {
+	if err := decodeStrict(raw, &ov); err != nil {
 		return nil, fmt.Errorf("overrides: parse overrides.yaml: %w", err)
 	}
 	ov.dir = abs
