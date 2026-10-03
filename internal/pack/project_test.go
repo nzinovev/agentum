@@ -600,6 +600,13 @@ func TestProjectSource_ListProjectPacks(t *testing.T) {
 				"manifest.yaml":  replacementManifest,
 				"overrides.yaml": "base: base-pack\n",
 			}),
+			// A prompt that happens to be called manifest.yaml is a pack
+			// file, not the pack's document.
+			projectFiles("nested", map[string]string{
+				"overrides.yaml":        "base: base-pack\n",
+				"prompts/manifest.yaml": "not a manifest",
+			}),
+			map[string]string{ProjectPacksDir + "/README.md": "notes"},
 		)),
 	)
 	listing, err := source.ListProjectPacks(t.Context(), repoPath, baseCommit)
@@ -618,6 +625,12 @@ func TestProjectSource_ListProjectPacks(t *testing.T) {
 	}
 	if byName["broken"] != "invalid" {
 		t.Errorf("broken kind = %q, want invalid (both files)", byName["broken"])
+	}
+	if byName["nested"] != "overrides" {
+		t.Errorf("nested kind = %q, want overrides (a nested manifest.yaml is not the pack document)", byName["nested"])
+	}
+	if _, listed := byName["README.md"]; listed {
+		t.Error("a file directly under .agentum/packs/ is not a pack")
 	}
 	if _, listed := byName["base-pack"]; listed {
 		t.Error("the listing must contain only project packs, not builtin names")

@@ -425,8 +425,10 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 		if rest == "" || strings.HasPrefix(rest, "/") {
 			continue
 		}
-		name, _, _ := strings.Cut(rest, "/")
-		if name == "" {
+		// A blob directly under .agentum/packs/ (a README, a stray file) is not
+		// a pack: only a directory names one.
+		name, inside, nested := strings.Cut(rest, "/")
+		if name == "" || !nested {
 			continue
 		}
 		record, ok := byName[name]
@@ -434,14 +436,17 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 			record = &ProjectPackEntry{Name: name}
 			byName[name] = record
 		}
-		switch {
-		case strings.HasSuffix(rest, "/manifest.yaml"):
+		// Matched against the path inside the pack directory, not by suffix: a
+		// nested prompts/manifest.yaml is an ordinary pack file and must not
+		// change what kind of pack this is.
+		switch inside {
+		case "manifest.yaml":
 			if record.Kind == "overrides" {
 				record.Kind = "invalid"
 			} else {
 				record.Kind = "manifest"
 			}
-		case strings.HasSuffix(rest, "/overrides.yaml"):
+		case "overrides.yaml":
 			if record.Kind == "manifest" {
 				record.Kind = "invalid"
 			} else {
