@@ -1,6 +1,7 @@
 package pack
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,6 +385,10 @@ func TestDirSource_ListSkipsNonPackDirectories(t *testing.T) {
 		writeManifest(t, root, "real", terminalOnlyPack)
 		// A dot-directory is skipped even when it holds a manifest.yaml.
 		writeManifest(t, root, ".git", "not yaml: [")
+		writeManifest(t, root, ".hidden", strings.Replace(terminalOnlyPack, "name: real", "name: .hidden", 1))
+		if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "linked")); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.MkdirAll(filepath.Join(root, "lost+found"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -393,6 +398,18 @@ func TestDirSource_ListSkipsNonPackDirectories(t *testing.T) {
 		}
 		if len(metas) != 1 || metas[0].Name != "real" {
 			t.Fatalf("listed %+v, want only the pack \"real\"", metas)
+		}
+		for _, ref := range []string{".hidden", "real/../.hidden", `real\hidden`, "linked"} {
+			if _, resolveErr := NewDirSource(root).Resolve(t.Context(), ref); resolveErr == nil {
+				t.Errorf("Resolve(%q) accepted a pack the boot catalog cannot inspect", ref)
+			}
+		}
+		hidden, loadErr := Load(filepath.Join(root, ".hidden"))
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if validateErr := hidden.Validate(); validateErr == nil {
+			t.Error("a hidden pack's manifest name must be invalid too")
 		}
 	})
 
@@ -404,4 +421,19 @@ func TestDirSource_ListSkipsNonPackDirectories(t *testing.T) {
 			t.Fatal("a directory with an unloadable manifest.yaml must fail the listing")
 		}
 	})
+}
+
+// TestDirSource_ResolveReadFailureClass: an unreadable source file is a read
+// failure after the pack has passed format validation.
+func TestDirSource_ResolveReadFailureClass(t *testing.T) {
+	t.Parallel()
+	source := builtinSourceWithBasePack(t)
+	brokenLink := filepath.Join(source.Root, "base-pack", "broken-link")
+	if err := os.Symlink("missing-target", brokenLink); err != nil {
+		t.Fatal(err)
+	}
+	_, err := source.Resolve(t.Context(), "base-pack")
+	if !errors.Is(err, ErrPackReadFailed) {
+		t.Fatalf("Resolve error = %v, want ErrPackReadFailed", err)
+	}
 }

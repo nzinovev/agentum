@@ -75,6 +75,9 @@ type ProjectPacksEvidence struct {
 	// base_commit pack; the flag tells a reviewer the checkout's committed
 	// pack was not the one applied.
 	BaseDiverged bool `json:"base_diverged,omitempty"`
+	// BaseComparison is matched, diverged, or unreadable. Unreadable preserves
+	// a failed comparison as unknown because this evidence keeps its first write.
+	BaseComparison string `json:"base_comparison"`
 }
 
 // ProjectConfigEvidence is the project config the run pinned, and how the

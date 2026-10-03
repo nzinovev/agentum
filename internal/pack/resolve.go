@@ -1,7 +1,9 @@
 package pack
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,7 @@ func LoadOverrides(dir string) (*Overrides, error) {
 	}
 	raw, err := os.ReadFile(filepath.Join(abs, "overrides.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf("overrides: read overrides.yaml: %w", err)
+		return nil, fmt.Errorf("overrides: read overrides.yaml: %w: %w", ErrPackReadFailed, err)
 	}
 	var ov Overrides
 	if err := decodeStrict(raw, &ov); err != nil {
@@ -47,6 +49,9 @@ func loadOverridePrompts(ov *Overrides) error {
 		}
 		text, err := os.ReadFile(clean)
 		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("overrides: prompt for stage %q read %q: %w: %w", stage, rel, ErrPackReadFailed, err)
+			}
 			return fmt.Errorf("overrides: prompt for stage %q read %q: %w", stage, rel, err)
 		}
 		ov.promptText[stage] = string(text)

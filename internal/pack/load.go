@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -41,7 +42,7 @@ func Load(dir string) (*Pack, error) {
 	manifestPath := filepath.Join(abs, "manifest.yaml")
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("pack: read manifest: %w", err)
+		return nil, fmt.Errorf("pack: read manifest: %w: %w", ErrPackReadFailed, err)
 	}
 
 	var p Pack
@@ -76,6 +77,9 @@ func loadPrompts(p *Pack) error {
 		}
 		text, err := os.ReadFile(clean)
 		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("pack: stage %q read prompt %q: %w: %w", id, s.Prompt, ErrPackReadFailed, err)
+			}
 			return fmt.Errorf("pack: stage %q read prompt %q: %w", id, s.Prompt, err)
 		}
 		s.promptText = string(text)
@@ -115,19 +119,19 @@ func DirHash(dir string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("pack: walk dir %s: %w", dir, err)
+		return "", fmt.Errorf("pack: walk dir %s: %w: %w", dir, ErrPackReadFailed, err)
 	}
 	sort.Strings(files)
 	for _, filePath := range files {
 		rel, relErr := filepath.Rel(dir, filePath)
 		if relErr != nil {
-			return "", fmt.Errorf("pack: rel %s under %s: %w", filePath, dir, relErr)
+			return "", fmt.Errorf("pack: rel %s under %s: %w: %w", filePath, dir, ErrPackReadFailed, relErr)
 		}
 		hasher.Write([]byte(rel))
 		hasher.Write([]byte{0})
 		content, readErr := os.ReadFile(filePath)
 		if readErr != nil {
-			return "", fmt.Errorf("pack: read %s: %w", filePath, readErr)
+			return "", fmt.Errorf("pack: read %s: %w: %w", filePath, ErrPackReadFailed, readErr)
 		}
 		hasher.Write(content)
 		hasher.Write([]byte{0})

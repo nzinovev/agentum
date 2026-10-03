@@ -455,7 +455,7 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 		// A blob directly under .agentum/packs/ (a README, a stray file) is not
 		// a pack: only a directory names one.
 		name, inside, nested := strings.Cut(rest, "/")
-		if name == "" || !nested {
+		if !nested || !validPackName(name) {
 			continue
 		}
 		record, ok := byName[name]

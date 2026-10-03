@@ -466,12 +466,14 @@ func (runner *Runner) pauseOnProjectPackDrift(ctx context.Context, record sqlc.R
 	// Decide from the whole listing; the cap applies only to what is recorded.
 	uncommitted, ignored := classifyPackDirChanges(packDir, changes)
 	evidence := &manifest.ProjectPacksEvidence{
-		Dir:         packDir,
-		Uncommitted: capPackDriftEntries(uncommitted),
-		Ignored:     capPackDriftEntries(ignored),
+		Dir:            packDir,
+		Uncommitted:    capPackDriftEntries(uncommitted),
+		Ignored:        capPackDriftEntries(ignored),
+		BaseComparison: "matched",
 	}
 	if head, headErr := runner.wt.HeadCommit(ctx, checkoutPath); headErr != nil {
 		runner.log.Warn("read checkout HEAD for pack drift evidence", "run", record.ID, "error", headErr)
+		evidence.BaseComparison = "unreadable"
 	} else if head != baseCommit {
 		// A committed difference is the documented model — the run applies the
 		// base_commit pack — so it is recorded, never a pause. Compared by the
@@ -480,8 +482,11 @@ func (runner *Runner) pauseOnProjectPackDrift(ctx context.Context, record sqlc.R
 		differs, diffErr := runner.wt.PathDiffersBetween(ctx, checkoutPath, baseCommit, head, packDir)
 		if diffErr != nil {
 			runner.log.Warn("compare pack dir between base_commit and HEAD", "run", record.ID, "error", diffErr)
+			evidence.BaseComparison = "unreadable"
+		} else if differs {
+			evidence.BaseDiverged = true
+			evidence.BaseComparison = "diverged"
 		}
-		evidence.BaseDiverged = differs
 	}
 	runner.recordProjectPacksEvidence(ctx, record, evidence)
 

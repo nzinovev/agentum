@@ -116,8 +116,7 @@ func (api *API) handleListPacks(w http.ResponseWriter, r *http.Request) {
 	}
 	builtin, err := api.packs.ListBuiltin(r.Context())
 	if err != nil {
-		logUnexpected(api.log, err, "ListBuiltin(packs)")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		api.writePackReadFailure(w, err, "ListBuiltin(packs)")
 		return
 	}
 	entries := make([]packListEntry, 0, len(builtin))
@@ -169,24 +168,31 @@ func (api *API) handleListProjectPacks(w http.ResponseWriter, r *http.Request, p
 
 	builtin, err := api.packs.ListBuiltin(r.Context())
 	if err != nil {
-		logUnexpected(api.log, err, "ListBuiltin(packs)")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		api.writePackReadFailure(w, err, "ListBuiltin(packs)")
 		return
 	}
 	projectPacks, err := api.packs.ListProjectPacks(r.Context(), project.RepoPath, commit)
 	if err != nil {
-		logUnexpected(api.log, err, "ListProjectPacks(packs)")
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		api.writePackReadFailure(w, err, "ListProjectPacks(packs)")
 		return
 	}
-	// Fill the identity block when a project pack resolves; a configuration
-	// error leaves it empty rather than failing the whole listing.
-	projectIdentity := func(name string) (pack.Meta, bool) {
-		resolved, resolveErr := api.packs.ResolveForCommit(r.Context(), name, project.RepoPath, commit)
+	// Configuration errors leave a project's row with empty metadata. A read
+	// failure has no pack verdict and stops the listing with a server error.
+	identities := make(map[string]pack.Meta, len(projectPacks))
+	for _, entry := range projectPacks {
+		resolved, resolveErr := api.packs.ResolveForCommit(r.Context(), entry.Name, project.RepoPath, commit)
 		if resolveErr != nil {
-			return pack.Meta{}, false
+			if errors.Is(resolveErr, pack.ErrPackReadFailed) {
+				api.writePackReadFailure(w, resolveErr, "ResolveForCommit(packs)")
+				return
+			}
+			continue
 		}
-		return resolved.Pack.Pack, true
+		identities[entry.Name] = resolved.Pack.Pack
+	}
+	projectIdentity := func(name string) (pack.Meta, bool) {
+		meta, found := identities[name]
+		return meta, found
 	}
 	writeJSON(w, http.StatusOK, packListResponse{
 		Packs:  mergePackListings(builtin, projectPacks, projectIdentity),
@@ -313,11 +319,17 @@ func (api *API) writePackResolutionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, pack.ErrPackNotFound):
 		writeError(w, http.StatusNotFound, codeNotFound, "pack not found")
 	case errors.Is(err, pack.ErrPackReadFailed):
-		logUnexpected(api.log, err, "resolve pack")
-		writeError(w, http.StatusInternalServerError, codeInternal, "the pack could not be read")
+		api.writePackReadFailure(w, err, "resolve pack")
 	default:
 		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 	}
+}
+
+// writePackReadFailure logs an internal read failure without returning Git or
+// filesystem diagnostics to the caller. Those diagnostics can contain local paths.
+func (api *API) writePackReadFailure(w http.ResponseWriter, err error, operation string) {
+	logUnexpected(api.log, err, operation)
+	writeError(w, http.StatusInternalServerError, codeInternal, "the pack could not be read")
 }
 
 // packDetailOf renders a resolved pack with its field origins.

@@ -130,8 +130,10 @@ that cannot be read pauses the run too
 not a clean one, and continue re-runs the comparison. Untracked junk a project does not ignore can still pause; delete it
 or ignore it. The pause lifts when the directory is clean against HEAD again —
 revert the edit OR commit it; after a commit the run continues executing the
-pinned `base_commit` pack, and a pack directory that differs between
-`base_commit` and HEAD is recorded as `base_diverged` evidence, never a pause. A textless continue on a run paused
+pinned `base_commit` pack. Evidence records `base_comparison` as `matched`,
+`diverged`, or `unreadable`; `base_diverged` is set only when the directory
+comparison succeeds and differs. A committed difference never pauses the run.
+A textless continue on a run paused
 before its first invocation starts the run at the pack entry.
 
 The exclude maintenance behind the comparison: Agentum keeps

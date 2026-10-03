@@ -607,6 +607,7 @@ func TestProjectSource_ListProjectPacks(t *testing.T) {
 				"prompts/manifest.yaml": "not a manifest",
 			}),
 			map[string]string{ProjectPacksDir + "/README.md": "notes"},
+			projectFiles(".hidden", map[string]string{"manifest.yaml": replacementManifest}),
 		)),
 	)
 	listing, err := source.ListProjectPacks(t.Context(), repoPath, baseCommit)
@@ -631,6 +632,9 @@ func TestProjectSource_ListProjectPacks(t *testing.T) {
 	}
 	if _, listed := byName["README.md"]; listed {
 		t.Error("a file directly under .agentum/packs/ is not a pack")
+	}
+	if _, listed := byName[".hidden"]; listed {
+		t.Error("a pack name refused by Resolve must not appear in the catalog")
 	}
 	if _, listed := byName["base-pack"]; listed {
 		t.Error("the listing must contain only project packs, not builtin names")

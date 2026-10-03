@@ -21,11 +21,13 @@ import (
 // under test is authz, the ref contract, merging, and rendering — resolution
 // itself is covered by internal/pack's tests against a real ProjectSource.
 type fakePackCatalog struct {
-	builtin     []pack.Meta
-	builtinPack map[string]*pack.Resolved
-	project     []pack.ProjectPackEntry
-	projectPack map[string]*pack.Resolved
-	resolveErr  error
+	builtin        []pack.Meta
+	builtinPack    map[string]*pack.Resolved
+	project        []pack.ProjectPackEntry
+	projectPack    map[string]*pack.Resolved
+	resolveErr     error
+	listProjectErr error
+	listBuiltinErr error
 }
 
 func (catalog *fakePackCatalog) ResolveForCommit(_ context.Context, ref, _, _ string) (*pack.Resolved, error) {
@@ -51,10 +53,16 @@ func (catalog *fakePackCatalog) ResolveBuiltin(_ context.Context, ref string) (*
 }
 
 func (catalog *fakePackCatalog) ListProjectPacks(_ context.Context, _, _ string) ([]pack.ProjectPackEntry, error) {
+	if catalog.listProjectErr != nil {
+		return nil, catalog.listProjectErr
+	}
 	return catalog.project, nil
 }
 
 func (catalog *fakePackCatalog) ListBuiltin(_ context.Context) ([]pack.Meta, error) {
+	if catalog.listBuiltinErr != nil {
+		return nil, catalog.listBuiltinErr
+	}
 	return catalog.builtin, nil
 }
 
@@ -317,6 +325,42 @@ func TestHandleGetPack_ReadFailureIsInternal(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "not a git repository") {
 		t.Errorf("body = %s, must not carry the underlying read error", recorder.Body.String())
+	}
+}
+
+// TestHandleListProjectPacks_ReadFailures: a tree read failure returns 500
+// without Git diagnostics whether it happens during discovery or resolution.
+func TestHandleListProjectPacks_ReadFailures(t *testing.T) {
+	harness := newRegistrationHarness(t)
+	repo := t.TempDir()
+	initRegistrationRepo(t, repo, "pack catalog read failure")
+	project := harness.registerProject(repo)
+	harness.api.gitRefs = fakeRefResolver{commit: "commit-abc"}
+	readFailure := fmt.Errorf("tree read: %w: %w", pack.ErrPackReadFailed, errors.New("fatal: private checkout path"))
+	cases := []struct {
+		name    string
+		catalog *fakePackCatalog
+	}{
+		{name: "discovery", catalog: &fakePackCatalog{listProjectErr: readFailure}},
+		{name: "resolution", catalog: &fakePackCatalog{
+			project: []pack.ProjectPackEntry{{Name: "probe", Kind: "manifest"}}, resolveErr: readFailure,
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness.api.packs = testCase.catalog
+			request := httptest.NewRequest(http.MethodGet,
+				"/api/v1/packs?project_id="+project.ID+"&ref=main", nil)
+			request = request.WithContext(authz.WithPrincipal(request.Context(), harness.principal))
+			recorder := httptest.NewRecorder()
+			harness.api.handleListPacks(recorder, request)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, body = %s; want 500", recorder.Code, recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "private checkout path") {
+				t.Errorf("response exposed Git diagnostics: %s", recorder.Body.String())
+			}
+		})
 	}
 }
 

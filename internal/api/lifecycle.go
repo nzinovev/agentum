@@ -332,6 +332,24 @@ func (api *API) decisionIsIdempotent(w http.ResponseWriter, r *http.Request, run
 	return true
 }
 
+// hasRejectedApproval finds a prior terminal reject without resolving the pack.
+// A plan reject is stored under the pack's approval name, which is unavailable
+// once the run leaves that gate and its checkout may no longer be readable.
+func (api *API) hasRejectedApproval(ctx context.Context, run sqlc.Run) (bool, error) {
+	approvals, err := api.queries.ListApprovalsForRun(ctx, sqlc.ListApprovalsForRunParams{
+		TenantID: run.TenantID, RunID: run.ID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, approval := range approvals {
+		if approval.Decision == "rejected" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // handleInvocationAdvance POST /api/v1/runs/{id}/invocations/{iid}/advance
 // Pass a gate → the next stage runs (a fresh invocation). When the run's
 // current stage is the pack's approval stage (ADR 0003 D3/D4), advancing IS the
@@ -432,9 +450,8 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// "final_review"; at the plan gate it is the pack-declared plan-approval name
 	// (resolved from the pack, not hardcoded — a hardcoded "plan" would collide
 	// with the recorded approve when the pack names its approval differently, and
-	// ON CONFLICT DO NOTHING would discard the reject). The same name
-	// keys the idempotency check, so a repeat reject after any gate reject
-	// returns 200 regardless of which gate fired first.
+	// ON CONFLICT DO NOTHING would discard the reject). A repeat reject reads
+	// the durable decisions after the run leaves its gate.
 	// The pack is read only at the plan gate, the one place its approval name
 	// is used: everywhere else the name is final_review, and a pack that does
 	// not resolve (the run failed on that very pack, or its checkout moved)
@@ -458,18 +475,18 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !atFinalGate && !atPlanGate {
-		if api.decisionIsIdempotent(w, r, run, rejectName, "rejected") {
+		alreadyRejected, approvalErr := api.hasRejectedApproval(r.Context(), run)
+		if approvalErr != nil {
+			logUnexpected(api.log, approvalErr, "ListApprovalsForRun(reject)")
+			writeError(w, http.StatusInternalServerError, codeInternal, "could not read the run's decisions")
+			return
+		}
+		if alreadyRejected {
+			writeJSON(w, http.StatusOK, toRunResponse(run))
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
 			"reject requires awaiting_final_review or paused_gate; run is "+run.State)
-		return
-	}
-	if engine.IsTerminal(engine.RunState(run.State)) {
-		if api.decisionIsIdempotent(w, r, run, rejectName, "rejected") {
-			return
-		}
-		writeError(w, http.StatusConflict, codeIllegalTransition, "run is already terminal: "+run.State)
 		return
 	}
 	next, ok := api.beginTerminalAbort(w, run)
