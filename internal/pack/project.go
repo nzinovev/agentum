@@ -66,9 +66,13 @@ var (
 	ErrPackNameMismatch = errors.New("project pack manifest name does not match its directory")
 	// ErrPackNotFound: the ref names no builtin pack and the project ships no
 	// pack under the name. The listing and detail surfaces map it to their
-	// not-found answers; every other resolution failure is a configuration
-	// error.
+	// not-found answers. A builtin that exists but does not satisfy the ref's
+	// constraint, or fails to load, is not "not found".
 	ErrPackNotFound = errors.New("pack not found")
+	// ErrPackReadFailed: the pack's bytes could not be read — the commit tree
+	// or the scratch directory failed. It says nothing about the pack, so a
+	// caller must not report it as the pack's (or the requester's) fault.
+	ErrPackReadFailed = errors.New("pack could not be read")
 )
 
 // TreeEntry is one file of a commit-tree listing, as the reader below returns
@@ -160,22 +164,22 @@ func (source *ProjectSource) ResolveForFloor(ctx context.Context, ref, repoPath,
 		// ref resolves builtin (the partially wired server and test shape).
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, fmt.Errorf("project pack %q: %w: %w", name, ErrPackNotFound, baseErr)
+			return nil, fmt.Errorf("project pack %q: %w", name, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
 	packDir := ProjectPacksDir + "/" + name
 	entries, err := source.Reader.ListTreeAtCommit(ctx, repoPath, baseCommit, packDir)
 	if err != nil {
-		return nil, fmt.Errorf("project pack %q: list %s at %s: %w", name, packDir, baseCommit, err)
+		return nil, fmt.Errorf("project pack %q: list %s at %s: %w: %w", name, packDir, baseCommit, ErrPackReadFailed, err)
 	}
 	if len(entries) == 0 {
-		// No project pack under this name: the builtin source answers. Its
-		// not-found failure wraps ErrPackNotFound so the catalog surfaces can
-		// tell "no such pack" from a configuration error.
+		// No project pack under this name: the builtin source answers, and
+		// marks its own "no such pack" with ErrPackNotFound so the catalog
+		// surfaces can tell it from a configuration error.
 		base, baseErr := source.Builtin.Resolve(ctx, ref)
 		if baseErr != nil {
-			return nil, fmt.Errorf("project pack %q: %w: %w", name, ErrPackNotFound, baseErr)
+			return nil, fmt.Errorf("project pack %q: %w", name, baseErr)
 		}
 		return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 	}
@@ -261,7 +265,7 @@ func (source *ProjectSource) resolveProjectOverrides(ctx context.Context, materi
 		// name belongs to a project pack here and the inheritance is refused.
 		shadowed, shadowErr := source.Reader.ListTreeAtCommit(ctx, repoPath, baseCommit, ProjectPacksDir+"/"+baseName)
 		if shadowErr != nil {
-			return nil, fmt.Errorf("project pack %q: check base %q: %w", name, baseName, shadowErr)
+			return nil, fmt.Errorf("project pack %q: check base %q: %w: %w", name, baseName, ErrPackReadFailed, shadowErr)
 		}
 		if len(shadowed) > 0 {
 			return nil, fmt.Errorf("project pack %q: base %q: %w", name, baseName, ErrBaseNotBuiltin)
@@ -381,24 +385,24 @@ func packFilePresent(entries []TreeEntry, packDir, file string) bool {
 func materializePack(ctx context.Context, reader CommitTree, repoPath, baseCommit, packDir string, entries []TreeEntry) (string, error) {
 	tempDir, err := os.MkdirTemp("", "agentum-project-pack-")
 	if err != nil {
-		return "", fmt.Errorf("project pack %q: materialize: %w", packDir, err)
+		return "", fmt.Errorf("project pack %q: materialize: %w: %w", packDir, ErrPackReadFailed, err)
 	}
 	prefix := packDir + "/"
 	for _, entry := range entries {
 		content, readErr := reader.FileAtCommit(ctx, repoPath, baseCommit, entry.Path)
 		if readErr != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack: read %s at %s: %w", entry.Path, baseCommit, readErr)
+			return "", fmt.Errorf("project pack: read %s at %s: %w: %w", entry.Path, baseCommit, ErrPackReadFailed, readErr)
 		}
 		relativePath := filepath.FromSlash(strings.TrimPrefix(entry.Path, prefix))
 		target := filepath.Join(tempDir, relativePath)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack %q: materialize %s: %w", packDir, entry.Path, err)
+			return "", fmt.Errorf("project pack %q: materialize %s: %w: %w", packDir, entry.Path, ErrPackReadFailed, err)
 		}
 		if err := os.WriteFile(target, content, 0o644); err != nil {
 			_ = os.RemoveAll(tempDir)
-			return "", fmt.Errorf("project pack %q: materialize %s: %w", packDir, entry.Path, err)
+			return "", fmt.Errorf("project pack %q: materialize %s: %w: %w", packDir, entry.Path, ErrPackReadFailed, err)
 		}
 	}
 	return tempDir, nil
@@ -409,7 +413,7 @@ func materializePack(ctx context.Context, reader CommitTree, repoPath, baseCommi
 func (source *ProjectSource) ResolveBuiltin(ctx context.Context, ref string) (*Resolved, error) {
 	base, err := source.Builtin.Resolve(ctx, ref)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrPackNotFound, err)
+		return nil, err
 	}
 	return &Resolved{Pack: base, Origin: OriginBuiltin}, nil
 }
@@ -439,7 +443,7 @@ func (source *ProjectSource) ListProjectPacks(ctx context.Context, repoPath, com
 	}
 	entries, err := source.Reader.ListTreeAtCommit(ctx, repoPath, commit, ProjectPacksDir)
 	if err != nil {
-		return nil, fmt.Errorf("list %s at %s: %w", ProjectPacksDir, commit, err)
+		return nil, fmt.Errorf("list %s at %s: %w: %w", ProjectPacksDir, commit, ErrPackReadFailed, err)
 	}
 	prefix := ProjectPacksDir + "/"
 	byName := map[string]*ProjectPackEntry{}

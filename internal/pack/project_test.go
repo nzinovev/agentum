@@ -653,3 +653,70 @@ func TestGate_PausesForHuman(t *testing.T) {
 		}
 	}
 }
+
+// failingCommitTree fails every read, as a repository git cannot open does.
+type failingCommitTree struct{}
+
+func (failingCommitTree) FileAtCommit(context.Context, string, string, string) ([]byte, error) {
+	return nil, errors.New("fatal: not a git repository")
+}
+
+func (failingCommitTree) ListTreeAtCommit(context.Context, string, string, string) ([]TreeEntry, error) {
+	return nil, errors.New("fatal: not a git repository")
+}
+
+// The catalog surfaces answer 404, 500 and 400 from these three classes, so
+// they must stay apart: only an absent pack is "not found", a failed read is
+// neither that nor a statement about the pack, and a builtin that exists but
+// misses the ref's constraint is the caller's ref, not a missing pack.
+func TestProjectSource_ResolutionErrorClasses(t *testing.T) {
+	t.Parallel()
+	builtin := builtinSourceWithBasePack(t)
+
+	t.Run("an unknown name is not found", func(t *testing.T) {
+		t.Parallel()
+		source := NewProjectSource(builtin, fakeTreeFromProject(nil))
+		_, err := source.ResolveForCommit(t.Context(), "no-such-pack", repoPath, baseCommit)
+		if !errors.Is(err, ErrPackNotFound) {
+			t.Fatalf("err = %v, want ErrPackNotFound", err)
+		}
+		if _, builtinErr := source.ResolveBuiltin(t.Context(), "no-such-pack"); !errors.Is(builtinErr, ErrPackNotFound) {
+			t.Fatalf("ResolveBuiltin err = %v, want ErrPackNotFound", builtinErr)
+		}
+	})
+
+	t.Run("a constraint the builtin does not satisfy is not a missing pack", func(t *testing.T) {
+		t.Parallel()
+		source := NewProjectSource(builtin, fakeTreeFromProject(nil))
+		for _, resolve := range []func() error{
+			func() error {
+				_, err := source.ResolveForCommit(t.Context(), "base-pack@^9", repoPath, baseCommit)
+				return err
+			},
+			func() error { _, err := source.ResolveBuiltin(t.Context(), "base-pack@^9"); return err },
+		} {
+			err := resolve()
+			if err == nil {
+				t.Fatal("a constraint the pack does not satisfy must fail")
+			}
+			if errors.Is(err, ErrPackNotFound) || errors.Is(err, ErrPackReadFailed) {
+				t.Fatalf("err = %v, want neither ErrPackNotFound nor ErrPackReadFailed", err)
+			}
+		}
+	})
+
+	t.Run("a failed tree read is a read failure", func(t *testing.T) {
+		t.Parallel()
+		source := NewProjectSource(builtin, failingCommitTree{})
+		_, err := source.ResolveForCommit(t.Context(), "base-pack", repoPath, baseCommit)
+		if !errors.Is(err, ErrPackReadFailed) {
+			t.Fatalf("err = %v, want ErrPackReadFailed", err)
+		}
+		if errors.Is(err, ErrPackNotFound) {
+			t.Fatalf("err = %v, a failed read must not read as a missing pack", err)
+		}
+		if _, listErr := source.ListProjectPacks(t.Context(), repoPath, baseCommit); !errors.Is(listErr, ErrPackReadFailed) {
+			t.Fatalf("ListProjectPacks err = %v, want ErrPackReadFailed", listErr)
+		}
+	})
+}

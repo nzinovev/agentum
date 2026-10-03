@@ -345,21 +345,29 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	planName, nameErr := api.planApprovalName(r.Context(), run)
-	if nameErr != nil {
-		logUnexpected(api.log, nameErr, "resolveRunPack(advance)")
-		writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
-		return
-	}
 	if engine.RunState(run.State) != engine.StatePausedGate {
+		// Off the gate the approval name only keys the idempotency lookup, so
+		// a pack that does not resolve — the run failed on that very pack, or
+		// its checkout moved — must not turn the answer into a 500: the
+		// advance is illegal either way, and that is what the caller is told.
+		if nameErr != nil {
+			api.log.Warn("resolve run pack for the advance idempotency check; answering without it",
+				"run", run.ID, "error", nameErr)
+		}
 		// Idempotency: if the plan gate was already decided approved, a repeat
 		// advance returns the current run without re-transitioning. Keyed on the
 		// pack-declared plan name (not current_stage — the runner has advanced
 		// past it, so reading current_stage would race the runner).
-		if planName != "" && api.decisionIsIdempotent(w, r, run, planName, "approved") {
+		if nameErr == nil && planName != "" && api.decisionIsIdempotent(w, r, run, planName, "approved") {
 			return
 		}
 		writeError(w, http.StatusConflict, codeIllegalTransition,
 			"advance requires paused_gate; run is "+run.State)
+		return
+	}
+	if nameErr != nil {
+		logUnexpected(api.log, nameErr, "resolveRunPack(advance)")
+		writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
 		return
 	}
 	bodyBytes, read := readRequestBody(w, r, maxGateAnswerBodyBytes)
@@ -427,14 +435,18 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// ON CONFLICT DO NOTHING would discard the reject). The same name
 	// keys the idempotency check, so a repeat reject after any gate reject
 	// returns 200 regardless of which gate fired first.
-	planName, nameErr := api.planApprovalName(r.Context(), run)
-	if nameErr != nil {
-		logUnexpected(api.log, nameErr, "resolveRunPack(reject)")
-		writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
-		return
-	}
+	// The pack is read only at the plan gate, the one place its approval name
+	// is used: everywhere else the name is final_review, and a pack that does
+	// not resolve (the run failed on that very pack, or its checkout moved)
+	// must not turn an illegal-state 409 into a 500.
 	rejectName := approvalNameFinalReview
 	if atPlanGate {
+		planName, nameErr := api.planApprovalName(r.Context(), run)
+		if nameErr != nil {
+			logUnexpected(api.log, nameErr, "resolveRunPack(reject)")
+			writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
+			return
+		}
 		rejectName = planName
 		if rejectName == "" {
 			// A pack with no source_write approval has no plan gate to reject at;

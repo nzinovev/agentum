@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -297,6 +298,25 @@ func TestHandleGetPack_ConfigurationErrorIsBadRequest(t *testing.T) {
 	api.handleGetPack(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a sentinel configuration error", recorder.Code)
+	}
+}
+
+// A failure to read the pack's bytes is the server's own: a 500 that does not
+// hand the caller git's stderr, never a 400 blaming the request.
+func TestHandleGetPack_ReadFailureIsInternal(t *testing.T) {
+	t.Parallel()
+	readFailure := fmt.Errorf("list tree: %w: %w", pack.ErrPackReadFailed, errors.New("fatal: not a git repository"))
+	api := New(nil, nil, slog.New(slog.DiscardHandler), nil,
+		WithPackCatalog(&fakePackCatalog{resolveErr: readFailure}))
+	recorder := httptest.NewRecorder()
+	request := principalRequest(http.MethodGet, "/api/v1/packs/probe")
+	request.SetPathValue("name", "probe")
+	api.handleGetPack(recorder, request)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for a read failure", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "not a git repository") {
+		t.Errorf("body = %s, must not carry the underlying read error", recorder.Body.String())
 	}
 }
 

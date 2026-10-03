@@ -94,7 +94,12 @@ func (s *DirSource) Resolve(ctx context.Context, ref string) (*Pack, error) {
 	}
 	dir := filepath.Join(s.Root, name)
 	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); err != nil {
-		return nil, fmt.Errorf("pack source: pack %q not found at %s: %w", name, dir, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Only absence is "not found"; a pack that exists and fails the
+			// constraint or validation below is a different answer.
+			return nil, fmt.Errorf("pack source: pack %q not found at %s: %w: %w", name, dir, ErrPackNotFound, err)
+		}
+		return nil, fmt.Errorf("pack source: stat pack %q at %s: %w", name, dir, err)
 	}
 	p, err := Load(dir)
 	if err != nil {

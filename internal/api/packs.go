@@ -51,8 +51,11 @@ type packDetailResponse struct {
 	Persona     string `json:"persona"`
 	Description string `json:"description,omitempty"`
 	Origin      string `json:"origin"`
-	Entry       string `json:"entry"`
-	Memory      struct {
+	// Commit is set only for a project-scoped read: the commit ref resolved
+	// to, so the answer names exactly what it describes (as the listing does).
+	Commit string `json:"commit,omitempty"`
+	Entry  string `json:"entry"`
+	Memory struct {
 		Reads  []string `json:"reads"`
 		Writes bool     `json:"writes"`
 	} `json:"memory"`
@@ -249,6 +252,7 @@ func (api *API) handleGetPack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resolved *pack.Resolved
+	resolvedCommit := ""
 	if projectID := r.URL.Query().Get("project_id"); projectID != "" {
 		if strings.TrimSpace(r.URL.Query().Get("ref")) == "" {
 			writeError(w, http.StatusBadRequest, codeBadInput, msgPackRefRequired)
@@ -279,29 +283,41 @@ func (api *API) handleGetPack(w http.ResponseWriter, r *http.Request) {
 		}
 		resolved, err = api.packs.ResolveForCommit(r.Context(), name, project.RepoPath, commit)
 		if err != nil {
-			writePackResolutionError(w, err)
+			api.writePackResolutionError(w, err)
 			return
 		}
+		resolvedCommit = commit
 	} else {
 		var err error
 		resolved, err = api.packs.ResolveBuiltin(r.Context(), name)
 		if err != nil {
-			writePackResolutionError(w, err)
+			api.writePackResolutionError(w, err)
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, packDetailOf(resolved))
+	detail := packDetailOf(resolved)
+	detail.Commit = resolvedCommit
+	writeJSON(w, http.StatusOK, detail)
 }
 
-// writePackResolutionError maps a pack resolution failure: an unknown name is
-// a 404, a sentinel configuration error (both documents, a symlinked entry, a
-// base naming a project pack, …) is a 400 naming it, anything else a 500.
-func writePackResolutionError(w http.ResponseWriter, err error) {
-	if errors.Is(err, pack.ErrPackNotFound) {
+// writePackResolutionError maps a pack resolution failure. An unknown name is
+// a 404. A failure to read the pack's bytes (the commit tree, the scratch
+// directory) is the server's own and a logged 500 — it says nothing about the
+// pack, and its text (git's stderr) is not the caller's to act on. Everything
+// else describes the pack or the ref the caller named — both documents
+// present, a symlinked entry, a base naming a project pack, a constraint the
+// pack's version does not satisfy, a manifest that does not validate — and is
+// a 400 carrying that description.
+func (api *API) writePackResolutionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, pack.ErrPackNotFound):
 		writeError(w, http.StatusNotFound, codeNotFound, "pack not found")
-		return
+	case errors.Is(err, pack.ErrPackReadFailed):
+		logUnexpected(api.log, err, "resolve pack")
+		writeError(w, http.StatusInternalServerError, codeInternal, "the pack could not be read")
+	default:
+		writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 	}
-	writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
 }
 
 // packDetailOf renders a resolved pack with its field origins.
