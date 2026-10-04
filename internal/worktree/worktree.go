@@ -809,9 +809,9 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID stri
 	return nil
 }
 
-// RemoveUnreadableWorktree removes a registered run worktree whose HEAD cannot
-// be read. It removes only that tree's Git registration so another damaged
-// worktree in the same repository remains available for repair.
+// RemoveUnreadableWorktree removes the canonical run directory when its HEAD
+// cannot be read. A missing Git registration must not strand a terminal run.
+// A registration for another branch still refuses deletion.
 func (manager *Manager) RemoveUnreadableWorktree(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -828,11 +828,16 @@ func (manager *Manager) RemoveUnreadableWorktree(ctx context.Context, repoPath, 
 	if statErr == nil && !info.IsDir() {
 		return errors.New("unreadable worktree path is not a directory")
 	}
+	if statErr == nil {
+		for _, parentPath := range []string{filepath.Join(repoAbs, ".agentum"), filepath.Join(repoAbs, ".agentum", "worktrees")} {
+			parentInfo, parentErr := os.Lstat(parentPath)
+			if parentErr != nil || !parentInfo.IsDir() {
+				return fmt.Errorf("worktree parent is not a directory: %s", parentPath)
+			}
+		}
+	}
 	metadataPath, metadataErr := registeredWorktreeMetadata(ctx, repoAbs, wtPath, BranchFor(runID))
 	if metadataErr != nil {
-		if os.IsNotExist(statErr) && errors.Is(metadataErr, errWorktreeRegistrationMissing) {
-			return nil
-		}
 		return metadataErr
 	}
 	if statErr == nil && DirPresent(wtPath) {
@@ -845,13 +850,13 @@ func (manager *Manager) RemoveUnreadableWorktree(ctx context.Context, repoPath, 
 			return fmt.Errorf("remove unreadable worktree: %w", removeErr)
 		}
 	}
-	if removeErr := os.RemoveAll(metadataPath); removeErr != nil {
-		return fmt.Errorf("remove unreadable worktree registration: %w", removeErr)
+	if metadataPath != "" {
+		if removeErr := os.RemoveAll(metadataPath); removeErr != nil {
+			return fmt.Errorf("remove unreadable worktree registration: %w", removeErr)
+		}
 	}
 	return nil
 }
-
-var errWorktreeRegistrationMissing = errors.New("worktree has no registration for this run branch")
 
 func registeredWorktreeMetadata(ctx context.Context, repoPath, wtPath, branch string) (string, error) {
 	out, err := git(ctx, repoPath, revParseCmd, "--git-common-dir")
@@ -864,6 +869,9 @@ func registeredWorktreeMetadata(ctx context.Context, repoPath, wtPath, branch st
 	}
 	entries, readErr := os.ReadDir(filepath.Join(commonDir, "worktrees"))
 	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return "", nil
+		}
 		return "", fmt.Errorf("read worktree registrations: %w", readErr)
 	}
 	for _, entry := range entries {
@@ -876,11 +884,28 @@ func registeredWorktreeMetadata(ctx context.Context, repoPath, wtPath, branch st
 			continue
 		}
 		head, headErr := os.ReadFile(filepath.Join(metadataPath, "HEAD"))
-		if headErr == nil && strings.TrimSpace(string(head)) == "ref: refs/heads/"+branch {
+		if headErr != nil {
+			return "", fmt.Errorf("read worktree registration HEAD: %w", headErr)
+		}
+		registeredHead := strings.TrimSpace(string(head))
+		if registeredHead == "ref: refs/heads/"+branch || isDetachedCommit(registeredHead) {
 			return metadataPath, nil
 		}
+		return "", fmt.Errorf("worktree registration belongs to another branch: %s", registeredHead)
 	}
-	return "", errWorktreeRegistrationMissing
+	return "", nil
+}
+
+func isDetachedCommit(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, digit := range value {
+		if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteBranch removes the agentum/<run-id> branch. This is the explicit,

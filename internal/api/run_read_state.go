@@ -80,9 +80,7 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 		return nil
 	}
 	budget, budgetErr := api.resolveRunPack(ctx, run)
-	if budgetErr != nil {
-		api.log.Warn("read plan budget", "run", run.ID, "error", budgetErr)
-	} else if budget != nil {
+	if budgetErr == nil && budget != nil {
 		used, countErr := api.queries.CountJobsOfKindForRun(ctx, sqlc.CountJobsOfKindForRunParams{
 			RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
 		})
@@ -95,7 +93,7 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 	if _, pathErr := os.Stat(wtPath); pathErr == nil {
 		response.Worktree.State = "present"
 		if !worktree.DirPresent(wtPath) {
-			response.Worktree.LastError = &runResourceError{Code: "worktree_unreadable", Message: "worktree link is missing; repair the local checkout before deleting it"}
+			response.Worktree.LastError = &runResourceError{Code: "worktree_unreadable", Message: "worktree link is missing; HEAD and uncommitted changes cannot be read"}
 		} else if head, headErr := manager.HeadCommit(ctx, wtPath); headErr != nil {
 			response.Worktree.LastError = &runResourceError{Code: "worktree_unreadable", Message: headErr.Error()}
 		} else {

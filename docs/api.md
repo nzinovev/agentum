@@ -146,7 +146,7 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
 | `POST` | `/runs/{id}/cleanup` | ✅ | terminal run with no worktree → branch deletion queued (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) / `409 conflict` (worktree still present). The worker checks for the worktree again before deleting the branch. |
 | `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
-| `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. A terminal run with an unreadable worktree uses `{discard_unreadable:true,discard_uncommitted:true}` after confirming loss of all files; the job verifies the run's Git registration and refuses a tree whose HEAD becomes readable. Requires `run:discard-worktree`. |
+| `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. A terminal run with an unreadable worktree uses `{discard_unreadable:true,discard_uncommitted:true}` after confirming loss of all files; the job confines deletion to the run's worktree path and refuses a tree whose HEAD becomes readable. Requires `run:discard-worktree`. |
 | `POST` | `/runs/{id}/continue` | ✅ | continue a `paused_user_stop` run before its first invocation. An optional `{"text":…}` reaches the first stage's Task section. Uses the same Continue handler and validation as the invocation route. |
 
 `base_ref` is the git ref the run builds against — **required and explicit**;
@@ -197,11 +197,12 @@ its tip is the HEAD the discard confirmed — otherwise the run pauses with
 `worktree_branch_unconfirmed`.
 
 A terminal run whose worktree HEAD cannot be read accepts
-`{discard_unreadable:true,discard_uncommitted:true}`. The job verifies that Git
-registered the directory for this run branch. It removes that directory and
-its registration, while preserving the branch. If the HEAD becomes readable
-before execution, the job refuses removal and the person must confirm its
-current `expected_head` instead.
+`{discard_unreadable:true,discard_uncommitted:true}`. The job removes the
+canonical `.agentum/worktrees/<run-id>` directory and its Git registration
+when one exists. A detached HEAD is accepted. A registration for another branch
+is refused. The branch remains. If the HEAD becomes readable before execution,
+the job refuses removal and the person must confirm its current
+`expected_head` instead.
 
 A run resumed over a worktree holding **uncommitted changes** does not get its
 tree wiped: the runner pauses with stop reason `worktree_uncommitted_changes`
