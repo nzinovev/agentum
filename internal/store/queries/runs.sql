@@ -10,11 +10,16 @@ SELECT * FROM runs WHERE id = $1 AND tenant_id = $2;
 -- name: ListRunsByProject :many
 SELECT * FROM runs
 WHERE tenant_id = $1 AND project_id = $2
-ORDER BY created_at DESC
+ORDER BY CASE WHEN state IN ('paused_open_questions', 'paused_gate', 'paused_user_stop', 'awaiting_final_review') THEN 0 ELSE 1 END,
+         updated_at DESC, id DESC
 LIMIT $3 OFFSET $4;
 
 -- name: UpdateRunState :one
-UPDATE runs SET state = $3, updated_at = now()
+UPDATE runs SET state = $3,
+    stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
+    error = CASE WHEN $3::text = 'failed' THEN sqlc.arg(error)::text ELSE '' END,
+    cancel_reason = CASE WHEN $3::text = 'cancelled' THEN sqlc.arg(cancel_reason)::text ELSE '' END,
+    updated_at = now()
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
@@ -22,7 +27,9 @@ RETURNING *;
 -- Set the runner's current position in the pack and (optionally) the state in
 -- one write. currentStage may be empty (e.g. clearing on terminal); state is
 -- always set. Used by the runner as it walks the pack's stages.
-UPDATE runs SET current_stage = $3, state = $4, updated_at = now()
+UPDATE runs SET current_stage = $3, state = $4,
+    stop_reason = CASE WHEN $4::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
+    error = '', cancel_reason = '', updated_at = now()
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 

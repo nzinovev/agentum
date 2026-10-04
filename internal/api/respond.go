@@ -39,6 +39,7 @@ type errorBody struct {
 type errorInfo struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Field   string `json:"field,omitempty"`
 }
 
 // Stable error codes. Add as the surface grows.
@@ -70,6 +71,10 @@ const (
 // writeError emits a structured error response.
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, errorBody{Error: errorInfo{Code: code, Message: msg}})
+}
+
+func writeFieldError(w http.ResponseWriter, status int, code, msg, field string) {
+	writeJSON(w, status, errorBody{Error: errorInfo{Code: code, Message: msg, Field: field}})
 }
 
 // notImplemented is the stub response for endpoints declared in the contract

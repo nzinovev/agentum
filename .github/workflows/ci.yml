@@ -54,6 +54,23 @@ jobs:
       - name: Download deps
         run: go mod download
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Verify embedded browser UI
+        run: |
+          npm ci --prefix web
+          make web-build
+          if [ -n "$(git status --porcelain -- internal/server/web)" ]; then
+            echo "Embedded UI differs from web/src; run make web-build and commit internal/server/web." >&2
+            git status --short -- internal/server/web
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 

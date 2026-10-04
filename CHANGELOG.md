@@ -10,6 +10,10 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **The Go server now serves a browser UI for projects and runs.** Operators
+  can register a repository, create and start a run, and view its progress and
+  artifacts at `/projects`. Open that route after starting Agentum; UI
+  contributors rebuild embedded assets with `make web-build`. (#54)
 - **`ask-to-edit` answers a plan gate with Request changes.** Before this, a
   remark on a plan had nowhere to go: `continue` refuses `paused_gate`, so
   the only answers were approve or reject. `POST .../ask-to-edit` with

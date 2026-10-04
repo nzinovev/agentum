@@ -158,7 +158,7 @@ func (rec *Reconciler) repairOrphanedRuns(ctx context.Context) error {
 			continue
 		}
 		if _, transitionErr := rec.runs.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
-			ID: run.ID, TenantID: run.TenantID, State: string(engine.StatePausedUserStop),
+			ID: run.ID, TenantID: run.TenantID, State: string(engine.StatePausedUserStop), StopReason: "interrupted",
 		}); transitionErr != nil {
 			rec.log.Error("reconcile: pause orphaned run", "run", run.ID, "error", transitionErr)
 			continue

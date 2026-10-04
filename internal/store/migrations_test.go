@@ -60,6 +60,79 @@ func TestMigrations_UpDownUp(t *testing.T) {
 	requireTables(t, reopenedStore.DB, expectedTables)
 }
 
+func TestMigration17BackfillsRunDiagnostics(t *testing.T) {
+	handle := dbtest.Store(t)
+	ctx := context.Background()
+	if err := handle.Store.MigrateDownTo(ctx, 16); err != nil {
+		t.Fatal(err)
+	}
+	const tenantID = "3ad5e0b1-64c1-4e30-9f0e-2b1c9d8a7e10"
+	const userID = "4be6f1c2-75d2-4f41-8a1f-3c2d0e9b8f21"
+	const projectID = "00000000-0000-0000-0000-000000000011"
+	if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO projects
+		(id, tenant_id, user_id, repo_identity, repo_root_commits, repo_path, name)
+		VALUES ($1, $2, $3, 'git-roots:v1:backfill', '{a233383e18550c5974d09c6b36ae62fe1c7e9a1a}', '/migration/backfill', 'backfill')`,
+		projectID, tenantID, userID); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := []struct{ id, state, payload string }{
+		{"00000000-0000-0000-0000-000000000012", "paused_user_stop", `{"to":"paused_user_stop","stop_reason":"interrupted"}`},
+		{"00000000-0000-0000-0000-000000000013", "failed", `{"to":"failed","error":"adapter crashed"}`},
+		{"00000000-0000-0000-0000-000000000014", "cancelled", `{"to":"cancelled"}`},
+		{"00000000-0000-0000-0000-000000000015", "cancelled", `{"to":"cancelled"}`},
+	}
+	for _, fixture := range fixtures {
+		if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO runs
+			(id, tenant_id, user_id, project_id, pipeline_pack, title, description, overrides, base_ref, state)
+			VALUES ($1, $2, $3, $4, 'backend-development', 'legacy', 'legacy', '{}', 'HEAD', $5)`,
+			fixture.id, tenantID, userID, projectID, fixture.state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO events
+			(tenant_id, user_id, run_id, type, payload, actor)
+			VALUES ($1, $2, $3, 'run.state_changed', $4, 'system')`,
+			tenantID, userID, fixture.id, fixture.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO stage_invocations
+		(tenant_id, user_id, run_id, stage, sequence) VALUES ($1, $2, $3, 'review', 1)`,
+		tenantID, userID, fixtures[0].id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO run_approvals
+		(tenant_id, user_id, run_id, name, decision, actor)
+		VALUES ($1, $2, $3, 'final_review', 'rejected', 'human')`,
+		tenantID, userID, fixtures[2].id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO run_approvals
+		(tenant_id, user_id, run_id, name, decision, actor)
+		VALUES ($1, $2, $3, 'plan_approval', 'rejected', 'human')`,
+		tenantID, userID, fixtures[3].id); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct{ id, stage, stop, failure, cancellation string }{
+		{fixtures[0].id, "review", "interrupted", "", ""},
+		{fixtures[1].id, "", "", "adapter crashed", ""},
+		{fixtures[2].id, "", "", "", "rejected_at_final_review"},
+		{fixtures[3].id, "", "", "", "rejected_at_plan"},
+	} {
+		var stage sql.NullString
+		var stopReason, failure, cancellation string
+		if err := handle.Store.DB.QueryRowContext(ctx, `SELECT current_stage, stop_reason, error, cancel_reason FROM runs WHERE id = $1`, check.id).
+			Scan(&stage, &stopReason, &failure, &cancellation); err != nil {
+			t.Fatal(err)
+		}
+		if stage.String != check.stage || stopReason != check.stop || failure != check.failure || cancellation != check.cancellation {
+			t.Errorf("run %s: got %q, %q, %q, %q", check.id, stage.String, stopReason, failure, cancellation)
+		}
+	}
+}
+
 // TestDBTest_IsolatesDatabases proves the property every other database test
 // stands on: each test's database is its own. Both subtests insert the same
 // primary key — in a shared database the second insert would collide and the

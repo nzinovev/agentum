@@ -90,8 +90,12 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, "invalid JSON body")
 		return
 	}
-	if req.RepoPath == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, codeBadInput, "repo_path and name are required")
+	if req.RepoPath == "" {
+		writeFieldError(w, http.StatusBadRequest, codeBadInput, "repo_path is required", "repo_path")
+		return
+	}
+	if req.Name == "" {
+		writeFieldError(w, http.StatusBadRequest, codeBadInput, "name is required", "name")
 		return
 	}
 	// related_projects is NOT NULL DEFAULT '{}' in Postgres, but pq.Array(nil)
@@ -105,7 +109,7 @@ func (api *API) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// copy" (no commits, shallow, linked worktree) come from one probe.
 	identity, err := repoid.Resolve(r.Context(), req.RepoPath)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, codeBadInput, "repo_path: "+err.Error())
+		writeFieldError(w, http.StatusBadRequest, codeBadInput, "repo_path: "+err.Error(), "repo_path")
 		return
 	}
 

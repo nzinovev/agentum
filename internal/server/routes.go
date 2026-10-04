@@ -5,12 +5,13 @@ import (
 	"net/http"
 )
 
-// registerRoutes wires the system endpoints only (health, ready). All /api/v1/*
-// surface is owned by internal/api and mounted via api.Register.
+// registerRoutes wires health, readiness, the API, and bundled frontend routes.
+// The API registers first so its specific patterns take precedence over the SPA root.
 func (server *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", server.handleHealth)
 	mux.HandleFunc("GET /readyz", server.handleReady)
 	server.api.Register(mux)
+	mux.HandleFunc("GET /", serveSPA)
 }
 
 func (server *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

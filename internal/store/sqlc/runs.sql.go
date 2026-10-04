@@ -37,7 +37,7 @@ const createRun = `-- name: CreateRun :one
 INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
                   title, description, overrides, base_ref, state)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type CreateRunParams struct {
@@ -81,12 +81,15 @@ func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (Run, erro
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
 
 const findOrphanedRunningRuns = `-- name: FindOrphanedRunningRuns :many
-SELECT runningrun.id, runningrun.tenant_id, runningrun.user_id, runningrun.project_id, runningrun.pipeline_pack, runningrun.title, runningrun.state, runningrun.created_at, runningrun.updated_at, runningrun.current_stage, runningrun.base_ref, runningrun.base_commit, runningrun.result_commit, runningrun.description, runningrun.overrides, runningrun.checkout_path, runningrun.pipeline_pack_origin FROM runs runningRun
+SELECT runningrun.id, runningrun.tenant_id, runningrun.user_id, runningrun.project_id, runningrun.pipeline_pack, runningrun.title, runningrun.state, runningrun.created_at, runningrun.updated_at, runningrun.current_stage, runningrun.base_ref, runningrun.base_commit, runningrun.result_commit, runningrun.description, runningrun.overrides, runningrun.checkout_path, runningrun.pipeline_pack_origin, runningrun.stop_reason, runningrun.error, runningrun.cancel_reason FROM runs runningRun
 WHERE runningRun.tenant_id = $1
   AND runningRun.state = 'running'
   AND NOT EXISTS (
@@ -130,6 +133,9 @@ func (q *Queries) FindOrphanedRunningRuns(ctx context.Context, tenantID string) 
 			&i.Overrides,
 			&i.CheckoutPath,
 			&i.PipelinePackOrigin,
+			&i.StopReason,
+			&i.Error,
+			&i.CancelReason,
 		); err != nil {
 			return nil, err
 		}
@@ -145,7 +151,7 @@ func (q *Queries) FindOrphanedRunningRuns(ctx context.Context, tenantID string) 
 }
 
 const getRun = `-- name: GetRun :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin FROM runs WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason FROM runs WHERE id = $1 AND tenant_id = $2
 `
 
 type GetRunParams struct {
@@ -174,12 +180,15 @@ func (q *Queries) GetRun(ctx context.Context, arg GetRunParams) (Run, error) {
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
 
 const getRunForUpdate = `-- name: GetRunForUpdate :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
 `
 
 type GetRunForUpdateParams struct {
@@ -211,14 +220,18 @@ func (q *Queries) GetRunForUpdate(ctx context.Context, arg GetRunForUpdateParams
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
 
 const listRunsByProject = `-- name: ListRunsByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin FROM runs
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason FROM runs
 WHERE tenant_id = $1 AND project_id = $2
-ORDER BY created_at DESC
+ORDER BY CASE WHEN state IN ('paused_open_questions', 'paused_gate', 'paused_user_stop', 'awaiting_final_review') THEN 0 ELSE 1 END,
+         updated_at DESC, id DESC
 LIMIT $3 OFFSET $4
 `
 
@@ -261,6 +274,9 @@ func (q *Queries) ListRunsByProject(ctx context.Context, arg ListRunsByProjectPa
 			&i.Overrides,
 			&i.CheckoutPath,
 			&i.PipelinePackOrigin,
+			&i.StopReason,
+			&i.Error,
+			&i.CancelReason,
 		); err != nil {
 			return nil, err
 		}
@@ -279,7 +295,7 @@ const rebindActiveCheckouts = `-- name: RebindActiveCheckouts :many
 UPDATE runs SET checkout_path = $4, updated_at = now()
 WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
   AND state NOT IN ('done', 'failed', 'cancelled')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type RebindActiveCheckoutsParams struct {
@@ -325,6 +341,9 @@ func (q *Queries) RebindActiveCheckouts(ctx context.Context, arg RebindActiveChe
 			&i.Overrides,
 			&i.CheckoutPath,
 			&i.PipelinePackOrigin,
+			&i.StopReason,
+			&i.Error,
+			&i.CancelReason,
 		); err != nil {
 			return nil, err
 		}
@@ -342,7 +361,7 @@ func (q *Queries) RebindActiveCheckouts(ctx context.Context, arg RebindActiveChe
 const setBaseCommit = `-- name: SetBaseCommit :one
 UPDATE runs SET base_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type SetBaseCommitParams struct {
@@ -378,6 +397,9 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (R
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
@@ -385,7 +407,7 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (R
 const setCheckoutPath = `-- name: SetCheckoutPath :one
 UPDATE runs SET checkout_path = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND checkout_path = ''
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type SetCheckoutPathParams struct {
@@ -422,6 +444,9 @@ func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
@@ -429,7 +454,7 @@ func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams
 const setPipelinePackOrigin = `-- name: SetPipelinePackOrigin :one
 UPDATE runs SET pipeline_pack_origin = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND pipeline_pack_origin IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type SetPipelinePackOriginParams struct {
@@ -465,6 +490,9 @@ func (q *Queries) SetPipelinePackOrigin(ctx context.Context, arg SetPipelinePack
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
@@ -472,7 +500,7 @@ func (q *Queries) SetPipelinePackOrigin(ctx context.Context, arg SetPipelinePack
 const setResultCommit = `-- name: SetResultCommit :one
 UPDATE runs SET result_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type SetResultCommitParams struct {
@@ -504,14 +532,19 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
 
 const updateRunStage = `-- name: UpdateRunStage :one
-UPDATE runs SET current_stage = $3, state = $4, updated_at = now()
+UPDATE runs SET current_stage = $3, state = $4,
+    stop_reason = CASE WHEN $4::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN $5::text ELSE '' END,
+    error = '', cancel_reason = '', updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type UpdateRunStageParams struct {
@@ -519,6 +552,7 @@ type UpdateRunStageParams struct {
 	TenantID     string         `json:"tenant_id"`
 	CurrentStage sql.NullString `json:"current_stage"`
 	State        string         `json:"state"`
+	StopReason   string         `json:"stop_reason"`
 }
 
 // Set the runner's current position in the pack and (optionally) the state in
@@ -530,6 +564,7 @@ func (q *Queries) UpdateRunStage(ctx context.Context, arg UpdateRunStageParams) 
 		arg.TenantID,
 		arg.CurrentStage,
 		arg.State,
+		arg.StopReason,
 	)
 	var i Run
 	err := row.Scan(
@@ -550,24 +585,41 @@ func (q *Queries) UpdateRunStage(ctx context.Context, arg UpdateRunStageParams) 
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }
 
 const updateRunState = `-- name: UpdateRunState :one
-UPDATE runs SET state = $3, updated_at = now()
+UPDATE runs SET state = $3,
+    stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN $4::text ELSE '' END,
+    error = CASE WHEN $3::text = 'failed' THEN $5::text ELSE '' END,
+    cancel_reason = CASE WHEN $3::text = 'cancelled' THEN $6::text ELSE '' END,
+    updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason
 `
 
 type UpdateRunStateParams struct {
-	ID       string `json:"id"`
-	TenantID string `json:"tenant_id"`
-	State    string `json:"state"`
+	ID           string `json:"id"`
+	TenantID     string `json:"tenant_id"`
+	State        string `json:"state"`
+	StopReason   string `json:"stop_reason"`
+	Error        string `json:"error"`
+	CancelReason string `json:"cancel_reason"`
 }
 
 func (q *Queries) UpdateRunState(ctx context.Context, arg UpdateRunStateParams) (Run, error) {
-	row := q.db.QueryRowContext(ctx, updateRunState, arg.ID, arg.TenantID, arg.State)
+	row := q.db.QueryRowContext(ctx, updateRunState,
+		arg.ID,
+		arg.TenantID,
+		arg.State,
+		arg.StopReason,
+		arg.Error,
+		arg.CancelReason,
+	)
 	var i Run
 	err := row.Scan(
 		&i.ID,
@@ -587,6 +639,9 @@ func (q *Queries) UpdateRunState(ctx context.Context, arg UpdateRunStateParams) 
 		&i.Overrides,
 		&i.CheckoutPath,
 		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
 	)
 	return i, err
 }

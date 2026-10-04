@@ -16,7 +16,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -58,21 +57,30 @@ type Request struct {
 	Overrides   Overrides
 }
 
+// FieldError keeps the invalid request field available to HTTP callers even
+// when the human-readable validation message changes.
+type FieldError struct {
+	Field   string
+	Message string
+}
+
+func (fieldError *FieldError) Error() string { return fieldError.Message }
+
 // Validate enforces the request rules: title and description must be present
 // and non-empty after trimming, and each within its byte budget. Errors name
 // the offending field so a 400 message tells the author what to fix.
 func (request Request) Validate() error {
 	if strings.TrimSpace(request.Title) == "" {
-		return errors.New("title is required")
+		return &FieldError{Field: "title", Message: "title is required"}
 	}
 	if len(request.Title) > MaxTitleBytes {
-		return fmt.Errorf("title exceeds %d bytes (got %d)", MaxTitleBytes, len(request.Title))
+		return &FieldError{Field: "title", Message: fmt.Sprintf("title exceeds %d bytes (got %d)", MaxTitleBytes, len(request.Title))}
 	}
 	if strings.TrimSpace(request.Description) == "" {
-		return errors.New("description is required")
+		return &FieldError{Field: "description", Message: "description is required"}
 	}
 	if len(request.Description) > MaxDescriptionBytes {
-		return fmt.Errorf("description exceeds %d bytes (got %d)", MaxDescriptionBytes, len(request.Description))
+		return &FieldError{Field: "description", Message: fmt.Sprintf("description exceeds %d bytes (got %d)", MaxDescriptionBytes, len(request.Description))}
 	}
 	return nil
 }

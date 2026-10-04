@@ -11,8 +11,8 @@ hard-coded name: Agentum ships the opencode adapter today, and the model, its
 parameters, and the runtime's version are evidence on every recorded
 invocation.
 
-> **Status:** early. The engine foundation, multi-tenant schema, explicit run
-> FSM, single-front-door HTTP API, and the project-memory schema are scaffolded.
+> **Status:** early. The browser UI covers project registration, run creation,
+> run status, and artifact viewing. The engine and HTTP API are under active development.
 > See `AGENTS.md` for the build agreement and architecture seams.
 
 ## Quick start
@@ -20,8 +20,16 @@ invocation.
 1. Install Go 1.25+ and Docker.
 2. Start Postgres: `make docker-up`.
 3. Resolve deps and run: `go mod tidy && make run`.
-4. Check health: `curl http://localhost:8080/healthz`.
-5. (Optional) Generate the data layer: install `sqlc`, then `make sqlc-gen`.
+4. Open `http://localhost:8080/projects` to register a repository and create a run.
+5. Check health: `curl http://localhost:8080/healthz`.
+6. (Optional) Generate the data layer: install `sqlc`, then `make sqlc-gen`.
+
+## Browser UI development
+
+Install Node.js 22 and run `npm ci --prefix web` once. After editing `web/src`,
+run `make web-build` and commit the generated files in `internal/server/web`.
+CI rebuilds the UI and checks that those files match. A Go build and the running
+server use the committed files and do not require Node.js.
 
 ## Documentation
 
