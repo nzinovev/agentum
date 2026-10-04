@@ -10,6 +10,12 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **The run page now supports human decisions from plan approval through final review.**
+  Before this, the browser showed progress and artifacts but could not complete
+  a `backend-development` run. Open a run to decide the plan, answer questions,
+  resume or reconcile a pause, inspect checks, reviewer findings, and
+  `diff.stat`, retry publication, and approve, reject, or cancel. Review code
+  in the draft PR. (#55)
 - **The Go server now serves a browser UI for projects and runs.** Operators
   can register a repository, create and start a run, and view its progress and
   artifacts at `/projects`. Open that route after starting Agentum; UI
@@ -48,7 +54,7 @@ Once tagged releases begin, this project adheres to
   it applies to and is audited.
 - **`POST /runs/{id}/worktree/discard` removes a stopped or terminal run's
   working tree — the tree only, never the branch.** The explicit, audited
-  counterpart to keeping failed runs' worktrees: it requires the run's current
+  counterpart to keeping failed runs' worktrees: it normally requires the current
   HEAD, `discard_uncommitted: true` when the tree is dirty, and no active job;
   the runner re-verifies every precondition before removing anything.
   `cleanup` remains the branch-deleting verb. A stopped run stays resumable
@@ -75,6 +81,10 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Changed
+- **Approve, reject, and cancel now leave the worktree and branch in place.**
+  Before this, terminal teardown removed the worktree. Use the run page's
+  confirmed Delete worktree and Delete branch actions when the local result
+  is no longer needed. (#55)
 - **`base_ref` is required at `POST /runs`; nothing defaults to `HEAD`
   silently.** Before this, an omitted `base_ref` made the run start from
   whatever the operator's checkout happened to be on, so a developer branch's
@@ -98,6 +108,18 @@ Once tagged releases begin, this project adheres to
   already pinned keep their recorded `base_ref`/`base_commit`.
 
 ### Fixed
+- **A missing checkout or unreadable pinned pack no longer blocks the run page.**
+  Before this, `GET /runs/{id}` returned `500` and hid Continue and Cancel.
+  The read omits `plan_edits` until the pinned pack can be resolved; restore
+  the checkout or pack before taking plan-gate actions. (#55)
+- **Run polling no longer takes Git's optional index lock.** Before this, a
+  status read could collide with an agent or runner commit and fail its stage.
+  Operators need no action. (#55)
+- **A terminal run can delete an unreadable worktree without a Git registration.**
+  Previously a missing registration or detached HEAD could strand both the
+  directory and branch. Confirm the loss in the run page, then delete the
+  branch separately. A registration for another branch still blocks deletion.
+  (#55)
 - **A `.agentum.yaml` that exists only in the working copy reads as absence
   instead of failing the run.** Before this, `FileAtCommit` detected a
   missing path by matching git's English "does not exist" text, so git's
