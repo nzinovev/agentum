@@ -30,7 +30,9 @@ build: ## build all packages
 web-build: ## type-check and rebuild the embedded browser UI
 	npm run build --prefix web
 
-SOURCES := $(wildcard cmd/agentum/*.go internal/*/*.go internal/store/migrations/*.sql) internal/publish/pr-template.md
+# The embedded UI is listed so a bundle-only change (make web-build) still
+# rebuilds the binary that run-bg starts.
+SOURCES := $(wildcard cmd/agentum/*.go internal/*/*.go internal/store/migrations/*.sql internal/server/web/* internal/server/web/assets/*) internal/publish/pr-template.md
 
 $(AGENTUM_BIN): $(SOURCES)
 	@mkdir -p bin
