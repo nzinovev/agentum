@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
@@ -41,6 +42,11 @@ type runResponse struct {
 	Description        string          `json:"description"`
 	Overrides          json.RawMessage `json:"overrides"`
 	State              string          `json:"state"`
+	CurrentStage       string          `json:"current_stage"`
+	StopReason         string          `json:"stop_reason"`
+	Error              string          `json:"error"`
+	CancelReason       string          `json:"cancel_reason"`
+	OpenQuestions      *[]string       `json:"open_questions,omitempty"`
 	BaseRef            string          `json:"base_ref"`
 	BaseCommit         string          `json:"base_commit"`
 	ResultCommit       string          `json:"result_commit"`
@@ -63,6 +69,10 @@ func toRunResponse(run sqlc.Run) runResponse {
 		Description:        run.Description,
 		Overrides:          overrides,
 		State:              run.State,
+		CurrentStage:       nullStringOr(run.CurrentStage),
+		StopReason:         run.StopReason,
+		Error:              run.Error,
+		CancelReason:       run.CancelReason,
 		BaseRef:            run.BaseRef,
 		BaseCommit:         nullStringOr(run.BaseCommit),
 		ResultCommit:       nullStringOr(run.ResultCommit),
@@ -148,6 +158,9 @@ func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
 	if err := decoder.Decode(&req); err != nil {
 		return runCreateRequest{}, taskinput.Request{}, err
 	}
+	if req.PipelinePack == "" {
+		req.PipelinePack = "backend-development"
+	}
 	overrides, err := taskinput.ParseOverrides(req.Overrides)
 	if err != nil {
 		return runCreateRequest{}, taskinput.Request{}, err
@@ -200,7 +213,7 @@ func scanRequestForCredentials(request taskinput.Request) error {
 		{name: "description", text: request.Description},
 	} {
 		if _, scanErr := scanner.Scan(field.name, "run_request", []byte(field.text)); scanErr != nil {
-			return scanErr
+			return fmt.Errorf("%s: %w", field.name, scanErr)
 		}
 	}
 	return nil
@@ -212,11 +225,22 @@ func scanRequestForCredentials(request taskinput.Request) error {
 // uses for ErrSecretDetected (do not invent a new code). Shared by the
 // create-run and continue handlers, whose bodies face the same failure set.
 func writeRequestBodyError(w http.ResponseWriter, err error) {
+	field := requestErrorField(err)
 	if errors.Is(err, artifacts.ErrSecretDetected) {
-		writeError(w, http.StatusUnprocessableEntity, codeBadInput, err.Error())
+		writeFieldError(w, http.StatusUnprocessableEntity, codeBadInput, err.Error(), field)
 		return
 	}
-	writeError(w, http.StatusBadRequest, codeBadInput, err.Error())
+	writeFieldError(w, http.StatusBadRequest, codeBadInput, err.Error(), field)
+}
+
+func requestErrorField(err error) string {
+	message := err.Error()
+	for _, field := range []string{"project_id", "pipeline_pack", "title", "description", "overrides", "base_ref"} {
+		if strings.HasPrefix(message, field+" ") || strings.HasPrefix(message, field+":") || strings.HasPrefix(message, field+".") || strings.Contains(message, `unknown field "`+field+`"`) {
+			return field
+		}
+	}
+	return ""
 }
 
 // handleCreateRun POST /api/v1/runs
@@ -243,8 +267,8 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	// blank one through taskinput.Validate, with a message naming the field.
 	// base_ref is likewise already required by parseRunCreate — the rule
 	// lives with the other pure body rules, testable without a database.
-	if req.ProjectID == "" || req.PipelinePack == "" {
-		writeError(w, http.StatusBadRequest, codeBadInput, "project_id and pipeline_pack are required")
+	if req.ProjectID == "" {
+		writeFieldError(w, http.StatusBadRequest, codeBadInput, "project_id is required", "project_id")
 		return
 	}
 	canonicalOverrides, marshalErr := typed.Overrides.Marshal()
@@ -288,7 +312,29 @@ func (api *API) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, toRunResponse(run))
+	response := toRunResponse(run)
+	if run.State == string(engine.StatePausedOpenQuestions) {
+		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{RunID: run.ID, TenantID: run.TenantID})
+		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
+			logUnexpected(api.log, latestErr, "LatestStageForRun(get run)")
+			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
+			return
+		}
+		questions := []string{}
+		if latestErr == nil && latest.Result.Valid && len(latest.Result.RawMessage) > 0 {
+			var result agent.ResultJSON
+			if err := json.Unmarshal(latest.Result.RawMessage, &result); err != nil {
+				logUnexpected(api.log, err, "decode latest invocation result")
+				writeError(w, http.StatusInternalServerError, codeInternal, "could not read open questions")
+				return
+			}
+			if result.OpenQuestions != nil {
+				questions = result.OpenQuestions
+			}
+		}
+		response.OpenQuestions = &questions
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleListRuns GET /api/v1/runs?project_id=...&limit=...&offset=...

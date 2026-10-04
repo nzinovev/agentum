@@ -223,6 +223,7 @@ func (api *API) Register(mux interface {
 	mux.HandleFunc("GET /api/v1/projects", api.handleListProjects)
 	mux.HandleFunc("POST /api/v1/projects", api.handleCreateProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}", api.handleGetProject)
+	mux.HandleFunc("GET /api/v1/fs/dirs", api.handleListFSDirs)
 
 	// Runs (lifecycle).
 	mux.HandleFunc("GET /api/v1/runs", api.handleListRuns)

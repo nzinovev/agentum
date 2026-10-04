@@ -1,15 +1,20 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
+	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/sqlc-dev/pqtype"
 )
 
 // validCreateBody is the body every accepted case starts from, as compact JSON.
@@ -143,6 +148,142 @@ func TestParseTaskCreate(t *testing.T) {
 				t.Errorf("errors.Is(err, ErrSecretDetected) = %v, want %v", errors.Is(err, artifacts.ErrSecretDetected), testCase.secret)
 			}
 		})
+	}
+}
+
+func TestParseRunCreate_DefaultPack(t *testing.T) {
+	t.Parallel()
+	body := strings.Replace(validCreateBody, "  \"pipeline_pack\": \"backend-development@0.1.0\",\n", "", 1)
+	request, _, err := parseRunCreate([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.PipelinePack != "backend-development" {
+		t.Errorf("pack = %q, want backend-development", request.PipelinePack)
+	}
+}
+
+func TestRunUIStateAndOrdering(t *testing.T) {
+	harness := newRegistrationHarness(t)
+	repositoryPath := t.TempDir()
+	initRegistrationRepo(t, repositoryPath, "run ui state")
+	project := harness.registerProject(repositoryPath)
+
+	created := harness.seedRun(project.ID, "created", "")
+	paused := harness.seedRun(project.ID, "created", "")
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: paused.ID, TenantID: testTenantID, CurrentStage: sql.NullString{String: "spec", Valid: true},
+		State: "paused_open_questions", StopReason: "open_questions",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := harness.queries.CreateStageInvocation(t.Context(), sqlc.CreateStageInvocationParams{
+		TenantID: testTenantID, UserID: testUserID, RunID: paused.ID, Stage: "spec", Sequence: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.queries.FinishStageInvocation(t.Context(), sqlc.FinishStageInvocationParams{
+		ID: invocation.ID, TenantID: testTenantID,
+		Result: pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"status":"blocked","open_questions":["Which database?"]}`), Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pausedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+paused.ID, nil)
+	pausedRequest.SetPathValue("id", paused.ID)
+	pausedRequest = pausedRequest.WithContext(authz.WithPrincipal(pausedRequest.Context(), harness.principal))
+	pausedRecorder := httptest.NewRecorder()
+	harness.api.handleGetRun(pausedRecorder, pausedRequest)
+	if pausedRecorder.Code != http.StatusOK {
+		t.Fatalf("paused GET status = %d: %s", pausedRecorder.Code, pausedRecorder.Body.String())
+	}
+	var pausedResponse runResponse
+	if err := json.Unmarshal(pausedRecorder.Body.Bytes(), &pausedResponse); err != nil {
+		t.Fatal(err)
+	}
+	if pausedResponse.CurrentStage != "spec" || pausedResponse.StopReason != "open_questions" || pausedResponse.OpenQuestions == nil || len(*pausedResponse.OpenQuestions) != 1 || (*pausedResponse.OpenQuestions)[0] != "Which database?" {
+		t.Errorf("paused run response = %+v", pausedResponse)
+	}
+	failed := harness.seedRun(project.ID, "created", "")
+	if _, err := harness.queries.UpdateRunState(t.Context(), sqlc.UpdateRunStateParams{
+		ID: failed.ID, TenantID: testTenantID, State: "failed", Error: "pack failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := harness.queries.ListRunsByProject(t.Context(), sqlc.ListRunsByProjectParams{
+		TenantID: testTenantID, ProjectID: project.ID, Limit: 2, Offset: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != 2 || ordered[0].ID != paused.ID || ordered[1].ID != failed.ID {
+		t.Fatalf("first page = %+v; want paused before failed", ordered)
+	}
+	secondPage, err := harness.queries.ListRunsByProject(t.Context(), sqlc.ListRunsByProjectParams{
+		TenantID: testTenantID, ProjectID: project.ID, Limit: 2, Offset: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage) != 1 || secondPage[0].ID != created.ID {
+		t.Fatalf("second page = %+v; want created run", secondPage)
+	}
+	resumed, err := harness.queries.UpdateRunState(t.Context(), sqlc.UpdateRunStateParams{
+		ID: paused.ID, TenantID: testTenantID, State: "running", StopReason: "stale",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.StopReason != "" || resumed.Error != "" || resumed.CancelReason != "" {
+		t.Errorf("resumed diagnostics = %+v; want all empty", resumed)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+failed.ID, nil)
+	request.SetPathValue("id", failed.ID)
+	request = request.WithContext(authz.WithPrincipal(request.Context(), harness.principal))
+	recorder := httptest.NewRecorder()
+	harness.api.handleGetRun(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response runResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error != "pack failed" || response.CurrentStage != "" || response.StopReason != "" {
+		t.Errorf("failed run response = %+v", response)
+	}
+	createBody := fmt.Sprintf(`{"project_id":%q,"title":"Default pack","description":"Check default pack.","base_ref":"HEAD"}`, project.ID)
+	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(createBody))
+	createRequest = createRequest.WithContext(authz.WithPrincipal(createRequest.Context(), harness.principal))
+	createRecorder := httptest.NewRecorder()
+	harness.api.handleCreateRun(createRecorder, createRequest)
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+	var createdResponse runResponse
+	if err := json.Unmarshal(createRecorder.Body.Bytes(), &createdResponse); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: createdResponse.ID, TenantID: testTenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdResponse.PipelinePack != "backend-development" || stored.PipelinePack != "backend-development" {
+		t.Errorf("default pack response = %q, stored = %q", createdResponse.PipelinePack, stored.PipelinePack)
+	}
+}
+
+func TestRunValidationErrorField(t *testing.T) {
+	t.Parallel()
+	recorder := httptest.NewRecorder()
+	writeRequestBodyError(recorder, errors.New("description exceeds 10 bytes"))
+	var response errorBody
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error.Field != "description" || response.Error.Code != codeBadInput || response.Error.Message != "description exceeds 10 bytes" {
+		t.Errorf("error = %+v", response.Error)
 	}
 }
 

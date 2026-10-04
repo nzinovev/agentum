@@ -106,6 +106,9 @@ type Run struct {
 	Overrides          json.RawMessage `json:"overrides"`
 	CheckoutPath       string          `json:"checkout_path"`
 	PipelinePackOrigin sql.NullString  `json:"pipeline_pack_origin"`
+	StopReason         string          `json:"stop_reason"`
+	Error              string          `json:"error"`
+	CancelReason       string          `json:"cancel_reason"`
 }
 
 type RunApproval struct {

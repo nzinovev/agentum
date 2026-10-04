@@ -148,6 +148,10 @@ const (
 	ActionProjectRead   = "project:read"
 	ActionProjectList   = "project:list"
 
+	// ActionFSDirs permits browsing local directories for project registration.
+	// The endpoint confines paths to the home directory because it exposes host filenames.
+	ActionFSDirs = "fs:browse"
+
 	// ActionPackList is the right to read the pack catalog: builtin packs,
 	// and — with project:read on the project — the project's packs at a ref.
 	// Tenant-scoped: the builtin set is process-wide.

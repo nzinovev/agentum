@@ -2251,7 +2251,7 @@ func (runner *Runner) applyPauseDecision(ctx context.Context, record sqlc.Run, d
 	}
 	if _, err := runner.store.UpdateRunStage(ctx, sqlc.UpdateRunStageParams{
 		ID: record.ID, TenantID: record.TenantID,
-		CurrentStage: nullStr(stageID), State: string(newState),
+		CurrentStage: nullStr(stageID), State: string(newState), StopReason: decision.StopReason,
 	}); err != nil {
 		return fmt.Errorf("persist pause: %w", err)
 	}
@@ -2691,7 +2691,7 @@ func (runner *Runner) nextCycleForStage(ctx context.Context, record sqlc.Run, st
 func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error) error {
 	runner.log.Error("runner failing run", "run", record.ID, "error", cause)
 	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
-		ID: record.ID, TenantID: record.TenantID, State: string(engine.StateFailed),
+		ID: record.ID, TenantID: record.TenantID, State: string(engine.StateFailed), Error: cause.Error(),
 	}); err != nil {
 		return fmt.Errorf("%w (and failed to mark run failed: %v)", cause, err)
 	}

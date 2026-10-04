@@ -498,7 +498,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
 			run: run, next: next, jobKind: jobKindTeardown,
-			decision: decision, policy: recordLenient,
+			decision: decision, policy: recordLenient, cancelReason: "rejected",
 		})
 		if txErr != nil {
 			return txErr
@@ -679,9 +679,10 @@ type lifecycleTransition struct {
 	// jobPayload is the job body. Empty (or a literal JSON null, which is what
 	// an absent request body decodes to) becomes "{}" — a job row always
 	// carries a valid JSON object.
-	jobPayload []byte
-	decision   manifest.Body
-	policy     recordPolicy
+	jobPayload   []byte
+	decision     manifest.Body
+	policy       recordPolicy
+	cancelReason string
 }
 
 // applyTransition performs the three writes every lifecycle transaction opens
@@ -695,8 +696,12 @@ func (api *API) applyTransition(ctx context.Context, qtx *sqlc.Queries, principa
 	if len(jobPayload) == 0 || string(jobPayload) == "null" {
 		jobPayload = []byte("{}")
 	}
+	cancelReason := transition.cancelReason
+	if transition.next == engine.StateCancelled && cancelReason == "" {
+		cancelReason = "cancelled"
+	}
 	transitioned, transitionErr := qtx.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
-		ID: transition.run.ID, TenantID: principal.TenantID, State: string(transition.next),
+		ID: transition.run.ID, TenantID: principal.TenantID, State: string(transition.next), CancelReason: cancelReason,
 	})
 	if transitionErr != nil {
 		return sqlc.Run{}, transitionErr

@@ -19,6 +19,8 @@ and land with the epic named in the table.
   { "error": { "code": "illegal_transition", "message": "engine: illegal transition running --start-->" } }
   ```
 
+  Validation errors may also include `error.field` so a form can place the
+  message beside the input. `error.code` and `error.message` remain present.
   Codes are stable machine identifiers; the UI branches on them. Current codes:
   `not_found`, `illegal_transition`, `bad_input`, `unauthorized`, `forbidden`,
   `not_implemented`, `internal`, `conflict`, `too_many_requests`,
@@ -80,6 +82,33 @@ repository / checkout, run vs work item, actor / creator / owner).
 | `GET` | `/projects` | ✅ | `?limit=&offset=` → `200 Project[]` |
 | `GET` | `/projects/{id}` | ✅ | → `200 Project` / `404 not_found` |
 
+### Local directory browser
+
+`GET /api/v1/fs/dirs?path=…` lists directories for the registration picker.
+Without `path`, it opens the server user's home directory. The endpoint accepts
+loopback connections only and resolves symbolic links before requiring every
+listed path to stay inside that home directory. It requires `fs:browse` access.
+
+```json
+{
+  "path": "/home/me/src",
+  "parent": "/home/me",
+  "directories": [
+    {
+      "name": "my-app",
+      "path": "/home/me/src/my-app",
+      "is_git": true,
+      "shallow": false,
+      "has_commits": true,
+      "registered_project_id": ""
+    }
+  ]
+}
+```
+
+`parent` is empty at the home directory. `registered_project_id` is empty for
+an unregistered repository.
+
 ### Project
 
 ```json
@@ -105,9 +134,9 @@ one of the two counters is non-zero on any given registration.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack, title, description, overrides?, base_ref}` → `201 Run`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
-| `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]` |
-| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found` |
+| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack?, title, description, overrides?, base_ref}` → `201 Run`. Omitted `pipeline_pack` stores `backend-development`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]`. Human-waiting states (`paused_open_questions`, `paused_gate`, `paused_user_stop`, `awaiting_final_review`) come first. Each group is ordered by `updated_at DESC, id DESC`; pagination follows that order. |
+| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation when the run is in `paused_open_questions`. |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
@@ -211,6 +240,11 @@ gate".
   "description": "Problem. … What to do. …",
   "overrides": {},
   "state": "created | running | paused_open_questions | paused_gate | paused_user_stop | awaiting_final_review | done | failed | cancelled",
+  "current_stage": "implement",
+  "stop_reason": "",
+  "error": "",
+  "cancel_reason": "",
+  "open_questions": [],
   "base_ref": "main",
   "base_commit": "a1b2... full SHA the run branched from, set on first run",
   "result_commit": "c3d4... full SHA pinned at the final gate (the commit the human reviews); empty before the gate",
@@ -219,6 +253,12 @@ gate".
   "updated_at": "2026-07-05T..."
 }
 ```
+
+`current_stage`, `stop_reason`, `error`, and `cancel_reason` are strings on both
+run responses and list items. Empty means the value does not apply. A stop
+reason is present only while stopped; `error` is present only in `failed`.
+`cancel_reason` distinguishes a rejected run from an ordinary cancellation.
+Only `GET /runs/{id}` includes `open_questions`.
 
 ## Publication
 
