@@ -16,7 +16,7 @@ AGENTUM_BIN := bin/agentum
 PID_FILE    := /tmp/agentum.pid
 LOG_FILE    := /tmp/agentum.log
 
-.PHONY: help tidy build run run-bg stop logs test test-db vet fmt skills-check sqlc-gen migrate-up migrate-down docker-up docker-down
+.PHONY: help tidy build web-build run run-bg stop logs test test-db vet fmt skills-check sqlc-gen migrate-up migrate-down docker-up docker-down
 
 help: ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*##"}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -26,6 +26,9 @@ tidy: ## go mod tidy
 
 build: ## build all packages
 	go build ./...
+
+web-build: ## type-check and rebuild the embedded browser UI
+	npm run build --prefix web
 
 SOURCES := $(wildcard cmd/agentum/*.go internal/*/*.go internal/store/migrations/*.sql) internal/publish/pr-template.md
 

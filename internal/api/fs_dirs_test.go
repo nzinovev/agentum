@@ -15,6 +15,7 @@ func listFSDirs(t *testing.T, api *API, requestPath, remoteAddress string, princ
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/fs/dirs"+requestPath, nil)
 	request.RemoteAddr = remoteAddress
+	request.Host = "localhost:8080"
 	if principal {
 		request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
 			TenantID: testTenantID, UserID: testUserID,
@@ -29,6 +30,42 @@ func listFSDirs(t *testing.T, api *API, requestPath, remoteAddress string, princ
 		}
 	}
 	return recorder.Code, response
+}
+
+func TestListFSDirs_RejectsReboundHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/fs/dirs", nil)
+	request.RemoteAddr = "127.0.0.1:4000"
+	request.Host = "attacker.example:8080"
+	request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
+		TenantID: testTenantID, UserID: testUserID,
+	}))
+	recorder := httptest.NewRecorder()
+	New(nil, nil, nil, nil).handleListFSDirs(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestLoopbackHost(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		host string
+		want bool
+	}{
+		{host: "localhost:8080", want: true},
+		{host: "127.0.0.1:8080", want: true},
+		{host: "[::1]:8080", want: true},
+		{host: "[::1]", want: true},
+		{host: "attacker.example:8080"},
+		{host: "localhost.attacker.example:8080"},
+	} {
+		t.Run(testCase.host, func(t *testing.T) {
+			if got := loopbackHost(testCase.host); got != testCase.want {
+				t.Errorf("loopbackHost(%q) = %v, want %v", testCase.host, got, testCase.want)
+			}
+		})
+	}
 }
 
 func TestListFSDirs_AccessAndHomeBoundary(t *testing.T) {

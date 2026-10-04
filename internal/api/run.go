@@ -105,6 +105,16 @@ type runCreateRequest struct {
 	BaseRef      string          `json:"base_ref"`
 }
 
+const defaultRunPipelinePack = "backend-development"
+
+type requestFieldError struct {
+	field string
+	cause error
+}
+
+func (fieldError *requestFieldError) Error() string { return fieldError.cause.Error() }
+func (fieldError *requestFieldError) Unwrap() error { return fieldError.cause }
+
 // maxRunCreateBytes caps the create body on the transport. It must be sized
 // for the ENCODED body while the field budgets are measured on the DECODED
 // string, and those differ by more than a rounding error: a client that
@@ -159,11 +169,11 @@ func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
 		return runCreateRequest{}, taskinput.Request{}, err
 	}
 	if req.PipelinePack == "" {
-		req.PipelinePack = "backend-development"
+		req.PipelinePack = defaultRunPipelinePack
 	}
 	overrides, err := taskinput.ParseOverrides(req.Overrides)
 	if err != nil {
-		return runCreateRequest{}, taskinput.Request{}, err
+		return runCreateRequest{}, taskinput.Request{}, &requestFieldError{field: "overrides", cause: err}
 	}
 	// base_ref is required and explicit. The old silent default to HEAD made
 	// every run start from whatever the operator's checkout happened to be
@@ -171,9 +181,10 @@ func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
 	// and later into its pull request. "HEAD" itself stays a legal EXPLICIT
 	// choice (run from the current local branch); only the silent one is
 	// gone. The column default remains as a backstop for non-API writers.
-	if strings.TrimSpace(req.BaseRef) == "" {
-		return runCreateRequest{}, taskinput.Request{}, errors.New(
-			"base_ref is required: name the target branch the run builds on (e.g. refs/remotes/origin/main) or the commit it starts from; HEAD only as an explicit choice to run from the current local branch")
+	req.BaseRef = strings.TrimSpace(req.BaseRef)
+	if req.BaseRef == "" {
+		return runCreateRequest{}, taskinput.Request{}, &requestFieldError{field: "base_ref", cause: errors.New(
+			"base_ref is required: name the target branch the run builds on (e.g. refs/remotes/origin/main) or the commit it starts from; HEAD only as an explicit choice to run from the current local branch")}
 	}
 	typed := taskinput.Request{
 		Title:       req.Title,
@@ -213,7 +224,7 @@ func scanRequestForCredentials(request taskinput.Request) error {
 		{name: "description", text: request.Description},
 	} {
 		if _, scanErr := scanner.Scan(field.name, "run_request", []byte(field.text)); scanErr != nil {
-			return fmt.Errorf("%s: %w", field.name, scanErr)
+			return &requestFieldError{field: field.name, cause: fmt.Errorf("%s: %w", field.name, scanErr)}
 		}
 	}
 	return nil
@@ -234,11 +245,13 @@ func writeRequestBodyError(w http.ResponseWriter, err error) {
 }
 
 func requestErrorField(err error) string {
-	message := err.Error()
-	for _, field := range []string{"project_id", "pipeline_pack", "title", "description", "overrides", "base_ref"} {
-		if strings.HasPrefix(message, field+" ") || strings.HasPrefix(message, field+":") || strings.HasPrefix(message, field+".") || strings.Contains(message, `unknown field "`+field+`"`) {
-			return field
-		}
+	var requestIssue *requestFieldError
+	if errors.As(err, &requestIssue) {
+		return requestIssue.field
+	}
+	var taskIssue *taskinput.FieldError
+	if errors.As(err, &taskIssue) {
+		return taskIssue.Field
 	}
 	return ""
 }

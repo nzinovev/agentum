@@ -165,8 +165,14 @@ function StopPanel({
       break;
     case "paused_gate":
       eyebrow = "Waiting for you";
-      title = "The plan is ready for approval.";
-      body = "No source code changes until the plan is approved.";
+      title =
+        reason && reason !== "gate"
+          ? reasonCopy[0]
+          : "The plan is ready for approval.";
+      body =
+        reason && reason !== "gate"
+          ? reasonCopy[1]
+          : "No source code changes until the plan is approved.";
       action = "advance";
       artifactName = "plan/plan.md";
       break;
@@ -208,14 +214,26 @@ function StopPanel({
       kept = [`branch ${item.branch}`];
       break;
     case "cancelled":
+      const rejectedAtPlan = item.cancel_reason === "rejected_at_plan";
+      const rejectedAtFinal = item.cancel_reason === "rejected_at_final_review";
+      const rejected =
+        rejectedAtPlan || rejectedAtFinal || item.cancel_reason === "rejected";
       eyebrow =
-        item.cancel_reason === "rejected"
-          ? "Cancelled · rejected at final review"
-          : "Cancelled";
+        rejectedAtPlan
+          ? "Cancelled · rejected at plan gate"
+          : rejectedAtFinal
+            ? "Cancelled · rejected at final review"
+            : rejected
+              ? "Cancelled · rejected"
+              : "Cancelled";
       title =
-        item.cancel_reason === "rejected"
-          ? "The result was rejected."
-          : `The run was cancelled${item.current_stage ? " during " + item.current_stage : ""}.`;
+        rejectedAtPlan
+          ? "The plan was rejected."
+          : rejectedAtFinal
+            ? "The result was rejected."
+            : rejected
+              ? "The run was rejected."
+              : `The run was cancelled${item.current_stage ? " during " + item.current_stage : ""}.`;
       body = "The worktree was removed; the branch is kept for reference.";
       kept = [`branch ${item.branch}`];
       if (item.result_commit)
@@ -229,6 +247,13 @@ function StopPanel({
   const actionPath = latest
     ? `POST /api/v1/runs/${item.id}/invocations/${latest.id}/${action}`
     : `POST /api/v1/runs/${item.id}`;
+  if (waitingStates.has(state)) {
+    const elapsedMinutes = Math.max(
+      0,
+      Math.floor((now - Date.parse(item.updated_at)) / 60000),
+    );
+    eyebrow += ` · ${elapsedMinutes}m`;
+  }
   return (
     <section className={"stop-panel " + stateTone(state)}>
       <div>
@@ -387,7 +412,17 @@ function ArtifactViewer({
   useEffect(() => {
     setText(null);
     setError(null);
-    artifactContent(runID, item.id).then(setText).catch(setError);
+    let active = true;
+    artifactContent(runID, item.id)
+      .then((content) => {
+        if (active) setText(content);
+      })
+      .catch((caught) => {
+        if (active) setError(caught);
+      });
+    return () => {
+      active = false;
+    };
   }, [runID, item.id]);
   const kind =
     item.name.endsWith(".md") ||
@@ -513,7 +548,12 @@ function Artifacts({
         </div>
       )}
       {open && (
-        <ArtifactViewer item={open} runID={runID} close={() => setOpen(null)} />
+        <ArtifactViewer
+          key={open.id}
+          item={open}
+          runID={runID}
+          close={() => setOpen(null)}
+        />
       )}
     </section>
   );
@@ -634,7 +674,7 @@ export function RunPage({
         : item.state === "paused_open_questions"
           ? (item.current_stage || "plan") + "/result.json"
           : item.state === "awaiting_final_review"
-            ? "review/verdict.json"
+            ? "review/notes.md"
             : item.state === "paused_user_stop"
               ? "review/notes.md"
               : "";
@@ -771,7 +811,8 @@ export function RunPage({
                 {!terminalStates.has(item.state) && (
                   <code>POST /api/v1/runs/{item.id}/cancel</code>
                 )}
-                {item.state === "awaiting_final_review" && (
+                {(item.state === "awaiting_final_review" ||
+                  item.state === "paused_gate") && (
                   <code>POST /api/v1/runs/{item.id}/reject</code>
                 )}
               </div>

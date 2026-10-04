@@ -32,7 +32,7 @@ function App() {
   )
     page = <NewRunPage projectID={parts[1]} navigate={navigate} />;
   else if (parts[0] === "runs" && parts[1] && parts.length === 2)
-    page = <RunPage runID={parts[1]} navigate={navigate} />;
+    page = <RunPage key={parts[1]} runID={parts[1]} navigate={navigate} />;
   else
     page = (
       <main className="not-found">

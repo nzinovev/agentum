@@ -85,9 +85,10 @@ repository / checkout, run vs work item, actor / creator / owner).
 ### Local directory browser
 
 `GET /api/v1/fs/dirs?path=…` lists directories for the registration picker.
-Without `path`, it opens the server user's home directory. The endpoint accepts
-loopback connections only and resolves symbolic links before requiring every
-listed path to stay inside that home directory. It requires `fs:browse` access.
+Without `path`, it opens the server user's home directory. The endpoint requires
+both a loopback TCP peer and a local `Host` (`localhost` or a loopback IP).
+It resolves symbolic links and requires every listed path to stay inside that
+home directory. It requires `fs:browse` access.
 
 ```json
 {
@@ -257,7 +258,8 @@ gate".
 `current_stage`, `stop_reason`, `error`, and `cancel_reason` are strings on both
 run responses and list items. Empty means the value does not apply. A stop
 reason is present only while stopped; `error` is present only in `failed`.
-`cancel_reason` distinguishes a rejected run from an ordinary cancellation.
+`cancel_reason` is `rejected_at_plan` or `rejected_at_final_review` for a
+rejected run, and `cancelled` for an ordinary cancellation.
 Only `GET /runs/{id}` includes `open_questions`.
 
 ## Publication

@@ -52,14 +52,17 @@ function FolderPicker({
       if (event.key === "Escape") close();
       if (event.key === "Tab") {
         const items = dialog.current?.querySelectorAll<HTMLElement>(
-          'button,[tabindex="0"]',
+          'button:not(:disabled),[tabindex="0"]',
         );
         if (!items?.length) return;
         const first = items[0],
           last = items[items.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) {
           event.preventDefault();
           last.focus();
+        } else if (!event.shiftKey && document.activeElement === dialog.current) {
+          event.preventDefault();
+          first.focus();
         } else if (!event.shiftKey && document.activeElement === last) {
           event.preventDefault();
           first.focus();

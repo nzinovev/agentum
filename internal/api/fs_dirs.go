@@ -35,7 +35,10 @@ func (api *API) handleListFSDirs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !loopbackPeer(r.RemoteAddr) {
+	// RemoteAddr names the TCP peer; Host is client supplied and must also name
+	// this machine so a rebinding page cannot read local directories through a
+	// loopback connection from its own origin.
+	if !loopbackPeer(r.RemoteAddr) || !loopbackHost(r.Host) {
 		writeError(w, http.StatusForbidden, codeForbidden, "directory browsing requires a loopback connection")
 		return
 	}
@@ -123,6 +126,21 @@ func loopbackPeer(remoteAddress string) bool {
 	return err == nil && address.Unmap().IsLoopback()
 }
 
+func loopbackHost(hostPort string) bool {
+	host := hostPort
+	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsedHost
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.Unmap().IsLoopback()
+}
+
 func withinHome(homePath, candidatePath string) bool {
 	relativePath, err := filepath.Rel(homePath, candidatePath)
 	return err == nil && relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator))
@@ -152,6 +170,8 @@ func probeGitDirectory(ctx context.Context, directoryPath string) (bool, bool, b
 
 func fsGitOutput(ctx context.Context, directoryPath string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", directoryPath}, args...)...)
+	// Git configuration can redirect probes or run external helpers. Ignore
+	// system and user configuration while inspecting a directory chosen in UI.
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	return strings.TrimSpace(string(output)), err

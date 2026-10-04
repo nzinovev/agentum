@@ -493,12 +493,16 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	cancelReason := "rejected_at_plan"
+	if atFinalGate {
+		cancelReason = "rejected_at_final_review"
+	}
 	decision := gateDecisionPatch(run, principal, gateReject, decisionRejected)
 	var updated sqlc.Run
 	if err := api.runInTx(r.Context(), func(qtx *sqlc.Queries) error {
 		transitioned, txErr := api.applyTransition(r.Context(), qtx, principal, lifecycleTransition{
 			run: run, next: next, jobKind: jobKindTeardown,
-			decision: decision, policy: recordLenient, cancelReason: "rejected",
+			decision: decision, policy: recordLenient, cancelReason: cancelReason,
 		})
 		if txErr != nil {
 			return txErr

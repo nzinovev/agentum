@@ -3,6 +3,7 @@ import { ApiError, createRun, project, startRun, type Project } from "./api";
 import { Link, Loading, PageHeading, Problem, Shell } from "./common";
 import type { Navigate } from "./main";
 import { bytes } from "./util";
+const defaultPipelinePack = "backend-development";
 export function NewRunPage({
   projectID,
   navigate,
@@ -50,14 +51,15 @@ export function NewRunPage({
       fieldErrors.description = "description is required";
     else if (bytes(description) > 32768)
       fieldErrors.description = `description exceeds 32768 bytes (got ${bytes(description)})`;
-    if (!baseRef.trim()) fieldErrors.base_ref = "base_ref is required";
+    const normalizedBaseRef = baseRef.trim();
+    if (!normalizedBaseRef) fieldErrors.base_ref = "base_ref is required";
     setErrors(fieldErrors);
     setSecret(null);
     if (Object.keys(fieldErrors).length) return;
     setSubmitting(true);
     try {
-      const created = await createRun(projectID, title, description, baseRef);
-      localStorage.setItem("agentum.base_ref." + projectID, baseRef);
+      const created = await createRun(projectID, title, description, normalizedBaseRef);
+      localStorage.setItem("agentum.base_ref." + projectID, normalizedBaseRef);
       try {
         await startRun(created.id);
         sessionStorage.removeItem("agentum.start_error." + created.id);
@@ -214,7 +216,7 @@ export function NewRunPage({
             <span>
               {submitting
                 ? "Creating the run, then starting it. Repeat clicks are ignored."
-                : "Creates the run and starts it with the backend-development pack."}
+                : `Creates the run and starts it with the ${defaultPipelinePack} pack.`}
             </span>
           </div>
         </form>

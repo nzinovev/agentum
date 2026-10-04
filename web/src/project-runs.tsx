@@ -80,7 +80,8 @@ export function ProjectRunsPage({
       ]);
       const page = pages.flat();
       setInfo(projectData);
-      setItems(append ? [...(items || []), ...page] : page);
+      const rows = append ? [...(items || []), ...page] : page;
+      setItems(Array.from(new Map(rows.map((row) => [row.id, row])).values()));
       setHasMore(pages.at(-1)?.length === 50);
       setError(null);
       setStale(false);

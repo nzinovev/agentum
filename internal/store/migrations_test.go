@@ -79,6 +79,7 @@ func TestMigration17BackfillsRunDiagnostics(t *testing.T) {
 		{"00000000-0000-0000-0000-000000000012", "paused_user_stop", `{"to":"paused_user_stop","stop_reason":"interrupted"}`},
 		{"00000000-0000-0000-0000-000000000013", "failed", `{"to":"failed","error":"adapter crashed"}`},
 		{"00000000-0000-0000-0000-000000000014", "cancelled", `{"to":"cancelled"}`},
+		{"00000000-0000-0000-0000-000000000015", "cancelled", `{"to":"cancelled"}`},
 	}
 	for _, fixture := range fixtures {
 		if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO runs
@@ -105,13 +106,20 @@ func TestMigration17BackfillsRunDiagnostics(t *testing.T) {
 		tenantID, userID, fixtures[2].id); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := handle.Store.DB.ExecContext(ctx, `INSERT INTO run_approvals
+		(tenant_id, user_id, run_id, name, decision, actor)
+		VALUES ($1, $2, $3, 'plan_approval', 'rejected', 'human')`,
+		tenantID, userID, fixtures[3].id); err != nil {
+		t.Fatal(err)
+	}
 	if err := handle.Store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
 	for _, check := range []struct{ id, stage, stop, failure, cancellation string }{
 		{fixtures[0].id, "review", "interrupted", "", ""},
 		{fixtures[1].id, "", "", "adapter crashed", ""},
-		{fixtures[2].id, "", "", "", "rejected"},
+		{fixtures[2].id, "", "", "", "rejected_at_final_review"},
+		{fixtures[3].id, "", "", "", "rejected_at_plan"},
 	} {
 		var stage sql.NullString
 		var stopReason, failure, cancellation string

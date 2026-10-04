@@ -158,8 +158,40 @@ func TestParseRunCreate_DefaultPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.PipelinePack != "backend-development" {
+	if request.PipelinePack != defaultRunPipelinePack {
 		t.Errorf("pack = %q, want backend-development", request.PipelinePack)
+	}
+}
+
+func TestParseRunCreate_TrimsBaseRef(t *testing.T) {
+	t.Parallel()
+	body := strings.Replace(validCreateBody, `"base_ref": "HEAD"`, `"base_ref": "  HEAD  "`, 1)
+	request, _, err := parseRunCreate([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.BaseRef != "HEAD" {
+		t.Errorf("base_ref = %q, want HEAD", request.BaseRef)
+	}
+}
+
+func TestRequestErrorField_UsesStructuredField(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name  string
+		err   error
+		field string
+	}{
+		{name: "task field with unrelated copy", err: &taskinput.FieldError{Field: "title", Message: "please enter a task name"}, field: "title"},
+		{name: "wrapped request field", err: fmt.Errorf("invalid input: %w", &requestFieldError{field: "base_ref", cause: errors.New("choose a revision")}), field: "base_ref"},
+		{name: "unrelated error", err: errors.New("invalid JSON"), field: ""},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := requestErrorField(testCase.err); got != testCase.field {
+				t.Errorf("field = %q, want %q", got, testCase.field)
+			}
+		})
 	}
 }
 
@@ -277,7 +309,7 @@ func TestRunUIStateAndOrdering(t *testing.T) {
 func TestRunValidationErrorField(t *testing.T) {
 	t.Parallel()
 	recorder := httptest.NewRecorder()
-	writeRequestBodyError(recorder, errors.New("description exceeds 10 bytes"))
+	writeRequestBodyError(recorder, &taskinput.FieldError{Field: "description", Message: "description exceeds 10 bytes"})
 	var response errorBody
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
