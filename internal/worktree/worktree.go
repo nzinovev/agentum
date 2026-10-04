@@ -5,10 +5,9 @@
 // cancelled). A failed run keeps its tree: the uncommitted work may be the
 // only copy, and disposal is a separate audited human action.
 //
-// F.6.1 splits teardown into two distinct actions:
-//   - RemoveWorktree disposes of the per-run working tree at terminal state.
-//     The branch agentum/<run-id> and its commits survive — they are the
-//     durable delivery output a human reviews and Epic 8 hands off.
+// Local resource deletion has two explicit actions:
+//   - RemoveWorktree disposes of the per-run working tree after a human confirms.
+//     The branch agentum/<run-id> and its commits survive for review.
 //   - DeleteBranch is the explicit, audited cleanup that removes the branch once
 //     the delivery is no longer needed. It is never auto-run at teardown.
 //
@@ -373,6 +372,33 @@ type UncommittedChange struct {
 	Code        string
 	Path        string
 	RenamedFrom string
+}
+
+// WorktreeChanges returns the paths a person must review before reconciling or
+// deleting a run worktree. Git's NUL format keeps whitespace in paths intact.
+func (manager *Manager) WorktreeChanges(ctx context.Context, wtRoot string) ([]UncommittedChange, error) {
+	out, err := git(ctx, wtRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, fmt.Errorf("git status: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	tokens := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	changes := make([]UncommittedChange, 0, len(tokens))
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "" {
+			continue
+		}
+		if len(token) < 4 {
+			return nil, fmt.Errorf("git status: unparseable record %q", token)
+		}
+		change := UncommittedChange{Code: token[:2], Path: token[3:]}
+		if strings.ContainsAny(change.Code, "RC") && index+1 < len(tokens) {
+			index++
+			change.RenamedFrom = tokens[index]
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
 }
 
 // UncommittedChanges lists the uncommitted changes under path — untracked
@@ -760,10 +786,8 @@ func (manager *Manager) CountAhead(ctx context.Context, repoPath, from, to strin
 	return count, nil
 }
 
-// RemoveWorktree removes only the per-run working tree. The agentum/<run-id>
-// branch and its commits remain resolvable — they are the durable delivery
-// output that survives teardown (F.6.1 AC #3). Idempotent: a missing worktree
-// is a no-op. Used at terminal state (done/cancelled/failed).
+// RemoveWorktree removes only the per-run working tree after an explicit
+// discard request. The branch and committed delivery remain resolvable.
 func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -776,9 +800,8 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID stri
 	if !isWorktree(ctx, wtPath) {
 		return nil
 	}
-	// --force: the worktree may contain uncommitted agent work; teardown at
-	// terminal state discards the *working tree* but the branch tip (committed
-	// delivery) is preserved by virtue of not deleting the branch here.
+	// --force is safe here because the discard job checked the current HEAD
+	// and required separate confirmation before losing uncommitted files.
 	out, err := git(ctx, repoAbs, "worktree", "remove", "--force", wtPath)
 	if err != nil {
 		return fmt.Errorf("git worktree remove: %w (%s)", err, strings.TrimSpace(string(out)))

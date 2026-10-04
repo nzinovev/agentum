@@ -306,12 +306,9 @@ func repoIdentityOf(repoPath string) (repoid.Identity, error) {
 	return repoid.Resolve(context.Background(), repoPath)
 }
 
-// TestRunner_TeardownAfterRepoMoveRemovesWorktree: the repository moved after
-// the run paused, and the terminal teardown must still clean up in the moved
-// copy — relink first, then remove. Without the relink the removal is a
-// no-op that logs nothing, and the worktree outlives the run, potentially
-// holding the agent's uncommitted work.
-func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
+// TestRunner_TeardownAfterRepoMoveKeepsWorktree: terminal teardown records the
+// result in the moved checkout while the worktree stays for explicit deletion.
+func TestRunner_TeardownAfterRepoMoveKeepsWorktree(t *testing.T) {
 	t.Parallel()
 
 	original := t.TempDir()
@@ -352,8 +349,20 @@ func TestRunner_TeardownAfterRepoMoveRemovesWorktree(t *testing.T) {
 	if err := runner.HandleTeardown(t.Context(), job("teardown", runID, "tn", "us")); err != nil {
 		t.Fatalf("teardown after move: %v", err)
 	}
-	if worktree.DirPresent(worktree.PathFor(moved, runID)) {
-		t.Fatal("teardown left the worktree behind in the moved copy")
+	if !worktree.DirPresent(worktree.PathFor(moved, runID)) {
+		t.Fatal("teardown removed the worktree in the moved copy")
+	}
+	if err := runner.HandleCleanup(t.Context(), job("cleanup", runID, "tn", "us")); err == nil {
+		t.Fatal("cleanup deleted a branch while its worktree was present")
+	}
+	if _, err := worktree.New().ResolveRef(t.Context(), moved, worktree.BranchFor(runID)); err != nil {
+		t.Fatalf("cleanup changed the branch: %v", err)
+	}
+	if err := worktree.New().RemoveWorktree(t.Context(), moved, runID); err != nil {
+		t.Fatalf("explicit worktree removal: %v", err)
+	}
+	if err := runner.HandleCleanup(t.Context(), job("cleanup", runID, "tn", "us")); err != nil {
+		t.Fatalf("cleanup after worktree removal: %v", err)
 	}
 }
 

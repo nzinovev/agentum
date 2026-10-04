@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/nzinovev/agentum/internal/artifacts"
@@ -18,19 +19,36 @@ import (
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
-// handleInvocationContinue POST /api/v1/runs/{id}/invocations/{iid}/continue
-// Resume after open_questions / user_stop (session-id resume). The body is an
-// optional continuation: {"text": "..."} carries the user's answer or extra
-// context to the resumed session, rendered inside the routing block's Task
-// section; an empty body, {}, or null continues without new text. Every body
+// handleInvocationContinue accepts Continue at an invocation or before the
+// first invocation through POST /api/v1/runs/{id}/continue.
+// Resume after open_questions or user_stop. The body is an optional
+// continuation. Text reaches the resumed session, or the first stage when a
+// user_stop occurred before any invocation. An empty body, {}, or null
+// continues without new text. Every body
 // rule — strict shape, UTF-8, byte budgets, the credentials scan — is checked
 // before the FSM transition, so a refused body leaves the run untouched.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunContinue, "GetRun(continue)")
 	if !ok {
 		return
+	}
+	if r.PathValue("iid") == "" {
+		if engine.RunState(run.State) != engine.StatePausedUserStop {
+			writeError(w, http.StatusConflict, codeIllegalTransition, "run-level continue requires paused_user_stop before the first invocation")
+			return
+		}
+		_, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{RunID: run.ID, TenantID: run.TenantID})
+		if latestErr == nil {
+			writeError(w, http.StatusConflict, codeIllegalTransition, "run already has an invocation; use its continue endpoint")
+			return
+		}
+		if !errors.Is(latestErr, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
+			return
+		}
 	}
 	// Continue is valid from either open-questions or user-stop pause.
 	var event engine.RunEvent
@@ -56,11 +74,9 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
-	// Text rides the captured session: with no session there is no delivery,
-	// and the request is refused before the transition commits rather than
-	// accepted onto a job the runner would have to drop. A read FAILURE is not
-	// an answer about the session — the session may exist while the read could
-	// not see it — so it is a logged 500, never a 409 claiming absence.
+	// A captured session receives text after an invocation. Before the first
+	// invocation, a user-stop note reaches the first stage's Task section.
+	// A read failure returns 500 because it cannot establish either case.
 	if continuation.Text != "" {
 		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
 			RunID: run.ID, TenantID: run.TenantID,
@@ -70,10 +86,10 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
 			return
 		}
-		// sql.ErrNoRows means the run has no invocation at all; a NULL or empty
-		// session id means the latest one captured no session. Both leave the
-		// text without a target.
-		if errors.Is(latestErr, sql.ErrNoRows) || !latest.SessionID.Valid || latest.SessionID.String == "" {
+		// A NULL session after an invocation has no delivery target. A user
+		// stop before the first invocation uses the first stage instead.
+		if (errors.Is(latestErr, sql.ErrNoRows) && engine.RunState(run.State) != engine.StatePausedUserStop) ||
+			(latestErr == nil && (!latest.SessionID.Valid || latest.SessionID.String == "")) {
 			writeError(w, http.StatusConflict, codeIllegalTransition,
 				"continue with text requires a captured session to resume; the latest invocation has none")
 			return
@@ -432,8 +448,8 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 // sealed record from describing a rejected result as an abort. At the plan gate
 // this trivially satisfies "rejecting does not modify source code" — nothing
 // ever unlocked source-write, so there is no source change to undo. Reject is
-// terminal and preserves everything: worktree torn down, branch retained,
-// manifest sealed. Idempotent: a repeat reject matching the recorded decision
+// terminal and keeps the worktree and branch. The manifest is sealed.
+// Idempotent: a repeat reject matching the recorded decision
 // returns 200.
 func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunReject, "GetRun(reject)")
@@ -555,9 +571,8 @@ func (conflict conflictingGateDecision) Error() string {
 }
 
 // handleInvocationApprove POST /api/v1/runs/{id}/invocations/{iid}/approve
-// Final approval → run done. Memory commit (Epic 1) is deferred. The teardown
-// job records result_commit (the agentum/<run-id> tip) and removes the worktree
-// only — the branch + result_commit remain resolvable for review (F.6.1 AC #3).
+// Final approval moves the run to done. The teardown job records result_commit
+// and seals the manifest while retaining both local resources.
 func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunApprove, "GetRun(approve)")
 	if !ok {
@@ -583,7 +598,7 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 	// Transactional outbox: the done transition, the teardown-job enqueue, the
 	// human-decision evidence, and the final_review approval row commit
 	// atomically. result_commit capture happens inside the teardown job (the
-	// runner owns the worktree manager) before the worktree is removed. The
+	// runner owns the worktree manager). The
 	// approval decision rides in the same tx as the transition it gates: a
 	// crash between them cannot leave a run that advanced past final approval
 	// with no record of who let it through.
@@ -623,9 +638,8 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 // Terminal abort: any non-terminal run → cancelled. The in-flight run (if any)
 // is aborted via the cancel registry, then the FSM transition + teardown-job
 // enqueue commit atomically. F.6.1: cancel is a terminal ABORT, distinct from
-// pause (non-terminal) and cleanup (explicit branch deletion). The teardown job
-// removes the worktree only — the agentum/<run-id> branch and any committed
-// recovery work survive for review (AC #4).
+// pause (non-terminal) and cleanup (explicit branch deletion). Teardown keeps
+// the worktree and branch available for review.
 func (api *API) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunCancel, "GetRun(cancel)")
 	if !ok {
@@ -667,7 +681,7 @@ func (api *API) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // jobKindTeardown is the job every terminal transition enqueues: it captures
-// result_commit and removes the worktree, leaving the branch resolvable.
+// result_commit and seals the manifest without deleting local resources.
 const jobKindTeardown = "teardown"
 
 // lifecycleTransition is the shape every lifecycle write shares: the state the
@@ -825,12 +839,8 @@ func (api *API) resolveApprovalRevisionID(ctx context.Context, qtx *sqlc.Queries
 }
 
 // handleCleanupRun POST /api/v1/runs/{id}/cleanup
-// Explicit, idempotent branch deletion (F.6.1 AC #4). Distinct verb from
-// cancel (terminal abort) and pause: cleanup operates on an ALREADY-terminal
-// run and removes its delivery artifacts. A generic cancel cannot ambiguously
-// mean all three. Enqueues a cleanup job (the runner owns the worktree manager
-// that performs the git branch deletion); the job is idempotent, so re-posting
-// is safe. Audited via the run.cleanup_done event.
+// Explicit branch deletion for a terminal run. A present worktree returns
+// 409 conflict. The worker checks again before deleting the branch.
 func (api *API) handleCleanupRun(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunCleanup, "GetRun(cleanup)")
 	if !ok {
@@ -841,6 +851,22 @@ func (api *API) handleCleanupRun(w http.ResponseWriter, r *http.Request) {
 	if !engine.IsTerminal(engine.RunState(run.State)) {
 		writeError(w, http.StatusConflict, codeIllegalTransition,
 			"cleanup requires a terminal run; run is "+run.State)
+		return
+	}
+	project, projectErr := api.queries.GetProject(r.Context(), sqlc.GetProjectParams{ID: run.ProjectID, TenantID: run.TenantID})
+	if projectErr != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, projectErr.Error())
+		return
+	}
+	checkoutPath := run.CheckoutPath
+	if checkoutPath == "" {
+		checkoutPath = project.RepoPath
+	}
+	if _, statErr := os.Stat(worktree.PathFor(checkoutPath, run.ID)); statErr == nil {
+		writeError(w, http.StatusConflict, codeConflict, "worktree still exists: delete the worktree first")
+		return
+	} else if !os.IsNotExist(statErr) {
+		writeError(w, http.StatusInternalServerError, codeInternal, statErr.Error())
 		return
 	}
 	if _, err := api.queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{

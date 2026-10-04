@@ -17,6 +17,7 @@ import (
 	"github.com/nzinovev/agentum/internal/dbtest"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // The worktree reconcile and discard endpoints: the human actions over a tree
@@ -90,24 +91,30 @@ var worktreeFixtureSeq atomic.Int64
 // one finished spec invocation, and initializes the manifest.
 func (harness *worktreeHarness) insertWorktreeFixtureRun(t *testing.T, state string) string {
 	t.Helper()
+	identity := fmt.Sprintf("%s-%d", t.Name(), worktreeFixtureSeq.Add(1))
+	repoPath := t.TempDir()
+	initRegistrationRepo(t, repoPath, identity)
 	const insertProjectAndRun = `
 		WITH inserted_project AS (
 		    INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits,
 		                          repo_path, name, related_projects)
-		    VALUES ($1, $2, $3, '{}', '/tmp/worktree-fixture-' || $3, 'worktree fixture ' || $3, '{}')
+		    VALUES ($1, $2, $3, '{}', $5, 'worktree fixture ' || $3, '{}')
 		    RETURNING id
 		)
 		INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
-		                  title, description, overrides, base_ref, state, current_stage)
+		                  title, description, overrides, base_ref, state, current_stage, stop_reason)
 		SELECT $1, $2, inserted_project.id, 'backend-development',
-		       'fixture', 'fixture', '{}', 'main', $4, 'spec'
+		       'fixture', 'fixture', '{}', 'main', $4, 'spec',
+		       CASE WHEN $4 = 'paused_user_stop' THEN 'worktree_uncommitted_changes' ELSE '' END
 		FROM inserted_project
 		RETURNING id`
 	var runID string
-	identity := fmt.Sprintf("%s-%d", t.Name(), worktreeFixtureSeq.Add(1))
 	if err := harness.db.QueryRowContext(context.Background(), insertProjectAndRun,
-		continueTestTenant, continueTestUser, identity, state).Scan(&runID); err != nil {
+		continueTestTenant, continueTestUser, identity, state, repoPath).Scan(&runID); err != nil {
 		t.Fatalf("insert run fixture: %v", err)
+	}
+	if _, err := worktree.New().Create(t.Context(), repoPath, runID, ""); err != nil {
+		t.Fatalf("create worktree fixture: %v", err)
 	}
 	if err := harness.api.mfst.Init(t.Context(), continueTestTenant, continueTestUser, runID); err != nil {
 		t.Fatal(err)
@@ -119,6 +126,23 @@ func (harness *worktreeHarness) insertWorktreeFixtureRun(t *testing.T, state str
 		t.Fatalf("insert stage invocation: %v", err)
 	}
 	return runID
+}
+
+func (harness *worktreeHarness) headFor(t *testing.T, runID string) string {
+	t.Helper()
+	record, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := harness.queries.GetProject(t.Context(), sqlc.GetProjectParams{ID: record.ProjectID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := worktree.New().HeadCommit(t.Context(), worktree.PathFor(project.RepoPath, runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head
 }
 
 // callWorktreeAction dispatches one of the worktree handlers directly with
@@ -150,7 +174,12 @@ func TestWorktreeReconcileEndpoint_DeliversDecisionToJob(t *testing.T) {
 	harness := newWorktreeHarness(t)
 	runID := harness.insertWorktreeFixtureRun(t, "paused_user_stop")
 
-	head := strings.Repeat("d", 40)
+	head := harness.headFor(t, runID)
+	stale := harness.callWorktreeAction(t, "reconcile", runID,
+		`{"mode":"keep_as_checkpoint","expected_head":"`+strings.Repeat("d", 40)+`"}`)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale HEAD status = %d, body %s", stale.Code, stale.Body.String())
+	}
 	recorder := harness.callWorktreeAction(t, "reconcile", runID,
 		`{"mode":"keep_as_checkpoint","expected_head":"`+head+`"}`)
 	if recorder.Code != http.StatusOK {
@@ -234,6 +263,7 @@ func TestWorktreeDiscardEndpoint_Guards(t *testing.T) {
 	}
 
 	pausedRun := harness.insertWorktreeFixtureRun(t, "paused_user_stop")
+	head = harness.headFor(t, pausedRun)
 	recorder = harness.callWorktreeAction(t, "discard", pausedRun,
 		`{"expected_head":"`+head+`","discard_uncommitted":true}`)
 	if recorder.Code != http.StatusAccepted {

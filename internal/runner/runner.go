@@ -616,18 +616,8 @@ func (runner *Runner) HandleDiscardWorktree(ctx context.Context, job sqlc.Job) e
 	return runner.discardWorktree(ctx, job)
 }
 
-// teardown removes the run's worktree once it has reached a terminal state
-// (done/cancelled/failed). F.6.1: the worktree is disposable, the branch is not
-// — RemoveWorktree deletes the working tree only; agentum/<run-id> and any
-// committed recovery/delivery work remain resolvable. Idempotent: a missing
-// worktree is a no-op. Enqueued by the cancel/approve handlers and by failRun;
-// the worker claims it after the driving run job is done, so it never races the
-// runner (04 §7.1.3). Branch deletion is a separate explicit cleanup action.
-//
-// Before removing the worktree, teardown captures the agentum/<run-id> tip as
-// result_commit — the immutable record of what was delivered (done) or recovered
-// (cancelled/failed). The branch survives teardown, so result_commit is always
-// resolvable after the fact; recording it here keeps the API free of git.
+// teardown records result_commit and seals a terminal run's manifest. The
+// worktree and branch remain available until a person deletes each resource.
 func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
@@ -643,13 +633,10 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 	// remove a worktree that was never this run's while leaving the real one
 	// behind forever.
 	checkoutPath := checkoutPathOf(record, project)
-	// Relink first when the repository moved: isWorktree's liveness check
-	// would otherwise turn the removal below into a no-op that logs nothing,
-	// and the worktree would outlive the run. A repair that itself fails must not
-	// wedge the teardown of a terminal run — log it and let RemoveWorktree
-	// decide; its no-op is at least visible in the log then.
+	// Relink a moved checkout so the live branch and recorded result commit
+	// refer to the same repository. A repair failure does not block sealing.
 	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
-		runner.log.Warn("teardown: repair worktree before removal", "run", record.ID, "error", repairErr)
+		runner.log.Warn("teardown: repair worktree", "run", record.ID, "error", repairErr)
 	}
 	runner.recordResultCommit(ctx, record, checkoutPath)
 	// ADR 0003 D8: result_commit is now pinned at the final gate (the commit the
@@ -671,22 +658,11 @@ func (runner *Runner) teardown(ctx context.Context, job sqlc.Job) error {
 		runner.verifyDeliveryCommitBinding(ctx, record)
 		runner.sealManifestAtTerminal(ctx, record)
 	}
-	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
-		runner.log.Error("teardown worktree", "run", record.ID, "error", err)
-		return err
-	}
-	runner.emit(ctx, record, EvWorktreeRemoved, map[string]any{"stage": record.CurrentStage.String})
 	return nil
 }
 
-// cleanup is the explicit, idempotent, audited deletion of a terminal run's
-// delivery artifacts (F.6.1 AC #4). Triggered by POST /runs/{id}/cleanup, it
-// removes the agentum/<run-id> branch AND any lingering worktree (the latter
-// idempotent — a run whose teardown already ran has only the branch left).
-// Distinct from teardown (worktree-only at terminal state) and from cancel
-// (terminal abort): cleanup is the operator saying "I am done with this
-// delivery." Branch deletion is forced: a delivered run's commits are reviewed
-// via result_commit / the branch before cleanup; -D is the intent.
+// cleanup deletes a terminal run's branch after its worktree is gone. The
+// worker rechecks the worktree because it may change after the HTTP request.
 func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
 	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
@@ -700,17 +676,15 @@ func (runner *Runner) cleanup(ctx context.Context, job sqlc.Job) error {
 	// branch and any lingering worktree live there, wherever the project
 	// points now.
 	checkoutPath := checkoutPathOf(record, project)
-	// Same relink-before-removal as teardown, for the same reason; and a
-	// failed repair is logged, not fatal — branch deletion must not wedge on
-	// a directory state.
+	// A moved checkout may still hold the branch. Repair its worktree link
+	// before checking that the directory was removed explicitly.
 	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
-		runner.log.Warn("cleanup: repair worktree before removal", "run", record.ID, "error", repairErr)
+		runner.log.Warn("cleanup: repair worktree", "run", record.ID, "error", repairErr)
 	}
-	// Remove any lingering worktree first (idempotent). A branch that is
-	// checked out in a worktree cannot be deleted; clearing the worktree frees it.
-	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
-		runner.log.Error("cleanup: remove worktree", "run", record.ID, "error", err)
-		return err
+	if _, statErr := os.Stat(worktree.PathFor(checkoutPath, record.ID)); statErr == nil {
+		return errors.New("worktree still exists: delete the worktree first")
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("cleanup: inspect worktree: %w", statErr)
 	}
 	if err := runner.wt.DeleteBranch(ctx, checkoutPath, record.ID); err != nil {
 		runner.log.Error("cleanup: delete branch", "run", record.ID, "error", err)
@@ -1097,7 +1071,15 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	if halt != nil {
 		return runner.applyPauseDecision(ctx, record, halt.decision, halt.stageID)
 	}
-	if sessionFault := continuationSessionFault(continuation, resumeSession); sessionFault != nil {
+	freshContinue := false
+	if job.Kind == "continue" && continuation.Text != "" && resumeSession == "" {
+		_, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{RunID: record.ID, TenantID: record.TenantID})
+		freshContinue = errors.Is(latestErr, sql.ErrNoRows)
+		if latestErr != nil && !freshContinue {
+			return runner.failRun(ctx, record, fmt.Errorf("read continuation session: %w", latestErr))
+		}
+	}
+	if sessionFault := continuationSessionFault(continuation, resumeSession); sessionFault != nil && !freshContinue {
 		pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, sessionFault)
 		if pauseErr != nil {
 			return runner.failRun(ctx, record, pauseErr)
@@ -1225,9 +1207,9 @@ func decodeContinuation(job sqlc.Job) (taskinput.Continuation, *continuationFaul
 	return continuation, nil
 }
 
-// continuationSessionFault reports why the decoded continuation cannot ride the
-// resolved session: text with no session has no delivery target. nil when
-// there is nothing to deliver or a session to deliver it on.
+// continuationSessionFault reports text that cannot ride a captured session.
+// The caller skips this check for a run with no invocation yet; its first
+// stage receives the text in the Task section.
 func continuationSessionFault(continuation taskinput.Continuation, resumeSession string) *continuationFault {
 	if continuation.Text == "" || resumeSession != "" {
 		return nil
@@ -1240,7 +1222,7 @@ func continuationSessionFault(continuation taskinput.Continuation, resumeSession
 
 // pauseForUndeliverableContinuation stops the run in paused_user_stop with the
 // fault's stop_reason, without invoking the agent. The API refuses a text
-// continue with no session before enqueueing; this is the runner's re-check for
+// continue after an invocation with no session before enqueueing. This is the runner's re-check for
 // the window between the two (a job that sat in the queue across a schema or
 // writer change). paused_user_stop keeps continue/cancel as the exits and the
 // stop_reason on the state-change event is the diagnosis.
@@ -1719,11 +1701,8 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 			if errors.Is(latestErr, sql.ErrNoRows) && job.Kind == "continue" {
 				// A run paused before its first invocation (an unresolvable
 				// base_ref, an unavailable checkout, a drifted pack directory)
-				// has no session to resume: a textless continue starts the run
-				// at the pack entry. Reconcile and ask_to_edit genuinely need
-				// a session and keep the error; a continue carrying text never
-				// reaches this branch — the session fault below pauses it
-				// rather than dropping the text on a fresh start.
+				// has no session to resume. Continue starts at the pack entry.
+				// Its first invocation receives any text in the Task section.
 				return runPack.Entry, "", nil, nil
 			}
 			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
@@ -2679,15 +2658,8 @@ func (runner *Runner) nextCycleForStage(ctx context.Context, record sqlc.Run, st
 // runner cannot proceed (bad pack, missing stage, evaluator error) — these are
 // genuine failures, not retryable pause points.
 //
-// A failure never schedules worktree teardown. The failed run's tree may hold
-// the only copy of uncommitted agent work, and `failed` is terminal with no
-// resume edge — a teardown job that ran `git worktree remove --force` here was
-// destroying exactly the work a person would want to inspect and salvage. The
-// tree, the branch, and the checkpoints survive the failure; removing the
-// worktree afterwards is the separate, audited human action (the
-// discard-worktree job). The explicit cancel/approve paths keep their teardown:
-// there a human decided the run is over, which is a different claim than a
-// system error making that decision for them.
+// A failure keeps the worktree and branch. The tree may hold the only copy of
+// uncommitted agent work. A person can remove it with the discard-worktree job.
 func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error) error {
 	runner.log.Error("runner failing run", "run", record.ID, "error", cause)
 	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{

@@ -58,6 +58,39 @@ func TestParseContinueBody_AcceptsTheCanonicalShapes(t *testing.T) {
 	}
 }
 
+// TestContinueBeforeFirstInvocation accepts a note at a pre-invocation
+// user stop and queues it for the first stage through the run-level route.
+func TestContinueBeforeFirstInvocation(t *testing.T) {
+	harness := newContinueHarness(t)
+	runID := harness.insertPausedRun(t, false)
+	if _, err := harness.db.ExecContext(t.Context(),
+		`DELETE FROM stage_invocations WHERE run_id = $1 AND tenant_id = $2`, runID, continueTestTenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant, CurrentStage: sql.NullString{String: "spec", Valid: true},
+		State: "paused_user_stop", StopReason: "base_not_on_target",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+runID+"/continue", strings.NewReader(`{"text":"base is now on the target"}`))
+	request = request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{TenantID: continueTestTenant, UserID: continueTestUser}))
+	response := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	harness.api.Register(mux)
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("continue status = %d, body %s", response.Code, response.Body.String())
+	}
+	if state := harness.runStateOf(t, runID); state != "running" {
+		t.Fatalf("state = %q, want running", state)
+	}
+	payload, found := harness.latestContinuePayload(t, runID)
+	if !found || !strings.Contains(payload, "base is now on the target") {
+		t.Fatalf("continue payload = %q, found = %t", payload, found)
+	}
+}
+
 // TestParseContinueBody_RejectsMalformedInput is the refusal table: broken
 // JSON, an unknown field, a non-string text, a second JSON object, invalid
 // UTF-8, and an over-budget text are all errors, and a credential-shaped text

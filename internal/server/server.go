@@ -254,7 +254,8 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 		api.WithExecutionAdapter(adapter),
 		api.WithResolvedTiers(effectiveTierConfig(modelsCfg, adapter.Describe())),
 		api.WithModelTestLimits(cfg.ModelTestMaxSeconds, cfg.ModelTestRetentionMinutes),
-		api.WithPublicationConfig(cfg.PublishEnabled, string(publicationProvider.ID())))
+		api.WithPublicationConfig(cfg.PublishEnabled, string(publicationProvider.ID())),
+		api.WithPublicationTarget(cfg.PublishRemote, cfg.PublishBaseBranch))
 
 	return &Server{
 		cfg: cfg, log: log, store: dataStore, adapter: adapter, models: modelsCfg,

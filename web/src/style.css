@@ -1444,3 +1444,74 @@ code {
 .route-placeholder {
   margin: 8px 0;
 }
+
+.run-action-panel { grid-template-columns: minmax(0, 1fr) 200px; gap: 24px; padding: 14px 18px; }
+.run-action-side { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.run-action-side .danger-ghost { margin-top: 8px; border-top-color: #4a2a2f; }
+.run-action-side small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.danger-ghost { min-height: 32px; padding: 6px 12px; border: 1px solid #4a2a2f; border-radius: 6px; background: transparent; color: #e08a94; cursor: pointer; }
+.danger-ghost:hover:not(:disabled) { background: #1a1012; }
+.run-action-panel button:disabled, .run-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.run-action-expansion { grid-column: 1 / -1; min-width: 0; margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.07); }
+.run-action-expansion h3 { margin: 0 0 10px; font-size: 13px; font-weight: 500; }
+.run-action-expansion label { display: block; margin-bottom: 8px; font-size: 12px; }
+.run-action-expansion textarea, .plan-editor { box-sizing: border-box; display: block; width: 100%; min-height: 96px; padding: 10px 12px; border: 1px solid #3a434e; border-radius: 6px; outline: none; background: #0f1317; color: var(--text); font: 13px/1.5 "Geist", sans-serif; resize: vertical; }
+.run-action-expansion textarea:focus, .plan-editor:focus { border-color: #8fb2f5; }
+.run-action-expansion textarea[aria-invalid=true], .plan-editor[aria-invalid=true] { border-color: #8a3e48; }
+.run-action-expansion small { color: var(--muted); font-size: 11px; }
+.run-form-label { display: flex; justify-content: space-between; gap: 20px; color: var(--secondary); font-size: 11px; }
+.run-form-footer { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.run-form-footer span { color: var(--muted); font-size: 11px; }
+.run-plan-meta { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 14px 0 8px; font-size: 11px; }
+.run-plan-meta > span { padding: 2px 6px; border-radius: 4px; background: #2b2216; color: #e0b268; }
+.run-plan-meta em { margin-left: auto; color: #e0b268; font-style: normal; }
+.run-plan-excerpt { position: relative; max-height: 176px; overflow: hidden; border: 1px solid #272e37; border-radius: 6px; background: #0f1317; }
+.run-plan-excerpt::after { content: ""; position: absolute; right: 0; bottom: 0; left: 0; height: 56px; background: linear-gradient(transparent,#0f1317); pointer-events: none; }
+.run-plan-excerpt pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--body); font: 12px/1.65 "Geist Mono", monospace; }
+.run-notice, .run-action-error { max-width: 88ch; margin-top: 10px; padding: 8px 12px; border: 1px solid #4a3a20; border-radius: 6px; background: #1c170e; color: #e0b268; font-size: 12px; }
+.run-notice.work { border-color: #2b3d63; background: #111a28; color: #8fb2f5; }
+.run-notice.ok { border-color: #234436; background: #0f1a15; color: #7fc49f; }
+.run-notice.fail, .run-action-error { border-color: #4a2a2f; background: #1e1215; color: #e08a94; }
+.run-notice.neutral { border-color: #3a434e; background: #151a20; color: #b4bdc7; }
+.run-notice code, .run-action-error code { display: block; margin-top: 4px; overflow-wrap: anywhere; color: #c9d1da; white-space: pre-wrap; font-size: 11px; }
+.run-review-grid, .run-resource-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.run-review-card { min-width: 0; padding: 12px; border: 1px solid #313943; border-radius: 6px; background: #11161c; }
+.run-review-card h3 { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; font-size: 12px; font-weight: 500; }
+.run-review-card h3 span { color: var(--muted); font: 11px "Geist Mono", monospace; }
+.run-review-card p { margin: 5px 0; overflow-wrap: anywhere; font-size: 12px; }
+.run-review-card small { display: block; margin-top: 8px; }
+.run-stat { grid-column: 1 / -1; }
+.run-stat pre { max-height: 220px; overflow: auto; padding: 10px; border-radius: 4px; background: #0f1317; color: var(--body); font: 11px/1.5 "Geist Mono", monospace; }
+.run-check-row { display: grid; grid-template-columns: minmax(0,1fr) 70px 80px; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--soft); font-size: 11px; }
+.run-check-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ok-text { color: #7fc49f !important; } .fail-text { color: #e08a94 !important; }
+.run-publication { display: grid; grid-template-columns: 96px minmax(0,1fr) auto; gap: 12px; align-items: start; font-size: 12px; }
+.run-publication strong { margin-right: 10px; } .run-publication p { margin: 6px 0; }
+.run-mini-label { color: var(--muted); font: 11px "Geist Mono", monospace; }
+.run-branch-copy { display: flex; gap: 6px; align-items: center; max-width: 100%; }
+.run-branch-copy code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-resource-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-size: 12px; }
+.run-resource-head span { color: var(--muted); }
+.run-resource-fact { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 8px; padding: 5px 0; font-size: 11px; }
+.run-resource-fact span { color: var(--muted); }
+.run-resource-fact code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-resource-grid .danger-ghost { margin-top: 12px; }
+.run-dirty-list { max-height: 150px; overflow: auto; padding: 8px; border: 1px solid var(--soft); border-radius: 6px; font: 11px/1.6 "Geist Mono", monospace; overflow-wrap: anywhere; }
+.run-dirty-list code { color: #e0b268; }
+.run-reconcile-options { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-top: 12px; }
+.run-reconcile-options label { display: grid; grid-template-columns: 18px 1fr; gap: 5px; padding: 10px; border: 1px solid #3a434e; border-radius: 6px; cursor: pointer; }
+.run-reconcile-options label.selected { border-color: #8fb2f5; background: #141c2a; }
+.run-reconcile-options label.danger-selected { border-color: #8a3e48; background: #1a1012; }
+.run-reconcile-options label span, .run-reconcile-options label code { grid-column: 2; font-size: 11px; }
+.run-loss-check { display: flex !important; align-items: start; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid #8a3e48; border-radius: 6px; color: #e08a94; font-size: 12px; }
+.run-loss-check input { margin-top: 2px; }
+.run-dialog-scrim { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(5,6,8,.72); }
+.run-dialog { box-sizing: border-box; width: 520px; max-width: 100%; padding: 24px; border: 1px solid #3a434e; border-radius: 10px; background: #151a20; box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+.run-dialog h2 { margin: 0 0 10px; font-size: 17px; font-weight: 500; }
+.run-dialog p { color: var(--body); font-size: 13px; line-height: 1.5; }
+.run-dialog-facts { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--soft); border-radius: 6px; }
+.run-dialog-facts code { overflow-wrap: anywhere; font-size: 11px; }
+.run-dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.plan-editing { border-color: #4a3a20; }
+.plan-editor { min-height: 420px; font: 12px/1.7 "Geist Mono", monospace; }
+.run-pr-link { display: inline-block; margin-top: 10px; color: var(--link); font-size: 12px; }

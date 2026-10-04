@@ -5,20 +5,23 @@ import {
   artifactContent,
   artifacts,
   invocations,
+  finalReview,
+  publication,
+  savePlan,
   project,
   run,
   startRun,
   type Artifact,
   type Invocation,
+  type FinalReview,
+  type Publication,
   type Project,
   type Run,
 } from "./api";
 import {
   Badge,
   Copy,
-  Link,
   Loading,
-  PageHeading,
   Problem,
   Reserved,
   Shell,
@@ -30,292 +33,15 @@ import {
   exact,
   relative,
   short,
-  stateTone,
   terminalStates,
   waitingStates,
 } from "./util";
-const reasons: Record<string, [string, string]> = {
-  gate: [
-    "Waiting for approval",
-    "The stage finished and its gate stops for a human decision.",
-  ],
-  plan_not_approved: [
-    "Plan not approved",
-    "A source-writing stage was about to start without an approved plan. The run waits at the plan gate.",
-  ],
-  plan_revision_drift: [
-    "Plan changed after approval",
-    "The plan's current revision differs from the one that was approved.",
-  ],
-  open_questions: [
-    "The agent has questions",
-    "The stage is blocked until the questions are answered.",
-  ],
-  parse_error: [
-    "Stage result unreadable",
-    "The agent finished without a valid result.json. Continuing re-runs the stage in the same session.",
-  ],
-  adapter_error: [
-    "Agent runtime error",
-    "The agent adapter reported an error: a crash, a timeout, or no output from the model.",
-  ],
-  artifact_rejected: [
-    "Artifact refused",
-    "A declared artifact escaped the worktree, could not be resolved, or contained a secret.",
-  ],
-  fix_budget_exhausted: [
-    "Fix budget exhausted",
-    "Review still requests changes and all fix cycles allowed by the pack are spent. Nothing was removed: branch, checkpoints and artifacts are kept.",
-  ],
-  verdict_unreadable: [
-    "Review verdict unreadable",
-    "The reviewer produced no parseable verdict.json, so the next stage cannot be chosen.",
-  ],
-  worktree_uncommitted_changes: [
-    "Uncommitted changes in the worktree",
-    "The resumed worktree holds uncommitted files. Someone must choose: resume over them, keep them as a checkpoint, or discard them.",
-  ],
-  base_ref_unresolvable: [
-    "Base ref not found",
-    "base_ref does not resolve to a commit in the run's working copy.",
-  ],
-  project_pack_drift: [
-    "Project pack has uncommitted changes",
-    "Files under .agentum/packs/ differ from HEAD. Commit or revert them, then continue.",
-  ],
-  project_pack_status_unreadable: [
-    "Pack status unreadable",
-    "git status failed for the pack directory in the working copy.",
-  ],
-  base_target_unverifiable: [
-    "Base cannot be checked against the target",
-    "The publication target branch could not be compared with the run's base.",
-  ],
-  base_not_on_target: [
-    "Base is not on the target branch",
-    "The base carries commits that the publication target branch does not have.",
-  ],
-  checkout_unavailable: [
-    "Working copy unavailable",
-    "The run's working copy is missing or now holds a different repository. Restore the directory or re-register the project, then continue.",
-  ],
-  interrupted: [
-    "Interrupted",
-    "The worker stopped in the middle of a stage (restart or crash). Continuing resumes the captured session.",
-  ],
-  continue_payload_unreadable: [
-    "Continue request unreadable",
-    "The continue job's payload could not be decoded, so the agent was not invoked.",
-  ],
-  resume_session_missing: [
-    "No session to resume",
-    "Continue carried text, but the latest invocation has no captured session.",
-  ],
-  worktree_branch_unconfirmed: [
-    "Branch moved after discard",
-    "The run branch tip differs from the HEAD confirmed when the worktree was discarded.",
-  ],
-};
-function StopPanel({
-  item,
-  history,
-  revisions,
-  startError,
-  openRevision,
-  now,
-}: {
-  item: Run;
-  history: Invocation[];
-  revisions: Artifact[];
-  startError: string;
-  openRevision: (revision: Artifact) => void;
-  now: number;
-}) {
-  const latest = history.at(-1),
-    state = item.state,
-    reason = item.stop_reason,
-    reasonCopy = reasons[reason] || [
-      "Unrecognised stop reason",
-      "This version of the UI has no description for this code. Search the run log for it.",
-    ];
-  let eyebrow = "",
-    title = "",
-    body = "",
-    action = "",
-    artifactName = "",
-    kept: string[] = [];
-  switch (state) {
-    case "created":
-      eyebrow = startError ? "Not started · start failed" : "Not started";
-      title = startError
-        ? "The run was created, but starting it failed."
-        : "The run is created and has not started.";
-      body = startError
-        ? startError
-        : `Starting resolves base_ref to a commit, creates the branch ${item.branch || "agentum/" + short(item.id)} and runs the first stage, plan.`;
-      break;
-    case "running":
-      eyebrow = "Working · no action needed";
-      title = latest
-        ? `Invocation #${latest.sequence} · ${latest.stage} · cycle ${latest.cycle}`
-        : "The run is starting.";
-      body = latest
-        ? "The agent is working. This page updates every 3 seconds."
-        : "The first invocation will appear here when it starts.";
-      break;
-    case "paused_gate":
-      eyebrow = "Waiting for you";
-      title =
-        reason && reason !== "gate"
-          ? reasonCopy[0]
-          : "The plan is ready for approval.";
-      body =
-        reason && reason !== "gate"
-          ? reasonCopy[1]
-          : "No source code changes until the plan is approved.";
-      action = "advance";
-      artifactName = "plan/plan.md";
-      break;
-    case "paused_open_questions":
-      eyebrow = "Waiting for you";
-      title = `The agent asked ${(item.open_questions || []).length} questions in ${item.current_stage || "plan"}.`;
-      body = "The stage is blocked until they are answered.";
-      action = "continue {text}";
-      artifactName = (item.current_stage || "plan") + "/result.json";
-      break;
-    case "paused_user_stop":
-      eyebrow = "Stopped · waiting for you";
-      title = reasonCopy[0];
-      body = reasonCopy[1];
-      action = "continue";
-      break;
-    case "awaiting_final_review":
-      eyebrow = "Waiting for you · final review";
-      title = "The work is ready for final review.";
-      body = `Result commit ${short(item.result_commit, 7)} on ${item.branch}.`;
-      action = "approve";
-      artifactName = "review/verdict.json";
-      break;
-    case "done":
-      eyebrow = "Done";
-      title = "Accepted at final review.";
-      body = `Result commit ${short(item.result_commit, 7)}. The worktree was removed; the branch is kept.`;
-      kept = [
-        `branch ${item.branch}`,
-        `result_commit ${short(item.result_commit, 7)}`,
-        `${revisions.length} artifacts`,
-      ];
-      break;
-    case "failed":
-      eyebrow = "Failed · not resumable";
-      title = `The run failed${item.current_stage ? " in " + item.current_stage : ""}.`;
-      body =
-        "Your work is saved: nothing was removed. A new run can start from any of the kept commits.";
-      kept = [`branch ${item.branch}`];
-      break;
-    case "cancelled":
-      const rejectedAtPlan = item.cancel_reason === "rejected_at_plan";
-      const rejectedAtFinal = item.cancel_reason === "rejected_at_final_review";
-      const rejected =
-        rejectedAtPlan || rejectedAtFinal || item.cancel_reason === "rejected";
-      eyebrow =
-        rejectedAtPlan
-          ? "Cancelled · rejected at plan gate"
-          : rejectedAtFinal
-            ? "Cancelled · rejected at final review"
-            : rejected
-              ? "Cancelled · rejected"
-              : "Cancelled";
-      title =
-        rejectedAtPlan
-          ? "The plan was rejected."
-          : rejectedAtFinal
-            ? "The result was rejected."
-            : rejected
-              ? "The run was rejected."
-              : `The run was cancelled${item.current_stage ? " during " + item.current_stage : ""}.`;
-      body = "The worktree was removed; the branch is kept for reference.";
-      kept = [`branch ${item.branch}`];
-      if (item.result_commit)
-        kept.push(`result_commit ${short(item.result_commit, 7)}`);
-      break;
-  }
-  const match =
-    revisions.find(
-      (revision) => revision.name === artifactName && revision.is_current,
-    ) || revisions.find((revision) => revision.name === artifactName);
-  const actionPath = latest
-    ? `POST /api/v1/runs/${item.id}/invocations/${latest.id}/${action}`
-    : `POST /api/v1/runs/${item.id}`;
-  if (waitingStates.has(state)) {
-    const elapsedMinutes = Math.max(
-      0,
-      Math.floor((now - Date.parse(item.updated_at)) / 60000),
-    );
-    eyebrow += ` · ${elapsedMinutes}m`;
-  }
-  return (
-    <section className={"stop-panel " + stateTone(state)}>
-      <div>
-        <div className="eyebrow">
-          {eyebrow}
-          {reason && waitingStates.has(state) && <code>{reason}</code>}
-        </div>
-        <h2>{title}</h2>
-        <p>{body}</p>
-        {state === "paused_open_questions" && item.open_questions && (
-          <ol className="questions">
-            {item.open_questions.map((question, index) => (
-              <li key={index}>{question}</li>
-            ))}
-          </ol>
-        )}
-        {match && (
-          <button className="artifact-link" onClick={() => openRevision(match)}>
-            {state === "paused_gate"
-              ? "Awaiting decision:"
-              : state === "awaiting_final_review"
-                ? "Verdict:"
-                : "Source:"}{" "}
-            <code>{match.name}</code>
-          </button>
-        )}
-        {state === "failed" && item.error && (
-          <pre className="failure-detail">{item.error}</pre>
-        )}
-        {kept.length > 0 && (
-          <ul className="kept">
-            {kept.map((value) => (
-              <li key={value}>✓ {value}</li>
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="stop-side">
-        {state === "running" && latest ? (
-          <div className="live-time">
-            <strong>
-              {duration(latest.started_at, new Date(now).toISOString())}
-            </strong>
-            <span>
-              since{" "}
-              {new Date(latest.started_at).toLocaleTimeString("en", {
-                hour12: false,
-              })}
-            </span>
-          </div>
-        ) : (
-          action && (
-            <div className="api-hint">
-              <span>Action is available via API for now</span>
-              <code>{actionPath}</code>
-            </div>
-          )
-        )}
-      </div>
-    </section>
-  );
+import { RunActionPanel } from "./run-actions";
+
+function resourceStatus(state?: string): string {
+  return ({ present: "Kept", removing: "Removing…", removed: "Removed", not_created: "Not created" } as Record<string, string>)[state || ""] || "—";
 }
+
 function Invocations({ items, state }: { items: Invocation[]; state: string }) {
   const latest = items.at(-1),
     fixCycles = Math.max(0, ...items.map((item) => item.cycle));
@@ -402,20 +128,39 @@ function ArtifactViewer({
   item,
   runID,
   close,
+  editing,
+  startEditing,
+  latestInvocation,
+  canEdit,
+  nextRevision,
+  stopEditing,
+  saved,
+  refresh,
 }: {
   item: Artifact;
   runID: string;
   close: () => void;
+  editing: boolean;
+  startEditing: () => void;
+  latestInvocation?: Invocation;
+  canEdit: boolean;
+  nextRevision: number;
+  stopEditing: () => void;
+  saved: (revision: Artifact) => void;
+  refresh: () => Promise<void>;
 }) {
   const [text, setText] = useState<string | null>(null),
-    [error, setError] = useState<unknown>(null);
+    [error, setError] = useState<unknown>(null),
+    [draft, setDraft] = useState(""),
+    [saveError, setSaveError] = useState<unknown>(null),
+    [saving, setSaving] = useState(false);
   useEffect(() => {
     setText(null);
     setError(null);
     let active = true;
     artifactContent(runID, item.id)
       .then((content) => {
-        if (active) setText(content);
+        if (active) { setText(content); setDraft(content); }
       })
       .catch((caught) => {
         if (active) setError(caught);
@@ -434,17 +179,24 @@ function ArtifactViewer({
         : item.name.endsWith(".diff") || item.name.endsWith(".patch")
           ? "diff"
           : "text";
+  const save = async () => {
+    if (!latestInvocation || text === null || draft === text || saving) return;
+    setSaving(true); setSaveError(null);
+    try {
+      const revision = await savePlan(runID, latestInvocation.id, draft, item.id);
+      stopEditing(); saved(revision);
+    } catch (caught) { setSaveError(caught); if (caught instanceof ApiError && (caught.status === 409 || caught.status === 428)) await refresh(); }
+    finally { setSaving(false); }
+  };
   return (
-    <div className="viewer">
+    <div className={"viewer " + (editing ? "plan-editing" : "")} id="artifact-viewer">
       <div className="viewer-head">
         <div>
           <strong>{item.name}</strong>
-          <span className="mono">
-            {item.actor} · {item.content_size} bytes · sha256{" "}
-            {short(item.content_hash, 7)}
-          </span>
+          <span className="mono">{editing ? `editing · base rev ${item.id}` : `${item.actor} · ${item.content_size} bytes · sha256 ${short(item.content_hash, 7)}`}</span>
         </div>
-        <button className="secondary" onClick={close}>
+        {item.name === "plan/plan.md" && canEdit && !editing && latestInvocation && <button className="secondary" onClick={startEditing}>Edit</button>}
+        <button className="secondary" onClick={() => { stopEditing(); close(); }}>
           Close
         </button>
       </div>
@@ -452,7 +204,13 @@ function ArtifactViewer({
         <Problem error={error} title="Artifact could not be loaded." />
       ) : text === null ? (
         <Loading label="Loading artifact…" />
-      ) : kind === "md" ? (
+      ) : editing ? <>
+        {saveError && (saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) ?
+          <div className="run-notice human" role="alert"><strong>Plan changed. Review the current revision before trying again. Your edited text is kept and was not saved.</strong><code>{saveError.status} {saveError.code} · {saveError.message}</code></div> :
+          <Problem error={saveError} title="Plan was not saved. Your edited text is kept." />)}
+        <textarea className="plan-editor" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={!!saveError} />
+        <div className="run-form-footer"><button className="primary" disabled={saving || !canEdit || draft === text || !draft.trim()} onClick={() => void save()}>{saving ? "Saving…" : `Save as rev ${nextRevision}`}</button><button className="secondary" disabled={saving} onClick={stopEditing}>Discard changes</button><span>Saving creates a new revision. The run stays at the gate until you approve it.</span></div>
+      </> : kind === "md" ? (
         <div className="markdown">
           <ReactMarkdown skipHtml>{text}</ReactMarkdown>
         </div>
@@ -486,11 +244,25 @@ function Artifacts({
   runID,
   open,
   setOpen,
+  editing,
+  startEditing,
+  latestInvocation,
+  canEdit,
+  stopEditing,
+  saved,
+  refresh,
 }: {
   items: Artifact[];
   runID: string;
   open: Artifact | null;
   setOpen: (value: Artifact | null) => void;
+  editing: boolean;
+  startEditing: () => void;
+  latestInvocation?: Invocation;
+  canEdit: boolean;
+  stopEditing: () => void;
+  saved: (revision: Artifact) => void;
+  refresh: () => Promise<void>;
 }) {
   const ordered = useMemo(
     () =>
@@ -553,6 +325,14 @@ function Artifacts({
           item={open}
           runID={runID}
           close={() => setOpen(null)}
+          editing={editing && open.name === "plan/plan.md"}
+          startEditing={startEditing}
+          latestInvocation={latestInvocation}
+          canEdit={canEdit}
+          nextRevision={(revisions.get("plan/plan.md") || 0) + 1}
+          stopEditing={stopEditing}
+          saved={saved}
+          refresh={refresh}
         />
       )}
     </section>
@@ -619,6 +399,13 @@ export function RunPage({
       () => sessionStorage.getItem("agentum.start_error." + runID) || "",
     ),
     [starting, setStarting] = useState(false);
+  const [review, setReview] = useState<FinalReview | null>(null);
+  const [delivery, setDelivery] = useState<Publication | null>(null);
+  const [stat, setStat] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [savedRevisionID, setSavedRevisionID] = useState("");
+  const [cancelSignal, setCancelSignal] = useState(0);
+  const [removalPending, setRemovalPending] = useState(false);
   const load = useCallback(async () => {
     try {
       const data = await run(runID);
@@ -629,6 +416,13 @@ export function RunPage({
       setItem(data);
       setHistory(attempts);
       setRevisions(artifactRows);
+      if (["awaiting_final_review", "done", "cancelled"].includes(data.state)) {
+        finalReview(runID).then((result) => {
+          setReview(result);
+          if (result.diff?.stat_revision_id) artifactContent(runID, result.diff.stat_revision_id).then(setStat).catch(() => setStat(""));
+        }).catch(() => setReview(null));
+      }
+      if (["awaiting_final_review", "done"].includes(data.state)) publication(runID).then(setDelivery).catch(() => setDelivery({ state: "unavailable" }));
       setLastGood(new Date().toISOString());
       setStale(null);
       setError(null);
@@ -652,12 +446,13 @@ export function RunPage({
     void load();
   }, [runID]);
   useEffect(() => {
-    if (item && terminalStates.has(item.state)) return;
+    const sealing = item && ["done", "cancelled"].includes(item.state) && item.branch_state === "present" && !item.result_commit;
+    if (item && terminalStates.has(item.state) && !removalPending && !sealing && !["pending", "publishing"].includes(delivery?.state || "")) return;
     const timer = setInterval(() => {
       void load();
     }, 3000);
     return () => clearInterval(timer);
-  }, [runID, item?.state, load]);
+  }, [runID, item?.state, load, removalPending, delivery?.state]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -690,6 +485,15 @@ export function RunPage({
     setViewerTouched(true);
     setOpen(revision);
   };
+  const openAndScroll = (revision: Artifact) => {
+    selectRevision(revision);
+    setTimeout(() => document.getElementById("artifact-viewer")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  };
+  const editPlan = () => {
+    const plan = revisions.find((revision) => revision.name === "plan/plan.md" && revision.is_current);
+    if (!plan) return;
+    openAndScroll(plan); setEditing(true);
+  };
   const start = async () => {
     if (starting) return;
     setStarting(true);
@@ -707,7 +511,7 @@ export function RunPage({
     }
   };
   const poll =
-    item && terminalStates.has(item.state)
+    item && terminalStates.has(item.state) && !removalPending && !(["done", "cancelled"].includes(item.state) && item.branch_state === "present" && !item.result_commit) && !["pending", "publishing"].includes(delivery?.state || "")
       ? "Final state · polling stopped"
       : stale
         ? `Stale · last update ${relative(lastGood)}`
@@ -800,34 +604,35 @@ export function RunPage({
               {item.state === "created" && (
                 <button
                   className="primary"
-                  disabled={starting}
+                  disabled={starting || !!stale}
                   onClick={() => void start()}
                 >
                   {starting ? "Starting…" : "Start run"}
                 </button>
               )}
-              <div className="header-api-hints">
-                <span>Reserved · actions via API</span>
-                {!terminalStates.has(item.state) && (
-                  <code>POST /api/v1/runs/{item.id}/cancel</code>
-                )}
-                {(item.state === "awaiting_final_review" ||
-                  item.state === "paused_gate") && (
-                  <code>POST /api/v1/runs/{item.id}/reject</code>
-                )}
-              </div>
+              {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
           <div className="route-placeholder">
             <span>Route</span>
             <Reserved>selected route and the reason it was chosen</Reserved>
           </div>
-          <StopPanel
+          <RunActionPanel
             item={item}
             history={history}
             revisions={revisions}
+            stale={!!stale}
+            review={review}
+            publication={delivery}
+            stat={stat}
             startError={startError}
-            openRevision={selectRevision}
+            onEdit={editPlan}
+            editing={editing}
+            savedRevisionID={savedRevisionID}
+            onOpen={openAndScroll}
+            onRefresh={load}
+            cancelSignal={cancelSignal}
+            onRemovalPending={setRemovalPending}
             now={now}
           />
           <div className="tabs">
@@ -861,11 +666,29 @@ export function RunPage({
                 runID={runID}
                 open={open}
                 setOpen={selectRevision}
+                editing={editing}
+                startEditing={() => setEditing(true)}
+                latestInvocation={history.at(-1)}
+                canEdit={item.state === "paused_gate" && !stale}
+                stopEditing={() => setEditing(false)}
+                saved={(revision) => { setOpen(revision); void load().then(() => setSavedRevisionID(revision.id)); }}
+                refresh={load}
               />
             </div>
             <aside className="run-aside">
               <Facts item={item} />
-              <Reserved>Result</Reserved>
+              <section className="facts"><h2 className="section-title">Result</h2>
+                <div className="fact"><span>publication</span><code>{delivery?.state || "—"}</code></div>
+                <div className="fact"><span>commit</span><code title={item.result_commit}>{short(item.result_commit, 8) || "—"}</code></div>
+                <div className="fact"><span>checks</span><code>{review?.checks?.ran ? review.checks.mandatory_passed ? "required passed" : "failed" : "—"}</code></div>
+                <div className="fact"><span>reviewer</span><code>{review?.review?.verdict || "—"}</code></div>
+                <div className="fact"><span>changes</span><code>{review?.diff?.stat_revision_id ? "diff.stat" : "—"}</code></div>
+                {delivery?.pull_request?.url && <a className="run-pr-link" href={delivery.pull_request.url} target="_blank" rel="noreferrer">Open draft PR ↗</a>}
+              </section>
+              <section className="facts"><h2 className="section-title">Local resources</h2>
+                <div className="fact"><span>worktree</span><code>{item.state === "created" ? "created on start" : terminalStates.has(item.state) ? resourceStatus(item.worktree?.state) : "in use by the run"}</code></div>
+                <div className="fact"><span>branch</span><code>{item.state === "created" ? "created on start" : terminalStates.has(item.state) ? resourceStatus(item.branch_state) : "in use by the run"}</code></div>
+              </section>
             </aside>
           </div>
         </>

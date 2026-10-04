@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,8 +16,71 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/nzinovev/agentum/internal/worktree"
 	"github.com/sqlc-dev/pqtype"
 )
+
+// TestGetRunLocalResources reports live HEAD, dirty paths, and the latest
+// asynchronous deletion refusal from the run's pinned checkout.
+func TestGetRunLocalResources(t *testing.T) {
+	harness := newRegistrationHarness(t)
+	repositoryPath := t.TempDir()
+	initRegistrationRepo(t, repositoryPath, "run resources")
+	project := harness.registerProject(repositoryPath)
+	record := harness.seedRun(project.ID, "done", repositoryPath)
+	manager := worktree.New()
+	baseCommit, err := manager.ResolveRef(t.Context(), repositoryPath, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.queries.SetBaseCommit(t.Context(), sqlc.SetBaseCommitParams{
+		ID: record.ID, TenantID: testTenantID, BaseCommit: sql.NullString{String: baseCommit, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := manager.Create(t.Context(), repositoryPath, record.ID, baseCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(created.Root, "unfinished.txt"), []byte("draft"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := func() runResponse {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+record.ID, nil)
+		request.SetPathValue("id", record.ID)
+		request = request.WithContext(authz.WithPrincipal(request.Context(), harness.principal))
+		response := httptest.NewRecorder()
+		harness.api.handleGetRun(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET run: %d %s", response.Code, response.Body.String())
+		}
+		var decoded runResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	initial := read()
+	if initial.Worktree == nil || initial.Worktree.State != "present" || initial.Worktree.Head != baseCommit || !initial.Worktree.Dirty || len(initial.Worktree.DirtyEntries) != 1 || initial.Worktree.DirtyEntries[0].Path != "unfinished.txt" || initial.BranchState != "present" {
+		t.Fatalf("live resources = %+v, branch = %s", initial.Worktree, initial.BranchState)
+	}
+	job, err := harness.queries.EnqueueJob(t.Context(), sqlc.EnqueueJobParams{
+		TenantID: testTenantID, UserID: testUserID, RunID: record.ID, Kind: "discard_worktree", Payload: []byte("{}"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read().Worktree.State; got != "removing" {
+		t.Fatalf("queued discard state = %q", got)
+	}
+	if err := harness.queries.FailJob(t.Context(), sqlc.FailJobParams{ID: job.ID, LastError: sql.NullString{String: "HEAD moved", Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	refused := read()
+	if refused.Worktree.State != "present" || refused.Worktree.LastError == nil || refused.Worktree.LastError.Message != "HEAD moved" {
+		t.Fatalf("failed discard = %+v", refused.Worktree)
+	}
+}
 
 // validCreateBody is the body every accepted case starts from, as compact JSON.
 const validCreateBody = `{

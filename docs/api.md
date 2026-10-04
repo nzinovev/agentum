@@ -137,16 +137,17 @@ one of the two counters is non-zero on any given registration.
 |---|---|---|---|
 | `POST` | `/runs` | ✅ | `{project_id, pipeline_pack?, title, description, overrides?, base_ref}` → `201 Run`. Omitted `pipeline_pack` stores `backend-development`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]`. Human-waiting states (`paused_open_questions`, `paused_gate`, `paused_user_stop`, `awaiting_final_review`) come first. Each group is ordered by `updated_at DESC, id DESC`; pagination follows that order. |
-| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation when the run is in `paused_open_questions`. |
+| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
 | `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions` / `publication`. `checks` holds the commit the checks ran against, `ran`, `mandatory_passed`, per-check `results` (`name`, `required`, `status`), and `config` — the project config that defined them (`file`, `present_at_base`, `base_hash`, and `checkout_change` when the source checkout's copy differed at the start of the run — `added`, `removed`, `modified`, or `unreadable` when it could not be read; `present_at_base: false` means the registry was empty). Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
 | `GET` | `/runs/{id}/publication` | ✅ | → `200 Publication`; requires `run:read`. See [Publication](#publication). |
 | `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
-| `POST` | `/runs/{id}/cleanup` | ✅ | terminal run → branch deleted (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) |
+| `POST` | `/runs/{id}/cleanup` | ✅ | terminal run with no worktree → branch deletion queued (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) / `409 conflict` (worktree still present). The worker checks for the worktree again before deleting the branch. |
 | `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
 | `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:discard-worktree`. |
+| `POST` | `/runs/{id}/continue` | ✅ | continue a `paused_user_stop` run before its first invocation. An optional `{"text":…}` reaches the first stage's Task section. Uses the same Continue handler and validation as the invocation route. |
 
 `base_ref` is the git ref the run builds against — **required and explicit**;
 an absent or blank value is a `400 bad_input`. Name the target branch of the
@@ -175,13 +176,12 @@ repository, the run pauses with stop reason `checkout_unavailable` (the
 the directory or re-register the project, then continue. The run never rebuilds
 its worktree in a different copy.
 
-`cancel` is a **terminal abort**: the in-flight run is aborted and the worktree
-is torn down, but the `agentum/<run-id>` branch and any committed recovery work
-survive for review. `cleanup` is the **explicit, post-terminal disposal** that
-deletes the branch; it is a distinct verb because cancel and cleanup must not be
-ambiguous with each other or with pause.
+`cancel` is a terminal abort. The in-flight run is aborted. Teardown records
+`result_commit` and seals the manifest while keeping the worktree and branch.
+`approve` and `reject` use the same resource retention. A person deletes the
+worktree with `worktree/discard`, then deletes the branch with `cleanup`.
 
-A **failure never tears the worktree down**. `failed` keeps the working tree,
+A **failure keeps the worktree**. `failed` keeps the working tree,
 the branch, and the checkpoints exactly as the error left them — the uncommitted
 files may be the only copy of a partially executed stage's work, and a person
 decides what to salvage. Removing that tree afterwards is the explicit,
@@ -426,7 +426,8 @@ stages. It grants no capability, approves no plan, and changes no checks.
 | malformed JSON, unknown field, non-string `text` (null included), a second JSON object | `400` | `bad_input`; no state change, no enqueue |
 | invalid UTF-8, or `text` over 32 KiB (decoded) or body over 256 KiB | `400` | `bad_input`; no truncation |
 | credential-shaped `text` (scanner reject) | `422` | `bad_input`; the text is not stored |
-| non-empty `text` with no captured session on the latest invocation | `409` | `illegal_transition`; no enqueue |
+| non-empty `text` after an invocation with no captured session | `409` | `illegal_transition`; no enqueue |
+| non-empty `text` at `paused_user_stop` before the first invocation | `200` | the note reaches the first stage's Task section |
 
 The text is not trimmed or rewritten on the way to the model; only the
 emptiness check trims. `jobs.payload` keeps the accepted text across a process

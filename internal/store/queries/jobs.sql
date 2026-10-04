@@ -73,3 +73,12 @@ WHERE run_id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') AND id
 SELECT count(*)::int
 FROM jobs
 WHERE run_id = $1 AND tenant_id = $2 AND kind = $3;
+
+-- name: LatestResourceJobForRun :one
+-- The latest explicit resource deletion request gives the read API its
+-- pending state or its final refusal after the asynchronous worker finishes.
+SELECT status, last_error
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3 AND kind = $4
+ORDER BY id DESC
+LIMIT 1;
