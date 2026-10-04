@@ -375,6 +375,7 @@ const jobKindDiscardWorktree = "discard_worktree"
 type discardWorktreeRequest struct {
 	ExpectedHead       string `json:"expected_head"`
 	DiscardUncommitted bool   `json:"discard_uncommitted"`
+	DiscardUnreadable  bool   `json:"discard_unreadable"`
 }
 
 // HandleReconcile serves the "reconcile" job kind: apply the human's recovery
@@ -523,6 +524,18 @@ func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
 	}
 
 	checkoutPath := checkoutPathOf(record, project)
+	if request.DiscardUnreadable {
+		if !engine.IsTerminal(state) || !request.DiscardUncommitted || request.ExpectedHead != "" {
+			return errors.New("discard worktree: unreadable-tree removal requires a terminal run and explicit loss confirmation")
+		}
+		if removeErr := runner.wt.RemoveUnreadableWorktree(ctx, checkoutPath, record.ID); removeErr != nil {
+			return fmt.Errorf("discard unreadable worktree: %w", removeErr)
+		}
+		runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{
+			"unreadable": true, "branch": worktree.BranchFor(record.ID),
+		})
+		return nil
+	}
 	if repairErr := runner.repairIfPresent(ctx, checkoutPath, record.ID); repairErr != nil {
 		return fmt.Errorf("discard worktree: relink worktree: %w", repairErr)
 	}

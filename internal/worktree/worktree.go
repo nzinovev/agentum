@@ -809,6 +809,80 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID stri
 	return nil
 }
 
+// RemoveUnreadableWorktree removes a registered run worktree whose HEAD cannot
+// be read. It removes only that tree's Git registration so another damaged
+// worktree in the same repository remains available for repair.
+func (manager *Manager) RemoveUnreadableWorktree(ctx context.Context, repoPath, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	wtPath := PathFor(repoAbs, runID)
+	info, statErr := os.Lstat(wtPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("unreadable worktree directory is not present: %w", statErr)
+	}
+	if statErr == nil && !info.IsDir() {
+		return errors.New("unreadable worktree path is not a directory")
+	}
+	metadataPath, metadataErr := registeredWorktreeMetadata(ctx, repoAbs, wtPath, BranchFor(runID))
+	if metadataErr != nil {
+		if os.IsNotExist(statErr) && errors.Is(metadataErr, errWorktreeRegistrationMissing) {
+			return nil
+		}
+		return metadataErr
+	}
+	if statErr == nil && DirPresent(wtPath) {
+		if _, headErr := manager.HeadCommit(ctx, wtPath); headErr == nil {
+			return errors.New("worktree HEAD became readable; confirm the current HEAD before deleting it")
+		}
+	}
+	if statErr == nil {
+		if removeErr := os.RemoveAll(wtPath); removeErr != nil {
+			return fmt.Errorf("remove unreadable worktree: %w", removeErr)
+		}
+	}
+	if removeErr := os.RemoveAll(metadataPath); removeErr != nil {
+		return fmt.Errorf("remove unreadable worktree registration: %w", removeErr)
+	}
+	return nil
+}
+
+var errWorktreeRegistrationMissing = errors.New("worktree has no registration for this run branch")
+
+func registeredWorktreeMetadata(ctx context.Context, repoPath, wtPath, branch string) (string, error) {
+	out, err := git(ctx, repoPath, revParseCmd, "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("find worktree registrations: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(repoPath, commonDir)
+	}
+	entries, readErr := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if readErr != nil {
+		return "", fmt.Errorf("read worktree registrations: %w", readErr)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		metadataPath := filepath.Join(commonDir, "worktrees", entry.Name())
+		gitdir, gitdirErr := os.ReadFile(filepath.Join(metadataPath, "gitdir"))
+		if gitdirErr != nil || filepath.Clean(strings.TrimSpace(string(gitdir))) != filepath.Join(wtPath, ".git") {
+			continue
+		}
+		head, headErr := os.ReadFile(filepath.Join(metadataPath, "HEAD"))
+		if headErr == nil && strings.TrimSpace(string(head)) == "ref: refs/heads/"+branch {
+			return metadataPath, nil
+		}
+	}
+	return "", errWorktreeRegistrationMissing
+}
+
 // DeleteBranch removes the agentum/<run-id> branch. This is the explicit,
 // audited cleanup action — distinct from terminal teardown. Idempotent: a
 // missing branch is a no-op. -D forces removal even if not merged: a delivered
@@ -959,6 +1033,8 @@ func (manager *Manager) Repair(ctx context.Context, repoPath, runID string) erro
 // stderr) so callers see git's full diagnostic; trimmed at the call sites.
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// Reads must not refresh the shared index while an agent commits in its worktree.
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 	return cmd.CombinedOutput()
 }
 

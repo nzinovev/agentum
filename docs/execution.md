@@ -447,6 +447,9 @@ teardown, so `result_commit` is always resolvable after the fact; the
 The separate `worktree/discard` job checks `expected_head` and the dirty-file
 confirmation before removal. `cleanup` deletes the branch only after the
 worktree is gone. The API returns `409 conflict` while it still exists.
+An unreadable worktree on a terminal run requires `discard_unreadable: true`
+and `discard_uncommitted: true`. The job verifies its run branch registration
+and removes only that worktree and registration.
 
 Artifact *files* are durable independently of the worktree —
 `artifact_revisions` rows + the content-addressed blob store survive teardown.

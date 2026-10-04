@@ -82,6 +82,60 @@ func TestGetRunLocalResources(t *testing.T) {
 	}
 }
 
+// TestGetRunWithUnavailableCheckout: a missing pinned checkout omits the plan
+// budget while the run and its human actions remain readable.
+func TestGetRunWithUnavailableCheckout(t *testing.T) {
+	harness := newRegistrationHarness(t)
+	repositoryPath := t.TempDir()
+	initRegistrationRepo(t, repositoryPath, "unavailable checkout")
+	project := harness.registerProject(repositoryPath)
+	record := harness.seedRun(project.ID, "paused_user_stop", repositoryPath)
+	baseCommit, err := worktree.New().ResolveRef(t.Context(), repositoryPath, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.queries.SetBaseCommit(t.Context(), sqlc.SetBaseCommitParams{
+		ID: record.ID, TenantID: testTenantID, BaseCommit: sql.NullString{String: baseCommit, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repositoryPath, repositoryPath+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+record.ID, nil)
+	request.SetPathValue("id", record.ID)
+	request = request.WithContext(authz.WithPrincipal(request.Context(), harness.principal))
+	response := httptest.NewRecorder()
+	harness.api.handleGetRun(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET run with unavailable checkout: %d %s", response.Code, response.Body.String())
+	}
+	var decoded runResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PlanEdits != nil || decoded.Worktree == nil || decoded.Worktree.State != "removed" {
+		t.Fatalf("read state with unavailable checkout = %+v", decoded)
+	}
+	if err := os.Rename(repositoryPath+"-moved", repositoryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(repositoryPath, ".git"), filepath.Join(repositoryPath, ".git-moved")); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	harness.api.handleGetRun(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET run with unresolvable pack: %d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PlanEdits != nil {
+		t.Fatalf("plan budget was reported from an unreadable checkout: %+v", decoded.PlanEdits)
+	}
+}
+
 // validCreateBody is the body every accepted case starts from, as compact JSON.
 const validCreateBody = `{
   "project_id": "P1",

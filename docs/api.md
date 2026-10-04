@@ -137,7 +137,7 @@ one of the two counters is non-zero on any given registration.
 |---|---|---|---|
 | `POST` | `/runs` | ✅ | `{project_id, pipeline_pack?, title, description, overrides?, base_ref}` → `201 Run`. Omitted `pipeline_pack` stores `backend-development`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]`. Human-waiting states (`paused_open_questions`, `paused_gate`, `paused_user_stop`, `awaiting_final_review`) come first. Each group is ordered by `updated_at DESC, id DESC`; pagination follows that order. |
-| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
+| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs; it is omitted when the pinned checkout or pack cannot be read. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
@@ -146,7 +146,7 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
 | `POST` | `/runs/{id}/cleanup` | ✅ | terminal run with no worktree → branch deletion queued (idempotent, audited) → `202 Run` / `409 illegal_transition` (if not terminal) / `409 conflict` (worktree still present). The worker checks for the worktree again before deleting the branch. |
 | `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
-| `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:discard-worktree`. |
+| `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. A terminal run with an unreadable worktree uses `{discard_unreadable:true,discard_uncommitted:true}` after confirming loss of all files; the job verifies the run's Git registration and refuses a tree whose HEAD becomes readable. Requires `run:discard-worktree`. |
 | `POST` | `/runs/{id}/continue` | ✅ | continue a `paused_user_stop` run before its first invocation. An optional `{"text":…}` reaches the first stage's Task section. Uses the same Continue handler and validation as the invocation route. |
 
 `base_ref` is the git ref the run builds against — **required and explicit**;
@@ -195,6 +195,13 @@ the request does not describe. A discarded stopped run can still be continued
 or advanced: the runner checks the surviving branch out again, but only while
 its tip is the HEAD the discard confirmed — otherwise the run pauses with
 `worktree_branch_unconfirmed`.
+
+A terminal run whose worktree HEAD cannot be read accepts
+`{discard_unreadable:true,discard_uncommitted:true}`. The job verifies that Git
+registered the directory for this run branch. It removes that directory and
+its registration, while preserving the branch. If the HEAD becomes readable
+before execution, the job refuses removal and the person must confirm its
+current `expected_head` instead.
 
 A run resumed over a worktree holding **uncommitted changes** does not get its
 tree wiped: the runner pauses with stop reason `worktree_uncommitted_changes`

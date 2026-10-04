@@ -61,21 +61,6 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 	}
 	response.Worktree = &runWorktreeView{State: "not_created", DirtyEntries: []runDirtyEntry{}}
 	response.BranchState = "not_created"
-	if run.BaseCommit.Valid && run.BaseCommit.String != "" {
-		budget, err := api.resolveRunPack(ctx, run)
-		if err != nil {
-			return fmt.Errorf("read plan budget: %w", err)
-		}
-		if budget != nil {
-			used, countErr := api.queries.CountJobsOfKindForRun(ctx, sqlc.CountJobsOfKindForRunParams{
-				RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
-			})
-			if countErr != nil {
-				return fmt.Errorf("count plan edits: %w", countErr)
-			}
-			response.PlanEdits = &planEditBudget{Used: int(used), Max: budget.Budgets.AskToEdit}
-		}
-	}
 	if !run.BaseCommit.Valid || run.BaseCommit.String == "" {
 		return nil
 	}
@@ -93,6 +78,18 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 	response.BranchState = "removed"
 	if _, statErr := os.Stat(checkoutPath); statErr != nil {
 		return nil
+	}
+	budget, budgetErr := api.resolveRunPack(ctx, run)
+	if budgetErr != nil {
+		api.log.Warn("read plan budget", "run", run.ID, "error", budgetErr)
+	} else if budget != nil {
+		used, countErr := api.queries.CountJobsOfKindForRun(ctx, sqlc.CountJobsOfKindForRunParams{
+			RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
+		})
+		if countErr != nil {
+			return fmt.Errorf("count plan edits: %w", countErr)
+		}
+		response.PlanEdits = &planEditBudget{Used: int(used), Max: budget.Budgets.AskToEdit}
 	}
 	manager := worktree.New()
 	if _, pathErr := os.Stat(wtPath); pathErr == nil {
@@ -139,6 +136,7 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 		}
 		resourceJobSeen = true
 		if job.Status == "pending" || job.Status == "running" {
+			*resource.lastError = nil
 			if *resource.state == "present" {
 				*resource.state = "removing"
 			}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,9 @@ func TestParseDiscardWorktreeBody_Contract(t *testing.T) {
 	}{
 		{"valid body", `{"expected_head":"` + head + `","discard_uncommitted":true}`, false},
 		{"valid without flag", `{"expected_head":"` + head + `"}`, false},
+		{"valid unreadable tree", `{"discard_unreadable":true,"discard_uncommitted":true}`, false},
+		{"unreadable without loss confirmation", `{"discard_unreadable":true}`, true},
+		{"unreadable with expected head", `{"discard_unreadable":true,"discard_uncommitted":true,"expected_head":"` + head + `"}`, true},
 		{"empty body", "", true},
 		{"json null", "null", true},
 		{"broken json", `{"expected_head":`, true},
@@ -58,10 +63,60 @@ func TestParseDiscardWorktreeBody_Contract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseDiscardWorktreeBody(%q): %v", testCase.body, err)
 			}
-			if request.ExpectedHead != strings.Repeat("c", 40) {
+			if !request.DiscardUnreadable && request.ExpectedHead != strings.Repeat("c", 40) {
 				t.Errorf("expected_head = %q", request.ExpectedHead)
 			}
 		})
+	}
+}
+
+// TestWorktreeDiscardEndpoint_UnreadableTree: a terminal run can enqueue a
+// separately confirmed removal when its worktree HEAD cannot be read.
+func TestWorktreeDiscardEndpoint_UnreadableTree(t *testing.T) {
+	harness := newWorktreeHarness(t)
+	runID := harness.insertWorktreeFixtureRun(t, "done")
+	record, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := harness.queries.GetProject(t.Context(), sqlc.GetProjectParams{ID: record.ProjectID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommit, err := worktree.New().ResolveRef(t.Context(), project.RepoPath, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.queries.SetBaseCommit(t.Context(), sqlc.SetBaseCommitParams{
+		ID: runID, TenantID: continueTestTenant, BaseCommit: sql.NullString{String: baseCommit, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitLink := filepath.Join(worktree.PathFor(project.RepoPath, runID), ".git")
+	if err := os.WriteFile(gitLink, []byte("gitdir: /missing/metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response := harness.callWorktreeAction(t, "discard", runID,
+		`{"discard_unreadable":true,"discard_uncommitted":true}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("unreadable discard status = %d, body %s", response.Code, response.Body.String())
+	}
+	readRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil)
+	readRequest.SetPathValue("id", runID)
+	readRequest = readRequest.WithContext(authz.WithPrincipal(readRequest.Context(), authz.Principal{
+		TenantID: continueTestTenant, UserID: continueTestUser,
+	}))
+	readResponse := httptest.NewRecorder()
+	harness.api.handleGetRun(readResponse, readRequest)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("GET run during removal: %d %s", readResponse.Code, readResponse.Body.String())
+	}
+	var readState runResponse
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &readState); err != nil {
+		t.Fatal(err)
+	}
+	if readState.Worktree == nil || readState.Worktree.State != "removing" || readState.Worktree.LastError != nil {
+		t.Fatalf("unreadable removal state = %+v", readState.Worktree)
 	}
 }
 

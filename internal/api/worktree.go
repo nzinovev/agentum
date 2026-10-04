@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
@@ -94,6 +95,7 @@ func (api *API) handleWorktreeReconcile(w http.ResponseWriter, r *http.Request) 
 type discardWorktreeRequest struct {
 	ExpectedHead       string `json:"expected_head"`
 	DiscardUncommitted bool   `json:"discard_uncommitted"`
+	DiscardUnreadable  bool   `json:"discard_unreadable"`
 }
 
 // parseDiscardWorktreeBody strictly decodes the discard request: exactly one
@@ -110,6 +112,12 @@ func parseDiscardWorktreeBody(body []byte) (discardWorktreeRequest, error) {
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return discardWorktreeRequest{}, errors.New("request body must contain exactly one JSON object")
+	}
+	if req.DiscardUnreadable {
+		if req.ExpectedHead != "" || !req.DiscardUncommitted {
+			return discardWorktreeRequest{}, errors.New("discard_unreadable requires an empty expected_head and discard_uncommitted: true")
+		}
+		return req, nil
 	}
 	if !taskinput.IsFullCommitSHA(req.ExpectedHead) {
 		return discardWorktreeRequest{}, errors.New("expected_head must be the full commit SHA of the worktree being discarded")
@@ -146,8 +154,18 @@ func (api *API) handleWorktreeDiscard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeBadInput, parseErr.Error())
 		return
 	}
-	if !api.requireCurrentWorktree(w, r, run, request.ExpectedHead, true, request.DiscardUncommitted) {
+	if request.DiscardUnreadable && !engine.IsTerminal(state) {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "discard_unreadable requires a terminal run")
 		return
+	}
+	if request.DiscardUnreadable {
+		if !api.requireUnreadableWorktree(w, r, run) {
+			return
+		}
+	} else {
+		if !api.requireCurrentWorktree(w, r, run, request.ExpectedHead, true, request.DiscardUncommitted) {
+			return
+		}
 	}
 	payload, marshalErr := json.Marshal(request)
 	if marshalErr != nil {
@@ -260,6 +278,33 @@ func (api *API) requireCurrentWorktree(w http.ResponseWriter, r *http.Request, r
 	if len(changes) > 0 && !confirmDirty {
 		writeError(w, http.StatusBadRequest, codeBadInput, "worktree holds uncommitted paths; confirm their loss")
 		return false
+	}
+	return true
+}
+
+// requireUnreadableWorktree accepts the separately confirmed recovery path only
+// while the run's worktree directory exists and its HEAD cannot be read.
+func (api *API) requireUnreadableWorktree(w http.ResponseWriter, r *http.Request, run sqlc.Run) bool {
+	project, err := api.queries.GetProject(r.Context(), sqlc.GetProjectParams{ID: run.ProjectID, TenantID: run.TenantID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return false
+	}
+	checkoutPath := run.CheckoutPath
+	if checkoutPath == "" {
+		checkoutPath = project.RepoPath
+	}
+	wtRoot := worktree.PathFor(checkoutPath, run.ID)
+	info, statErr := os.Lstat(wtRoot)
+	if statErr != nil || !info.IsDir() {
+		writeError(w, http.StatusConflict, codeConflict, "worktree directory is no longer present; reload the run")
+		return false
+	}
+	if worktree.DirPresent(wtRoot) {
+		if _, headErr := worktree.New().HeadCommit(r.Context(), wtRoot); headErr == nil {
+			writeError(w, http.StatusConflict, codeConflict, "worktree HEAD is readable; reload the run and confirm its current HEAD")
+			return false
+		}
 	}
 	return true
 }

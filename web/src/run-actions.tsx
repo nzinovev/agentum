@@ -92,8 +92,8 @@ function ResourceCards({ item, disabled, pending, onDelete, error }: {
       <div className="run-review-card"><h3>Worktree <span>{label(treeState)}</span></h3>
         <div className="run-resource-fact"><span>path</span><code title={worktree?.path}>{worktree?.path || "—"}</code></div>
         <div className="run-resource-fact"><span>HEAD</span><code title={worktree?.head}>{short(worktree?.head || "", 10) || "—"}</code></div>
-        <div className="run-resource-fact"><span>state</span><code>{worktree?.dirty ? `${worktree.dirty_entries.length} uncommitted paths` : "clean"}</code></div>
-        {treeState === "present" && <button className="danger-ghost" disabled={disabled || !worktree?.head} onClick={() => onDelete("discard")}>Delete worktree</button>}
+        <div className="run-resource-fact"><span>state</span><code>{worktree?.last_error?.code === "worktree_unreadable" || !worktree?.head && treeState === "present" ? "unreadable · changes unknown" : worktree?.dirty ? `${worktree.dirty_entries.length} uncommitted paths` : "clean"}</code></div>
+        {treeState === "present" && <button className="danger-ghost" disabled={disabled} onClick={() => onDelete("discard")}>Delete worktree</button>}
         {treeState === "removing" && <small>Removal requested (202). Waiting for server confirmation.</small>}
         {treeState === "removed" && <small>Removed, confirmed by the server.</small>}
       </div>
@@ -168,6 +168,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     return () => { active = false; };
   }, [item.id, plan?.id]);
   useEffect(() => {
+    if (stale) return;
     if (pendingRemoval === "discard" && (item.worktree?.state === "removed" || item.worktree?.last_error)) {
       if (item.worktree?.last_error) setResourceError({ status: 0, ...item.worktree.last_error });
       setNotice(null);
@@ -178,7 +179,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
       setNotice(null);
       setPendingRemoval("");
     }
-  }, [pendingRemoval, item.worktree?.state, item.worktree?.last_error, item.branch_state, item.branch_last_error]);
+  }, [pendingRemoval, stale, item.worktree?.state, item.worktree?.last_error, item.branch_state, item.branch_last_error]);
   useEffect(() => { onRemovalPending?.(!!pendingRemoval); }, [pendingRemoval, onRemovalPending]);
   useEffect(() => { if (publication?.state !== "pending") setPendingPublish(false); }, [publication?.state]);
   useEffect(() => {
@@ -207,7 +208,8 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     } catch (caught) {
       const failure = asActionError(caught);
       if (failure.code === "illegal_transition") {
-        setChangesOpen(false); setDialog(null); setNotice({ tone: "neutral", title: `${action} not sent: the run had already moved on.` });
+        setFormError(failure);
+        setNotice({ tone: "human", title: `${action} was not accepted.`, detail: `${failure.status} ${failure.code} · ${failure.message}` });
         await onRefresh();
       } else if (action === "Reconcile" && (failure.status === 409 || failure.status === 400)) {
         setReconcileMode("resume_session"); setConfirmLoss(false);
@@ -228,22 +230,27 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     if (!dialog) return;
     setBusy(true); setDialogError(null); setResourceError(null);
     try {
+      let requestedRemoval = "";
       if (dialog === "approve_result") {
         if (!latest) throw new Error("No invocation is available");
         await postInvocation(item.id, latest.id, "approve");
       } else if (dialog === "discard") {
-        await postRun(item.id, "worktree/discard", { expected_head: item.worktree?.head, ...(item.worktree?.dirty ? { discard_uncommitted: dialogCheck } : {}) });
-        setPendingRemoval("discard");
+        await postRun(item.id, "worktree/discard", item.worktree?.head
+          ? { expected_head: item.worktree.head, ...(item.worktree.dirty ? { discard_uncommitted: dialogCheck } : {}) }
+          : { discard_unreadable: true, discard_uncommitted: dialogCheck });
+        requestedRemoval = "discard";
       } else if (dialog === "cleanup") {
-        await postRun(item.id, "cleanup"); setPendingRemoval("cleanup");
+        await postRun(item.id, "cleanup"); requestedRemoval = "cleanup";
       } else await postRun(item.id, dialog === "cancel" ? "cancel" : "reject");
       setDialog(null);
       setNotice({ tone: "work", title: "Request accepted · waiting for the server to confirm…" });
       await onRefresh();
+      if (requestedRemoval) setPendingRemoval(requestedRemoval);
     } catch (caught) {
       const failure = asActionError(caught);
-      if (failure.code === "illegal_transition") { setDialog(null); await onRefresh(); setNotice({ tone: "neutral", title: "Decision not sent: the run had already moved on." }); }
-      else { setDialogError(failure); if (dialog === "discard" || dialog === "cleanup") setResourceError(failure); }
+      setDialogError(failure);
+      if (dialog === "discard" || dialog === "cleanup") setResourceError(failure);
+      if (failure.code === "illegal_transition") await onRefresh();
     } finally { setBusy(false); }
   };
   const retryPublication = async () => {
@@ -325,13 +332,13 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
       <h2>{dialogTitles[dialog]}</h2><p>Run “{item.title}”</p>
       {(dialog === "cancel" || dialog.startsWith("reject")) && <p>The run ends. Its worktree and branch stay until you delete them.</p>}
       {dialog === "approve_result" && <p>Publication continues on its own.</p>}
-      {dialog === "discard" && <p>Delete this local worktree. The branch and artifacts remain.</p>}
+      {dialog === "discard" && <p>{item.worktree?.head ? "Delete this local worktree. The branch and artifacts remain." : "The worktree cannot be read. Delete its files and Git registration without checking HEAD or uncommitted changes. The branch and artifacts remain."}</p>}
       {dialog === "cleanup" && <p>Delete the local branch after its worktree has been removed.</p>}
       <div className="run-dialog-facts"><code>{dialog === "discard" ? item.worktree?.path : dialog === "reject_plan" ? `plan/plan.md · rev ${planRevision}` : item.branch}</code><code>{dialog === "discard" ? item.worktree?.head : dialog === "reject_plan" ? plan?.id : item.result_commit || item.branch_tip}</code></div>
       {dialog === "discard" && !!item.worktree?.dirty_entries.length && <div className="run-dirty-list">{item.worktree.dirty_entries.map((entry) => <div key={entry.path}><code>{entry.status}</code> {entry.path}</div>)}</div>}
-      {dialog === "discard" && item.worktree?.dirty && <label className="run-loss-check"><input type="checkbox" checked={dialogCheck} onChange={(event) => setDialogCheck(event.target.checked)} />I understand that {item.worktree.dirty_entries.length} uncommitted paths will be lost.</label>}
+      {dialog === "discard" && (item.worktree?.dirty || !item.worktree?.head) && <label className="run-loss-check"><input type="checkbox" checked={dialogCheck} onChange={(event) => setDialogCheck(event.target.checked)} />{item.worktree?.head ? `I understand that ${item.worktree.dirty_entries.length} uncommitted paths will be lost.` : "I understand that all files in this unreadable worktree will be lost."}</label>}
       {dialogError && <ErrorBox title="Request was refused" error={dialogError} />}
-      <div className="run-dialog-footer"><button className="secondary" disabled={busy} onClick={() => setDialog(null)}>Keep</button><button className={dialog === "approve_result" ? "primary" : "danger-ghost"} disabled={busy || stale || dialog === "discard" && !!item.worktree?.dirty && !dialogCheck} onClick={() => void submitDialog()}>{busy ? "Requesting…" : dialogActions[dialog]}</button></div>
+      <div className="run-dialog-footer"><button className="secondary" disabled={busy} onClick={() => setDialog(null)}>Keep</button><button className={dialog === "approve_result" ? "primary" : "danger-ghost"} disabled={busy || stale || dialog === "discard" && (!!item.worktree?.dirty || !item.worktree?.head) && !dialogCheck} onClick={() => void submitDialog()}>{busy ? "Requesting…" : dialogActions[dialog]}</button></div>
     </div></div>}
   </>;
 }

@@ -153,10 +153,16 @@ function ArtifactViewer({
     [error, setError] = useState<unknown>(null),
     [draft, setDraft] = useState(""),
     [saveError, setSaveError] = useState<unknown>(null),
+    [revisionError, setRevisionError] = useState<unknown>(null),
+    [baseRevisionID, setBaseRevisionID] = useState(item.id),
+    [currentPlan, setCurrentPlan] = useState<string | null>(null),
     [saving, setSaving] = useState(false);
   useEffect(() => {
     setText(null);
     setError(null);
+    setBaseRevisionID(item.id);
+    setCurrentPlan(null);
+    setRevisionError(null);
     let active = true;
     artifactContent(runID, item.id)
       .then((content) => {
@@ -180,20 +186,40 @@ function ArtifactViewer({
           ? "diff"
           : "text";
   const save = async () => {
-    if (!latestInvocation || text === null || draft === text || saving) return;
+    if (!latestInvocation || text === null || draft === text || saving ||
+      saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && currentPlan === null) return;
     setSaving(true); setSaveError(null);
     try {
-      const revision = await savePlan(runID, latestInvocation.id, draft, item.id);
+      const revision = await savePlan(runID, latestInvocation.id, draft, baseRevisionID);
       stopEditing(); saved(revision);
-    } catch (caught) { setSaveError(caught); if (caught instanceof ApiError && (caught.status === 409 || caught.status === 428)) await refresh(); }
+    } catch (caught) {
+      setSaveError(caught);
+      if (caught instanceof ApiError && (caught.status === 409 || caught.status === 428)) {
+        await refresh();
+        await reloadCurrentPlan();
+      }
+    }
     finally { setSaving(false); }
+  };
+  const reloadCurrentPlan = async () => {
+    setRevisionError(null);
+    setCurrentPlan(null);
+    try {
+      const rows = await artifacts(runID);
+      const current = rows.find((revision) => revision.name === "plan/plan.md" && revision.is_current);
+      if (!current) throw new Error("The current plan revision is unavailable.");
+      const content = await artifactContent(runID, current.id);
+      setBaseRevisionID(current.id);
+      setText(content);
+      setCurrentPlan(content);
+    } catch (caught) { setRevisionError(caught); }
   };
   return (
     <div className={"viewer " + (editing ? "plan-editing" : "")} id="artifact-viewer">
       <div className="viewer-head">
         <div>
           <strong>{item.name}</strong>
-          <span className="mono">{editing ? `editing · base rev ${item.id}` : `${item.actor} · ${item.content_size} bytes · sha256 ${short(item.content_hash, 7)}`}</span>
+          <span className="mono">{editing ? `editing · base revision ${short(baseRevisionID, 8)}` : `${item.actor} · ${item.content_size} bytes · sha256 ${short(item.content_hash, 7)}`}</span>
         </div>
         {item.name === "plan/plan.md" && canEdit && !editing && latestInvocation && <button className="secondary" onClick={startEditing}>Edit</button>}
         <button className="secondary" onClick={() => { stopEditing(); close(); }}>
@@ -206,10 +232,11 @@ function ArtifactViewer({
         <Loading label="Loading artifact…" />
       ) : editing ? <>
         {saveError && (saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) ?
-          <div className="run-notice human" role="alert"><strong>Plan changed. Review the current revision before trying again. Your edited text is kept and was not saved.</strong><code>{saveError.status} {saveError.code} · {saveError.message}</code></div> :
+          <div className="run-notice human" role="alert"><strong>Plan changed. Review the current revision below before trying again. Your edited text is kept and was not saved.</strong><code>{saveError.status} {saveError.code} · {saveError.message}</code></div> :
           <Problem error={saveError} title="Plan was not saved. Your edited text is kept." />)}
+        {saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && <div className="run-current-plan"><strong>Current plan · revision {short(baseRevisionID, 8)}</strong>{currentPlan !== null ? <pre>{currentPlan}</pre> : <button className="secondary" disabled={saving} onClick={() => void reloadCurrentPlan()}>Reload current revision</button>}{!!revisionError && <Problem error={revisionError} title="Current revision could not be loaded." />}</div>}
         <textarea className="plan-editor" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={!!saveError} />
-        <div className="run-form-footer"><button className="primary" disabled={saving || !canEdit || draft === text || !draft.trim()} onClick={() => void save()}>{saving ? "Saving…" : `Save as rev ${nextRevision}`}</button><button className="secondary" disabled={saving} onClick={stopEditing}>Discard changes</button><span>Saving creates a new revision. The run stays at the gate until you approve it.</span></div>
+        <div className="run-form-footer"><button className="primary" disabled={saving || !canEdit || draft === text || !draft.trim() || saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && currentPlan === null} onClick={() => void save()}>{saving ? "Saving…" : `Save as rev ${nextRevision}`}</button><button className="secondary" disabled={saving} onClick={stopEditing}>Discard changes</button><span>Saving creates a new revision. The run stays at the gate until you approve it.</span></div>
       </> : kind === "md" ? (
         <div className="markdown">
           <ReactMarkdown skipHtml>{text}</ReactMarkdown>
@@ -422,7 +449,7 @@ export function RunPage({
           if (result.diff?.stat_revision_id) artifactContent(runID, result.diff.stat_revision_id).then(setStat).catch(() => setStat(""));
         }).catch(() => setReview(null));
       }
-      if (["awaiting_final_review", "done"].includes(data.state)) publication(runID).then(setDelivery).catch(() => setDelivery({ state: "unavailable" }));
+      if (["awaiting_final_review", "done", "cancelled"].includes(data.state)) publication(runID).then(setDelivery).catch(() => setDelivery({ state: "unavailable" }));
       setLastGood(new Date().toISOString());
       setStale(null);
       setError(null);

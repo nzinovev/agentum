@@ -1514,4 +1514,6 @@ code {
 .run-dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .plan-editing { border-color: #4a3a20; }
 .plan-editor { min-height: 420px; font: 12px/1.7 "Geist Mono", monospace; }
+.run-current-plan { margin: 12px 0; padding: 12px; border: 1px solid #4a3a20; border-radius: 6px; background: #151a20; font-size: 12px; }
+.run-current-plan pre { max-height: 320px; margin: 10px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--body); font: 12px/1.6 "Geist Mono", monospace; }
 .run-pr-link { display: inline-block; margin-top: 10px; color: var(--link); font-size: 12px; }
