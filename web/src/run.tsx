@@ -17,6 +17,7 @@ import {
   type Publication,
   type Project,
   type Run,
+  type RouteGraph,
 } from "./api";
 import {
   Badge,
@@ -42,7 +43,7 @@ function resourceStatus(state?: string): string {
   return ({ present: "Kept", removing: "Removing…", removed: "Removed", not_created: "Not created" } as Record<string, string>)[state || ""] || "—";
 }
 
-function Invocations({ items, state }: { items: Invocation[]; state: string }) {
+function Invocations({ items, state, route }: { items: Invocation[]; state: string; route?: RouteGraph }) {
   const latest = items.at(-1),
     fixCycles = Math.max(0, ...items.map((item) => item.cycle));
   return (
@@ -97,6 +98,7 @@ function Invocations({ items, state }: { items: Invocation[]; state: string }) {
               </span>
               <span className="truncate">
                 {item.stage}
+                {route?.progress?.invocation_steps[item.id] && <small className="route-invocation-step">{route.progress.invocation_steps[item.id]}</small>}
                 {item.resume_of && (
                   <small className="resume-chip" title={item.resume_of}>
                     resume of #
@@ -490,17 +492,16 @@ export function RunPage({
   useEffect(() => {
     if (viewerTouched || open || !item) return;
     const approvalArtifact = item.route_graph?.approvals.find((approval) => approval.unlocks === "source_write");
-    const reviewerStages = item.route_graph?.nodes.filter((node) => node.role === "reviewer").map((node) => node.id) || [];
-    const reviewNotes = [...revisions].reverse().find((revision) => revision.is_current && reviewerStages.some((stage) => revision.name === `${stage}/notes.md`));
+    const reviewArtifact = [...revisions].reverse().find((revision) => revision.is_current && revision.kind === "verdict_json");
     const desired =
       item.state === "paused_gate"
         ? approvalArtifact ? approvalArtifact.stage + "/" + approvalArtifact.artifact : revisions.find((revision) => revision.kind === "plan_md" && revision.is_current)?.name || ""
         : item.state === "paused_open_questions"
           ? (item.current_stage || item.route_graph?.entry || "") + "/result.json"
           : item.state === "awaiting_final_review"
-            ? reviewNotes?.name || ""
+            ? reviewArtifact?.name || ""
             : item.state === "paused_user_stop"
-              ? reviewNotes?.name || ""
+              ? reviewArtifact?.name || ""
               : "";
     if (desired) {
       const match =
@@ -613,7 +614,7 @@ export function RunPage({
               <div className="run-meta">
                 <Badge state={item.state} />
                 <span>
-                  Stage <code>{item.current_stage || (item.state === "running" && !item.route_source ? "choosing route" : "—")}</code>
+                  Stage <code>{item.current_stage || (item.state === "running" && !item.route_source ? "choosing route" : "—")}{item.route_graph?.progress?.current_step && ` · ${item.route_graph.progress.current_step}`}</code>
                 </span>
                 <span>
                   Created{" "}
@@ -642,7 +643,7 @@ export function RunPage({
               {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
-          <RouteBlock item={item} history={history} />
+          <RouteBlock item={item} />
           <RunActionPanel
             item={item}
             history={history}
@@ -673,20 +674,21 @@ export function RunPage({
                 <h2 className="section-title">
                   Request <span>{bytes(item.description)} bytes</span>
                 </h2>
-                <div className={"request-text " + (expanded ? "expanded" : "")}>
+                <div id="run-request-description" className={"request-text " + (expanded ? "expanded" : "")}>
                   {item.description}
                 </div>
                 {item.description.length > 150 && (
                   <button
                     className="text-button expand"
                     aria-expanded={expanded}
+                    aria-controls="run-request-description"
                     onClick={() => setExpanded(!expanded)}
                   >
                     {expanded ? "Show less" : "Show full description"}
                   </button>
                 )}
               </section>
-              <Invocations items={history} state={item.state} />
+              <Invocations items={history} state={item.state} route={item.route_graph} />
               <Artifacts
                 items={revisions}
                 runID={runID}

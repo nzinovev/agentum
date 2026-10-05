@@ -426,11 +426,11 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	}
 	if atApproval {
 		approvalPlan.expectedRevisionID = expectedRevisionID
-		if approvalPlan.withinStage && expectedRevisionID == "" {
-			writeError(w, http.StatusConflict, codeIllegalTransition, "the short plan must have a revision before source_write can be approved")
+		if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
 			return
 		}
-		if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
+		if approvalPlan.withinStage && expectedRevisionID == "" {
+			writeError(w, http.StatusConflict, codeIllegalTransition, "the short plan must have a revision before source_write can be approved")
 			return
 		}
 	}

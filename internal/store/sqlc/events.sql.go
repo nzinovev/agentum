@@ -152,3 +152,47 @@ func (q *Queries) ListEventsAfterRun(ctx context.Context, arg ListEventsAfterRun
 	}
 	return items, nil
 }
+
+const listRouteTransitionsForRun = `-- name: ListRouteTransitionsForRun :many
+SELECT id, tenant_id, user_id, run_id, type, payload, created_at, actor FROM events
+WHERE tenant_id = $1 AND run_id = $2 AND type = 'stage.transition'
+ORDER BY id ASC
+`
+
+type ListRouteTransitionsForRunParams struct {
+	TenantID string         `json:"tenant_id"`
+	RunID    sql.NullString `json:"run_id"`
+}
+
+// Read the durable transition decisions used to render route progress.
+func (q *Queries) ListRouteTransitionsForRun(ctx context.Context, arg ListRouteTransitionsForRunParams) ([]Event, error) {
+	rows, err := q.db.QueryContext(ctx, listRouteTransitionsForRun, arg.TenantID, arg.RunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Event
+	for rows.Next() {
+		var i Event
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.UserID,
+			&i.RunID,
+			&i.Type,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.Actor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

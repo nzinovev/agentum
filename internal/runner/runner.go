@@ -53,6 +53,7 @@ type Store interface {
 	SelectRunRoute(ctx context.Context, arg sqlc.SelectRunRouteParams) (sqlc.Run, error)
 	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
+	ListUnfinishedTriageInvocationsForRun(ctx context.Context, arg sqlc.ListUnfinishedTriageInvocationsForRunParams) ([]sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
 	LatestStageForRun(ctx context.Context, arg sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error)
 	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
@@ -873,12 +874,20 @@ func (runner *Runner) checksVerifiedCommit(ctx context.Context, record sqlc.Run)
 // drive performs the shared setup (load run + project + pack, resolve the
 // lineage anchor, reconcile any partially-modified worktree, create the
 // worktree off base_commit, record the base checkpoint) and enters the stage
-// loop. It registers a cancel for the run so the cancel handler can abort the
-// run mid-stage; a child context carries that cancellation down to the adapter.
+// loop. It registers a cancel before reading the run so the cancel handler
+// can abort triage as well as stage invocations through the child context.
 func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	runner.cancels.Register(job.RunID, cancel)
+	defer runner.cancels.Unregister(job.RunID)
+	ctx = runCtx
 	record, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
+	}
+	if record.State == string(engine.StateCancelled) || record.State == string(engine.StateFailed) || record.State == string(engine.StateDone) || ctx.Err() != nil {
+		return nil
 	}
 	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
 	if err != nil {
@@ -938,10 +947,25 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 			}
 		}
 		selected, routeErr := runner.selectRoute(ctx, record, checkoutPath, baseCommit)
+		if ctx.Err() != nil {
+			return nil
+		}
 		if routeErr != nil {
 			return runner.failRun(ctx, record, fmt.Errorf("select route: %w", routeErr))
 		}
+		// A terminal decision can land while the adapter is returning. Use the
+		// durable state before any worktree or stage side effect.
 		record = selected
+		record, err = runner.store.GetRun(ctx, sqlc.GetRunParams{ID: job.RunID, TenantID: job.TenantID})
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reload run after triage: %w", err)
+		}
+		if record.State == string(engine.StateCancelled) || record.State == string(engine.StateFailed) || record.State == string(engine.StateDone) || ctx.Err() != nil {
+			return nil
+		}
 	}
 
 	// Resolve the run's EFFECTIVE pack: the project's layer at the pinned
@@ -1113,14 +1137,6 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		}
 		return nil
 	}
-
-	// Register a cancel for this run so the cancel handler can abort the
-	// in-flight run. The child context propagates that cancellation to the
-	// adapter (the §5.1 seam).
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	runner.cancels.Register(job.RunID, cancel)
-	defer runner.cancels.Unregister(job.RunID)
 
 	run := stageRun{record: record, project: project, runPack: runPack, worktree: runWorktree, executionPlan: executionPlan}
 	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):

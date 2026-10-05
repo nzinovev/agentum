@@ -10,7 +10,7 @@ RETURNING *;
 UPDATE runs SET pipeline_pack = $3, route_source = $4, route_reason = $5,
     route_fallback_code = $6, route_fallback_message = $7,
     route_triage_invocation_id = $8, route_decided_at = now(), updated_at = now()
-WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL
+WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL AND state IN ('created', 'running')
 RETURNING *;
 
 -- name: GetRun :one

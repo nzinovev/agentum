@@ -86,14 +86,15 @@ type packApprovalRef struct {
 }
 
 type packStageView struct {
-	ID           string               `json:"id"`
-	Gate         string               `json:"gate"`
-	Tier         string               `json:"tier,omitempty"`
-	Role         string               `json:"role,omitempty"`
-	Prompt       string               `json:"prompt,omitempty"`
-	Terminal     bool                 `json:"terminal"`
-	Capabilities []string             `json:"capabilities,omitempty"`
-	Transitions  []packTransitionView `json:"transitions,omitempty"`
+	ID              string               `json:"id"`
+	Gate            string               `json:"gate"`
+	Tier            string               `json:"tier,omitempty"`
+	Role            string               `json:"role,omitempty"`
+	Prompt          string               `json:"prompt,omitempty"`
+	Terminal        bool                 `json:"terminal"`
+	FinalReviewGate bool                 `json:"final_review_gate,omitempty"`
+	Capabilities    []string             `json:"capabilities,omitempty"`
+	Transitions     []packTransitionView `json:"transitions,omitempty"`
 }
 
 type packTransitionView struct {

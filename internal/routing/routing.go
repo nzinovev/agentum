@@ -67,7 +67,8 @@ type Block struct {
 	// The agent learns WHAT the checks are; it cannot change WHICH checks gate
 	// delivery. Empty renders nothing. The runner maps checks.Item onto this
 	// plain struct so routing has no checks-package import.
-	Checks []CheckRef
+	Checks       []CheckRef
+	RouteCatalog []RouteRef
 
 	// VerdictPath is the absolute path to the verdict.json a verdict-sourcing
 	// stage must write. Empty for a stage that does not branch on verdict; when
@@ -143,6 +144,12 @@ type CheckRef struct {
 	Command     []string // the arg vector (no shell)
 	Description string   // human-readable purpose, when set
 	Required    bool     // true for a mandatory (baseline) check
+}
+
+// RouteRef is one candidate the triage invocation may choose.
+type RouteRef struct {
+	Name        string
+	Description string
 }
 
 // PriorStage is one earlier stage whose artifacts are referenceable.

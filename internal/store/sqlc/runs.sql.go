@@ -402,7 +402,7 @@ const selectRunRoute = `-- name: SelectRunRoute :one
 UPDATE runs SET pipeline_pack = $3, route_source = $4, route_reason = $5,
     route_fallback_code = $6, route_fallback_message = $7,
     route_triage_invocation_id = $8, route_decided_at = now(), updated_at = now()
-WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL
+WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL AND state IN ('created', 'running')
 RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id
 `
 

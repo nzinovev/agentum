@@ -207,4 +207,5 @@ type StageInvocation struct {
 	FinishedAt        sql.NullTime          `json:"finished_at"`
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 	Cycle             int32                 `json:"cycle"`
+	Kind              string                `json:"kind"`
 }

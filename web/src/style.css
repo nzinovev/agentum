@@ -1454,6 +1454,7 @@ code {
 .route-version, .route-identity time { color: var(--muted); font: 11px "Geist Mono", monospace; }
 .route-chip { padding: 3px 7px; border: 1px solid var(--line); border-radius: 10px; color: var(--body); font-size: 11px; line-height: 1.2; }
 .route-chip.source-triage { border-color: #2b3d63; background: #141c2a; color: #8fb2f5; }
+.route-chip.source-request { border-color: #3a434e; background: #171c22; color: #c9d1da; }
 .route-chip.source-fallback { border-color: #4a3a20; background: #221a0f; color: #e0b268; }
 .route-now { margin-left: auto; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--secondary); font-size: 11px; white-space: nowrap; }
 .route-now.running { border-color: #2b3d63; color: #8fb2f5; }
@@ -1492,6 +1493,12 @@ code {
 .route-node.accepted .route-node-state { color: #4fa678; }
 .route-node small { color: var(--secondary); font: 10px "Geist Mono", monospace; }
 .route-node-gate { margin-top: 9px; padding-left: 7px; border-left: 2px solid #d89a3a; color: var(--secondary); font-size: 10px; line-height: 1.4; }
+.route-node-steps { display: grid; gap: 4px; margin-top: 9px; padding-left: 7px; border-left: 2px solid #d89a3a; }
+.route-step { color: var(--muted); font-size: 10px; }
+.route-step.done, .route-step.approved { color: #78bd95; }
+.route-step.waiting, .route-step.running { color: #e0b268; }
+.route-step span { display: inline-block; width: 12px; }
+.route-invocation-step { display: inline-block; margin-left: 6px; padding: 1px 5px; border: 1px solid #4a3a20; border-radius: 3px; color: #e0b268; font-size: 10px; }
 .route-node-edge { margin-top: 7px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .route-node-edge code { display: block; max-height: 2.8em; overflow: hidden; }
 .route-connector { display: grid; place-items: center; flex: 0 0 22px; color: var(--muted); }

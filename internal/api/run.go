@@ -16,6 +16,7 @@ import (
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -129,7 +130,7 @@ type runCreateRequest struct {
 	specifiedPack bool
 }
 
-const defaultRunPipelinePack = "backend-development"
+const defaultRunPipelinePack = pack.DefaultPipelinePack
 
 type requestFieldError struct {
 	field string
@@ -317,6 +318,10 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	routeSource := ""
+	if req.specifiedPack {
+		routeSource = "request"
+	}
 	run, err := api.queries.CreateRun(r.Context(), sqlc.CreateRunParams{
 		TenantID:     principal.TenantID,
 		UserID:       principal.UserID,
@@ -326,7 +331,7 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		Description:  req.Description,
 		Overrides:    canonicalOverrides,
 		BaseRef:      req.BaseRef,
-		RouteSource:  map[bool]string{true: "request", false: ""}[req.specifiedPack],
+		RouteSource:  routeSource,
 	})
 	if err != nil {
 		logUnexpected(api.log, err, "CreateRun")

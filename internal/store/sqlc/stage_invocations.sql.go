@@ -14,9 +14,9 @@ import (
 )
 
 const createStageInvocation = `-- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle
+INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle, kind)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11::text = '' THEN 'stage' ELSE $11::text END)
+RETURNING id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind
 `
 
 type CreateStageInvocationParams struct {
@@ -30,6 +30,7 @@ type CreateStageInvocationParams struct {
 	StopReason        sql.NullString        `json:"stop_reason"`
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 	Cycle             int32                 `json:"cycle"`
+	Kind              string                `json:"kind"`
 }
 
 func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvocationParams) (StageInvocation, error) {
@@ -44,6 +45,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		arg.StopReason,
 		arg.CapabilityProfile,
 		arg.Cycle,
+		arg.Kind,
 	)
 	var i StageInvocation
 	err := row.Scan(
@@ -62,6 +64,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.FinishedAt,
 		&i.CapabilityProfile,
 		&i.Cycle,
+		&i.Kind,
 	)
 	return i, err
 }
@@ -95,7 +98,7 @@ func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvo
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations WHERE id = $1 AND tenant_id = $2
 `
 
 type GetStageInvocationParams struct {
@@ -122,13 +125,14 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 		&i.FinishedAt,
 		&i.CapabilityProfile,
 		&i.Cycle,
+		&i.Kind,
 	)
 	return i, err
 }
 
 const latestStageForRun = `-- name: LatestStageForRun :one
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence DESC
 LIMIT 1
 `
@@ -157,13 +161,14 @@ func (q *Queries) LatestStageForRun(ctx context.Context, arg LatestStageForRunPa
 		&i.FinishedAt,
 		&i.CapabilityProfile,
 		&i.Cycle,
+		&i.Kind,
 	)
 	return i, err
 }
 
 const listStageInvocationsForRun = `-- name: ListStageInvocationsForRun :many
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence ASC
 `
 
@@ -199,6 +204,59 @@ func (q *Queries) ListStageInvocationsForRun(ctx context.Context, arg ListStageI
 			&i.FinishedAt,
 			&i.CapabilityProfile,
 			&i.Cycle,
+			&i.Kind,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnfinishedTriageInvocationsForRun = `-- name: ListUnfinishedTriageInvocationsForRun :many
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'triage' AND finished_at IS NULL
+ORDER BY started_at ASC
+`
+
+type ListUnfinishedTriageInvocationsForRunParams struct {
+	RunID    string `json:"run_id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// Recovery closes interrupted triage evidence before starting a new attempt.
+func (q *Queries) ListUnfinishedTriageInvocationsForRun(ctx context.Context, arg ListUnfinishedTriageInvocationsForRunParams) ([]StageInvocation, error) {
+	rows, err := q.db.QueryContext(ctx, listUnfinishedTriageInvocationsForRun, arg.RunID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StageInvocation
+	for rows.Next() {
+		var i StageInvocation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.UserID,
+			&i.RunID,
+			&i.Stage,
+			&i.Sequence,
+			&i.SessionID,
+			&i.ResumeOf,
+			&i.StopReason,
+			&i.PendingEdits,
+			&i.Result,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CapabilityProfile,
+			&i.Cycle,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}
@@ -215,7 +273,7 @@ func (q *Queries) ListStageInvocationsForRun(ctx context.Context, arg ListStageI
 
 const maxCycleForStages = `-- name: MaxCycleForStages :one
 SELECT COALESCE(MAX(cycle), -1)::int FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND stage = ANY($3::text[])
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage' AND stage = ANY($3::text[])
 `
 
 type MaxCycleForStagesParams struct {

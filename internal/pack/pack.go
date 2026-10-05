@@ -18,6 +18,9 @@
 // (lock-major / fork / override-prompts / override-params) lands in PR 2.
 package pack
 
+// DefaultPipelinePack is the full route used when no route was selected.
+const DefaultPipelinePack = "backend-development"
+
 // APIVersion is the manifest api: value this build understands.
 const APIVersion = "agentum/v1"
 

@@ -46,8 +46,8 @@ function PublicationRow({ item, publication, disabled, onRetry, error, pending }
   </div>;
 }
 
-function FinalReviewBlock({ item, review, stat, notesName, openRevision }: {
-  item: Run; review: FinalReview | null; stat: string; notesName: string; openRevision: (name: string) => void;
+function FinalReviewBlock({ item, review, stat, reviewArtifactName, openRevision }: {
+  item: Run; review: FinalReview | null; stat: string; reviewArtifactName: string; openRevision: (name: string) => void;
 }) {
   const checks = review?.checks;
   const results = checks?.results || [];
@@ -57,7 +57,7 @@ function FinalReviewBlock({ item, review, stat, notesName, openRevision }: {
   const findings = review?.review?.findings || [];
   const blocking = findings.filter((finding) => finding.severity === "blocker" || finding.severity === "major").length;
   const statSummary = stat.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
-  return <div className="run-review-grid">
+  return <div id="final-review-panel" className="run-review-grid">
     <div className="run-review-card"><h3>Checks <span>{passed.length} of {required.length} required passed</span></h3>
       {results.length ? results.map((result) => <div className="run-check-row" key={result.name}>
         <code title={result.name}>{result.name}</code><span>{result.required ? "required" : "optional"}</span>
@@ -70,7 +70,7 @@ function FinalReviewBlock({ item, review, stat, notesName, openRevision }: {
     <div className="run-review-card"><h3>Reviewer <span>{review?.review?.verdict || "No verdict"}</span></h3>
       <p>{blocking} blocking · {findings.length - blocking} non-blocking</p>
       {findings.map((finding) => <p key={finding.id}>{finding.severity}: {finding.detail}{finding.path ? ` · ${finding.path}${finding.line ? `:${finding.line}` : ""}` : ""}</p>)}
-      {notesName && <button className="artifact-link" onClick={() => openRevision(notesName)}>Open {notesName}</button>}
+      {reviewArtifactName && <button className="artifact-link" onClick={() => openRevision(reviewArtifactName)}>Open {reviewArtifactName}</button>}
     </div>
     <div className="run-review-card run-stat"><h3>Changes · diff.stat <span>{statSummary ? `${statSummary[1]} files · +${statSummary[2] || 0} −${statSummary[3] || 0}` : "—"} · {review?.diff?.stat_revision_id ? short(review.diff.stat_revision_id, 8) : "—"}</span></h3>
       <pre>{stat || "No diff.stat recorded."}</pre>
@@ -139,8 +139,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   const planPath = approval ? `${approval.stage}/${approval.artifact}` : revisions.find((revision) => revision.kind === "plan_md" && revision.is_current)?.name || "";
   const plan = revisions.find((revision) => revision.name === planPath && revision.is_current);
   const planRevision = revisions.filter((revision) => revision.name === planPath).length;
-  const reviewerStages = item.route_graph?.nodes.filter((node) => node.role === "reviewer").map((node) => node.id) || [];
-  const notesName = [...revisions].reverse().find((revision) => revision.is_current && reviewerStages.some((stage) => revision.name === `${stage}/notes.md`))?.name || "";
+  const reviewArtifactName = [...revisions].reverse().find((revision) => revision.is_current && revision.kind === "verdict_json")?.name || "";
   const remaining = item.plan_edits ? Math.max(0, item.plan_edits.max - item.plan_edits.used) : null;
   const atPlanGate = approval?.stage === item.current_stage || (!!item.route_resolve_error && !!plan);
   const disabled = busy || stale || !!notice && notice.tone === "work";
@@ -306,7 +305,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
       <div className="run-action-side">
         {state === "paused_gate" && atPlanGate && <>
           <button className="primary" disabled={disabled || editing || !plan || !latest} onClick={() => latest && plan && void perform("Plan approval", () => postInvocation(item.id, latest.id, "advance", { expected_revision_id: plan.id }))}>Approve plan · rev {planRevision}</button>
-          <button className="secondary" aria-expanded={changesOpen} disabled={disabled || remaining === 0} onClick={() => setChangesOpen(!changesOpen)}>Request changes{remaining === 0 ? " · 0 left" : ""}</button>
+          <button className="secondary" aria-expanded={changesOpen} aria-controls="plan-changes-panel" disabled={disabled || remaining === 0} onClick={() => setChangesOpen(!changesOpen)}>Request changes{remaining === 0 ? " · 0 left" : ""}</button>
           <button className="secondary" disabled={disabled || !plan} onClick={onEdit}>Edit plan</button>
           <button className="danger-ghost" disabled={disabled} onClick={() => { setDialog("reject_plan"); setDialogError(null); }}>Reject run</button>
         </>}
@@ -317,7 +316,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
         {state === "awaiting_final_review" && <><button className="primary" disabled={disabled || !latest} onClick={() => { setDialog("approve_result"); setDialogError(null); }}>Approve result</button><button className="danger-ghost" disabled={disabled} onClick={() => { setDialog("reject_result"); setDialogError(null); }}>Reject run</button><small>Does not depend on publication.</small></>}
         {state === "running" && latest && <div className="live-time"><strong>{Math.max(0, Math.floor((now - Date.parse(latest.started_at)) / 1000))}s</strong><span>since {new Date(latest.started_at).toLocaleTimeString("en", { hour12: false })}</span></div>}
       </div>
-      {state === "paused_gate" && atPlanGate && changesOpen && <div className="run-action-expansion"><div className="run-form-label"><label htmlFor="plan-changes">What should change in the plan?</label><span>request {(item.plan_edits?.used || 0) + 1} of {item.plan_edits?.max ?? "?"} · targets rev {planRevision}</span></div>
+      {state === "paused_gate" && atPlanGate && changesOpen && <div id="plan-changes-panel" className="run-action-expansion"><div className="run-form-label"><label htmlFor="plan-changes">What should change in the plan?</label><span>request {(item.plan_edits?.used || 0) + 1} of {item.plan_edits?.max ?? "?"} · targets rev {planRevision}</span></div>
         <textarea id="plan-changes" value={changesDraft} onChange={(event) => setChangesDraft(event.target.value)} aria-invalid={!!formError} disabled={disabled} />
         <div className="run-form-footer"><button className="primary" disabled={disabled || !changesDraft.trim() || !latest || !plan || remaining === 0} onClick={() => latest && plan && void perform("Request changes", () => postInvocation(item.id, latest.id, "ask-to-edit", { text: changesDraft, target_revision_id: plan.id }))}>Send remarks</button><button className="secondary" onClick={() => setChangesOpen(false)}>Cancel</button><span>{approval?.stage || "The stage"} re-runs with your remarks and returns a new revision.</span></div>
         {remaining === 0 && <small>Budget spent · {item.plan_edits?.used || 0} of {item.plan_edits?.max || 0} used. Approve, edit, or reject the current plan.</small>}
@@ -330,7 +329,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
         {reconcileMode === "discard_to_checkpoint" && <label className="run-loss-check"><input type="checkbox" checked={confirmLoss} onChange={(event) => setConfirmLoss(event.target.checked)} />I understand that the {item.worktree?.dirty_entries.length || 0} uncommitted paths above will be lost.</label>}
         {formError && <ErrorBox title="The worktree changed. Nothing was applied." error={formError} />}
       </div>}
-      {(state === "awaiting_final_review" || state === "done" || state === "cancelled" && item.cancel_reason === "rejected_at_final_review") && <div className="run-action-expansion">{state !== "awaiting_final_review" && <button className="secondary" aria-expanded={reviewOpen} onClick={() => setReviewOpen(!reviewOpen)}>{reviewOpen ? "Hide" : "Show"} final review: checks, reviewer, changes</button>}{(state === "awaiting_final_review" || reviewOpen) && <FinalReviewBlock item={item} review={review} stat={stat} notesName={notesName} openRevision={openRevision} />}</div>}
+      {(state === "awaiting_final_review" || state === "done" || state === "cancelled" && item.cancel_reason === "rejected_at_final_review") && <div className="run-action-expansion">{state !== "awaiting_final_review" && <button className="secondary" aria-expanded={reviewOpen} aria-controls="final-review-panel" onClick={() => setReviewOpen(!reviewOpen)}>{reviewOpen ? "Hide" : "Show"} final review: checks, reviewer, changes</button>}{(state === "awaiting_final_review" || reviewOpen) && <FinalReviewBlock item={item} review={review} stat={stat} reviewArtifactName={reviewArtifactName} openRevision={openRevision} />}</div>}
       {(state === "awaiting_final_review" || state === "done") && <div className="run-action-expansion"><PublicationRow item={item} publication={publication} disabled={disabled} onRetry={() => void retryPublication()} error={publicationError} pending={pendingPublish} /></div>}
       {terminalStates.has(state) && <div className="run-action-expansion"><ResourceCards item={item} disabled={disabled} pending={pendingRemoval} error={resourceError} onDelete={(kind) => { setDialog(kind); setDialogCheck(false); setDialogError(null); }} /></div>}
     </section>

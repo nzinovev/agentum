@@ -54,7 +54,13 @@ export type RouteGraph = {
   entry: string;
   fix_cycles: number;
   approvals: { name: string; stage: string; artifact: string; unlocks: string; within_stage?: boolean }[];
-  nodes: { id: string; gate: string; role?: string; terminal: boolean; transitions?: { to: string; condition?: string }[] }[];
+  nodes: { id: string; gate: string; role?: string; terminal: boolean; final_review_gate?: boolean; transitions?: { to: string; condition?: string }[] }[];
+  progress?: {
+    nodes: Record<string, { state: string; pass_sequences: number[]; steps?: { id: string; label: string; state: string }[] }>;
+    edges: { from: string; to: string; condition: string; count: number }[];
+    current_step?: string;
+    invocation_steps: Record<string, string>;
+  };
 };
 export type Publication = {
   state: string;

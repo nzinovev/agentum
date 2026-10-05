@@ -1,6 +1,6 @@
 -- name: CreateStageInvocation :one
-INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle, kind)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN sqlc.arg(kind)::text = '' THEN 'stage' ELSE sqlc.arg(kind)::text END)
 RETURNING *;
 
 -- name: GetStageInvocation :one
@@ -8,7 +8,7 @@ SELECT * FROM stage_invocations WHERE id = $1 AND tenant_id = $2;
 
 -- name: LatestStageForRun :one
 SELECT * FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence DESC
 LIMIT 1;
 
@@ -16,7 +16,7 @@ LIMIT 1;
 -- Ordered by sequence so each attempt is visible in run order; the cycle column
 -- distinguishes retries from resumes. Backs GET /runs/{id}/invocations.
 SELECT * FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence ASC;
 
 -- name: MaxCycleForStages :one
@@ -27,7 +27,13 @@ ORDER BY sequence ASC;
 -- stage = ANY($3) takes the fixer set in one round-trip (pq.Array over pgx
 -- stdlib, already exercised by projects.related_projects).
 SELECT COALESCE(MAX(cycle), -1)::int FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2 AND stage = ANY($3::text[]);
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage' AND stage = ANY($3::text[]);
+
+-- name: ListUnfinishedTriageInvocationsForRun :many
+-- Recovery closes interrupted triage evidence before starting a new attempt.
+SELECT * FROM stage_invocations
+WHERE run_id = $1 AND tenant_id = $2 AND kind = 'triage' AND finished_at IS NULL
+ORDER BY started_at ASC;
 
 -- name: SetStageSession :exec
 UPDATE stage_invocations SET session_id = $3
