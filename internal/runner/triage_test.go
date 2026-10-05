@@ -10,6 +10,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/agent"
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -59,6 +60,8 @@ type scriptedTriageAdapter struct {
 	count        int
 	profile      caps.Profile
 	routingBlock string
+	selection    models.Selection
+	delay        time.Duration
 }
 
 func (adapter *scriptedTriageAdapter) Supported() []caps.Category {
@@ -68,6 +71,10 @@ func (adapter *scriptedTriageAdapter) Invoke(_ context.Context, invocation agent
 	adapter.count++
 	adapter.profile = invocation.Profile
 	adapter.routingBlock = invocation.RoutingBlock
+	adapter.selection = invocation.Model
+	if adapter.delay > 0 {
+		time.Sleep(adapter.delay)
+	}
 	stream := make(chan agent.Event, 1)
 	stream <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{ResultJSON: agent.ResultJSON{
 		SchemaVersion: "1", Status: agent.StatusComplete,
@@ -87,7 +94,7 @@ func TestTriageSelectsAndPinsThreeRoutes(t *testing.T) {
 	for _, routeName := range []string{"small-change", "backend-development", "research-first"} {
 		t.Run(routeName, func(t *testing.T) {
 			record := sqlc.Run{ID: "T-" + routeName, TenantID: "tn", UserID: "us", ProjectID: "P1", PipelinePack: routeDefaultPack, Title: routeName, Description: "task"}
-			store := newFakeStore(record, sqlc.Project{})
+			store := newFakeStore(record, sqlc.Project{Name: "Readable Project"})
 			adapter := &scriptedTriageAdapter{chosen: routeName}
 			runner := New(Deps{Store: store, Packs: catalog, Adapter: adapter})
 			evidence := &fakeManifestService{}
@@ -104,6 +111,9 @@ func TestTriageSelectsAndPinsThreeRoutes(t *testing.T) {
 			}
 			if !strings.Contains(adapter.routingBlock, "--- BEGIN TASK REQUEST ---") || !strings.Contains(adapter.routingBlock, "## Route catalog") || strings.Count(adapter.routingBlock, "## Task") != 1 {
 				t.Errorf("triage did not use the routing block: %s", adapter.routingBlock)
+			}
+			if !strings.Contains(adapter.routingBlock, "Readable Project") || strings.Contains(adapter.routingBlock, "project P1") {
+				t.Errorf("triage project name = %s", adapter.routingBlock)
 			}
 			if selected.RouteTriageInvocationID.String == "" || len(evidence.addEvidence) == 0 || len(evidence.addEvidence[0].Invocations) != 1 {
 				t.Error("triage invocation missing from run or evidence")
@@ -202,8 +212,66 @@ func TestTriageUsesConfiguredDefaultTier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selected.RouteSource.String != "triage" || adapter.count != 1 {
+	if selected.RouteSource.String != "triage" || adapter.count != 1 || adapter.selection.Tier != "strong" {
 		t.Errorf("configured default tier did not run triage: %+v", selected)
+	}
+}
+
+// TestTriagePrefersFastTier keeps routine route selection on fast when the
+// operator defines it alongside a stronger default tier.
+func TestTriagePrefersFastTier(t *testing.T) {
+	record := sqlc.Run{ID: "fast-tier", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: routeDefaultPack, Title: "task"}
+	store := newFakeStore(record, sqlc.Project{})
+	adapter := &scriptedTriageAdapter{chosen: routeDefaultPack}
+	configuration := &models.Config{Tiers: map[string]models.TierDefinition{
+		"fast": {Model: "stub/fast-model"}, "strong": {Model: "stub/strong-model"},
+	}, Default: "strong"}
+	runner := New(Deps{Store: store, Packs: scriptedRouteCatalog{entries: []pack.Meta{{Name: routeDefaultPack}}}, Adapter: adapter, Models: configuration})
+	selected, err := runner.selectRoute(t.Context(), record, "/repo", "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.RouteSource.String != "triage" || adapter.selection.Tier != "fast" || adapter.selection.Options.Model != "stub/fast-model" {
+		t.Errorf("triage selection = %+v, route = %+v", adapter.selection, selected)
+	}
+}
+
+type contextCheckingTriageStore struct{ *fakeStore }
+
+func (store *contextCheckingTriageStore) FinishStageInvocation(ctx context.Context, params sqlc.FinishStageInvocationParams) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return store.fakeStore.FinishStageInvocation(ctx, params)
+}
+
+type contextCheckingTriageManifest struct{ *fakeManifestService }
+
+func (service *contextCheckingTriageManifest) AddEvidence(ctx context.Context, tenantID, runID string, patch manifest.Body) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return service.fakeManifestService.AddEvidence(ctx, tenantID, runID, patch)
+}
+
+// TestSlowTriageClosesInvocationAndEvidence requires the closure deadline to
+// start after model output, even when the model call exceeds ten seconds.
+func TestSlowTriageClosesInvocationAndEvidence(t *testing.T) {
+	record := sqlc.Run{ID: "slow-triage", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: routeDefaultPack, Title: "task"}
+	store := &contextCheckingTriageStore{fakeStore: newFakeStore(record, sqlc.Project{})}
+	adapter := &scriptedTriageAdapter{chosen: routeDefaultPack, delay: 11 * time.Second}
+	runner := New(Deps{Store: store, Packs: scriptedRouteCatalog{entries: []pack.Meta{{Name: routeDefaultPack}}}, Adapter: adapter})
+	evidence := &contextCheckingTriageManifest{fakeManifestService: &fakeManifestService{}}
+	runner.mfst = evidence
+	selected, err := runner.selectRoute(t.Context(), record, "/repo", "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.RouteSource.String != "triage" || len(store.invocations) != 1 || !store.invocations[0].FinishedAt.Valid || store.invocations[0].StopReason.String != "complete" {
+		t.Errorf("slow triage invocation = %+v, route = %+v", store.invocations, selected)
+	}
+	if len(evidence.addEvidence) != 2 || len(evidence.addEvidence[1].Invocations) != 1 || evidence.addEvidence[1].Invocations[0].StopReason != "complete" {
+		t.Errorf("slow triage evidence = %+v", evidence.addEvidence)
 	}
 }
 
@@ -248,7 +316,7 @@ func TestRouteCandidatesSkipsInvalidProjectPacks(t *testing.T) {
 	store := newFakeStore(record, sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repository})
 	adapter := &scriptedTriageAdapter{chosen: "small-change"}
 	runner := New(Deps{Store: store, Packs: catalog, Adapter: adapter})
-	candidates, err := runner.routeCandidates(t.Context(), record, catalog, repository, baseCommit)
+	candidates, err := runner.routeCandidates(t.Context(), record, store.project, catalog, repository, baseCommit)
 	if err != nil {
 		t.Fatal(err)
 	}

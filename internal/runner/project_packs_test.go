@@ -355,6 +355,30 @@ stages:
 	}
 }
 
+// TestRunner_ExplicitProjectPackRejectsReviewerWithinStage ensures a named
+// project route cannot start source edits when its within_stage gate has a reviewer role.
+func TestRunner_ExplicitProjectPackRejectsReviewerWithinStage(t *testing.T) {
+	invalid := strings.Replace(floorPassingProjectPack,
+		"unlocks: source_write}", "unlocks: source_write, within_stage: true}", 1)
+	invalid = strings.Replace(invalid, "  spec:\n    gate: human_approval", "  spec:\n    role: reviewer\n    gate: human_approval", 1)
+	fixture := newProjectPackFixture(t, invalid)
+	if err := fixture.runner.HandleRun(t.Context(), job("run", fixture.runID, "tn", "us")); err == nil || !strings.Contains(err.Error(), "within_stage") {
+		t.Fatalf("run job error = %v, want within_stage validation error", err)
+	}
+	if fixture.store.taskState() != "failed" || len(fixture.store.invocations) != 0 || fixture.store.record.RouteSource.String != "request" {
+		t.Errorf("invalid explicit project route started: run=%+v invocations=%+v", fixture.store.record, fixture.store.invocations)
+	}
+	foundRoleError := false
+	for _, event := range fixture.store.events {
+		if strings.Contains(string(event.Payload), "within_stage") && strings.Contains(string(event.Payload), "implementer") {
+			foundRoleError = true
+		}
+	}
+	if !foundRoleError {
+		t.Errorf("expected within_stage role error in events: %+v", fixture.store.events)
+	}
+}
+
 // TestClassifyPackDirChanges: the pause decision reads the whole listing and
 // matches the pack's documents by full path.
 func TestClassifyPackDirChanges(t *testing.T) {

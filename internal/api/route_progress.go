@@ -123,11 +123,23 @@ func routeProgressOf(run sqlc.Run, graph *runRouteGraph, invocations []sqlc.Stag
 			editsState := "not_reached"
 			if len(attempts) > 0 {
 				planState = "done"
-				gateState = "waiting"
 			}
-			if state == "running" && !decided {
-				planState = "running"
-				gateState = "not_reached"
+			if run.CurrentStage.Valid && run.CurrentStage.String == node.ID && !decided {
+				switch run.State {
+				case "running":
+					planState = "running"
+				case "paused_gate":
+					planState = "done"
+					gateState = "waiting"
+				case "paused_open_questions":
+					planState = "questions"
+				case "paused_user_stop":
+					planState = "stopped"
+				case "failed":
+					planState = "failed"
+				case "cancelled":
+					planState = "cancelled"
+				}
 			}
 			if decided {
 				gateState = approval.Decision

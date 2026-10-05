@@ -52,14 +52,18 @@ func (runner *Runner) selectRoute(ctx context.Context, record sqlc.Run, checkout
 	if !available {
 		return record, nil
 	}
-	candidates, catalogErr := runner.routeCandidates(ctx, record, catalog, checkoutPath, baseCommit)
+	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
+	if err != nil {
+		return record, fmt.Errorf("load project for triage: %w", err)
+	}
+	candidates, catalogErr := runner.routeCandidates(ctx, record, project, catalog, checkoutPath, baseCommit)
 	choice := routeChoice{}
 	failure := routeFailure{}
 	invocationID := ""
 	if catalogErr != nil {
 		failure = routeFailure{code: "triage_catalog_error", message: catalogErr.Error()}
 	} else {
-		choice, invocationID, failure = runner.invokeTriage(ctx, record, candidates)
+		choice, invocationID, failure = runner.invokeTriage(ctx, record, project.Name, candidates)
 	}
 	if failure.code == "" {
 		if _, known := candidates[choice.Pack]; !known {
@@ -110,7 +114,7 @@ func (runner *Runner) closeInterruptedTriage(ctx context.Context, record sqlc.Ru
 
 // routeCandidates omits broken project packs independently so one bad layer
 // cannot disable triage for the other routes.
-func (runner *Runner) routeCandidates(ctx context.Context, record sqlc.Run, catalog routeCatalog, checkoutPath, baseCommit string) (map[string]pack.Meta, error) {
+func (runner *Runner) routeCandidates(ctx context.Context, record sqlc.Run, project sqlc.Project, catalog routeCatalog, checkoutPath, baseCommit string) (map[string]pack.Meta, error) {
 	builtin, err := catalog.ListBuiltin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list builtin routes: %w", err)
@@ -125,10 +129,6 @@ func (runner *Runner) routeCandidates(ctx context.Context, record sqlc.Run, cata
 	}
 	if len(projectEntries) == 0 {
 		return candidates, nil
-	}
-	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
-	if err != nil {
-		return nil, fmt.Errorf("load project for route catalog: %w", err)
 	}
 	record.BaseCommit = sql.NullString{String: baseCommit, Valid: true}
 	registry, err := runner.loadRegistryAtBaseCommit(ctx, record, project, checkoutPath)
@@ -162,7 +162,7 @@ func (runner *Runner) routeCandidates(ctx context.Context, record sqlc.Run, cata
 
 // invokeTriage runs the normal adapter under a read-only capability profile.
 // The routing template is the only path for title and description to the agent.
-func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, candidates map[string]pack.Meta) (routeChoice, string, routeFailure) {
+func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, projectName string, candidates map[string]pack.Meta) (routeChoice, string, routeFailure) {
 	tempDir, err := os.MkdirTemp("", "agentum-triage-")
 	if err != nil {
 		return routeChoice{}, "", routeFailure{code: "triage_adapter_error", message: err.Error()}
@@ -179,7 +179,7 @@ func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, candida
 		Role:        caps.RoleAnalyst,
 		HardTimeout: runner.hardTimeout, IdleTimeout: runner.idleTimeout,
 	}))
-	selection, err := models.Resolve(runner.models, runner.adapter.Describe().DefaultTiers, "")
+	selection, err := models.ResolveTriage(runner.models, runner.adapter.Describe().DefaultTiers)
 	if err != nil {
 		return routeChoice{}, "", routeFailure{code: "triage_model_error", message: err.Error()}
 	}
@@ -201,7 +201,7 @@ func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, candida
 		routes = append(routes, routing.RouteRef{Name: name, Description: strings.Join(strings.Fields(candidates[name].Description), " ")})
 	}
 	block := routing.Render(routing.Block{
-		RunID: record.ID, ProjectName: record.ProjectID, Stage: "triage", Gate: "auto",
+		RunID: record.ID, ProjectName: projectName, Stage: "triage", Gate: "auto",
 		ArtifactDir: artifactDir, Title: record.Title, Description: record.Description,
 		RouteCatalog: routes,
 	})
@@ -212,16 +212,19 @@ func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, candida
 	if err != nil {
 		return routeChoice{}, "", routeFailure{code: "triage_record_error", message: err.Error()}
 	}
-	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer finishCancel()
+	finish := func(sessionID, stopReason string, resultJSON *agent.ResultJSON, telemetry *agent.Telemetry) {
+		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer finishCancel()
+		runner.finalize(finishCtx, invocation, record, sessionID, stopReason, resultJSON)
+		runner.closeInvocationEvidence(finishCtx, record, invocation.ID, stopReason, telemetry)
+	}
 	runner.recordTriageEvidence(ctx, record, invocation, selection, block, profile)
 	stream, err := runner.adapter.Invoke(ctx, agent.Invocation{
 		Workdir: tempDir, ArtifactDir: artifactDir, Prompt: triagePrompt,
 		RoutingBlock: block, Model: selection, Profile: profile,
 	})
 	if err != nil {
-		runner.finalize(finishCtx, invocation, record, "", "adapter_error", nil)
-		runner.closeInvocationEvidence(finishCtx, record, invocation.ID, "adapter_error", nil)
+		finish("", "adapter_error", nil, nil)
 		return routeChoice{}, invocation.ID, routeFailure{code: "triage_adapter_error", message: err.Error()}
 	}
 	var result *agent.Result
@@ -243,13 +246,11 @@ func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, candida
 		if ctx.Err() != nil {
 			stopReason = "cancelled"
 		}
-		runner.finalize(finishCtx, invocation, record, "", stopReason, nil)
-		runner.closeInvocationEvidence(finishCtx, record, invocation.ID, stopReason, nil)
+		finish("", stopReason, nil, nil)
 		return routeChoice{}, invocation.ID, routeFailure{code: "triage_adapter_error", message: message}
 	}
 	stopReason := string(result.Status)
-	runner.finalize(finishCtx, invocation, record, result.SessionID, stopReason, result.ResultJSON)
-	runner.closeInvocationEvidence(finishCtx, record, invocation.ID, stopReason, &result.Telemetry)
+	finish(result.SessionID, stopReason, &result.ResultJSON, &result.Telemetry)
 	if result.Status != agent.StatusComplete {
 		return routeChoice{}, invocation.ID, routeFailure{code: "triage_refused", message: fmt.Sprintf("triage status was %q", result.Status)}
 	}

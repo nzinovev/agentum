@@ -46,3 +46,31 @@ func TestRouteProgressWithinStageSteps(t *testing.T) {
 		t.Errorf("within-stage progress = %+v", progress)
 	}
 }
+
+// TestRouteProgressGateWaitsOnlyAtGate keeps a completed attempt from making
+// the approval look actionable while the run is at questions or a failure.
+func TestRouteProgressGateWaitsOnlyAtGate(t *testing.T) {
+	graph := &runRouteGraph{
+		Approvals: []packApprovalRef{{Name: "short_plan", Stage: "implement", Artifact: "plan.md", Unlocks: "source_write", WithinStage: true}},
+		Nodes:     []packStageView{{ID: "implement"}},
+	}
+	history := []sqlc.StageInvocation{{ID: "plan", Stage: "implement", Sequence: 1, FinishedAt: sql.NullTime{Time: time.Now(), Valid: true}}}
+	for _, testCase := range []struct {
+		state    string
+		wantPlan string
+		wantGate string
+	}{
+		{state: "paused_gate", wantPlan: "done", wantGate: "waiting"},
+		{state: "paused_open_questions", wantPlan: "questions", wantGate: "not_reached"},
+		{state: "failed", wantPlan: "failed", wantGate: "not_reached"},
+		{state: "running", wantPlan: "running", wantGate: "not_reached"},
+	} {
+		t.Run(testCase.state, func(t *testing.T) {
+			run := sqlc.Run{State: testCase.state, CurrentStage: sql.NullString{String: "implement", Valid: true}}
+			steps := routeProgressOf(run, graph, history, nil, nil, nil).Nodes["implement"].Steps
+			if steps[0].State != testCase.wantPlan || steps[1].State != testCase.wantGate {
+				t.Errorf("steps for %s = %+v", testCase.state, steps)
+			}
+		})
+	}
+}
