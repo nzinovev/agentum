@@ -46,8 +46,8 @@ function PublicationRow({ item, publication, disabled, onRetry, error, pending }
   </div>;
 }
 
-function FinalReviewBlock({ item, review, stat, openRevision }: {
-  item: Run; review: FinalReview | null; stat: string; openRevision: (name: string) => void;
+function FinalReviewBlock({ item, review, stat, notesName, openRevision }: {
+  item: Run; review: FinalReview | null; stat: string; notesName: string; openRevision: (name: string) => void;
 }) {
   const checks = review?.checks;
   const results = checks?.results || [];
@@ -70,7 +70,7 @@ function FinalReviewBlock({ item, review, stat, openRevision }: {
     <div className="run-review-card"><h3>Reviewer <span>{review?.review?.verdict || "No verdict"}</span></h3>
       <p>{blocking} blocking · {findings.length - blocking} non-blocking</p>
       {findings.map((finding) => <p key={finding.id}>{finding.severity}: {finding.detail}{finding.path ? ` · ${finding.path}${finding.line ? `:${finding.line}` : ""}` : ""}</p>)}
-      <button className="artifact-link" onClick={() => openRevision("review/notes.md")}>Open review/notes.md</button>
+      {notesName && <button className="artifact-link" onClick={() => openRevision(notesName)}>Open {notesName}</button>}
     </div>
     <div className="run-review-card run-stat"><h3>Changes · diff.stat <span>{statSummary ? `${statSummary[1]} files · +${statSummary[2] || 0} −${statSummary[3] || 0}` : "—"} · {review?.diff?.stat_revision_id ? short(review.diff.stat_revision_id, 8) : "—"}</span></h3>
       <pre>{stat || "No diff.stat recorded."}</pre>
@@ -135,9 +135,14 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   const [reviewOpen, setReviewOpen] = useState(false);
   const [planContent, setPlanContent] = useState("");
   const latest = history.at(-1);
-  const plan = revisions.find((revision) => revision.name === "plan/plan.md" && revision.is_current);
-  const planRevision = revisions.filter((revision) => revision.name === "plan/plan.md").length;
-  const remaining = Math.max(0, (item.plan_edits?.max || 0) - (item.plan_edits?.used || 0));
+  const approval = item.route_graph?.approvals.find((candidate) => candidate.unlocks === "source_write");
+  const planPath = approval ? `${approval.stage}/${approval.artifact}` : revisions.find((revision) => revision.kind === "plan_md" && revision.is_current)?.name || "";
+  const plan = revisions.find((revision) => revision.name === planPath && revision.is_current);
+  const planRevision = revisions.filter((revision) => revision.name === planPath).length;
+  const reviewerStages = item.route_graph?.nodes.filter((node) => node.role === "reviewer").map((node) => node.id) || [];
+  const notesName = [...revisions].reverse().find((revision) => revision.is_current && reviewerStages.some((stage) => revision.name === `${stage}/notes.md`))?.name || "";
+  const remaining = item.plan_edits ? Math.max(0, item.plan_edits.max - item.plan_edits.used) : null;
+  const atPlanGate = approval?.stage === item.current_stage || (!!item.route_resolve_error && !!plan);
   const disabled = busy || stale || !!notice && notice.tone === "work";
   const previousState = useRef(item.state);
   const previousSavedRevision = useRef(savedRevisionID);
@@ -263,9 +268,9 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   const reason = item.stop_reason;
   const titles: Record<string, string> = {
     created: startError ? "The run was created, but starting it failed." : "The run is created and has not started.",
-    running: latest ? `Invocation #${latest.sequence} · ${latest.stage} · cycle ${latest.cycle}` : "The run is starting.",
-    paused_gate: "The plan is ready for approval.",
-    paused_open_questions: `The agent asked ${(item.open_questions || []).length} questions in ${item.current_stage || "plan"}.`,
+    running: latest ? `Invocation #${latest.sequence} · ${latest.stage} · cycle ${latest.cycle}` : !item.route_source ? "Choosing a route for this request" : "The run is starting.",
+    paused_gate: approval?.within_stage ? `${approval.stage} wrote a short plan and stopped before editing source.` : atPlanGate ? "The plan is ready for approval." : `${item.current_stage || "The stage"} is waiting for approval.`,
+    paused_open_questions: `The agent asked ${(item.open_questions || []).length} questions in ${item.current_stage || item.route_graph?.entry || "this stage"}.`,
     paused_user_stop: reason === "base_not_on_target" ? "Base is not on the target branch" : reason === "worktree_uncommitted_changes" ? "Uncommitted changes in the worktree" : reason.replaceAll("_", " "),
     awaiting_final_review: "The work is ready for final review.", done: "Accepted at final review.",
     failed: `The run failed${item.current_stage ? " in " + item.current_stage : ""}.`,
@@ -274,7 +279,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   const body: Record<string, string> = {
     created: startError || "Starting resolves the base and creates the run branch and worktree.",
     running: "The agent is working. This page updates every 3 seconds.",
-    paused_gate: "No source code changes until the plan is approved.",
+    paused_gate: approval?.within_stage ? `Source edits start in the same stage, ${approval.stage}, after you approve a revision.` : atPlanGate ? "No source code changes until the plan is approved." : "Review the stage result before continuing.",
     paused_open_questions: "The stage is blocked until the questions are answered.",
     paused_user_stop: reason === "base_not_on_target" ? "The base carries commits that the publication target branch does not have." : "Review the reason and choose how to continue.",
     awaiting_final_review: `Result commit ${short(item.result_commit, 7)} on ${item.branch}.`,
@@ -290,30 +295,31 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
         <h2>{titles[state] || state}</h2><p>{body[state] || ""}</p>
         {stale && <div className="run-notice human"><strong>Decisions are disabled while the data is stale.</strong></div>}
         {!stale && notice && <div className={"run-notice " + notice.tone}><strong>{notice.title}</strong>{notice.detail && <code>{notice.detail}</code>}</div>}
-        {state === "paused_gate" && <>
-          <div className="run-plan-meta"><code>plan/plan.md</code><span>rev {planRevision}</span><code title={plan?.id}>{short(plan?.id || "", 8)}</code><span>{plan?.actor === "human" ? "edited by you" : "agent"}</span><em>Request changes · {remaining} of {item.plan_edits?.max || 0} left</em></div>
+        {state === "paused_gate" && atPlanGate && <>
+          <div className="run-plan-meta"><code>{planPath || "plan unavailable"}</code><span>rev {planRevision}</span><code title={plan?.id}>{short(plan?.id || "", 8)}</code><span>{plan?.actor === "human" ? "edited by you" : "agent"}</span><em>Request changes · {remaining === null ? "remaining unknown" : `${remaining} of ${item.plan_edits?.max} left`}</em></div>
           <div className="run-plan-excerpt"><pre>{planContent || "Loading plan…"}</pre></div>
-          <button className="artifact-link" onClick={() => openRevision("plan/plan.md")}>Read the full plan below ↓</button>
+          <button className="artifact-link" onClick={() => openRevision(planPath)}>Read the full plan below ↓</button>
         </>}
         {state === "paused_open_questions" && <ol className="questions">{(item.open_questions || []).map((question, index) => <li key={index}>{question}</li>)}</ol>}
         {state === "failed" && item.error && <pre className="failure-detail">{item.error}</pre>}
       </div>
       <div className="run-action-side">
-        {state === "paused_gate" && <>
+        {state === "paused_gate" && atPlanGate && <>
           <button className="primary" disabled={disabled || editing || !plan || !latest} onClick={() => latest && plan && void perform("Plan approval", () => postInvocation(item.id, latest.id, "advance", { expected_revision_id: plan.id }))}>Approve plan · rev {planRevision}</button>
           <button className="secondary" aria-expanded={changesOpen} disabled={disabled || remaining === 0} onClick={() => setChangesOpen(!changesOpen)}>Request changes{remaining === 0 ? " · 0 left" : ""}</button>
           <button className="secondary" disabled={disabled || !plan} onClick={onEdit}>Edit plan</button>
           <button className="danger-ghost" disabled={disabled} onClick={() => { setDialog("reject_plan"); setDialogError(null); }}>Reject run</button>
         </>}
+        {state === "paused_gate" && !atPlanGate && <><button className="primary" disabled={disabled || !latest} onClick={() => latest && void perform("Advance", () => postInvocation(item.id, latest.id, "advance"))}>Continue past gate</button><button className="danger-ghost" disabled={disabled} onClick={() => { setDialog("reject_plan"); setDialogError(null); }}>Reject run</button></>}
         {state === "paused_open_questions" && <button className="primary" disabled={disabled || !answerDraft.trim() || !latest} onClick={() => latest && void perform("Answer", () => postInvocation(item.id, latest.id, "continue", { text: answerDraft }))}>Continue</button>}
         {state === "paused_user_stop" && reason !== "worktree_uncommitted_changes" && <button className="primary" disabled={disabled} onClick={() => void perform("Continue", () => latest ? postInvocation(item.id, latest.id, "continue", noteDraft.trim() ? { text: noteDraft } : undefined) : postRun(item.id, "continue", noteDraft.trim() ? { text: noteDraft } : undefined))}>{reason === "base_not_on_target" ? "Continue after fixing" : "Continue"}</button>}
         {state === "paused_user_stop" && reason === "worktree_uncommitted_changes" && <button className={reconcileMode === "discard_to_checkpoint" ? "danger-ghost" : "primary"} disabled={disabled || !item.worktree?.head || reconcileMode === "discard_to_checkpoint" && !confirmLoss} onClick={() => void perform("Reconcile", () => postRun(item.id, "worktree/reconcile", { mode: reconcileMode, expected_head: item.worktree?.head, ...(reconcileMode === "discard_to_checkpoint" ? { confirm_uncommitted_loss: true } : {}) }))}>{reconcileMode === "discard_to_checkpoint" ? "Discard and resume" : reconcileMode === "keep_as_checkpoint" ? "Keep and resume" : "Resume session"}</button>}
         {state === "awaiting_final_review" && <><button className="primary" disabled={disabled || !latest} onClick={() => { setDialog("approve_result"); setDialogError(null); }}>Approve result</button><button className="danger-ghost" disabled={disabled} onClick={() => { setDialog("reject_result"); setDialogError(null); }}>Reject run</button><small>Does not depend on publication.</small></>}
         {state === "running" && latest && <div className="live-time"><strong>{Math.max(0, Math.floor((now - Date.parse(latest.started_at)) / 1000))}s</strong><span>since {new Date(latest.started_at).toLocaleTimeString("en", { hour12: false })}</span></div>}
       </div>
-      {state === "paused_gate" && changesOpen && <div className="run-action-expansion"><div className="run-form-label"><label htmlFor="plan-changes">What should the planner change?</label><span>request {(item.plan_edits?.used || 0) + 1} of {item.plan_edits?.max || 0} · targets rev {planRevision}</span></div>
+      {state === "paused_gate" && atPlanGate && changesOpen && <div className="run-action-expansion"><div className="run-form-label"><label htmlFor="plan-changes">What should change in the plan?</label><span>request {(item.plan_edits?.used || 0) + 1} of {item.plan_edits?.max ?? "?"} · targets rev {planRevision}</span></div>
         <textarea id="plan-changes" value={changesDraft} onChange={(event) => setChangesDraft(event.target.value)} aria-invalid={!!formError} disabled={disabled} />
-        <div className="run-form-footer"><button className="primary" disabled={disabled || !changesDraft.trim() || !latest || !plan || remaining === 0} onClick={() => latest && plan && void perform("Request changes", () => postInvocation(item.id, latest.id, "ask-to-edit", { text: changesDraft, target_revision_id: plan.id }))}>Send to planner</button><button className="secondary" onClick={() => setChangesOpen(false)}>Cancel</button><span>Saving remarks asks the planner to create a new revision.</span></div>
+        <div className="run-form-footer"><button className="primary" disabled={disabled || !changesDraft.trim() || !latest || !plan || remaining === 0} onClick={() => latest && plan && void perform("Request changes", () => postInvocation(item.id, latest.id, "ask-to-edit", { text: changesDraft, target_revision_id: plan.id }))}>Send remarks</button><button className="secondary" onClick={() => setChangesOpen(false)}>Cancel</button><span>{approval?.stage || "The stage"} re-runs with your remarks and returns a new revision.</span></div>
         {remaining === 0 && <small>Budget spent · {item.plan_edits?.used || 0} of {item.plan_edits?.max || 0} used. Approve, edit, or reject the current plan.</small>}
         {formError && <ErrorBox title="Request changes failed" error={formError} />}
       </div>}
@@ -324,7 +330,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
         {reconcileMode === "discard_to_checkpoint" && <label className="run-loss-check"><input type="checkbox" checked={confirmLoss} onChange={(event) => setConfirmLoss(event.target.checked)} />I understand that the {item.worktree?.dirty_entries.length || 0} uncommitted paths above will be lost.</label>}
         {formError && <ErrorBox title="The worktree changed. Nothing was applied." error={formError} />}
       </div>}
-      {(state === "awaiting_final_review" || state === "done" || state === "cancelled" && item.cancel_reason === "rejected_at_final_review") && <div className="run-action-expansion">{state !== "awaiting_final_review" && <button className="secondary" aria-expanded={reviewOpen} onClick={() => setReviewOpen(!reviewOpen)}>{reviewOpen ? "Hide" : "Show"} final review: checks, reviewer, changes</button>}{(state === "awaiting_final_review" || reviewOpen) && <FinalReviewBlock item={item} review={review} stat={stat} openRevision={openRevision} />}</div>}
+      {(state === "awaiting_final_review" || state === "done" || state === "cancelled" && item.cancel_reason === "rejected_at_final_review") && <div className="run-action-expansion">{state !== "awaiting_final_review" && <button className="secondary" aria-expanded={reviewOpen} onClick={() => setReviewOpen(!reviewOpen)}>{reviewOpen ? "Hide" : "Show"} final review: checks, reviewer, changes</button>}{(state === "awaiting_final_review" || reviewOpen) && <FinalReviewBlock item={item} review={review} stat={stat} notesName={notesName} openRevision={openRevision} />}</div>}
       {(state === "awaiting_final_review" || state === "done") && <div className="run-action-expansion"><PublicationRow item={item} publication={publication} disabled={disabled} onRetry={() => void retryPublication()} error={publicationError} pending={pendingPublish} /></div>}
       {terminalStates.has(state) && <div className="run-action-expansion"><ResourceCards item={item} disabled={disabled} pending={pendingRemoval} error={resourceError} onDelete={(kind) => { setDialog(kind); setDialogCheck(false); setDialogError(null); }} /></div>}
     </section>
@@ -334,7 +340,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
       {dialog === "approve_result" && <p>Publication continues on its own.</p>}
       {dialog === "discard" && <p>{item.worktree?.head ? "Delete this local worktree. The branch and artifacts remain." : "The worktree cannot be read. Delete its files and Git registration without checking HEAD or uncommitted changes. The branch and artifacts remain."}</p>}
       {dialog === "cleanup" && <p>Delete the local branch after its worktree has been removed.</p>}
-      <div className="run-dialog-facts"><code>{dialog === "discard" ? item.worktree?.path : dialog === "reject_plan" ? `plan/plan.md · rev ${planRevision}` : item.branch}</code><code>{dialog === "discard" ? item.worktree?.head : dialog === "reject_plan" ? plan?.id : item.result_commit || item.branch_tip}</code></div>
+      <div className="run-dialog-facts"><code>{dialog === "discard" ? item.worktree?.path : dialog === "reject_plan" ? `${planPath} · rev ${planRevision}` : item.branch}</code><code>{dialog === "discard" ? item.worktree?.head : dialog === "reject_plan" ? plan?.id : item.result_commit || item.branch_tip}</code></div>
       {dialog === "discard" && !!item.worktree?.dirty_entries.length && <div className="run-dirty-list">{item.worktree.dirty_entries.map((entry) => <div key={entry.path}><code>{entry.status}</code> {entry.path}</div>)}</div>}
       {dialog === "discard" && (item.worktree?.dirty || !item.worktree?.head) && <label className="run-loss-check"><input type="checkbox" checked={dialogCheck} onChange={(event) => setDialogCheck(event.target.checked)} />{item.worktree?.head ? `I understand that ${item.worktree.dirty_entries.length} uncommitted paths will be lost.` : "I understand that all files in this unreadable worktree will be lost."}</label>}
       {dialogError && <ErrorBox title="Request was refused" error={dialogError} />}

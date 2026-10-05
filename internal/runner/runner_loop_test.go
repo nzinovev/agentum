@@ -108,6 +108,20 @@ func (store *fakeStore) SetPipelinePackOrigin(_ context.Context, arg sqlc.SetPip
 	}
 	return store.record, nil
 }
+func (store *fakeStore) SelectRunRoute(_ context.Context, arg sqlc.SelectRunRouteParams) (sqlc.Run, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.record.RouteSource.Valid {
+		return sqlc.Run{}, sql.ErrNoRows
+	}
+	store.record.PipelinePack = arg.PipelinePack
+	store.record.RouteSource = arg.RouteSource
+	store.record.RouteReason = arg.RouteReason
+	store.record.RouteFallbackCode = arg.RouteFallbackCode
+	store.record.RouteFallbackMessage = arg.RouteFallbackMessage
+	store.record.RouteTriageInvocationID = arg.RouteTriageInvocationID
+	return store.record, nil
+}
 func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -140,10 +154,12 @@ func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.Finish
 func (store *fakeStore) LatestStageForRun(_ context.Context, _ sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.invocations) == 0 {
-		return sqlc.StageInvocation{}, sql.ErrNoRows
+	for invocationIndex := len(store.invocations) - 1; invocationIndex >= 0; invocationIndex-- {
+		if store.invocations[invocationIndex].Sequence > 0 {
+			return store.invocations[invocationIndex], nil
+		}
 	}
-	return store.invocations[len(store.invocations)-1], nil
+	return sqlc.StageInvocation{}, sql.ErrNoRows
 }
 func (store *fakeStore) MaxCycleForStages(_ context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error) {
 	store.mu.Lock()
@@ -166,7 +182,7 @@ func (store *fakeStore) ListStageInvocationsForRun(_ context.Context, arg sqlc.L
 	defer store.mu.Unlock()
 	out := make([]sqlc.StageInvocation, 0, len(store.invocations))
 	for _, invocation := range store.invocations {
-		if invocation.RunID == arg.RunID {
+		if invocation.RunID == arg.RunID && invocation.Sequence > 0 {
 			out = append(out, invocation)
 		}
 	}

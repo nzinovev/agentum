@@ -50,6 +50,7 @@ type Store interface {
 	// above: a later commit changing the project's packs cannot rewrite what
 	// a running record says it executed.
 	SetPipelinePackOrigin(ctx context.Context, arg sqlc.SetPipelinePackOriginParams) (sqlc.Run, error)
+	SelectRunRoute(ctx context.Context, arg sqlc.SelectRunRouteParams) (sqlc.Run, error)
 	SetResultCommit(ctx context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error)
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
@@ -159,6 +160,7 @@ type Runner struct {
 // records calls or fails on demand; the production *manifest.Service satisfies
 // it without changes.
 type manifestService interface {
+	Init(ctx context.Context, tenantID, userID, runID string) error
 	AddEvidence(ctx context.Context, tenantID, runID string, patch manifest.Body) error
 	Seal(ctx context.Context, tenantID, userID, runID string, reason manifest.SealReason) error
 	RecordGap(ctx context.Context, tenantID, runID string, gap manifest.EvidenceGap) error
@@ -929,6 +931,18 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return nil
 	}
 	baseCommit := record.BaseCommit.String
+	if !record.RouteSource.Valid {
+		if runner.mfst != nil {
+			if initErr := runner.mfst.Init(ctx, record.TenantID, record.UserID, record.ID); initErr != nil {
+				return runner.failRun(ctx, record, fmt.Errorf("initialize triage evidence: %w", initErr))
+			}
+		}
+		selected, routeErr := runner.selectRoute(ctx, record, checkoutPath, baseCommit)
+		if routeErr != nil {
+			return runner.failRun(ctx, record, fmt.Errorf("select route: %w", routeErr))
+		}
+		record = selected
+	}
 
 	// Resolve the run's EFFECTIVE pack: the project's layer at the pinned
 	// base_commit over the builtin source (a project pack shadowing the
@@ -1732,6 +1746,13 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 		if !ok {
 			return "", "", nil, fmt.Errorf("advance: current stage %q not in pack", currentStageID)
 		}
+		if approval, hasApproval := runPack.SourceWriteApproval(); hasApproval && approval.WithinStage && approval.Stage == currentStageID {
+			latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{RunID: record.ID, TenantID: record.TenantID})
+			if latestErr != nil {
+				return "", "", nil, fmt.Errorf("advance: read short-plan session: %w", latestErr)
+			}
+			return currentStageID, latest.SessionID.String, nil, nil
+		}
 		if len(currentStage.Transitions) == 0 {
 			return "", "", nil, fmt.Errorf("advance: stage %q has no transition", currentStageID)
 		}
@@ -1907,6 +1928,9 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 		return nil
 	}
 	if !run.sourceWriteUnlock.Granted {
+		if approval.WithinStage && approval.Stage == stageID {
+			return nil
+		}
 		// EventStopGate (not EventStopUser): a gate is what this is. The human
 		// resolves it by advancing (which records the plan approval, because the
 		// pause sits at the approval stage) or by rejecting/cancelling.
@@ -2078,6 +2102,9 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// refused stage — see refuseSourceWriteBeforeApproval for why the pause
 		// must sit there for advance to resolve the right transition.
 		return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, halt.decision, halt.stageID)
+	}
+	if approval, hasApproval := run.runPack.SourceWriteApproval(); hasApproval && approval.WithinStage && approval.Stage == stageID && run.sourceWriteUnlock.Granted {
+		stage.Gate = pack.GateAuto
 	}
 
 	// ADR 0002 D4 layer 2: restore any instruction files the worktree drifted

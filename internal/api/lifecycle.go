@@ -228,6 +228,7 @@ func (api *API) planApprovalForStage(ctx context.Context, run sqlc.Run, currentS
 	}
 	return planApproval{
 		name: approval.Name, stage: approval.Stage, artifact: approval.Artifact,
+		withinStage: approval.WithinStage,
 	}, true, nil
 }
 
@@ -235,9 +236,10 @@ func (api *API) planApprovalForStage(ctx context.Context, run sqlc.Run, currentS
 // applyResume can write the run_approvals row alongside the transition. The
 // revision id is resolved inside the tx (reading the current plan revision).
 type planApproval struct {
-	name     string
-	stage    string
-	artifact string
+	name        string
+	stage       string
+	artifact    string
+	withinStage bool
 	// expectedRevisionID is the plan revision the human's request names. When
 	// set, the resume tx refuses unless it is still the current revision: an
 	// answer given to one revision must never land on a newer one the human
@@ -424,6 +426,10 @@ func (api *API) handleInvocationAdvance(w http.ResponseWriter, r *http.Request) 
 	}
 	if atApproval {
 		approvalPlan.expectedRevisionID = expectedRevisionID
+		if approvalPlan.withinStage && expectedRevisionID == "" {
+			writeError(w, http.StatusConflict, codeIllegalTransition, "the short plan must have a revision before source_write can be approved")
+			return
+		}
 		if !api.requirePlanRevisionPrecondition(w, r, run, approvalPlan) {
 			return
 		}
@@ -785,6 +791,9 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 			revisionID, revErr := api.resolveApprovalRevisionID(r.Context(), qtx, run, approval)
 			if revErr != nil {
 				return revErr
+			}
+			if approval.withinStage && !revisionID.Valid {
+				return staleRevisionError{expected: approval.expectedRevisionID, current: ""}
 			}
 			// Compared inside the tx, after applyTransition updated the run
 			// row: an artifact write takes a share lock on that row, so any

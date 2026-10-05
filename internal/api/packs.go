@@ -78,10 +78,11 @@ type packChecksView struct {
 }
 
 type packApprovalRef struct {
-	Name     string `json:"name"`
-	Stage    string `json:"stage"`
-	Artifact string `json:"artifact"`
-	Unlocks  string `json:"unlocks"`
+	Name        string `json:"name"`
+	Stage       string `json:"stage"`
+	Artifact    string `json:"artifact"`
+	Unlocks     string `json:"unlocks"`
+	WithinStage bool   `json:"within_stage,omitempty"`
 }
 
 type packStageView struct {
@@ -354,18 +355,18 @@ func packDetailOf(resolved *pack.Resolved) packDetailResponse {
 	detail.Memory.Writes = runPack.Memory.Writes
 	for _, approval := range runPack.Approvals {
 		detail.Approvals = append(detail.Approvals, packApprovalRef{
-			Name: approval.Name, Stage: approval.Stage, Artifact: approval.Artifact, Unlocks: approval.Unlocks,
+			Name: approval.Name, Stage: approval.Stage, Artifact: approval.Artifact, Unlocks: approval.Unlocks, WithinStage: approval.WithinStage,
 		})
 	}
-	stageIDs := make([]string, 0, len(runPack.Stages))
-	for stageID := range runPack.Stages {
-		stageIDs = append(stageIDs, stageID)
-	}
-	sort.Strings(stageIDs)
+	stageIDs := orderedStageIDs(runPack)
 	for _, stageID := range stageIDs {
 		stage := runPack.Stages[stageID]
+		role := ""
+		if !stage.Terminal() {
+			role = pack.EffectiveRole(stageID, stage)
+		}
 		view := packStageView{
-			ID: stageID, Gate: string(stage.Gate), Tier: stage.Tier, Role: stage.Role,
+			ID: stageID, Gate: string(stage.Gate), Tier: stage.Tier, Role: role,
 			Prompt: stage.Prompt, Terminal: stage.Terminal(),
 			Capabilities: append([]string(nil), stage.Capabilities...),
 		}
@@ -375,4 +376,34 @@ func packDetailOf(resolved *pack.Resolved) packDetailResponse {
 		detail.Stages = append(detail.Stages, view)
 	}
 	return detail
+}
+
+func orderedStageIDs(runPack *pack.Pack) []string {
+	order := make([]string, 0, len(runPack.Stages))
+	seen := map[string]bool{}
+	var visit func(string)
+	visit = func(stageID string) {
+		if seen[stageID] {
+			return
+		}
+		stage, exists := runPack.Stages[stageID]
+		if !exists {
+			return
+		}
+		seen[stageID] = true
+		order = append(order, stageID)
+		for _, transition := range stage.Transitions {
+			visit(transition.To)
+		}
+	}
+	visit(runPack.Entry)
+	remaining := make([]string, 0)
+	for stageID := range runPack.Stages {
+		if !seen[stageID] {
+			remaining = append(remaining, stageID)
+		}
+	}
+	sort.Strings(remaining)
+	order = append(order, remaining...)
+	return order
 }

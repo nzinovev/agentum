@@ -50,3 +50,38 @@ func TestShipped_BackendDevelopmentPack(t *testing.T) {
 		}
 	}
 }
+
+func TestShipped_RouteShapes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		entry         string
+		approvalStage string
+		withinStage   bool
+	}{
+		{name: "backend-development", entry: "plan", approvalStage: "plan"},
+		{name: "small-change", entry: "implement", approvalStage: "implement", withinStage: true},
+		{name: "research-first", entry: "research", approvalStage: "plan"},
+	}
+	for _, routeCase := range cases {
+		t.Run(routeCase.name, func(t *testing.T) {
+			loaded, err := Load(filepath.Join("..", "..", "packs", routeCase.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := loaded.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			approval, found := loaded.SourceWriteApproval()
+			if !found || approval.Stage != routeCase.approvalStage || approval.WithinStage != routeCase.withinStage {
+				t.Errorf("approval = %+v, found=%v", approval, found)
+			}
+			if loaded.Entry != routeCase.entry {
+				t.Errorf("entry = %q, want %q", loaded.Entry, routeCase.entry)
+			}
+			if loaded.Pack.Description == "" {
+				t.Error("route is missing a when-to-use description")
+			}
+		})
+	}
+}

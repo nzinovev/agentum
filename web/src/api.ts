@@ -38,8 +38,23 @@ export type Run = {
   branch: string;
   pipeline_pack: string;
   pipeline_pack_origin: string;
+  route_source: "request" | "triage" | "fallback" | "";
+  route_reason: string;
+  route_decided_at?: string;
+  route_triage_invocation_id?: string;
+  route_fallback?: { code: string; message: string };
+  route_resolve_error?: { code: string; message: string };
+  route_graph?: RouteGraph;
   created_at: string;
   updated_at: string;
+};
+export type RouteGraph = {
+  description: string;
+  version: string;
+  entry: string;
+  fix_cycles: number;
+  approvals: { name: string; stage: string; artifact: string; unlocks: string; within_stage?: boolean }[];
+  nodes: { id: string; gate: string; role?: string; terminal: boolean; transitions?: { to: string; condition?: string }[] }[];
 };
 export type Publication = {
   state: string;
@@ -180,8 +195,8 @@ export const postInvocation = (id: string, invocationID: string, action: string,
     method: "POST",
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-export const savePlan = (id: string, invocationID: string, content: string, expectedRevisionID: string) =>
-  request<Artifact>(runPath(id) + "/invocations/" + encodeURIComponent(invocationID) + "/artifacts/plan/plan.md", {
+export const savePlan = (id: string, invocationID: string, path: string, content: string, expectedRevisionID: string) =>
+  request<Artifact>(runPath(id) + "/invocations/" + encodeURIComponent(invocationID) + "/artifacts/" + path.split("/").map(encodeURIComponent).join("/"), {
     method: "PUT",
     body: JSON.stringify({ content, expected_revision_id: expectedRevisionID }),
   });

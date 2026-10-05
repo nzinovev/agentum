@@ -8,7 +8,7 @@ SELECT * FROM stage_invocations WHERE id = $1 AND tenant_id = $2;
 
 -- name: LatestStageForRun :one
 SELECT * FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2
+WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
 ORDER BY sequence DESC
 LIMIT 1;
 
@@ -16,7 +16,7 @@ LIMIT 1;
 -- Ordered by sequence so each attempt is visible in run order; the cycle column
 -- distinguishes retries from resumes. Backs GET /runs/{id}/invocations.
 SELECT * FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2
+WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
 ORDER BY sequence ASC;
 
 -- name: MaxCycleForStages :one

@@ -23,7 +23,6 @@ import {
   Copy,
   Loading,
   Problem,
-  Reserved,
   Shell,
 } from "./common";
 import type { Navigate } from "./main";
@@ -37,6 +36,7 @@ import {
   waitingStates,
 } from "./util";
 import { RunActionPanel } from "./run-actions";
+import { RouteBlock } from "./route";
 
 function resourceStatus(state?: string): string {
   return ({ present: "Kept", removing: "Removing…", removed: "Removed", not_created: "Not created" } as Record<string, string>)[state || ""] || "—";
@@ -57,8 +57,7 @@ function Invocations({ items, state }: { items: Invocation[]; state: string }) {
       </h2>
       {!items.length ? (
         <div className="empty-section">
-          No invocations yet. The first one starts with the <code>plan</code>{" "}
-          stage.
+          {state === "running" ? "No stage invocations yet. The route may still be choosing." : "No stage invocations yet."}
         </div>
       ) : (
         <div className="table invocation-table">
@@ -190,7 +189,7 @@ function ArtifactViewer({
       saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && currentPlan === null) return;
     setSaving(true); setSaveError(null);
     try {
-      const revision = await savePlan(runID, latestInvocation.id, draft, baseRevisionID);
+      const revision = await savePlan(runID, latestInvocation.id, item.name, draft, baseRevisionID);
       stopEditing(); saved(revision);
     } catch (caught) {
       setSaveError(caught);
@@ -206,7 +205,7 @@ function ArtifactViewer({
     setCurrentPlan(null);
     try {
       const rows = await artifacts(runID);
-      const current = rows.find((revision) => revision.name === "plan/plan.md" && revision.is_current);
+      const current = rows.find((revision) => revision.kind === "plan_md" && revision.is_current);
       if (!current) throw new Error("The current plan revision is unavailable.");
       const content = await artifactContent(runID, current.id);
       setBaseRevisionID(current.id);
@@ -221,7 +220,7 @@ function ArtifactViewer({
           <strong>{item.name}</strong>
           <span className="mono">{editing ? `editing · base revision ${short(baseRevisionID, 8)}` : `${item.actor} · ${item.content_size} bytes · sha256 ${short(item.content_hash, 7)}`}</span>
         </div>
-        {item.name === "plan/plan.md" && canEdit && !editing && latestInvocation && <button className="secondary" onClick={startEditing}>Edit</button>}
+        {item.kind === "plan_md" && canEdit && !editing && latestInvocation && <button className="secondary" onClick={startEditing}>Edit</button>}
         <button className="secondary" onClick={() => { stopEditing(); close(); }}>
           Close
         </button>
@@ -352,11 +351,11 @@ function Artifacts({
           item={open}
           runID={runID}
           close={() => setOpen(null)}
-          editing={editing && open.name === "plan/plan.md"}
+          editing={editing && open.kind === "plan_md"}
           startEditing={startEditing}
           latestInvocation={latestInvocation}
           canEdit={canEdit}
-          nextRevision={(revisions.get("plan/plan.md") || 0) + 1}
+          nextRevision={(revisions.get(open.name) || 0) + 1}
           stopEditing={stopEditing}
           saved={saved}
           refresh={refresh}
@@ -379,7 +378,7 @@ function Facts({ item }: { item: Run }) {
           ],
         ]
       : []),
-    ["pack", item.pipeline_pack, false],
+    ["pack", item.route_source ? item.pipeline_pack : "chosen on start", false],
     ["pack origin", item.pipeline_pack_origin || "set on start", false],
     ["run id", item.id, true],
   ];
@@ -490,15 +489,18 @@ export function RunPage({
   }, [revisions]);
   useEffect(() => {
     if (viewerTouched || open || !item) return;
+    const approvalArtifact = item.route_graph?.approvals.find((approval) => approval.unlocks === "source_write");
+    const reviewerStages = item.route_graph?.nodes.filter((node) => node.role === "reviewer").map((node) => node.id) || [];
+    const reviewNotes = [...revisions].reverse().find((revision) => revision.is_current && reviewerStages.some((stage) => revision.name === `${stage}/notes.md`));
     const desired =
       item.state === "paused_gate"
-        ? "plan/plan.md"
+        ? approvalArtifact ? approvalArtifact.stage + "/" + approvalArtifact.artifact : revisions.find((revision) => revision.kind === "plan_md" && revision.is_current)?.name || ""
         : item.state === "paused_open_questions"
-          ? (item.current_stage || "plan") + "/result.json"
+          ? (item.current_stage || item.route_graph?.entry || "") + "/result.json"
           : item.state === "awaiting_final_review"
-            ? "review/notes.md"
+            ? reviewNotes?.name || ""
             : item.state === "paused_user_stop"
-              ? "review/notes.md"
+              ? reviewNotes?.name || ""
               : "";
     if (desired) {
       const match =
@@ -517,7 +519,7 @@ export function RunPage({
     setTimeout(() => document.getElementById("artifact-viewer")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
   const editPlan = () => {
-    const plan = revisions.find((revision) => revision.name === "plan/plan.md" && revision.is_current);
+    const plan = revisions.find((revision) => revision.kind === "plan_md" && revision.is_current);
     if (!plan) return;
     openAndScroll(plan); setEditing(true);
   };
@@ -611,7 +613,7 @@ export function RunPage({
               <div className="run-meta">
                 <Badge state={item.state} />
                 <span>
-                  Stage <code>{item.current_stage || "—"}</code>
+                  Stage <code>{item.current_stage || (item.state === "running" && !item.route_source ? "choosing route" : "—")}</code>
                 </span>
                 <span>
                   Created{" "}
@@ -640,10 +642,7 @@ export function RunPage({
               {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
-          <div className="route-placeholder">
-            <span>Route</span>
-            <Reserved>selected route and the reason it was chosen</Reserved>
-          </div>
+          <RouteBlock item={item} history={history} />
           <RunActionPanel
             item={item}
             history={history}

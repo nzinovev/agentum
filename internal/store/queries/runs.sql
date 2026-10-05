@@ -1,7 +1,16 @@
 -- name: CreateRun :one
 INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
-                  title, description, overrides, base_ref, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created')
+                  title, description, overrides, base_ref, state, route_source, route_reason, route_decided_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', NULLIF(sqlc.arg(route_source)::text, ''),
+        CASE WHEN sqlc.arg(route_source)::text = 'request' THEN 'pipeline_pack was set in POST /runs. Triage did not run for this run.' ELSE '' END,
+        CASE WHEN sqlc.arg(route_source)::text = 'request' THEN now() ELSE NULL END)
+RETURNING *;
+
+-- name: SelectRunRoute :one
+UPDATE runs SET pipeline_pack = $3, route_source = $4, route_reason = $5,
+    route_fallback_code = $6, route_fallback_message = $7,
+    route_triage_invocation_id = $8, route_decided_at = now(), updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL
 RETURNING *;
 
 -- name: GetRun :one

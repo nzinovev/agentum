@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/publish"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -42,10 +43,21 @@ type runResourceError struct {
 	Message string `json:"message"`
 }
 
+type runRouteGraph struct {
+	Description string            `json:"description"`
+	Version     string            `json:"version"`
+	Entry       string            `json:"entry"`
+	FixCycles   int               `json:"fix_cycles"`
+	AskToEdit   int               `json:"ask_to_edit"`
+	Approvals   []packApprovalRef `json:"approvals"`
+	Nodes       []packStageView   `json:"nodes"`
+}
+
 // populateRunReadState adds the live local resources and the pinned pack's
 // request-changes budget to the run read. Destructive decisions use the live
 // worktree HEAD, so a stored result commit cannot stand in for this read.
 func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response *runResponse) error {
+	api.populateRunRoute(ctx, run, response)
 	if run.StopReason == "base_not_on_target" || run.StopReason == "base_target_unverifiable" {
 		remote := api.publication.remote
 		if remote == "" {
@@ -79,15 +91,14 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 	if _, statErr := os.Stat(checkoutPath); statErr != nil {
 		return nil
 	}
-	budget, budgetErr := api.resolveRunPack(ctx, run)
-	if budgetErr == nil && budget != nil {
+	if response.RouteGraph != nil {
 		used, countErr := api.queries.CountJobsOfKindForRun(ctx, sqlc.CountJobsOfKindForRunParams{
 			RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
 		})
 		if countErr != nil {
 			return fmt.Errorf("count plan edits: %w", countErr)
 		}
-		response.PlanEdits = &planEditBudget{Used: int(used), Max: budget.Budgets.AskToEdit}
+		response.PlanEdits = &planEditBudget{Used: int(used), Max: response.RouteGraph.AskToEdit}
 	}
 	manager := worktree.New()
 	if _, pathErr := os.Stat(wtPath); pathErr == nil {
@@ -158,4 +169,27 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 		return fmt.Errorf("read restore target: %w", checkpointErr)
 	}
 	return nil
+}
+
+func (api *API) populateRunRoute(ctx context.Context, run sqlc.Run, response *runResponse) {
+	if !run.RouteSource.Valid || run.RouteSource.String == "" {
+		return
+	}
+	resolvedPack, resolveErr := api.resolveRunPack(ctx, run)
+	if resolveErr != nil {
+		response.RouteResolveError = &runResourceError{Code: "pack_resolve_failed", Message: resolveErr.Error()}
+		return
+	}
+	if resolvedPack != nil {
+		response.RouteGraph = routeGraphOf(resolvedPack)
+	}
+}
+
+func routeGraphOf(runPack *pack.Pack) *runRouteGraph {
+	detail := packDetailOf(&pack.Resolved{Pack: runPack})
+	return &runRouteGraph{
+		Description: detail.Description, Version: detail.Version, Entry: detail.Entry,
+		FixCycles: detail.Budgets.FixCycles, Approvals: detail.Approvals, Nodes: detail.Stages,
+		AskToEdit: detail.Budgets.AskToEdit,
+	}
 }

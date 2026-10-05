@@ -128,7 +128,7 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 
 const latestStageForRun = `-- name: LatestStageForRun :one
 SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2
+WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
 ORDER BY sequence DESC
 LIMIT 1
 `
@@ -163,7 +163,7 @@ func (q *Queries) LatestStageForRun(ctx context.Context, arg LatestStageForRunPa
 
 const listStageInvocationsForRun = `-- name: ListStageInvocationsForRun :many
 SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle FROM stage_invocations
-WHERE run_id = $1 AND tenant_id = $2
+WHERE run_id = $1 AND tenant_id = $2 AND sequence > 0
 ORDER BY sequence ASC
 `
 

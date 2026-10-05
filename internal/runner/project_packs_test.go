@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -108,7 +109,7 @@ func newProjectPackFixture(t *testing.T, manifestBody string) *projectPackFixtur
 	commitProjectPack(t, repo, manifestBody, "spec prompt body")
 
 	runID := "T-pp"
-	record := sqlc.Run{ID: runID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "probe"}
+	record := sqlc.Run{ID: runID, TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: "probe", RouteSource: sql.NullString{String: "request", Valid: true}}
 	proj := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
 	store := newFakeStore(record, proj)
 	adapter := &scriptAdapter{scripts: map[string]agent.ResultJSON{

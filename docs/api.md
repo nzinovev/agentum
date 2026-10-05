@@ -135,9 +135,9 @@ one of the two counters is non-zero on any given registration.
 
 | Method | Path | Status | Body / Query → Response |
 |---|---|---|---|
-| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack?, title, description, overrides?, base_ref}` → `201 Run`. Omitted `pipeline_pack` stores `backend-development`. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
+| `POST` | `/runs` | ✅ | `{project_id, pipeline_pack?, title, description, overrides?, base_ref}` → `201 Run`. An omitted `pipeline_pack` leaves route selection pending; `backend-development` is the stored fallback until triage selects a pack at start. An explicit `pipeline_pack` sets `route_source: "request"` and skips triage. `base_ref` is required; see below. The body is decoded strictly (`DisallowUnknownFields`): an unknown key — including the legacy `input` blob — is a `400 bad_input`, not an ignored field. `description` is required, non-blank, ≤ 32 KiB; `title` ≤ 200 bytes (over-budget is a `400`, not a truncation). `title` and `description` are both scanned for credential material at the boundary and a match is a `422 bad_input`; the scan runs only the self-identifying rules (AWS key ids, GitHub PATs, PEM private-key blocks, `aws_secret_access_key` with its value), so prose that merely discusses credentials — "Add Bearer authentication to /settings" — is accepted. A body over the transport cap is a `400` naming the limit, not a JSON parse error. `overrides` is the orchestrator-facing half of the request; `overrides.checks.{required,optional}` name registered checks — a command is never accepted, and a typo'd key is a `400`. |
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]`. Human-waiting states (`paused_open_questions`, `paused_gate`, `paused_user_stop`, `awaiting_final_review`) come first. Each group is ordered by `updated_at DESC, id DESC`; pagination follows that order. |
-| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. `open_questions` comes from the last invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs; it is omitted when the pinned checkout or pack cannot be read. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
+| `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. The stored route source, reason, decision time, fallback and triage invocation id accompany the selected `pipeline_pack`. `route_graph` contains the pack description, version, entry, budgets, approvals and entry-first ordered nodes with gates and transitions. A pinned pack that cannot resolve gives `route_resolve_error {code,message}` and no graph while the response stays `200`; the read does not log each poll. `open_questions` comes from the last stage invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs; it is omitted when the pinned checkout or pack cannot be read. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
@@ -166,6 +166,13 @@ cause; stop reasons `base_ref_unresolvable`, `base_target_unverifiable`,
 that the base lies in the provider's current branch history (`base_diverged`,
 `base_unverifiable`). See `docs/execution.md` § "Safe lifecycle,
 checkpoints, and code egress" for the full lineage / abort / cleanup model.
+
+An omitted `pipeline_pack` starts a read-only triage invocation after
+`base_commit` is pinned. Triage receives the task and the pack catalog with
+descriptions. Its choice is stored once on the run. An unknown name, refusal,
+or triage failure stores `backend-development` with `route_source: "fallback"`
+and `route_fallback {code,message}`. Stage invocations omit triage; the
+evidence manifest records it by `route_triage_invocation_id`.
 
 A run executes in the working copy it pinned at first start (the project's
 `repo_path` at that moment), and keeps that copy even if the project is later
@@ -245,6 +252,13 @@ gate".
   "project_id": "uuid",
   "pipeline_pack": "java-spring@1",
   "pipeline_pack_origin": "project+builtin | builtin | project — where the executed pack's bytes came from; empty until the run starts and pins its pack with base_commit",
+  "route_source": "triage | request | fallback | empty until chosen",
+  "route_reason": "Why this route was chosen",
+  "route_decided_at": "2026-07-05T...",
+  "route_triage_invocation_id": "uuid when triage ran",
+  "route_fallback": {"code": "triage_unknown_pack", "message": "triage returned a name outside the catalog"},
+  "route_graph": {"entry": "plan", "version": "0.1.0", "description": "When to use this pack", "fix_cycles": 2, "ask_to_edit": 3, "approvals": [], "nodes": []},
+  "route_resolve_error": {"code": "pack_resolve_failed", "message": "pack resolution error"},
   "title": "Add auth to /settings",
   "description": "Problem. … What to do. …",
   "overrides": {},
@@ -269,6 +283,9 @@ reason is present only while stopped; `error` is present only in `failed`.
 `cancel_reason` is `rejected_at_plan` or `rejected_at_final_review` for a
 rejected run, and `cancelled` for an ordinary cancellation.
 Only `GET /runs/{id}` includes `open_questions`.
+Only `GET /runs/{id}` includes `route_graph` and `route_resolve_error`.
+`route_fallback` appears only after fallback. The graph and error are mutually
+exclusive.
 
 ## Publication
 
@@ -401,7 +418,7 @@ The three gate **actions** from §3.4:
 | Method | Path | Status | Action |
 |---|---|---|---|
 | `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job). Optional body `{"text": …}` carries new user text to the resumed session — see [Continue request](#continue-request) |
-| `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job). At the pack's plan approval stage the advance IS the approval and takes `{"expected_revision_id": "<plan revision>"}` (the `X-Revision-Id` of the plan the human read): omitted while the plan has a revision → `428 precondition_missing`; no longer current → `409 conflict`; either way nothing is enqueued or approved. Elsewhere the body is optional. |
+| `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job). An approval with `within_stage: true` resumes the same stage after the short plan is approved. At the pack's plan approval stage the advance IS the approval and takes `{"expected_revision_id": "<plan revision>"}` (the `X-Revision-Id` of the plan the human read): omitted while the plan has a revision → `428 precondition_missing`; no longer current → `409 conflict`; either way nothing is enqueued or approved. A within-stage approval requires a plan revision and returns `409 illegal_transition` when none exists. Elsewhere the body is optional. |
 | `POST` | `/runs/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → run done + memory commits. Pins `result_commit` at the gate. Idempotent. |
 | `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
 | `POST` | `/runs/{id}/invocations/{iid}/ask-to-edit` | ✅ | **Request changes at the plan gate**: body `{"text": "remarks", "target_revision_id": "<plan revision>"}` — `text` required, ≤ 32 KiB, credential-scanned → `422`; `target_revision_id` follows the same `428`/`409` rule as `advance` at the plan gate. Valid only at `paused_gate` on the pack's `source_write` approval stage before the first grant. The planner's session re-runs with the remarks in its Task section, the revised plan becomes a new revision needing its own approval, and the run pauses at the gate again. Bounded by the pack's `budgets.ask_to_edit`; a spent budget is `409 edit_budget_exhausted`. Requires `run:ask-to-edit`. |

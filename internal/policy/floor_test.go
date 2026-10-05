@@ -270,7 +270,7 @@ func TestFloor_Rule4_CapabilitiesWithinHost(t *testing.T) {
 func TestFloor_ShippedPacksPass(t *testing.T) {
 	t.Parallel()
 	floor := NewFloor(fullHostCaps())
-	for _, packDir := range []string{"../../packs/backend-development", "../../packs/minimal"} {
+	for _, packDir := range []string{"../../packs/backend-development", "../../packs/small-change", "../../packs/research-first", "../../packs/minimal"} {
 		loaded, err := pack.Load(packDir)
 		if err != nil {
 			t.Fatalf("load %s: %v", packDir, err)

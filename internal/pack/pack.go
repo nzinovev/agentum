@@ -300,7 +300,8 @@ type Approval struct {
 	// Unlocks is the closed-vocabulary capability subset the approval releases.
 	// v1 has one member, source_write; the field is a slice so a future approval
 	// can release a narrower set without a model change.
-	Unlocks string `yaml:"unlocks"`
+	Unlocks     string `yaml:"unlocks"`
+	WithinStage bool   `yaml:"within_stage,omitempty"`
 }
 
 // SourceWriteApproval returns the pack's source_write approval declaration, if
@@ -360,6 +361,9 @@ func (p *Pack) SourceWriteGateLeaks() []string {
 	var leaks []string
 	for _, stageID := range sourceStages {
 		if reachableWithoutApproval[stageID] {
+			if stageID == approvalStage && sourceApproval.WithinStage {
+				continue
+			}
 			leaks = append(leaks, stageID)
 		}
 	}

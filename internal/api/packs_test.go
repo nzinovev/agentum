@@ -246,8 +246,8 @@ func TestHandleGetPack_BuiltinDetail(t *testing.T) {
 	if detail.Entry != "plan" || len(detail.Stages) != 2 {
 		t.Errorf("detail = %+v, want the full graph", detail)
 	}
-	if detail.Stages[0].ID != "done" || detail.Stages[1].ID != "plan" {
-		t.Errorf("stages = %+v, want sorted by id", detail.Stages)
+	if detail.Stages[0].ID != "plan" || detail.Stages[1].ID != "done" {
+		t.Errorf("stages = %+v, want entry-first graph order", detail.Stages)
 	}
 	if detail.Budgets.FixCycles != 2 || detail.Budgets.AskToEdit != 3 {
 		t.Errorf("budgets = %+v, want the pack's declared budgets", detail.Budgets)
