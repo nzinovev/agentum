@@ -24,6 +24,8 @@ import (
 
 const routeDefaultPack = pack.DefaultPipelinePack
 
+const defaultTriageCloseTimeout = 10 * time.Second
+
 const triagePrompt = `Choose the best pipeline pack for the task. Use only the task and catalog below. Do not edit source. Write result.json with schema_version "1", status "complete", and summary containing ONLY a JSON object with keys "pack" and "reason". The pack must be one catalog name. The reason must be a brief explanation specific to the task. If no choice is possible, use status "blocked".`
 
 type routeCatalog interface {
@@ -213,9 +215,16 @@ func (runner *Runner) invokeTriage(ctx context.Context, record sqlc.Run, project
 		return routeChoice{}, "", routeFailure{code: "triage_record_error", message: err.Error()}
 	}
 	finish := func(sessionID, stopReason string, resultJSON *agent.ResultJSON, telemetry *agent.Telemetry) {
-		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.triageCloseTimeout)
 		defer finishCancel()
-		runner.finalize(finishCtx, invocation, record, sessionID, stopReason, resultJSON)
+		// A nil *agent.ResultJSON inside an interface is not a nil interface;
+		// finalize would store the JSON literal null instead of leaving the
+		// column empty.
+		var stored any
+		if resultJSON != nil {
+			stored = resultJSON
+		}
+		runner.finalize(finishCtx, invocation, record, sessionID, stopReason, stored)
 		runner.closeInvocationEvidence(finishCtx, record, invocation.ID, stopReason, telemetry)
 	}
 	runner.recordTriageEvidence(ctx, record, invocation, selection, block, profile)

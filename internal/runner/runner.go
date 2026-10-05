@@ -136,6 +136,12 @@ type Runner struct {
 	hardTimeout time.Duration
 	idleTimeout time.Duration
 
+	// triageCloseTimeout bounds the writes that close a triage invocation and
+	// its evidence. Those writes run on a context detached from the run's
+	// cancellation, so they need their own bound; it is a field so a test can
+	// outlast it without sleeping for the production value.
+	triageCloseTimeout time.Duration
+
 	// art is the immutable artifact revisions store. nil in unit tests that
 	// don't exercise evidence capture; captureArtifacts is a no-op then.
 	art artifacts.Store
@@ -280,6 +286,7 @@ func New(deps Deps) *Runner {
 		checkExec:   deps.CheckExec,
 		publication: deps.Publication,
 		hardTimeout: deps.HardTimeout, idleTimeout: deps.IdleTimeout,
+		triageCloseTimeout: defaultTriageCloseTimeout,
 	}
 }
 

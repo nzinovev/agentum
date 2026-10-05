@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -62,6 +63,7 @@ type scriptedTriageAdapter struct {
 	routingBlock string
 	selection    models.Selection
 	delay        time.Duration
+	invokeErr    error
 }
 
 func (adapter *scriptedTriageAdapter) Supported() []caps.Category {
@@ -74,6 +76,9 @@ func (adapter *scriptedTriageAdapter) Invoke(_ context.Context, invocation agent
 	adapter.selection = invocation.Model
 	if adapter.delay > 0 {
 		time.Sleep(adapter.delay)
+	}
+	if adapter.invokeErr != nil {
+		return nil, adapter.invokeErr
 	}
 	stream := make(chan agent.Event, 1)
 	stream <- agent.Event{Kind: agent.EventResult, Result: &agent.Result{ResultJSON: agent.ResultJSON{
@@ -236,12 +241,16 @@ func TestTriagePrefersFastTier(t *testing.T) {
 	}
 }
 
-type contextCheckingTriageStore struct{ *fakeStore }
+type contextCheckingTriageStore struct {
+	*fakeStore
+	finished []sqlc.FinishStageInvocationParams
+}
 
 func (store *contextCheckingTriageStore) FinishStageInvocation(ctx context.Context, params sqlc.FinishStageInvocationParams) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	store.finished = append(store.finished, params)
 	return store.fakeStore.FinishStageInvocation(ctx, params)
 }
 
@@ -255,12 +264,13 @@ func (service *contextCheckingTriageManifest) AddEvidence(ctx context.Context, t
 }
 
 // TestSlowTriageClosesInvocationAndEvidence requires the closure deadline to
-// start after model output, even when the model call exceeds ten seconds.
+// start after model output, even when the model call outlasts it.
 func TestSlowTriageClosesInvocationAndEvidence(t *testing.T) {
 	record := sqlc.Run{ID: "slow-triage", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: routeDefaultPack, Title: "task"}
 	store := &contextCheckingTriageStore{fakeStore: newFakeStore(record, sqlc.Project{})}
-	adapter := &scriptedTriageAdapter{chosen: routeDefaultPack, delay: 11 * time.Second}
+	adapter := &scriptedTriageAdapter{chosen: routeDefaultPack, delay: 150 * time.Millisecond}
 	runner := New(Deps{Store: store, Packs: scriptedRouteCatalog{entries: []pack.Meta{{Name: routeDefaultPack}}}, Adapter: adapter})
+	runner.triageCloseTimeout = 50 * time.Millisecond
 	evidence := &contextCheckingTriageManifest{fakeManifestService: &fakeManifestService{}}
 	runner.mfst = evidence
 	selected, err := runner.selectRoute(t.Context(), record, "/repo", "commit")
@@ -272,6 +282,25 @@ func TestSlowTriageClosesInvocationAndEvidence(t *testing.T) {
 	}
 	if len(evidence.addEvidence) != 2 || len(evidence.addEvidence[1].Invocations) != 1 || evidence.addEvidence[1].Invocations[0].StopReason != "complete" {
 		t.Errorf("slow triage evidence = %+v", evidence.addEvidence)
+	}
+}
+
+// TestFailedTriageStoresNoResult keeps the result column empty when the
+// adapter produced nothing: a stored JSON null would read as a recorded result.
+func TestFailedTriageStoresNoResult(t *testing.T) {
+	record := sqlc.Run{ID: "failed-triage", TenantID: "tn", UserID: "us", ProjectID: "P1", State: "running", PipelinePack: routeDefaultPack, Title: "task"}
+	store := &contextCheckingTriageStore{fakeStore: newFakeStore(record, sqlc.Project{})}
+	adapter := &scriptedTriageAdapter{invokeErr: errors.New("runtime unavailable")}
+	runner := New(Deps{Store: store, Packs: scriptedRouteCatalog{entries: []pack.Meta{{Name: routeDefaultPack}}}, Adapter: adapter})
+	selected, err := runner.selectRoute(t.Context(), record, "/repo", "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.RouteSource.String != "fallback" || selected.RouteFallbackCode != "triage_adapter_error" {
+		t.Errorf("route after failed triage = %+v", selected)
+	}
+	if len(store.finished) != 1 || store.finished[0].StopReason.String != "adapter_error" || store.finished[0].Result.Valid {
+		t.Errorf("failed triage invocation closed as %+v", store.finished)
 	}
 }
 
