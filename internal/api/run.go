@@ -37,22 +37,28 @@ type runResponse struct {
 	// PipelinePackOrigin says where the executed pack's bytes came from —
 	// builtin, project, or project+builtin — pinned with the base_commit the
 	// pack was read from. Empty until the run starts and resolves its pack.
-	PipelinePackOrigin string          `json:"pipeline_pack_origin"`
-	Title              string          `json:"title"`
-	Description        string          `json:"description"`
-	Overrides          json.RawMessage `json:"overrides"`
-	State              string          `json:"state"`
-	CurrentStage       string          `json:"current_stage"`
-	StopReason         string          `json:"stop_reason"`
-	Error              string          `json:"error"`
-	CancelReason       string          `json:"cancel_reason"`
-	OpenQuestions      *[]string       `json:"open_questions,omitempty"`
-	BaseRef            string          `json:"base_ref"`
-	BaseCommit         string          `json:"base_commit"`
-	ResultCommit       string          `json:"result_commit"`
-	Branch             string          `json:"branch"`
-	CreatedAt          string          `json:"created_at"`
-	UpdatedAt          string          `json:"updated_at"`
+	PipelinePackOrigin   string            `json:"pipeline_pack_origin"`
+	Title                string            `json:"title"`
+	Description          string            `json:"description"`
+	Overrides            json.RawMessage   `json:"overrides"`
+	State                string            `json:"state"`
+	CurrentStage         string            `json:"current_stage"`
+	StopReason           string            `json:"stop_reason"`
+	Error                string            `json:"error"`
+	CancelReason         string            `json:"cancel_reason"`
+	OpenQuestions        *[]string         `json:"open_questions,omitempty"`
+	PlanEdits            *planEditBudget   `json:"plan_edits,omitempty"`
+	Worktree             *runWorktreeView  `json:"worktree,omitempty"`
+	BranchState          string            `json:"branch_state,omitempty"`
+	BranchTip            string            `json:"branch_tip,omitempty"`
+	BranchLastError      *runResourceError `json:"branch_last_error,omitempty"`
+	PublicationTargetRef string            `json:"publication_target_ref,omitempty"`
+	BaseRef              string            `json:"base_ref"`
+	BaseCommit           string            `json:"base_commit"`
+	ResultCommit         string            `json:"result_commit"`
+	Branch               string            `json:"branch"`
+	CreatedAt            string            `json:"created_at"`
+	UpdatedAt            string            `json:"updated_at"`
 }
 
 func toRunResponse(run sqlc.Run) runResponse {
@@ -326,6 +332,11 @@ func (api *API) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := toRunResponse(run)
+	if err := api.populateRunReadState(r.Context(), run, &response); err != nil {
+		logUnexpected(api.log, err, "populateRunReadState")
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
 	if run.State == string(engine.StatePausedOpenQuestions) {
 		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{RunID: run.ID, TenantID: run.TenantID})
 		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {

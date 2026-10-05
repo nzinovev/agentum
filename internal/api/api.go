@@ -102,8 +102,10 @@ type API struct {
 // reaches the registry only at attempt time; the API stores it, it does not
 // resolve it.
 type publicationConfig struct {
-	enabled  bool
-	provider string
+	enabled    bool
+	provider   string
+	remote     string
+	baseBranch string
 }
 
 // Option configures an API at construction. Used for the artifact store +
@@ -167,6 +169,15 @@ func WithModelTestLimits(maxSeconds, retentionMinutes int) Option {
 func WithPublicationConfig(enabled bool, provider string) Option {
 	return func(apiInst *API) {
 		apiInst.publication = publicationConfig{enabled: enabled, provider: provider}
+	}
+}
+
+// WithPublicationTarget gives the run read the same target ref the runner
+// checks before starting a publishable run.
+func WithPublicationTarget(remote, baseBranch string) Option {
+	return func(apiInst *API) {
+		apiInst.publication.remote = remote
+		apiInst.publication.baseBranch = baseBranch
 	}
 }
 
@@ -267,6 +278,7 @@ func (api *API) Register(mux interface {
 
 	// Gate actions (§3.2 stop conditions → continue semantics).
 	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/continue", api.handleInvocationContinue)
+	mux.HandleFunc("POST /api/v1/runs/{id}/continue", api.handleInvocationContinue)
 	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/advance", api.handleInvocationAdvance)
 	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/approve", api.handleInvocationApprove)
 	mux.HandleFunc("POST /api/v1/runs/{id}/invocations/{iid}/edit", api.handleInvocationEdit)

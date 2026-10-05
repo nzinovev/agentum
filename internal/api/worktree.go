@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // Worktree recovery and disposal actions. Both exist because the runner no
@@ -48,6 +50,10 @@ func (api *API) handleWorktreeReconcile(w http.ResponseWriter, r *http.Request) 
 			"reconcile requires paused_user_stop (the worktree_uncommitted_changes stop); run is "+run.State)
 		return
 	}
+	if run.StopReason != "worktree_uncommitted_changes" {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "reconcile requires worktree_uncommitted_changes; stop reason is "+run.StopReason)
+		return
+	}
 	bodyBytes, read := readRequestBody(w, r, maxWorktreeBodyBytes)
 	if !read {
 		return
@@ -55,6 +61,9 @@ func (api *API) handleWorktreeReconcile(w http.ResponseWriter, r *http.Request) 
 	decision, parseErr := taskinput.ParseReconcileDecision(bodyBytes)
 	if parseErr != nil {
 		writeError(w, http.StatusBadRequest, codeBadInput, parseErr.Error())
+		return
+	}
+	if !api.requireCurrentWorktree(w, r, run, decision.ExpectedHead, false, false) {
 		return
 	}
 	payload, marshalErr := decision.Marshal()
@@ -86,6 +95,7 @@ func (api *API) handleWorktreeReconcile(w http.ResponseWriter, r *http.Request) 
 type discardWorktreeRequest struct {
 	ExpectedHead       string `json:"expected_head"`
 	DiscardUncommitted bool   `json:"discard_uncommitted"`
+	DiscardUnreadable  bool   `json:"discard_unreadable"`
 }
 
 // parseDiscardWorktreeBody strictly decodes the discard request: exactly one
@@ -102,6 +112,12 @@ func parseDiscardWorktreeBody(body []byte) (discardWorktreeRequest, error) {
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return discardWorktreeRequest{}, errors.New("request body must contain exactly one JSON object")
+	}
+	if req.DiscardUnreadable {
+		if req.ExpectedHead != "" || !req.DiscardUncommitted {
+			return discardWorktreeRequest{}, errors.New("discard_unreadable requires an empty expected_head and discard_uncommitted: true")
+		}
+		return req, nil
 	}
 	if !taskinput.IsFullCommitSHA(req.ExpectedHead) {
 		return discardWorktreeRequest{}, errors.New("expected_head must be the full commit SHA of the worktree being discarded")
@@ -137,6 +153,19 @@ func (api *API) handleWorktreeDiscard(w http.ResponseWriter, r *http.Request) {
 	if parseErr != nil {
 		writeError(w, http.StatusBadRequest, codeBadInput, parseErr.Error())
 		return
+	}
+	if request.DiscardUnreadable && !engine.IsTerminal(state) {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "discard_unreadable requires a terminal run")
+		return
+	}
+	if request.DiscardUnreadable {
+		if !api.requireUnreadableWorktree(w, r, run) {
+			return
+		}
+	} else {
+		if !api.requireCurrentWorktree(w, r, run, request.ExpectedHead, true, request.DiscardUncommitted) {
+			return
+		}
 	}
 	payload, marshalErr := json.Marshal(request)
 	if marshalErr != nil {
@@ -210,3 +239,72 @@ func (api *API) handleWorktreeDiscard(w http.ResponseWriter, r *http.Request) {
 type discardIneligibleError struct{ reason string }
 
 func (ineligible discardIneligibleError) Error() string { return ineligible.reason }
+
+// requireCurrentWorktree checks the HEAD and dirty-file confirmation before
+// queueing a destructive action. The worker checks again before applying it.
+func (api *API) requireCurrentWorktree(w http.ResponseWriter, r *http.Request, run sqlc.Run, expectedHead string, checkDirty, confirmDirty bool) bool {
+	project, err := api.queries.GetProject(r.Context(), sqlc.GetProjectParams{ID: run.ProjectID, TenantID: run.TenantID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return false
+	}
+	checkoutPath := run.CheckoutPath
+	if checkoutPath == "" {
+		checkoutPath = project.RepoPath
+	}
+	wtRoot := worktree.PathFor(checkoutPath, run.ID)
+	if !worktree.DirPresent(wtRoot) {
+		writeError(w, http.StatusConflict, codeConflict, "worktree is no longer present; reload the run")
+		return false
+	}
+	manager := worktree.New()
+	head, headErr := manager.HeadCommit(r.Context(), wtRoot)
+	if headErr != nil {
+		writeError(w, http.StatusConflict, codeConflict, "worktree HEAD could not be read; reload the run")
+		return false
+	}
+	if head != expectedHead {
+		writeError(w, http.StatusConflict, codeConflict, "worktree HEAD changed; reload the run before deciding")
+		return false
+	}
+	if !checkDirty {
+		return true
+	}
+	changes, changesErr := manager.WorktreeChanges(r.Context(), wtRoot)
+	if changesErr != nil {
+		writeError(w, http.StatusConflict, codeConflict, "worktree changes could not be read; reload the run")
+		return false
+	}
+	if len(changes) > 0 && !confirmDirty {
+		writeError(w, http.StatusBadRequest, codeBadInput, "worktree holds uncommitted paths; confirm their loss")
+		return false
+	}
+	return true
+}
+
+// requireUnreadableWorktree accepts the separately confirmed recovery path only
+// while the run's worktree directory exists and its HEAD cannot be read.
+func (api *API) requireUnreadableWorktree(w http.ResponseWriter, r *http.Request, run sqlc.Run) bool {
+	project, err := api.queries.GetProject(r.Context(), sqlc.GetProjectParams{ID: run.ProjectID, TenantID: run.TenantID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return false
+	}
+	checkoutPath := run.CheckoutPath
+	if checkoutPath == "" {
+		checkoutPath = project.RepoPath
+	}
+	wtRoot := worktree.PathFor(checkoutPath, run.ID)
+	info, statErr := os.Lstat(wtRoot)
+	if statErr != nil || !info.IsDir() {
+		writeError(w, http.StatusConflict, codeConflict, "worktree directory is no longer present; reload the run")
+		return false
+	}
+	if worktree.DirPresent(wtRoot) {
+		if _, headErr := worktree.New().HeadCommit(r.Context(), wtRoot); headErr == nil {
+			writeError(w, http.StatusConflict, codeConflict, "worktree HEAD is readable; reload the run and confirm its current HEAD")
+			return false
+		}
+	}
+	return true
+}

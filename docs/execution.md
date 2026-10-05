@@ -61,7 +61,7 @@ gone or holds a different repository pauses the run
 (`stop_reason = checkout_unavailable`) instead of rebuilding the worktree
 somewhere else; a repository that moved is re-linked with `git worktree
 repair` before the run continues. Created by `internal/worktree` on the first
-stage of a run; reused across stages and resumes; torn down at terminal state.
+stage of a run; reused across stages and resumes; retained at terminal state.
 
 When the run's worktree is first created, the runner records which
 `.agentum.yaml` the run applies and how the source checkout's copy compared
@@ -164,12 +164,12 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | Job kind | Entry point | Triggered by |
 |---|---|---|
 | `run` | fresh run, first stage | `POST /runs/{id}/start` |
-| `continue` | resume after `open_questions` / `user_stop`, same session | `POST .../continue` |
+| `continue` | resume after `open_questions` / `user_stop`; a stop before the first invocation starts at the pack entry | `POST .../continue` or `POST /runs/{id}/continue` before the first invocation |
 | `advance` | next stage, fresh session | `POST .../advance` |
 | `reconcile` | apply a human recovery decision over uncommitted work, then resume the session | `POST /runs/{id}/worktree/reconcile` |
 | `discard_worktree` | remove a stopped/terminal run's working tree (tree only, branch survives) | `POST /runs/{id}/worktree/discard` |
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
-| `teardown` | remove worktree after a human-terminal state | enqueued by `approve` / `cancel` / `reject` |
+| `teardown` | record `result_commit` and seal the terminal manifest | enqueued by `approve` / `cancel` / `reject` |
 
 A `continue` job's payload carries the user's continuation text
 (`{"text": …}`; `{}` when the continue carried none). The runner decodes it
@@ -177,7 +177,7 @@ before any invocation and renders it inside the routing block's Task section,
 after the original request. The text applies to the first invocation the job
 resumes and to nothing after it: once that invocation finishes, the loop
 carries no text into the next stage's fresh session. A payload the runner
-cannot deliver — an unreadable shape, or text with no captured session id —
+cannot deliver — an unreadable shape, or text after an invocation with no captured session id —
 stops the run in `paused_user_stop` with the stop reason
 (`continue_payload_unreadable` / `resume_session_missing`) instead of invoking
 the agent without the user's text. `run` and `advance` payloads are never
@@ -425,37 +425,32 @@ On boot, before the worker starts:
 Recovery is best-effort and conservative: it pauses for a human rather than
 re-running a stage with no record.
 
-## Worktree teardown
+## Terminal recording and local deletion
 
-Worktrees are torn down by Agentum after a **human-terminal state** — `done`
-(approve) or `cancelled` (cancel/reject) — not by a TTL and not manually.
-Teardown is a runner job (`kind=teardown`) that runs `git worktree remove
---force` **only**. The `agentum/<run-id>` branch and its commits are NOT
-deleted at teardown — they are the durable delivery output that survives for
-review and later handoff. Branch deletion is a separate, explicit `cleanup`
-action (below). Teardown is enqueued by:
+The runner retains worktrees after `done`, `cancelled`, and `failed`.
+The `teardown` job records `result_commit` and seals the manifest. It does not
+delete the worktree or the `agentum/<run-id>` branch. Teardown is enqueued by:
 
 - `handleInvocationApprove` — after the run moves to `done`.
 - `handleCancelRun` / `handleRejectRun` — after the run moves to `cancelled`.
 
-**A failure never enqueues teardown.** `failed` keeps the working tree, the
-branch, and the checkpoints exactly as the error left them: the uncommitted
-files may be the only copy of a partially executed stage's work, and `failed`
-is terminal — an automatic teardown was destroying exactly what a person would
-want to inspect and salvage. A failed run is not resumable; a human reviews
-and extracts what is useful, then starts a new run from a chosen commit.
-Removing a failed (or stopped) run's working tree afterwards is the explicit,
-audited discard action below.
+`failed` does not enqueue teardown. It keeps the working tree, branch, and
+checkpoints as the error left them. A failed run is not resumable. A person
+reviews the local result, then starts a new run from a chosen commit.
 
-Before removing the worktree, the teardown job captures the tip of
+The teardown job captures the tip of
 `agentum/<run-id>` as `result_commit` on the run's row — the immutable record of
 what was delivered (done) or recovered (cancelled). The branch survives
 teardown, so `result_commit` is always resolvable after the fact; the
 `base_commit..result_commit` range is the review/handoff surface.
 
-Enqueuing (rather than removing inline) serializes teardown with the
-still-running driving job — it never races the runner. The teardown job is
-idempotent: a missing worktree is a no-op.
+The separate `worktree/discard` job checks `expected_head` and the dirty-file
+confirmation before removal. `cleanup` deletes the branch only after the
+worktree is gone. The API returns `409 conflict` while it still exists.
+An unreadable worktree on a terminal run requires `discard_unreadable: true`
+and `discard_uncommitted: true`. The job removes the canonical run worktree
+directory and its registration when one exists. A registration for another
+branch refuses removal.
 
 Artifact *files* are durable independently of the worktree —
 `artifact_revisions` rows + the content-addressed blob store survive teardown.
@@ -618,9 +613,9 @@ through the artifact API and do not become a `publication` stage in final review
 | Recorded number no longer found | Record `pull_request_not_found`; do not create a replacement. |
 | Rate limit or temporary failure | Record `failed`; retry explicitly after addressing the cause. |
 
-Publication failures preserve the local branch and `result_commit`. Terminal
-worktree teardown retains them as described above. Explicit cleanup removes the
-local delivery branch and never deletes a remote branch or PR. Publication
+Publication failures preserve the local worktree, branch, and `result_commit`.
+Explicit cleanup removes the local delivery branch after the worktree is
+deleted. It never deletes a remote branch or PR. Publication
 records and artifact revisions survive cleanup. A human performs the merge.
 
 Publication events carry actor `system`. Evidence written after manifest sealing
@@ -634,9 +629,10 @@ concepts that were previously conflated:
 | Concept | Verb | Effect | Branch + commits |
 |---|---|---|---|
 | **Pause** | FSM `stop_*` events | Non-terminal; resumable via `continue`/`advance` | preserved |
-| **Terminal abort** | `POST /runs/{id}/cancel` (FSM `cancel`) | Terminal (`cancelled`); worktree torn down | **preserved** |
-| **Worktree teardown** | `teardown` job | Removes the disposable working tree | **preserved** |
-| **Cleanup** | `POST /runs/{id}/cleanup` (`cleanup` job) | Explicit branch deletion; idempotent; audited | deleted |
+| **Terminal abort** | `POST /runs/{id}/cancel` (FSM `cancel`) | Terminal (`cancelled`); worktree kept | **preserved** |
+| **Terminal teardown** | `teardown` job | Records `result_commit` and seals manifest; worktree kept | **preserved** |
+| **Worktree deletion** | `POST /runs/{id}/worktree/discard` | Explicit removal after HEAD and dirty-file confirmation | **preserved** |
+| **Cleanup** | `POST /runs/{id}/cleanup` (`cleanup` job) | Explicit branch deletion after worktree removal | deleted |
 
 A generic `cancel` cannot ambiguously mean all three — each is a distinct,
 named action. Pause is non-terminal; abort is terminal-but-preserves-delivery;

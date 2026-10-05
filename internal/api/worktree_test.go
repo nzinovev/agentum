@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/nzinovev/agentum/internal/dbtest"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // The worktree reconcile and discard endpoints: the human actions over a tree
@@ -35,6 +38,9 @@ func TestParseDiscardWorktreeBody_Contract(t *testing.T) {
 	}{
 		{"valid body", `{"expected_head":"` + head + `","discard_uncommitted":true}`, false},
 		{"valid without flag", `{"expected_head":"` + head + `"}`, false},
+		{"valid unreadable tree", `{"discard_unreadable":true,"discard_uncommitted":true}`, false},
+		{"unreadable without loss confirmation", `{"discard_unreadable":true}`, true},
+		{"unreadable with expected head", `{"discard_unreadable":true,"discard_uncommitted":true,"expected_head":"` + head + `"}`, true},
 		{"empty body", "", true},
 		{"json null", "null", true},
 		{"broken json", `{"expected_head":`, true},
@@ -57,10 +63,60 @@ func TestParseDiscardWorktreeBody_Contract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseDiscardWorktreeBody(%q): %v", testCase.body, err)
 			}
-			if request.ExpectedHead != strings.Repeat("c", 40) {
+			if !request.DiscardUnreadable && request.ExpectedHead != strings.Repeat("c", 40) {
 				t.Errorf("expected_head = %q", request.ExpectedHead)
 			}
 		})
+	}
+}
+
+// TestWorktreeDiscardEndpoint_UnreadableTree: a terminal run can enqueue a
+// separately confirmed removal when its worktree HEAD cannot be read.
+func TestWorktreeDiscardEndpoint_UnreadableTree(t *testing.T) {
+	harness := newWorktreeHarness(t)
+	runID := harness.insertWorktreeFixtureRun(t, "done")
+	record, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := harness.queries.GetProject(t.Context(), sqlc.GetProjectParams{ID: record.ProjectID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommit, err := worktree.New().ResolveRef(t.Context(), project.RepoPath, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.queries.SetBaseCommit(t.Context(), sqlc.SetBaseCommitParams{
+		ID: runID, TenantID: continueTestTenant, BaseCommit: sql.NullString{String: baseCommit, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitLink := filepath.Join(worktree.PathFor(project.RepoPath, runID), ".git")
+	if err := os.WriteFile(gitLink, []byte("gitdir: /missing/metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response := harness.callWorktreeAction(t, "discard", runID,
+		`{"discard_unreadable":true,"discard_uncommitted":true}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("unreadable discard status = %d, body %s", response.Code, response.Body.String())
+	}
+	readRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil)
+	readRequest.SetPathValue("id", runID)
+	readRequest = readRequest.WithContext(authz.WithPrincipal(readRequest.Context(), authz.Principal{
+		TenantID: continueTestTenant, UserID: continueTestUser,
+	}))
+	readResponse := httptest.NewRecorder()
+	harness.api.handleGetRun(readResponse, readRequest)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("GET run during removal: %d %s", readResponse.Code, readResponse.Body.String())
+	}
+	var readState runResponse
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &readState); err != nil {
+		t.Fatal(err)
+	}
+	if readState.Worktree == nil || readState.Worktree.State != "removing" || readState.Worktree.LastError != nil {
+		t.Fatalf("unreadable removal state = %+v", readState.Worktree)
 	}
 }
 
@@ -90,24 +146,30 @@ var worktreeFixtureSeq atomic.Int64
 // one finished spec invocation, and initializes the manifest.
 func (harness *worktreeHarness) insertWorktreeFixtureRun(t *testing.T, state string) string {
 	t.Helper()
+	identity := fmt.Sprintf("%s-%d", t.Name(), worktreeFixtureSeq.Add(1))
+	repoPath := t.TempDir()
+	initRegistrationRepo(t, repoPath, identity)
 	const insertProjectAndRun = `
 		WITH inserted_project AS (
 		    INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits,
 		                          repo_path, name, related_projects)
-		    VALUES ($1, $2, $3, '{}', '/tmp/worktree-fixture-' || $3, 'worktree fixture ' || $3, '{}')
+		    VALUES ($1, $2, $3, '{}', $5, 'worktree fixture ' || $3, '{}')
 		    RETURNING id
 		)
 		INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
-		                  title, description, overrides, base_ref, state, current_stage)
+		                  title, description, overrides, base_ref, state, current_stage, stop_reason)
 		SELECT $1, $2, inserted_project.id, 'backend-development',
-		       'fixture', 'fixture', '{}', 'main', $4, 'spec'
+		       'fixture', 'fixture', '{}', 'main', $4, 'spec',
+		       CASE WHEN $4 = 'paused_user_stop' THEN 'worktree_uncommitted_changes' ELSE '' END
 		FROM inserted_project
 		RETURNING id`
 	var runID string
-	identity := fmt.Sprintf("%s-%d", t.Name(), worktreeFixtureSeq.Add(1))
 	if err := harness.db.QueryRowContext(context.Background(), insertProjectAndRun,
-		continueTestTenant, continueTestUser, identity, state).Scan(&runID); err != nil {
+		continueTestTenant, continueTestUser, identity, state, repoPath).Scan(&runID); err != nil {
 		t.Fatalf("insert run fixture: %v", err)
+	}
+	if _, err := worktree.New().Create(t.Context(), repoPath, runID, ""); err != nil {
+		t.Fatalf("create worktree fixture: %v", err)
 	}
 	if err := harness.api.mfst.Init(t.Context(), continueTestTenant, continueTestUser, runID); err != nil {
 		t.Fatal(err)
@@ -119,6 +181,23 @@ func (harness *worktreeHarness) insertWorktreeFixtureRun(t *testing.T, state str
 		t.Fatalf("insert stage invocation: %v", err)
 	}
 	return runID
+}
+
+func (harness *worktreeHarness) headFor(t *testing.T, runID string) string {
+	t.Helper()
+	record, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := harness.queries.GetProject(t.Context(), sqlc.GetProjectParams{ID: record.ProjectID, TenantID: continueTestTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := worktree.New().HeadCommit(t.Context(), worktree.PathFor(project.RepoPath, runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head
 }
 
 // callWorktreeAction dispatches one of the worktree handlers directly with
@@ -150,7 +229,12 @@ func TestWorktreeReconcileEndpoint_DeliversDecisionToJob(t *testing.T) {
 	harness := newWorktreeHarness(t)
 	runID := harness.insertWorktreeFixtureRun(t, "paused_user_stop")
 
-	head := strings.Repeat("d", 40)
+	head := harness.headFor(t, runID)
+	stale := harness.callWorktreeAction(t, "reconcile", runID,
+		`{"mode":"keep_as_checkpoint","expected_head":"`+strings.Repeat("d", 40)+`"}`)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale HEAD status = %d, body %s", stale.Code, stale.Body.String())
+	}
 	recorder := harness.callWorktreeAction(t, "reconcile", runID,
 		`{"mode":"keep_as_checkpoint","expected_head":"`+head+`"}`)
 	if recorder.Code != http.StatusOK {
@@ -234,6 +318,7 @@ func TestWorktreeDiscardEndpoint_Guards(t *testing.T) {
 	}
 
 	pausedRun := harness.insertWorktreeFixtureRun(t, "paused_user_stop")
+	head = harness.headFor(t, pausedRun)
 	recorder = harness.callWorktreeAction(t, "discard", pausedRun,
 		`{"expected_head":"`+head+`","discard_uncommitted":true}`)
 	if recorder.Code != http.StatusAccepted {

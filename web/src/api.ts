@@ -18,6 +18,20 @@ export type Run = {
   error: string;
   cancel_reason: string;
   open_questions?: string[];
+  plan_edits?: { used: number; max: number };
+  worktree?: {
+    state: "not_created" | "present" | "removing" | "removed";
+    path?: string;
+    head?: string;
+    dirty: boolean;
+    dirty_entries: { status: string; path: string }[];
+    restore_target?: { label: string; commit: string };
+    last_error?: { code: string; message: string };
+  };
+  branch_state?: "not_created" | "present" | "removing" | "removed";
+  branch_tip?: string;
+  branch_last_error?: { code: string; message: string };
+  publication_target_ref?: string;
   base_ref: string;
   base_commit: string;
   result_commit: string;
@@ -26,6 +40,21 @@ export type Run = {
   pipeline_pack_origin: string;
   created_at: string;
   updated_at: string;
+};
+export type Publication = {
+  state: string;
+  attempts?: number;
+  published_commit?: string;
+  pull_request?: { number: number; url: string; state: string };
+  target?: { owner: string; repository: string; base_branch: string };
+  last_error?: { code: string; message: string };
+};
+export type FinalReview = {
+  git?: { branch: string; base_commit: string; result_commit?: string };
+  diff?: { stat_revision_id?: string };
+  review?: { verdict: string; findings: { id: string; severity: string; detail: string; path?: string; line?: number }[] };
+  checks?: { commit: string; ran: boolean; mandatory_passed: boolean; results: { name: string; required: boolean; status: string }[] };
+  publication?: Publication;
 };
 export type Invocation = {
   id: string;
@@ -140,6 +169,24 @@ export const startRun = (id: string) =>
   request<Run>("/runs/" + encodeURIComponent(id) + "/start", {
     method: "POST",
   });
+const runPath = (id: string) => "/runs/" + encodeURIComponent(id);
+export const postRun = (id: string, action: string, body?: object) =>
+  request<Run>(runPath(id) + "/" + action, {
+    method: "POST",
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+export const postInvocation = (id: string, invocationID: string, action: string, body?: object) =>
+  request<Run>(runPath(id) + "/invocations/" + encodeURIComponent(invocationID) + "/" + action, {
+    method: "POST",
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+export const savePlan = (id: string, invocationID: string, content: string, expectedRevisionID: string) =>
+  request<Artifact>(runPath(id) + "/invocations/" + encodeURIComponent(invocationID) + "/artifacts/plan/plan.md", {
+    method: "PUT",
+    body: JSON.stringify({ content, expected_revision_id: expectedRevisionID }),
+  });
+export const finalReview = (id: string) => request<FinalReview>(runPath(id) + "/final-review");
+export const publication = (id: string) => request<Publication>(runPath(id) + "/publication");
 export async function artifactContent(
   runID: string,
   revisionID: string,

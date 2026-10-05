@@ -26,6 +26,168 @@ func TestBranchFor_PathFor_ArtifactDir(t *testing.T) {
 	}
 }
 
+// TestRemoveUnreadableWorktree: forced removal clears only the confirmed run's
+// registration and leaves its branch and neighboring worktrees intact.
+func TestRemoveUnreadableWorktree(t *testing.T) {
+	cases := []struct {
+		name      string
+		breakLink func(string) error
+	}{
+		{name: "broken git link", breakLink: func(path string) error {
+			return os.WriteFile(path, []byte("gitdir: /missing/metadata\n"), 0o644)
+		}},
+		{name: "missing git link", breakLink: os.Remove},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			repoPath := t.TempDir()
+			if err := initRepoWithCommit(repoPath); err != nil {
+				t.Fatal(err)
+			}
+			manager := New()
+			target, err := manager.Create(t.Context(), repoPath, "target", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			neighbor, err := manager.Create(t.Context(), repoPath, "neighbor", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.RemoveUnreadableWorktree(t.Context(), repoPath, "target"); err == nil {
+				t.Fatal("readable worktree was removed without a HEAD confirmation")
+			}
+			if err := testCase.breakLink(filepath.Join(target.Root, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.RemoveUnreadableWorktree(t.Context(), repoPath, "target"); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.RemoveUnreadableWorktree(t.Context(), repoPath, "target"); err != nil {
+				t.Fatalf("repeated removal: %v", err)
+			}
+			if _, err := os.Lstat(target.Root); !os.IsNotExist(err) {
+				t.Fatalf("target directory still exists: %v", err)
+			}
+			if !isWorktree(t.Context(), neighbor.Root) {
+				t.Fatal("neighbor worktree was changed")
+			}
+			assertBranchListHas(t, repoPath, BranchFor("target"), true)
+			if err := manager.DeleteBranch(t.Context(), repoPath, "target"); err != nil {
+				t.Fatalf("target branch remains registered as checked out: %v", err)
+			}
+		})
+	}
+}
+
+// TestRemoveUnreadableWorktreeRegistrationStates: a pruned registration or
+// detached HEAD does not strand the run, while another branch protects its tree.
+func TestRemoveUnreadableWorktreeRegistrationStates(t *testing.T) {
+	cases := []struct {
+		name         string
+		registration string
+		wantRefusal  bool
+	}{
+		{name: "registration pruned", registration: "missing"},
+		{name: "detached HEAD", registration: "detached"},
+		{name: "registered to another branch", registration: "other", wantRefusal: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			repoPath := t.TempDir()
+			if err := initRepoWithCommit(repoPath); err != nil {
+				t.Fatal(err)
+			}
+			manager := New()
+			target, err := manager.Create(t.Context(), repoPath, "target", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			neighbor, err := manager.Create(t.Context(), repoPath, "neighbor", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch testCase.registration {
+			case "missing":
+				metadataPath, metadataErr := registeredWorktreeMetadata(t.Context(), repoPath, target.Root, BranchFor("target"))
+				if metadataErr != nil || metadataPath == "" {
+					t.Fatalf("locate registration: path %q, error %v", metadataPath, metadataErr)
+				}
+				if err := os.RemoveAll(metadataPath); err != nil {
+					t.Fatal(err)
+				}
+			case "detached":
+				if err := gitInRepo(target.Root, "checkout", "--detach"); err != nil {
+					t.Fatal(err)
+				}
+			case "other":
+				if err := gitInRepo(target.Root, "checkout", "-b", "unrelated"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(target.Root, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			removeErr := manager.RemoveUnreadableWorktree(t.Context(), repoPath, "target")
+			if testCase.wantRefusal {
+				if removeErr == nil {
+					t.Fatal("worktree registered to another branch was removed")
+				}
+				if _, err := os.Lstat(target.Root); err != nil {
+					t.Fatalf("refused tree was removed: %v", err)
+				}
+				return
+			}
+			if removeErr != nil {
+				t.Fatal(removeErr)
+			}
+			if _, err := os.Lstat(target.Root); !os.IsNotExist(err) {
+				t.Fatalf("target directory still exists: %v", err)
+			}
+			if !isWorktree(t.Context(), neighbor.Root) {
+				t.Fatal("neighbor worktree was changed")
+			}
+			if err := manager.DeleteBranch(t.Context(), repoPath, "target"); err != nil {
+				t.Fatalf("target branch cannot be cleaned up: %v", err)
+			}
+		})
+	}
+}
+
+// TestWorktreeChangesWithIndexLock: a read of dirty paths succeeds while the
+// agent holds the index lock for a write in the same worktree.
+func TestWorktreeChangesWithIndexLock(t *testing.T) {
+	repoPath := t.TempDir()
+	if err := initRepoWithCommit(repoPath); err != nil {
+		t.Fatal(err)
+	}
+	manager := New()
+	created, err := manager.Create(t.Context(), repoPath, "locked-index", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(created.Root, "README"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexOutput, err := git(t.Context(), created.Root, revParseCmd, "--git-path", "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexPath := strings.TrimSpace(string(indexOutput))
+	if !filepath.IsAbs(indexPath) {
+		indexPath = filepath.Join(created.Root, indexPath)
+	}
+	if err := os.WriteFile(indexPath+".lock", []byte("agent write in progress"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := manager.WorktreeChanges(t.Context(), created.Root)
+	if err != nil {
+		t.Fatalf("read dirty paths during index write: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Path != "README" {
+		t.Fatalf("dirty paths = %+v", changes)
+	}
+}
+
 func TestManager_Create_Idempotent_Remove(t *testing.T) {
 	// Not parallel: each subtest builds on the same repo state, and Create/Remove
 	// on the same repo must be observed in order.

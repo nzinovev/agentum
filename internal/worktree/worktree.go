@@ -5,10 +5,9 @@
 // cancelled). A failed run keeps its tree: the uncommitted work may be the
 // only copy, and disposal is a separate audited human action.
 //
-// F.6.1 splits teardown into two distinct actions:
-//   - RemoveWorktree disposes of the per-run working tree at terminal state.
-//     The branch agentum/<run-id> and its commits survive — they are the
-//     durable delivery output a human reviews and Epic 8 hands off.
+// Local resource deletion has two explicit actions:
+//   - RemoveWorktree disposes of the per-run working tree after a human confirms.
+//     The branch agentum/<run-id> and its commits survive for review.
 //   - DeleteBranch is the explicit, audited cleanup that removes the branch once
 //     the delivery is no longer needed. It is never auto-run at teardown.
 //
@@ -373,6 +372,33 @@ type UncommittedChange struct {
 	Code        string
 	Path        string
 	RenamedFrom string
+}
+
+// WorktreeChanges returns the paths a person must review before reconciling or
+// deleting a run worktree. Git's NUL format keeps whitespace in paths intact.
+func (manager *Manager) WorktreeChanges(ctx context.Context, wtRoot string) ([]UncommittedChange, error) {
+	out, err := git(ctx, wtRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, fmt.Errorf("git status: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	tokens := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	changes := make([]UncommittedChange, 0, len(tokens))
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "" {
+			continue
+		}
+		if len(token) < 4 {
+			return nil, fmt.Errorf("git status: unparseable record %q", token)
+		}
+		change := UncommittedChange{Code: token[:2], Path: token[3:]}
+		if strings.ContainsAny(change.Code, "RC") && index+1 < len(tokens) {
+			index++
+			change.RenamedFrom = tokens[index]
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
 }
 
 // UncommittedChanges lists the uncommitted changes under path — untracked
@@ -760,10 +786,8 @@ func (manager *Manager) CountAhead(ctx context.Context, repoPath, from, to strin
 	return count, nil
 }
 
-// RemoveWorktree removes only the per-run working tree. The agentum/<run-id>
-// branch and its commits remain resolvable — they are the durable delivery
-// output that survives teardown (F.6.1 AC #3). Idempotent: a missing worktree
-// is a no-op. Used at terminal state (done/cancelled/failed).
+// RemoveWorktree removes only the per-run working tree after an explicit
+// discard request. The branch and committed delivery remain resolvable.
 func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -776,14 +800,112 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID stri
 	if !isWorktree(ctx, wtPath) {
 		return nil
 	}
-	// --force: the worktree may contain uncommitted agent work; teardown at
-	// terminal state discards the *working tree* but the branch tip (committed
-	// delivery) is preserved by virtue of not deleting the branch here.
+	// --force is safe here because the discard job checked the current HEAD
+	// and required separate confirmation before losing uncommitted files.
 	out, err := git(ctx, repoAbs, "worktree", "remove", "--force", wtPath)
 	if err != nil {
 		return fmt.Errorf("git worktree remove: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// RemoveUnreadableWorktree removes the canonical run directory when its HEAD
+// cannot be read. A missing Git registration must not strand a terminal run.
+// A registration for another branch still refuses deletion.
+func (manager *Manager) RemoveUnreadableWorktree(ctx context.Context, repoPath, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	wtPath := PathFor(repoAbs, runID)
+	info, statErr := os.Lstat(wtPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("unreadable worktree directory is not present: %w", statErr)
+	}
+	if statErr == nil && !info.IsDir() {
+		return errors.New("unreadable worktree path is not a directory")
+	}
+	if statErr == nil {
+		for _, parentPath := range []string{filepath.Join(repoAbs, ".agentum"), filepath.Join(repoAbs, ".agentum", "worktrees")} {
+			parentInfo, parentErr := os.Lstat(parentPath)
+			if parentErr != nil || !parentInfo.IsDir() {
+				return fmt.Errorf("worktree parent is not a directory: %s", parentPath)
+			}
+		}
+	}
+	metadataPath, metadataErr := registeredWorktreeMetadata(ctx, repoAbs, wtPath, BranchFor(runID))
+	if metadataErr != nil {
+		return metadataErr
+	}
+	if statErr == nil && DirPresent(wtPath) {
+		if _, headErr := manager.HeadCommit(ctx, wtPath); headErr == nil {
+			return errors.New("worktree HEAD became readable; confirm the current HEAD before deleting it")
+		}
+	}
+	if statErr == nil {
+		if removeErr := os.RemoveAll(wtPath); removeErr != nil {
+			return fmt.Errorf("remove unreadable worktree: %w", removeErr)
+		}
+	}
+	if metadataPath != "" {
+		if removeErr := os.RemoveAll(metadataPath); removeErr != nil {
+			return fmt.Errorf("remove unreadable worktree registration: %w", removeErr)
+		}
+	}
+	return nil
+}
+
+func registeredWorktreeMetadata(ctx context.Context, repoPath, wtPath, branch string) (string, error) {
+	out, err := git(ctx, repoPath, revParseCmd, "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("find worktree registrations: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(repoPath, commonDir)
+	}
+	entries, readErr := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read worktree registrations: %w", readErr)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		metadataPath := filepath.Join(commonDir, "worktrees", entry.Name())
+		gitdir, gitdirErr := os.ReadFile(filepath.Join(metadataPath, "gitdir"))
+		if gitdirErr != nil || filepath.Clean(strings.TrimSpace(string(gitdir))) != filepath.Join(wtPath, ".git") {
+			continue
+		}
+		head, headErr := os.ReadFile(filepath.Join(metadataPath, "HEAD"))
+		if headErr != nil {
+			return "", fmt.Errorf("read worktree registration HEAD: %w", headErr)
+		}
+		registeredHead := strings.TrimSpace(string(head))
+		if registeredHead == "ref: refs/heads/"+branch || isDetachedCommit(registeredHead) {
+			return metadataPath, nil
+		}
+		return "", fmt.Errorf("worktree registration belongs to another branch: %s", registeredHead)
+	}
+	return "", nil
+}
+
+func isDetachedCommit(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, digit := range value {
+		if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteBranch removes the agentum/<run-id> branch. This is the explicit,
@@ -936,6 +1058,8 @@ func (manager *Manager) Repair(ctx context.Context, repoPath, runID string) erro
 // stderr) so callers see git's full diagnostic; trimmed at the call sites.
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// Reads must not refresh the shared index while an agent commits in its worktree.
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 	return cmd.CombinedOutput()
 }
 

@@ -95,6 +95,33 @@ func (q *Queries) CountJobsOfKindForRun(ctx context.Context, arg CountJobsOfKind
 	return column_1, err
 }
 
+const latestResourceJobForRun = `-- name: LatestResourceJobForRun :one
+SELECT status, last_error
+FROM jobs
+WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3 AND kind = $4
+ORDER BY id DESC
+LIMIT 1
+`
+
+type LatestResourceJobForRunParams struct {
+	RunID    string `json:"run_id"`
+	TenantID string `json:"tenant_id"`
+	UserID   string `json:"user_id"`
+	Kind     string `json:"kind"`
+}
+
+type LatestResourceJobForRunRow struct {
+	Status    string         `json:"status"`
+	LastError sql.NullString `json:"last_error"`
+}
+
+func (q *Queries) LatestResourceJobForRun(ctx context.Context, arg LatestResourceJobForRunParams) (LatestResourceJobForRunRow, error) {
+	row := q.db.QueryRowContext(ctx, latestResourceJobForRun, arg.RunID, arg.TenantID, arg.UserID, arg.Kind)
+	var result LatestResourceJobForRunRow
+	err := row.Scan(&result.Status, &result.LastError)
+	return result, err
+}
+
 const countRunningJobsForRun = `-- name: CountRunningJobsForRun :one
 SELECT count(*)::int FROM jobs WHERE run_id = $1 AND status = 'running'
 `

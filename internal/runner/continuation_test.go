@@ -361,13 +361,9 @@ func TestRunner_ContinueTextWithoutSessionPausesWithoutInvoking(t *testing.T) {
 	}
 }
 
-// TestRunner_ContinueTextWithNoInvocationPausesWithoutInvoking: a stored
-// text-carrying job on a run with no invocation row at all (an old or
-// hand-enqueued job — the API refuses this shape at the door now) has no
-// session and never had one. The run lands in the managed
-// resume_session_missing pause, not in failed: the run did nothing wrong, and
-// failRun would destroy the recovery path the pause keeps.
-func TestRunner_ContinueTextWithNoInvocationPausesWithoutInvoking(t *testing.T) {
+// TestRunner_ContinueTextWithNoInvocationStartsFirstStage: a pre-invocation
+// stop can carry a note to the first stage through the Task section.
+func TestRunner_ContinueTextWithNoInvocationStartsFirstStage(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
@@ -381,7 +377,7 @@ func TestRunner_ContinueTextWithNoInvocationPausesWithoutInvoking(t *testing.T) 
 	store := newFakeStore(record, proj)
 	// No invocations seeded: the run never produced one.
 	adapter := &sequenceAdapter{results: []agent.ResultJSON{
-		{SchemaVersion: "1", Status: agent.StatusComplete, Summary: "never reached"},
+		{SchemaVersion: "1", Status: agent.StatusComplete, Summary: "first stage reached"},
 	}}
 	src := &staticSource{pk: scriptPack("spec", map[string]pack.Stage{
 		"spec": {Gate: pack.GateAuto, Prompt: "spec.md", Transitions: []pack.Transition{{To: "done"}}},
@@ -394,14 +390,14 @@ func TestRunner_ContinueTextWithNoInvocationPausesWithoutInvoking(t *testing.T) 
 	if err := New(Deps{Store: store, Packs: src, Adapter: adapter}).HandleContinue(t.Context(), continueWithText); err != nil {
 		t.Fatalf("continue job: %v", err)
 	}
-	if got := store.taskState(); got != "paused_user_stop" {
-		t.Fatalf("state = %q, want paused_user_stop (managed pause, not failed)", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("state = %q, want awaiting_final_review", got)
 	}
-	if len(adapter.invocations) != 0 {
-		t.Fatalf("adapter invoked %d time(s); an invocation-less run must stop before any invocation", len(adapter.invocations))
+	if len(adapter.invocations) != 1 {
+		t.Fatalf("adapter invoked %d time(s), want one first-stage invocation", len(adapter.invocations))
 	}
-	if !hasStopReason(store.events, "resume_session_missing") {
-		t.Errorf("no run.state_changed event carries stop_reason resume_session_missing; events: %+v", store.events)
+	if !strings.Contains(adapter.invocations[0].RoutingBlock, "an answer with no invocation to ride on") {
+		t.Errorf("first invocation did not receive the note: %s", adapter.invocations[0].RoutingBlock)
 	}
 }
 
