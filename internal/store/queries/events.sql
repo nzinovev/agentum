@@ -22,3 +22,9 @@ LIMIT $4;
 INSERT INTO events (tenant_id, user_id, run_id, type, payload, actor)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
+
+-- name: ListRouteTransitionsForRun :many
+-- Read the durable transition decisions used to render route progress.
+SELECT * FROM events
+WHERE tenant_id = $1 AND run_id = $2 AND type = 'stage.transition'
+ORDER BY id ASC;

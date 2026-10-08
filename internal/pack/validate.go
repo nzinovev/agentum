@@ -530,6 +530,8 @@ func (p *Pack) validateApprovals() []string {
 			// A terminal stage has no outgoing transition; a human cannot
 			// "advance past" it, so it cannot be an approval gate.
 			problems = append(problems, fmt.Sprintf("approvals[%d].stage %q is terminal and cannot host an approval gate", index, approval.Stage))
+		} else if approval.WithinStage && (EffectiveRole(approval.Stage, stage) != "implementer" || !stage.Gate.PausesForHuman()) {
+			problems = append(problems, fmt.Sprintf("approvals[%d].within_stage requires an implementer stage with a human gate", index))
 		}
 
 		if approval.Artifact == "" {

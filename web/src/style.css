@@ -1445,6 +1445,74 @@ code {
   margin: 8px 0;
 }
 
+.route-block { margin: 10px 0 18px; padding: 12px 0 14px; border-top: 1px solid var(--soft); color: var(--body); font-size: 13px; }
+.route-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; margin-bottom: 10px; }
+.route-label { padding-top: 3px; color: var(--muted); font-size: 12px; }
+.route-value { min-width: 0; }
+.route-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.route-name { color: var(--text); font: 500 14px "Geist Mono", monospace; overflow-wrap: anywhere; }
+.route-version, .route-identity time { color: var(--muted); font: 11px "Geist Mono", monospace; }
+.route-chip { padding: 3px 7px; border: 1px solid var(--line); border-radius: 10px; color: var(--body); font-size: 11px; line-height: 1.2; }
+.route-chip.source-triage { border-color: #2b3d63; background: #141c2a; color: #8fb2f5; }
+.route-chip.source-request { border-color: #3a434e; background: #171c22; color: #c9d1da; }
+.route-chip.source-fallback { border-color: #4a3a20; background: #221a0f; color: #e0b268; }
+.route-now { margin-left: auto; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--secondary); font-size: 11px; white-space: nowrap; }
+.route-now.running { border-color: #2b3d63; color: #8fb2f5; }
+.route-now.waiting, .route-now.questions, .route-now.stopped { border-color: #4a3a20; color: #e0b268; }
+.route-reason p, .route-use, .route-alert p { margin: 0; line-height: 1.55; overflow-wrap: anywhere; }
+.route-use { color: var(--secondary); font-size: 12px; }
+.route-clamped { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.route-alert.fallback .route-clamped { -webkit-line-clamp: 3; line-clamp: 3; }
+.route-alert { padding: 10px 12px; border-left: 3px solid; border-radius: 3px; background: var(--surface); }
+.route-alert strong { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; }
+.route-alert code { display: inline-block; margin-bottom: 6px; padding: 2px 5px; border: 1px solid currentColor; border-radius: 3px; font-size: 11px; }
+.route-alert p { font: 12px/1.5 "Geist Mono", monospace; white-space: pre-wrap; }
+.route-alert small { display: block; margin-top: 8px; color: var(--secondary); }
+.route-alert.fallback { border-color: #d89a3a; color: #e0b268; background: #1b160f; }
+.route-alert.resolve-error { border-color: #cf6673; color: #e08a94; background: #1b1114; }
+.route-alert .text-button { margin: 6px 12px 0 0; }
+.route-pending { min-height: 150px; padding: 8px 0; }
+.route-pending p { margin: 7px 0 0; color: var(--secondary); }
+.route-skeleton { display: flex; gap: 10px; margin-top: 16px; overflow: hidden; }
+.route-skeleton span { flex: 1 0 150px; max-width: 205px; height: 76px; border: 1px dashed var(--line); border-radius: 6px; background: var(--surface); opacity: .55; }
+.route-rail { display: flex; align-items: stretch; min-width: 0; max-width: 100%; overflow-x: auto; padding: 2px 2px 12px; scrollbar-color: var(--strong) transparent; }
+.route-node { flex: 1 0 150px; min-width: 150px; max-width: 205px; min-height: 136px; padding: 8px 10px; border: 1px solid var(--line); border-top: 2px solid var(--line); border-radius: 6px; background: var(--surface); }
+.route-node.running { border-top-color: #5b8def; }
+.route-node.waiting, .route-node.questions, .route-node.stopped { border-top-color: #d89a3a; }
+.route-node.failed { border-top-color: #cf6673; }
+.route-node.accepted { border-top-color: #4fa678; }
+.route-node.not_reached, .route-node.not_taken { border-style: dashed; color: var(--muted); }
+.route-node-title { display: flex; justify-content: space-between; align-items: start; gap: 4px; color: var(--text); font: 500 12px "Geist Mono", monospace; overflow-wrap: anywhere; }
+.route-node-title span { color: var(--muted); font: 10px Geist, sans-serif; }
+.route-node-meta { margin: 6px 0 13px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.route-node-state { margin-bottom: 6px; font-size: 11px; }
+.route-node-state span { font-size: 14px; }
+.route-node.running .route-node-state { color: #8fb2f5; }
+.route-node.waiting .route-node-state, .route-node.questions .route-node-state { color: #e0b268; }
+.route-node.failed .route-node-state { color: #e08a94; }
+.route-node.accepted .route-node-state { color: #4fa678; }
+.route-node small { color: var(--secondary); font: 10px "Geist Mono", monospace; }
+.route-node-gate { margin-top: 9px; padding-left: 7px; border-left: 2px solid #d89a3a; color: var(--secondary); font-size: 10px; line-height: 1.4; }
+.route-node-steps { display: grid; gap: 4px; margin-top: 9px; padding-left: 7px; border-left: 2px solid #d89a3a; }
+.route-step { color: var(--muted); font-size: 10px; }
+.route-step.done, .route-step.approved { color: #78bd95; }
+.route-step.waiting, .route-step.running { color: #e0b268; }
+.route-step span { display: inline-block; width: 12px; }
+.route-invocation-step { display: inline-block; margin-left: 6px; padding: 1px 5px; border: 1px solid #4a3a20; border-radius: 3px; color: #e0b268; font-size: 10px; }
+.route-node-edge { margin-top: 7px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.route-node-edge code { display: block; max-height: 2.8em; overflow: hidden; }
+.route-connector { display: grid; place-items: center; flex: 0 0 22px; color: var(--muted); }
+.route-connector.hidden { visibility: hidden; }
+.route-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 10px; }
+.route-legend button { margin-left: auto; }
+.route-transitions { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; font-size: 11px; }
+.route-transitions p { color: var(--secondary); }
+.route-transitions table { width: 100%; border-collapse: collapse; text-align: left; }
+.route-transitions th, .route-transitions td { padding: 5px 7px; border-bottom: 1px solid var(--soft); overflow-wrap: anywhere; }
+.route-transitions small { display: block; margin-top: 9px; color: var(--muted); }
+.route-empty { color: var(--muted); }
+@media (max-width: 900px) { body { min-width: 0; } .sidebar { width: 64px; } .sidebar nav a { font-size: 0; } .main { padding: 16px; } .route-now { margin-left: 0; } }
+
 .run-action-panel { grid-template-columns: minmax(0, 1fr) 200px; gap: 24px; padding: 14px 18px; }
 .run-action-side { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 .run-action-side .danger-ghost { margin-top: 8px; border-top-color: #4a2a2f; }

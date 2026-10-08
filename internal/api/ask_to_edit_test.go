@@ -410,6 +410,62 @@ func TestPlanGate_AnswersBindToTheirRevision(t *testing.T) {
 	}
 }
 
+// TestWithinStageAdvanceRequiresRevision returns 428 for a missing
+// expected_revision_id when the short plan already has a revision.
+func TestWithinStageAdvanceRequiresRevision(t *testing.T) {
+	harness := newAskToEditHarness(t, 3)
+	packRoot := t.TempDir()
+	packDir := filepath.Join(packRoot, "backend-development")
+	if err := os.MkdirAll(filepath.Join(packDir, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestBody := `api: agentum/v1
+pack:
+  name: backend-development
+  version: 0.1.0
+memory: {reads: [project], writes: false}
+capabilities: [fs.read, fs.write, git.read, git.write, exec.bash]
+budgets: {fix_cycles: 1, ask_to_edit: 1}
+tiers: {default: strong}
+entry: implement
+approvals:
+  - {name: short_plan, stage: implement, artifact: plan.md, unlocks: source_write, within_stage: true}
+stages:
+  implement:
+    gate: human_approval
+    role: implementer
+    prompt: prompts/implement.md
+    transitions: [{to: done}]
+  done: {}
+`
+	if err := os.WriteFile(filepath.Join(packDir, "manifest.yaml"), []byte(manifestBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "prompts", "implement.md"), []byte("implement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	harness.api.packs = pack.NewProjectSource(pack.NewDirSource(packRoot), nil)
+	runID := harness.insertPlanGateRun(t, "paused_gate")
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant, CurrentStage: sql.NullString{String: "implement", Valid: true}, State: "paused_gate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.art.Put(t.Context(), artifacts.PutParams{
+		TenantID: continueTestTenant, UserID: continueTestUser, RunID: runID,
+		Name: "implement/plan.md", Kind: "plan_md", Bytes: []byte("short plan"), Actor: artifacts.ActorSystem,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := harness.callAdvance(t, runID, "")
+	if recorder.Code != http.StatusPreconditionRequired || !strings.Contains(recorder.Body.String(), codePreconditionMissing) {
+		t.Errorf("missing short-plan revision: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if count := harness.countJobsOfKind(t, runID, "advance"); count != 0 {
+		t.Errorf("refused advance queued %d jobs", count)
+	}
+}
+
 // TestPlanGate_RevisionWriteWaitsForGateAnswer pins the serialization a gate
 // answer relies on: while a transaction holds the run row — as the answer's
 // transition update does before it reads the plan revision — a plan write

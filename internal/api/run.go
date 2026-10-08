@@ -16,6 +16,7 @@ import (
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -31,9 +32,16 @@ import (
 // recorded tip at terminal teardown, and branch the resolvable delivery ref
 // that survives worktree teardown.
 type runResponse struct {
-	ID           string `json:"id"`
-	ProjectID    string `json:"project_id"`
-	PipelinePack string `json:"pipeline_pack"`
+	ID                      string            `json:"id"`
+	ProjectID               string            `json:"project_id"`
+	PipelinePack            string            `json:"pipeline_pack"`
+	RouteSource             string            `json:"route_source"`
+	RouteReason             string            `json:"route_reason"`
+	RouteDecidedAt          string            `json:"route_decided_at,omitempty"`
+	RouteTriageInvocationID string            `json:"route_triage_invocation_id,omitempty"`
+	RouteFallback           *runResourceError `json:"route_fallback,omitempty"`
+	RouteResolveError       *runResourceError `json:"route_resolve_error,omitempty"`
+	RouteGraph              *runRouteGraph    `json:"route_graph,omitempty"`
 	// PipelinePackOrigin says where the executed pack's bytes came from —
 	// builtin, project, or project+builtin — pinned with the base_commit the
 	// pack was read from. Empty until the run starts and resolves its pack.
@@ -66,26 +74,36 @@ func toRunResponse(run sqlc.Run) runResponse {
 	if len(overrides) == 0 {
 		overrides = json.RawMessage("{}")
 	}
-	return runResponse{
-		ID:                 run.ID,
-		ProjectID:          run.ProjectID,
-		PipelinePack:       run.PipelinePack,
-		PipelinePackOrigin: nullStringOr(run.PipelinePackOrigin),
-		Title:              run.Title,
-		Description:        run.Description,
-		Overrides:          overrides,
-		State:              run.State,
-		CurrentStage:       nullStringOr(run.CurrentStage),
-		StopReason:         run.StopReason,
-		Error:              run.Error,
-		CancelReason:       run.CancelReason,
-		BaseRef:            run.BaseRef,
-		BaseCommit:         nullStringOr(run.BaseCommit),
-		ResultCommit:       nullStringOr(run.ResultCommit),
-		Branch:             worktree.BranchFor(run.ID),
-		CreatedAt:          run.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:          run.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	response := runResponse{
+		ID:                      run.ID,
+		ProjectID:               run.ProjectID,
+		PipelinePack:            run.PipelinePack,
+		RouteSource:             nullStringOr(run.RouteSource),
+		RouteReason:             run.RouteReason,
+		RouteTriageInvocationID: nullStringOr(run.RouteTriageInvocationID),
+		PipelinePackOrigin:      nullStringOr(run.PipelinePackOrigin),
+		Title:                   run.Title,
+		Description:             run.Description,
+		Overrides:               overrides,
+		State:                   run.State,
+		CurrentStage:            nullStringOr(run.CurrentStage),
+		StopReason:              run.StopReason,
+		Error:                   run.Error,
+		CancelReason:            run.CancelReason,
+		BaseRef:                 run.BaseRef,
+		BaseCommit:              nullStringOr(run.BaseCommit),
+		ResultCommit:            nullStringOr(run.ResultCommit),
+		Branch:                  worktree.BranchFor(run.ID),
+		CreatedAt:               run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:               run.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
+	if run.RouteDecidedAt.Valid {
+		response.RouteDecidedAt = run.RouteDecidedAt.Time.UTC().Format(time.RFC3339Nano)
+	}
+	if run.RouteFallbackCode != "" {
+		response.RouteFallback = &runResourceError{Code: run.RouteFallbackCode, Message: run.RouteFallbackMessage}
+	}
+	return response
 }
 
 // nullStringOr returns the String value when Valid, else "". Keeps the response
@@ -103,15 +121,16 @@ func nullStringOr(value sql.NullString) string {
 // `input` blob is a 400 that names the field, not an ignored key that weakens
 // the run.
 type runCreateRequest struct {
-	ProjectID    string          `json:"project_id"`
-	PipelinePack string          `json:"pipeline_pack"`
-	Title        string          `json:"title"`
-	Description  string          `json:"description"`
-	Overrides    json.RawMessage `json:"overrides"`
-	BaseRef      string          `json:"base_ref"`
+	ProjectID     string          `json:"project_id"`
+	PipelinePack  string          `json:"pipeline_pack"`
+	Title         string          `json:"title"`
+	Description   string          `json:"description"`
+	Overrides     json.RawMessage `json:"overrides"`
+	BaseRef       string          `json:"base_ref"`
+	specifiedPack bool
 }
 
-const defaultRunPipelinePack = "backend-development"
+const defaultRunPipelinePack = pack.DefaultPipelinePack
 
 type requestFieldError struct {
 	field string
@@ -174,6 +193,7 @@ func parseRunCreate(body []byte) (runCreateRequest, taskinput.Request, error) {
 	if err := decoder.Decode(&req); err != nil {
 		return runCreateRequest{}, taskinput.Request{}, err
 	}
+	req.specifiedPack = req.PipelinePack != ""
 	if req.PipelinePack == "" {
 		req.PipelinePack = defaultRunPipelinePack
 	}
@@ -298,6 +318,10 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	routeSource := ""
+	if req.specifiedPack {
+		routeSource = "request"
+	}
 	run, err := api.queries.CreateRun(r.Context(), sqlc.CreateRunParams{
 		TenantID:     principal.TenantID,
 		UserID:       principal.UserID,
@@ -307,6 +331,7 @@ func (api *API) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		Description:  req.Description,
 		Overrides:    canonicalOverrides,
 		BaseRef:      req.BaseRef,
+		RouteSource:  routeSource,
 	})
 	if err != nil {
 		logUnexpected(api.log, err, "CreateRun")

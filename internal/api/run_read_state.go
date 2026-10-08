@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/publish"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/worktree"
@@ -42,10 +43,24 @@ type runResourceError struct {
 	Message string `json:"message"`
 }
 
+type runRouteGraph struct {
+	Description string            `json:"description"`
+	Version     string            `json:"version"`
+	Entry       string            `json:"entry"`
+	FixCycles   int               `json:"fix_cycles"`
+	AskToEdit   int               `json:"ask_to_edit"`
+	Approvals   []packApprovalRef `json:"approvals"`
+	Nodes       []packStageView   `json:"nodes"`
+	Progress    *runRouteProgress `json:"progress,omitempty"`
+}
+
 // populateRunReadState adds the live local resources and the pinned pack's
 // request-changes budget to the run read. Destructive decisions use the live
 // worktree HEAD, so a stored result commit cannot stand in for this read.
 func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response *runResponse) error {
+	if err := api.populateRunRoute(ctx, run, response); err != nil {
+		return err
+	}
 	if run.StopReason == "base_not_on_target" || run.StopReason == "base_target_unverifiable" {
 		remote := api.publication.remote
 		if remote == "" {
@@ -79,15 +94,14 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 	if _, statErr := os.Stat(checkoutPath); statErr != nil {
 		return nil
 	}
-	budget, budgetErr := api.resolveRunPack(ctx, run)
-	if budgetErr == nil && budget != nil {
+	if response.RouteGraph != nil {
 		used, countErr := api.queries.CountJobsOfKindForRun(ctx, sqlc.CountJobsOfKindForRunParams{
 			RunID: run.ID, TenantID: run.TenantID, Kind: jobKindAskToEdit,
 		})
 		if countErr != nil {
 			return fmt.Errorf("count plan edits: %w", countErr)
 		}
-		response.PlanEdits = &planEditBudget{Used: int(used), Max: budget.Budgets.AskToEdit}
+		response.PlanEdits = &planEditBudget{Used: int(used), Max: response.RouteGraph.AskToEdit}
 	}
 	manager := worktree.New()
 	if _, pathErr := os.Stat(wtPath); pathErr == nil {
@@ -158,4 +172,57 @@ func (api *API) populateRunReadState(ctx context.Context, run sqlc.Run, response
 		return fmt.Errorf("read restore target: %w", checkpointErr)
 	}
 	return nil
+}
+
+func (api *API) populateRunRoute(ctx context.Context, run sqlc.Run, response *runResponse) error {
+	if !run.RouteSource.Valid || run.RouteSource.String == "" {
+		return nil
+	}
+	resolvedPack, resolveErr := api.resolveRunPack(ctx, run)
+	if resolveErr != nil {
+		response.RouteResolveError = safeRouteResolveError(resolveErr)
+		return nil
+	}
+	if resolvedPack != nil {
+		response.RouteGraph = routeGraphOf(resolvedPack)
+		if api.queries != nil {
+			progress, err := api.routeProgress(ctx, run, response.RouteGraph)
+			if err != nil {
+				return fmt.Errorf("read route progress: %w", err)
+			}
+			response.RouteGraph.Progress = progress
+		}
+	}
+	return nil
+}
+
+// safeRouteResolveError keeps read failures useful without exposing checkout
+// paths or raw git diagnostics through a polled run response.
+func safeRouteResolveError(err error) *runResourceError {
+	switch {
+	case errors.Is(err, pack.ErrPackNotFound):
+		return &runResourceError{Code: "pack_not_found", Message: "The selected pack is absent at this run's base commit."}
+	case errors.Is(err, pack.ErrPackReadFailed):
+		return &runResourceError{Code: "pack_read_failed", Message: "The selected pack could not be read from this run's base commit."}
+	case errors.Is(err, pack.ErrBothPackFiles):
+		return &runResourceError{Code: "pack_ambiguous", Message: "The selected project pack has both manifest.yaml and overrides.yaml at this run's base commit."}
+	case errors.Is(err, pack.ErrNoPackFile):
+		return &runResourceError{Code: "pack_manifest_missing", Message: "The selected project pack has no manifest.yaml or overrides.yaml at this run's base commit."}
+	default:
+		return &runResourceError{Code: "pack_resolve_failed", Message: "The selected pack could not be resolved from this run's base commit. Check its manifest at that commit."}
+	}
+}
+
+func routeGraphOf(runPack *pack.Pack) *runRouteGraph {
+	detail := packDetailOf(&pack.Resolved{Pack: runPack})
+	for index := range detail.Stages {
+		if detail.Stages[index].Terminal {
+			detail.Stages[index].FinalReviewGate = true
+		}
+	}
+	return &runRouteGraph{
+		Description: detail.Description, Version: detail.Version, Entry: detail.Entry,
+		FixCycles: detail.Budgets.FixCycles, Approvals: detail.Approvals, Nodes: detail.Stages,
+		AskToEdit: detail.Budgets.AskToEdit,
+	}
 }

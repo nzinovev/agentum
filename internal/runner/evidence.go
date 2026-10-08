@@ -89,7 +89,7 @@ func (runner *Runner) captureStageOutputs(
 	// containment check — the same exemption verdict.json relies on. The kind
 	// plan_md is what the sync redirect and the drift check key on.
 	if run.runPack != nil {
-		if approval, hasApproval := run.runPack.SourceWriteApproval(); hasApproval && approval.Stage == stageID {
+		if approval, hasApproval := run.runPack.SourceWriteApproval(); hasApproval && approval.Stage == stageID && !(approval.WithinStage && run.sourceWriteUnlock.Granted) {
 			outputs = runner.captureFile(ctx, run, stageID, invocationID, artifactDir, approval.Artifact, "plan_md", outputs)
 		}
 	}
@@ -478,9 +478,11 @@ func baseRefEvidenceOf(runPack *pack.Pack) string {
 }
 
 // recordInitialEvidence seeds the manifest with the run / project / pack /
-// git lineage evidence at run start. Idempotent — AddEvidence merges by
-// section. Called once at the start of drive(). No-op when the manifest
-// service is nil (unit tests). Unlike the per-stage evidence helpers, a
+// git lineage evidence after route selection. Idempotent — AddEvidence merges by
+// section. Called once before the first stage. No-op when the manifest
+// service is nil (unit tests). Route selection initializes the manifest first
+// so its invocation evidence can be recorded before the pack is known.
+// Unlike the per-stage evidence helpers, a
 // failure here is returned: this is the run's provenance root (input, project,
 // pack, base commit), and a run whose provenance was never recorded should
 // fail rather than proceed — every later piece of evidence chains off this, so

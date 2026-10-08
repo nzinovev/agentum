@@ -377,6 +377,20 @@ func Resolve(override *Config, fallback Config, tier string) (Selection, error) 
 	return resolveFrom(fallback, tier)
 }
 
+// ResolveTriage selects fast when the active configuration defines it.
+// Triage runs for every run without an explicit pack, so this limits routine model cost.
+// A configuration without fast uses its declared default tier.
+func ResolveTriage(override *Config, fallback Config) (Selection, error) {
+	config := fallback
+	if override != nil {
+		config = *override
+	}
+	if _, available := config.Tiers["fast"]; available {
+		return resolveFrom(config, "fast")
+	}
+	return resolveFrom(config, "")
+}
+
 func resolveFrom(config Config, tier string) (Selection, error) {
 	if tier == "" {
 		tier = config.Default

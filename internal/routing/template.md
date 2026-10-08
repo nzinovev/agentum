@@ -132,6 +132,13 @@ change which checks gate delivery.
 {{range .Checks}}- **{{.Name}}**{{if .Required}} (required){{end}}: {{join .Command " "}}{{if .Description}} — {{.Description}}{{end}}
 {{end}}
 {{end}}
+{{if .RouteCatalog}}## Route catalog
+
+Choose one of these server-validated routes.
+
+{{range .RouteCatalog}}- **{{.Name}}**: {{.Description}}
+{{end}}
+{{end}}
 {{if .PriorStages}}## Prior stage artifacts
 
 {{range .PriorStages}}- **{{.Stage}}**: {{.Path}}

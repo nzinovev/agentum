@@ -108,6 +108,20 @@ func (store *fakeStore) SetPipelinePackOrigin(_ context.Context, arg sqlc.SetPip
 	}
 	return store.record, nil
 }
+func (store *fakeStore) SelectRunRoute(_ context.Context, arg sqlc.SelectRunRouteParams) (sqlc.Run, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.record.RouteSource.Valid || store.record.State == "cancelled" {
+		return sqlc.Run{}, sql.ErrNoRows
+	}
+	store.record.PipelinePack = arg.PipelinePack
+	store.record.RouteSource = arg.RouteSource
+	store.record.RouteReason = arg.RouteReason
+	store.record.RouteFallbackCode = arg.RouteFallbackCode
+	store.record.RouteFallbackMessage = arg.RouteFallbackMessage
+	store.record.RouteTriageInvocationID = arg.RouteTriageInvocationID
+	return store.record, nil
+}
 func (store *fakeStore) SetResultCommit(_ context.Context, arg sqlc.SetResultCommitParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -120,7 +134,10 @@ func (store *fakeStore) CreateStageInvocation(_ context.Context, arg sqlc.Create
 	invocation := sqlc.StageInvocation{
 		ID: fmt.Sprintf("inv-%d", len(store.invocations)+1), TenantID: arg.TenantID, UserID: arg.UserID,
 		RunID: arg.RunID, Stage: arg.Stage, Sequence: arg.Sequence, ResumeOf: arg.ResumeOf,
-		CapabilityProfile: arg.CapabilityProfile, Cycle: arg.Cycle,
+		CapabilityProfile: arg.CapabilityProfile, Cycle: arg.Cycle, Kind: arg.Kind,
+	}
+	if invocation.Kind == "" {
+		invocation.Kind = "stage"
 	}
 	store.invocations = append(store.invocations, invocation)
 	return invocation, nil
@@ -132,25 +149,39 @@ func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.Finish
 		if store.invocations[invocationIdx].ID == arg.ID {
 			store.invocations[invocationIdx].SessionID = arg.SessionID
 			store.invocations[invocationIdx].StopReason = arg.StopReason
+			store.invocations[invocationIdx].FinishedAt = sql.NullTime{Time: time.Now(), Valid: true}
 			return nil
 		}
 	}
 	return nil
 }
+func (store *fakeStore) ListUnfinishedTriageInvocationsForRun(_ context.Context, arg sqlc.ListUnfinishedTriageInvocationsForRunParams) ([]sqlc.StageInvocation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var unfinished []sqlc.StageInvocation
+	for _, invocation := range store.invocations {
+		if invocation.RunID == arg.RunID && invocation.TenantID == arg.TenantID && invocation.Kind == "triage" && !invocation.FinishedAt.Valid {
+			unfinished = append(unfinished, invocation)
+		}
+	}
+	return unfinished, nil
+}
 func (store *fakeStore) LatestStageForRun(_ context.Context, _ sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.invocations) == 0 {
-		return sqlc.StageInvocation{}, sql.ErrNoRows
+	for invocationIndex := len(store.invocations) - 1; invocationIndex >= 0; invocationIndex-- {
+		if store.invocations[invocationIndex].Kind != "triage" {
+			return store.invocations[invocationIndex], nil
+		}
 	}
-	return store.invocations[len(store.invocations)-1], nil
+	return sqlc.StageInvocation{}, sql.ErrNoRows
 }
 func (store *fakeStore) MaxCycleForStages(_ context.Context, arg sqlc.MaxCycleForStagesParams) (int32, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	var max int32 = -1
 	for _, invocation := range store.invocations {
-		if invocation.RunID != arg.RunID {
+		if invocation.RunID != arg.RunID || invocation.Kind == "triage" {
 			continue
 		}
 		for _, stageID := range arg.Column3 {
@@ -166,7 +197,7 @@ func (store *fakeStore) ListStageInvocationsForRun(_ context.Context, arg sqlc.L
 	defer store.mu.Unlock()
 	out := make([]sqlc.StageInvocation, 0, len(store.invocations))
 	for _, invocation := range store.invocations {
-		if invocation.RunID == arg.RunID {
+		if invocation.RunID == arg.RunID && invocation.Kind != "triage" {
 			out = append(out, invocation)
 		}
 	}

@@ -3,7 +3,6 @@ import { ApiError, createRun, project, startRun, type Project } from "./api";
 import { Link, Loading, PageHeading, Problem, Shell } from "./common";
 import type { Navigate } from "./main";
 import { bytes } from "./util";
-const defaultPipelinePack = "backend-development";
 export function NewRunPage({
   projectID,
   navigate,
@@ -173,7 +172,7 @@ export function NewRunPage({
             />
             <small id="desc-help">
               The request the agents work from: the problem, what to do,
-              constraints, and when it is done.
+              constraints, and when it is done. Agentum also uses it to choose the route.
             </small>
             {errors.description && (
               <small id="desc-error" className="error-text" role="alert">
@@ -216,7 +215,7 @@ export function NewRunPage({
             <span>
               {submitting
                 ? "Creating the run, then starting it. Repeat clicks are ignored."
-                : `Creates the run and starts it with the ${defaultPipelinePack} pack.`}
+                : "Creates the run and starts it. Agentum chooses a route for this request; the run page shows the route and why it was chosen."}
             </span>
           </div>
         </form>

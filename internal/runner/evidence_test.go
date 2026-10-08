@@ -499,6 +499,10 @@ type fakeManifestService struct {
 	checksCommitErr error
 }
 
+func (service *fakeManifestService) Init(context.Context, string, string, string) error {
+	return nil
+}
+
 func (service *fakeManifestService) AddEvidence(_ context.Context, _, _ string, patch manifest.Body) error {
 	service.mu.Lock()
 	defer service.mu.Unlock()

@@ -282,6 +282,13 @@ func executionAdapter(cfg config.Config, modelsCfg *models.Config) (agent.Adapte
 		return nil, fmt.Errorf("select execution adapter: %w", err)
 	}
 	descriptor := resolved.Describe()
+	triageSelection, triageErr := models.ResolveTriage(modelsCfg, descriptor.DefaultTiers)
+	if triageErr != nil {
+		return nil, fmt.Errorf("validate model tier for triage: %w", triageErr)
+	}
+	if optionErr := triageSelection.Options.SupportedBy(descriptor.ModelOptions); optionErr != nil {
+		return nil, fmt.Errorf("validate model tier for triage: %w", optionErr)
+	}
 	if modelsCfg != nil {
 		// Sorted, not map order: with two broken tiers the operator would
 		// otherwise get a different one named on each boot, and "fix the

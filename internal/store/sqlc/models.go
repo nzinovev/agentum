@@ -89,26 +89,32 @@ type Project struct {
 }
 
 type Run struct {
-	ID                 string          `json:"id"`
-	TenantID           string          `json:"tenant_id"`
-	UserID             string          `json:"user_id"`
-	ProjectID          string          `json:"project_id"`
-	PipelinePack       string          `json:"pipeline_pack"`
-	Title              string          `json:"title"`
-	State              string          `json:"state"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
-	CurrentStage       sql.NullString  `json:"current_stage"`
-	BaseRef            string          `json:"base_ref"`
-	BaseCommit         sql.NullString  `json:"base_commit"`
-	ResultCommit       sql.NullString  `json:"result_commit"`
-	Description        string          `json:"description"`
-	Overrides          json.RawMessage `json:"overrides"`
-	CheckoutPath       string          `json:"checkout_path"`
-	PipelinePackOrigin sql.NullString  `json:"pipeline_pack_origin"`
-	StopReason         string          `json:"stop_reason"`
-	Error              string          `json:"error"`
-	CancelReason       string          `json:"cancel_reason"`
+	ID                      string          `json:"id"`
+	TenantID                string          `json:"tenant_id"`
+	UserID                  string          `json:"user_id"`
+	ProjectID               string          `json:"project_id"`
+	PipelinePack            string          `json:"pipeline_pack"`
+	Title                   string          `json:"title"`
+	State                   string          `json:"state"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	CurrentStage            sql.NullString  `json:"current_stage"`
+	BaseRef                 string          `json:"base_ref"`
+	BaseCommit              sql.NullString  `json:"base_commit"`
+	ResultCommit            sql.NullString  `json:"result_commit"`
+	Description             string          `json:"description"`
+	Overrides               json.RawMessage `json:"overrides"`
+	CheckoutPath            string          `json:"checkout_path"`
+	PipelinePackOrigin      sql.NullString  `json:"pipeline_pack_origin"`
+	StopReason              string          `json:"stop_reason"`
+	Error                   string          `json:"error"`
+	CancelReason            string          `json:"cancel_reason"`
+	RouteSource             sql.NullString  `json:"route_source"`
+	RouteReason             string          `json:"route_reason"`
+	RouteFallbackCode       string          `json:"route_fallback_code"`
+	RouteFallbackMessage    string          `json:"route_fallback_message"`
+	RouteDecidedAt          sql.NullTime    `json:"route_decided_at"`
+	RouteTriageInvocationID sql.NullString  `json:"route_triage_invocation_id"`
 }
 
 type RunApproval struct {
@@ -201,4 +207,5 @@ type StageInvocation struct {
 	FinishedAt        sql.NullTime          `json:"finished_at"`
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 	Cycle             int32                 `json:"cycle"`
+	Kind              string                `json:"kind"`
 }

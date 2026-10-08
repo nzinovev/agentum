@@ -142,7 +142,7 @@ approvals:
   - name: plan            # unique, non-empty
     stage: plan           # a defined non-terminal stage
     artifact: plan.md     # bare file name (no path separators); lives in the stage's artifact dir
-    unlocks: [source_write]   # closed set; v1 has one member
+    unlocks: source_write   # closed set; v1 has one member
 ```
 
 | Field | Required | Notes |
@@ -151,6 +151,7 @@ approvals:
 | `stage` | yes | A defined non-terminal stage. The approval is recorded when the run advances past this stage's gate. |
 | `artifact` | yes | A **bare file name** — no path separators. It lives in the stage's artifact dir and is captured as an immutable revision the human may edit via `PUT` before approving. |
 | `unlocks` | yes | Closed set of unlock names. v1 has exactly one member: `source_write`. |
+| `within_stage` | no | Set `true` for a short plan written by the implementer before source edits. The approval resumes the same stage and its captured session. |
 
 **`source_write` unlock.** While a `source_write` approval is pending (the run
 has not yet advanced past the approval stage), the runner withholds
@@ -174,14 +175,23 @@ Validation (collected with the rest in one pass):
 - every `unlocks` entry is a known name (`source_write` in v1).
 - when a `source_write` approval exists, every source-writing stage (effective
   role `implementer` or `fixer`) is reachable from `entry` only through the
-  approval stage. This reachability check is **static and advisory** — it flags
+  approval stage. With `within_stage: true`, the approval stage itself may be
+  the implementer. Its first invocation runs with source-write capabilities
+  withheld, then pauses for approval of its plan artifact. This reachability check is **static and advisory** — it flags
   a pack that could bypass the gate by graph shape. The real guarantee is the
   runtime capability withholding (layer 1), which holds regardless of what the
   static check concludes.
 
 The shipped [`packs/backend-development`](../packs/backend-development/manifest.yaml)
 pack is the worked example: `plan → implement → review → (fix → review)* → done`,
-with `approvals: [{name: plan, stage: plan, artifact: plan.md, unlocks: [source_write]}]`.
+with `approvals: [{name: plan, stage: plan, artifact: plan.md, unlocks: source_write}]`.
+
+The shipped [`packs/small-change`](../packs/small-change/manifest.yaml) uses
+`within_stage: true` on `implement`. The first invocation writes `plan.md`
+without source-write capabilities. Approval requires a current plan revision.
+The second invocation resumes the same stage with source-write capabilities.
+The shipped [`packs/research-first`](../packs/research-first/manifest.yaml)
+adds a read-only `research` stage before the plan gate.
 
 ### Transition conditions
 
