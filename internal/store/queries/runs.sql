@@ -46,13 +46,18 @@ WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
 -- name: RequestRunPause :one
+-- A repeated request preserves the first timestamp while the runner finishes
+-- its current invocation and checkpoint.
 UPDATE runs SET pause_requested_at = COALESCE(pause_requested_at, now()), updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND state = 'running'
 RETURNING *;
 
 -- name: ReopenPlanGate :one
-UPDATE runs SET state = 'paused_gate', current_stage = $3,
+-- ReopenPlanGate stores the FSM result with the artifact edit in one transaction.
+-- The plan revision and the pause cannot become visible separately.
+UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
     stop_reason = 'plan_revision_drift', pause_requested_at = NULL,
+    active_fix_request_revision_id = NULL,
     previous_result_commit = COALESCE(result_commit, previous_result_commit),
     result_commit = NULL, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
@@ -60,8 +65,11 @@ WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
 -- name: ReopenFinalReviewForFix :one
-UPDATE runs SET state = 'running', current_stage = $3,
+-- ReopenFinalReviewForFix enters the FSM result only when the accepted human
+-- revision is still current for the same reviewed commit.
+UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
     previous_result_commit = result_commit, result_commit = NULL,
+    active_fix_request_revision_id = sqlc.arg(fix_revision_id),
     stop_reason = '', pause_requested_at = NULL, updated_at = now()
 WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_review'
   AND runs.result_commit = $4

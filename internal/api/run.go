@@ -65,6 +65,7 @@ type runResponse struct {
 	BaseCommit             string             `json:"base_commit"`
 	ResultCommit           string             `json:"result_commit"`
 	PreviousResultCommit   string             `json:"previous_result_commit,omitempty"`
+	ActiveFixRequestID      string             `json:"active_fix_request_revision_id,omitempty"`
 	PauseRequestedAt       string             `json:"pause_requested_at,omitempty"`
 	ApprovedPlanRevisionID string             `json:"approved_plan_revision_id,omitempty"`
 	Checkpoint             *runCheckpointView `json:"checkpoint,omitempty"`
@@ -104,6 +105,7 @@ func toRunResponse(run sqlc.Run) runResponse {
 		BaseCommit:              nullStringOr(run.BaseCommit),
 		ResultCommit:            nullStringOr(run.ResultCommit),
 		PreviousResultCommit:    nullStringOr(run.PreviousResultCommit),
+		ActiveFixRequestID:      nullStringOr(run.ActiveFixRequestRevisionID),
 		Branch:                  worktree.BranchFor(run.ID),
 		CreatedAt:               run.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:               run.UpdatedAt.UTC().Format(time.RFC3339Nano),

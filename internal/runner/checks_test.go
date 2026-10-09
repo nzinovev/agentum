@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
+	"github.com/nzinovev/agentum/internal/worktree"
 )
 
 // TestRunner_DeliveryChecks proves the orchestrator runs its own project checks
@@ -58,6 +60,41 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 			tc := tc
 			runDeliveryChecksCase(t, tc)
 		})
+	}
+}
+
+// TestHumanFixCheckFailurePausesAtFixer keeps an unsuccessful human correction
+// available for another fixer pass with its failed check names on the stop.
+func TestHumanFixCheckFailurePausesAtFixer(t *testing.T) {
+	repo := seedRepoWithChecks(t,
+		"api: agentum/v1\nchecks:\n  - name: build\n    command: [\"false\"]\n    required: true\n")
+	manager := worktree.New()
+	baseCommit, err := manager.ResolveRef(t.Context(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := manager.Create(t.Context(), repo, "human-check-failure", baseCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPack := scriptPack("fix", map[string]pack.Stage{
+		"fix":  {Gate: pack.GateAuto, Role: "fixer", Prompt: "fix.md", Transitions: []pack.Transition{{To: "done"}}},
+		"done": {},
+	})
+	record := sqlc.Run{ID: "T-human-check-failure", TenantID: "tn", UserID: "us", ProjectID: "P1",
+		State: "running", PipelinePack: "test@0.1.0", BaseCommit: sql.NullString{String: baseCommit, Valid: true},
+		CurrentStage:               sql.NullString{String: "done", Valid: true},
+		ActiveFixRequestRevisionID: sql.NullString{String: "request-revision", Valid: true}}
+	project := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(record, project)
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{})})
+	paused, checkErr := runner.runDeliveryChecks(t.Context(), stageRun{record: record, project: project, runPack: runPack, worktree: checkout})
+	if checkErr != nil || !paused {
+		t.Fatalf("checks paused = %t, err = %v", paused, checkErr)
+	}
+	if store.record.State != "paused_user_stop" || store.record.CurrentStage.String != "fix" ||
+		store.record.StopReason != "fix_checks_failed: build" {
+		t.Fatalf("check failure stop = %+v", store.record)
 	}
 }
 

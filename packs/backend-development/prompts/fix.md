@@ -8,22 +8,19 @@ do not own the task scope.
 
 1. Read the immutable task input and the approved Planning Bundle at the path in
    the routing block's *Approved implementation plan* section.
-2. Read the reviewer's `verdict.json` at the path in the routing block's
-   *Reviewer findings to address* section. That file is your authoritative work
-   list: each entry carries an `id`, `severity`, `category`, `path`, `line`, and
-   `detail`. The routing block also tells you how many findings to expect —
-   account for every one of them.
-3. Read the reviewer's `result.json` from the routing block's *Prior stage
-   artifacts* section for the narrative around those findings, and the latest
-   `implement` handoff for what was delivered. The narrative explains; the
-   verdict decides.
-4. Inspect the current implementation and relevant project instructions before
-   editing.
-5. Build a work list containing only findings whose `category` is
-   `implementation_defect` or `plan_deviation`.
+2. If the routing block has a *Human fix request to address* section, read that
+   artifact. Its text is the human's work request for this fix cycle. A prior
+   approved `verdict.json` does not cancel it.
+3. If the routing block has a *Reviewer findings to address* section, read the
+   `verdict.json` at its path. Each finding carries an `id`, `severity`,
+   `category`, `path`, `line`, and `detail`. Account for every finding. Read the
+   reviewer's `result.json` for context; the verdict controls reviewer findings.
+4. Read the latest `implement` handoff and inspect the current implementation
+   and relevant project instructions before editing.
+5. Build a work list from the human request, when present, and reviewer findings
+   whose `category` is `implementation_defect` or `plan_deviation`.
 
-Do not implement optional suggestions — they are not in `verdict.json` and are
-not part of this cycle. Do not address unrelated defects noticed while fixing
+Do not implement optional suggestions. Do not address unrelated defects noticed while fixing
 unless they are strictly necessary to resolve a finding; if they materially
 expand scope, block instead.
 
@@ -37,9 +34,9 @@ test evidence and block for review clarification.
 
 - Make the smallest coherent edits that resolve every actionable finding.
 - Preserve all already-satisfied acceptance criteria and approved invariants.
-- Stay within the reviewer's `edit_targets`. If the technically correct fix
-  requires another file, explain exactly why in `open_questions` rather than
-  silently widening the reviewer's scope.
+- For reviewer findings, stay within the reviewer's `edit_targets`. A human fix
+  request may require other files within the approved task and plan. If either
+  request contradicts the approved plan, block and ask for a plan revision.
 - Add or update focused tests when that is the validation requested by the
   finding or is necessary to prevent recurrence.
 - Follow `AGENTS.md`, applicable nested instructions, and existing repository
@@ -62,7 +59,8 @@ this Markdown structure in `notes`:
 
 ### Finding resolution
 
-For every actionable finding, referenced by its `RV-*` id, state:
+For every actionable reviewer finding, referenced by its `RV-*` id, and every
+human request, state:
 
 - `resolved` or `blocked`;
 - files and symbols changed;
@@ -71,7 +69,8 @@ For every actionable finding, referenced by its `RV-*` id, state:
 
 ### Changed files
 
-List every file changed in this fix cycle and map it to at least one `RV-*`.
+List every file changed in this fix cycle and map it to a reviewer finding or
+the human request.
 
 ### Verification performed
 
@@ -86,6 +85,5 @@ fix is committed. List the files changed in this cycle under `artifacts` with an
 appropriate kind, and the same paths in `edit_targets`. Do not write
 `verdict.json`; the reviewer alone decides whether the result is approved.
 
-This stage consumes one bounded fix cycle from the pack's budget. When the
-budget is spent the run stops and waits for a human, so solve the stated
-problems precisely: churn costs a cycle you do not get back.
+The automatic reviewer loop has a fix-cycle budget. A human fix request and
+its follow-up reviewer corrections can continue after that budget is spent.

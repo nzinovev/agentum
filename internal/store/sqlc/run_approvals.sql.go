@@ -139,7 +139,8 @@ func (q *Queries) ListApprovalsForRun(ctx context.Context, arg ListApprovalsForR
 }
 
 const rebindPlanApproval = `-- name: RebindPlanApproval :one
-UPDATE run_approvals SET artifact_revision_id = $4, user_id = $5, actor = 'human', created_at = now()
+UPDATE run_approvals SET artifact_revision_id = $4, user_id = $5,
+    decision = $6, actor = 'human', created_at = now()
 WHERE tenant_id = $1 AND run_id = $2 AND name = $3 AND decision = 'approved'
 RETURNING id, tenant_id, run_id, name, decision, artifact_revision_id, actor, created_at, user_id
 `
@@ -150,8 +151,11 @@ type RebindPlanApprovalParams struct {
 	Name               string         `json:"name"`
 	ArtifactRevisionID sql.NullString `json:"artifact_revision_id"`
 	UserID             string         `json:"user_id"`
+	Decision           string         `json:"decision"`
 }
 
+// RebindPlanApproval replaces the sole plan decision when a revised plan is
+// approved or rejected. Decision history is not stored in this row.
 func (q *Queries) RebindPlanApproval(ctx context.Context, arg RebindPlanApprovalParams) (RunApproval, error) {
 	row := q.db.QueryRowContext(ctx, rebindPlanApproval,
 		arg.TenantID,
@@ -159,6 +163,7 @@ func (q *Queries) RebindPlanApproval(ctx context.Context, arg RebindPlanApproval
 		arg.Name,
 		arg.ArtifactRevisionID,
 		arg.UserID,
+		arg.Decision,
 	)
 	var i RunApproval
 	err := row.Scan(

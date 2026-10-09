@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -115,46 +116,44 @@ func (api *API) handleFixRequest(w http.ResponseWriter, r *http.Request) {
 	if currentErr == nil {
 		expected = current.ID
 	}
-	fixRevision, err := api.art.Put(r.Context(), artifacts.PutParams{
-		TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
-		Name: artifactName, Kind: "human_fix_request", Bytes: []byte(request.Text),
-		Actor: artifacts.ActorHuman, ExpectedCurrentRevision: expected,
-		RequiredRunState: string(engine.StateAwaitingFinalReview),
-	})
-	if err != nil {
-		writeError(w, statusForArtifactStoreErr(err), codeForArtifactStoreErr(err), errForCaller(err))
-		return
-	}
-	if _, err := engine.Next(engine.RunState(run.State), engine.EventRequestFix); err != nil {
-		statusForTransition(w, err)
+	nextState, transitionErr := engine.Next(engine.RunState(run.State), engine.EventRequestFix)
+	if transitionErr != nil {
+		statusForTransition(w, transitionErr)
 		return
 	}
 	decision := gateDecisionPatch(run, principal, gateFinal, decisionRequestedChanges)
 	var updated sqlc.Run
-	err = api.runInTx(r.Context(), func(queries *sqlc.Queries) error {
-		var transitionErr error
-		updated, transitionErr = queries.ReopenFinalReviewForFix(r.Context(), sqlc.ReopenFinalReviewForFixParams{
-			ID: run.ID, TenantID: principal.TenantID, CurrentStage: sql.NullString{String: fixerStage, Valid: true},
-			ResultCommit: run.ResultCommit, FixRevisionID: fixRevision.ID,
-		})
-		if transitionErr != nil {
-			return transitionErr
-		}
-		_, enqueueErr := queries.EnqueueJob(r.Context(), sqlc.EnqueueJobParams{
-			TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
-			Kind: "fix_request", Payload: []byte("{}"),
-		})
-		if enqueueErr != nil {
-			return enqueueErr
-		}
-		return api.recordHumanDecisionTx(r.Context(), queries, principal, run.ID, decision, recordStrict)
+	_, err = api.art.Put(r.Context(), artifacts.PutParams{
+		TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
+		Name: artifactName, Kind: "human_fix_request", Bytes: []byte(request.Text),
+		Actor: artifacts.ActorHuman, ExpectedCurrentRevision: expected,
+		RequiredRunState: string(engine.StateAwaitingFinalReview),
+		AfterRevision: func(ctx context.Context, queries *sqlc.Queries, revision artifacts.Revision) error {
+			var reopenErr error
+			updated, reopenErr = queries.ReopenFinalReviewForFix(ctx, sqlc.ReopenFinalReviewForFixParams{
+				ID: run.ID, TenantID: principal.TenantID, CurrentStage: sql.NullString{String: fixerStage, Valid: true},
+				ResultCommit: run.ResultCommit,
+				FixRevisionID: sql.NullString{String: revision.ID, Valid: true}, NextState: string(nextState),
+			})
+			if reopenErr != nil {
+				return reopenErr
+			}
+			_, enqueueErr := queries.EnqueueJob(ctx, sqlc.EnqueueJobParams{
+				TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
+				Kind: "fix_request", Payload: []byte("{}"),
+			})
+			if enqueueErr != nil {
+				return enqueueErr
+			}
+			return api.recordHumanDecisionTx(ctx, queries, principal, run.ID, decision, recordStrict)
+		},
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusConflict, codeConflict, "result changed; review the current result")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		writeError(w, statusForArtifactStoreErr(err), codeForArtifactStoreErr(err), errForCaller(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))

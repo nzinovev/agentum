@@ -74,14 +74,12 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
-	if continuation.Text != "" {
-		_, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
-			RunID: run.ID, TenantID: run.TenantID,
-		})
-		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
-			logUnexpected(api.log, latestErr, "LatestStageForRun(continue)")
-			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
-			return
+	if strings.HasPrefix(run.StopReason, "fix_checks_failed: ") {
+		// The fixer needs the orchestrator's failed check names even when the
+		// human presses Continue without adding a second note.
+		checkContext := "Previous mandatory project checks failed: " + strings.TrimPrefix(run.StopReason, "fix_checks_failed: ")
+		if len(checkContext)+len(continuation.Text)+1 <= taskinput.MaxContinuationTextBytes {
+			continuation.Text = strings.TrimSpace(checkContext + "\n" + continuation.Text)
 		}
 	}
 	payload, marshalErr := continuation.Marshal()
@@ -468,6 +466,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// not resolve (the run failed on that very pack, or its checkout moved)
 	// must not turn an illegal-state 409 into a 500.
 	rejectName := approvalNameFinalReview
+	var revisedPlan planApproval
 	if atPlanGate {
 		planName, nameErr := api.planApprovalName(r.Context(), run)
 		if nameErr != nil {
@@ -483,6 +482,15 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 			// than guessing. (Should not happen for the shipped pack, but a pack
 			// author may pause at a non-approval gate.)
 			rejectName = approvalNameFinalReview
+		}
+		if run.StopReason == "plan_revision_drift" {
+			var atApproval bool
+			var approvalErr error
+			revisedPlan, atApproval, approvalErr = api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+			if approvalErr != nil || !atApproval {
+				writeError(w, http.StatusInternalServerError, codeInternal, "could not resolve the revised plan approval")
+				return
+			}
 		}
 	}
 	if !atFinalGate && !atPlanGate {
@@ -525,9 +533,30 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 		// with a 409-shape error instead of dropping the reject. This is
 		// the case the review flagged: reject at a non-approval paused_gate used
 		// to hardcode "plan", collide, and seal "approved".
-		if existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
+		existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
 			TenantID: run.TenantID, RunID: run.ID, Name: rejectName,
-		}); getErr == nil && existing.Decision != "rejected" {
+		})
+		if getErr != nil && !errors.Is(getErr, sql.ErrNoRows) {
+			return getErr
+		}
+		if getErr == nil && existing.Decision == "approved" && revisedPlan.name != "" {
+			currentPlan, revisionErr := qtx.CurrentArtifactRevisionForName(r.Context(), sqlc.CurrentArtifactRevisionForNameParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: revisedPlan.stage + "/" + revisedPlan.artifact,
+			})
+			if revisionErr != nil {
+				return revisionErr
+			}
+			if _, rebindErr := qtx.RebindPlanApproval(r.Context(), sqlc.RebindPlanApprovalParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: rejectName,
+				ArtifactRevisionID: sql.NullString{String: currentPlan.ID, Valid: true},
+				UserID:             principal.UserID, Decision: "rejected",
+			}); rebindErr != nil {
+				return rebindErr
+			}
+			updated = transitioned
+			return nil
+		}
+		if getErr == nil && existing.Decision != "rejected" {
 			return conflictingGateDecision{name: rejectName, existing: existing.Decision}
 		}
 		if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
@@ -799,10 +828,16 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 				updated = transitioned
 				return nil
 			}
-			if run.StopReason == "plan_revision_drift" {
+			priorApproval, priorErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: approval.name,
+			})
+			if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
+				return priorErr
+			}
+			if priorErr == nil && priorApproval.Decision == "approved" && priorApproval.ArtifactRevisionID != revisionID {
 				if _, rebindErr := qtx.RebindPlanApproval(r.Context(), sqlc.RebindPlanApprovalParams{
 					TenantID: run.TenantID, RunID: run.ID, Name: approval.name,
-					ArtifactRevisionID: revisionID, UserID: principal.UserID,
+					ArtifactRevisionID: revisionID, UserID: principal.UserID, Decision: "approved",
 				}); rebindErr != nil {
 					return rebindErr
 				}

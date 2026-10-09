@@ -141,6 +141,10 @@ type PutParams struct {
 	// RequiredRunState binds a human gate artifact to the run state observed
 	// under the store's run-row lock. Empty leaves ordinary stage writes alone.
 	RequiredRunState string
+	// AfterRevision runs in the same transaction as the revision write. The
+	// store locks the run row exclusively before calling it so a gate answer
+	// cannot race a revision that changes the run state.
+	AfterRevision func(context.Context, *sqlc.Queries, Revision) error
 }
 
 // Store is the durable artifact revisions store. Implementations keep the FS

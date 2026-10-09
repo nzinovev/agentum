@@ -1273,45 +1273,9 @@ func firstNonEmpty(preferred, fallback string) string {
 	return fallback
 }
 
-// mergeCheckEvidence combines two CheckEvidence. The set/registry/commit/profile
-// scalars take the patch's value when set (the runner writes a fresh full set
-// each delivery boundary), and results are merged de-duplicating by name so a
-// re-run after resume replaces a prior result for the same check with the latest
-// one. MandatoryPassed and Ran are the OR of the two — once mandatory checks
-// passed (or once any check ran), a later partial patch must not flip it back.
-func mergeCheckEvidence(existing *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
-	if existing == nil {
-		return patch
-	}
-	merged := &CheckEvidence{
-		SetVersion:       firstNonEmpty(patch.SetVersion, existing.SetVersion),
-		RegistryRevision: firstNonEmpty(patch.RegistryRevision, existing.RegistryRevision),
-		Commit:           firstNonEmpty(patch.Commit, existing.Commit),
-		Profile:          firstNonEmpty(patch.Profile, existing.Profile),
-		Ran:              existing.Ran || patch.Ran,
-		MandatoryPassed:  existing.MandatoryPassed || patch.MandatoryPassed,
-		Results:          appendUniqueCheckResult(existing.Results, patch.Results),
-	}
-	return merged
-}
-
-// appendUniqueCheckResult appends results whose Name is not already in base; a
-// repeat name replaces the prior entry so the latest run's result wins.
-func appendUniqueCheckResult(base []CheckResult, additions []CheckResult) []CheckResult {
-	out := make([]CheckResult, 0, len(base)+len(additions))
-	out = append(out, base...)
-	for _, addition := range additions {
-		replaced := false
-		for index, present := range out {
-			if present.Name == addition.Name {
-				out[index] = addition
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			out = append(out, addition)
-		}
-	}
-	return out
+// mergeCheckEvidence replaces the delivery boundary snapshot. The runner
+// records the complete result set for one commit each time checks run, so
+// retaining an earlier pass would pair it with a later failing commit.
+func mergeCheckEvidence(_ *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
+	return patch
 }

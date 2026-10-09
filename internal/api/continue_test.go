@@ -433,45 +433,53 @@ func TestContinueHandler_TextWithoutCapturedSessionIsAccepted(t *testing.T) {
 	}
 }
 
-// TestContinueHandler_SessionReadFailureIsInternalError: a failed invocation
-// read is not an answer about the session — the session may exist while the
-// read could not see it. The handler answers a logged 500, never a 409 that
-// claims absence; a 409 would tell the author to give up on text that could
-// have been delivered, and the run must stay paused with the queue untouched.
-func TestContinueHandler_SessionReadFailureIsInternalError(t *testing.T) {
+// TestContinueHandler_QueuesTextWithoutReadingSession protects the handoff to
+// the runner: it selects a matching session after the job starts, so the API
+// can queue text without consulting the invocation table.
+func TestContinueHandler_QueuesTextWithoutReadingSession(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("database test")
 	}
 	harness := newContinueHarness(t)
 	runID := harness.insertPausedRun(t, true)
-	// Break only the invocation read: the guard's GetRun still answers, the
-	// session check's LatestStageForRun fails. Renaming the table in this
-	// test's throwaway database leaves every other table intact.
+	// Renaming the table in this test's throwaway database proves the API
+	// neither selects a session nor rejects the note before the job is queued.
 	if _, err := harness.db.ExecContext(t.Context(),
 		`ALTER TABLE stage_invocations RENAME TO stage_invocations_unreadable`); err != nil {
 		t.Fatal(err)
 	}
 	recorder := harness.callContinue(t, runID, `{"text":"an answer the read never saw"}`, true)
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
 	}
-	var decoded struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+	if got := harness.runStateOf(t, runID); got != "running" {
+		t.Errorf("run state = %q, want running", got)
 	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
-		t.Fatalf("decode error body: %v", err)
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(payload, "an answer the read never saw") {
+		t.Errorf("continue job did not retain the note: %q, found = %t", payload, found)
 	}
-	if decoded.Error.Code != codeInternal {
-		t.Errorf("code = %q, want %q", decoded.Error.Code, codeInternal)
+}
+
+// TestContinueAfterFailedFixNamesChecks protects the retry handoff: the fixer
+// receives orchestrator check failures even without another human note.
+func TestContinueAfterFailedFixNamesChecks(t *testing.T) {
+	harness := newContinueHarness(t)
+	runID := harness.insertPausedRun(t, true)
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant,
+		CurrentStage: sql.NullString{String: "fix", Valid: true},
+		State:        "paused_user_stop", StopReason: "fix_checks_failed: build, lint",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if got := harness.runStateOf(t, runID); got != "paused_open_questions" {
-		t.Errorf("run state = %q, want paused_open_questions (a failed read must not resume the run)", got)
+	response := harness.callContinue(t, runID, `{}`, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("continue status = %d: %s", response.Code, response.Body.String())
 	}
-	if _, found := harness.latestContinuePayload(t, runID); found {
-		t.Error("a failed session read enqueued a continue job")
+	payload, found := harness.latestContinuePayload(t, runID)
+	if !found || !strings.Contains(payload, "Previous mandatory project checks failed: build, lint") {
+		t.Fatalf("retry payload = %q, found = %t", payload, found)
 	}
 }
 

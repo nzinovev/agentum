@@ -93,34 +93,30 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // being collapsed into "no current revision" — the latter would disable the
 // precondition without a sign and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
-	runID := r.PathValue("id")
-	var principal authz.Principal
-	var run sqlc.Run
-	if api.db != nil {
-		var ok bool
-		principal, run, ok = api.requireRunForAction(w, r, authz.ActionRunEditArtifact, "GetRun(artifact-put)")
-		if !ok {
-			return
-		}
-	} else {
-		var ok bool
-		principal, ok = requireAccess(w, r, authz.ActionRunEditArtifact, runID)
-		if !ok {
-			return
-		}
+	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunEditArtifact, "GetRun(artifact-put)")
+	if !ok {
+		return
 	}
 	if !api.requireArtifactStore(w) {
 		return
 	}
+	runPack, resolveErr := api.resolveRunPack(r.Context(), run)
+	if resolveErr != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, resolveErr.Error())
+		return
+	}
+	api.putArtifactRevision(w, r, principal, run, runPack)
+}
+
+// putArtifactRevision validates and stores a revision after the route guard
+// resolved the run. Isolating it keeps request-shape tests independent of DB
+// setup while the production handler always uses requireRunForAction.
+func (api *API) putArtifactRevision(w http.ResponseWriter, r *http.Request, principal authz.Principal, run sqlc.Run, runPack *pack.Pack) {
+	runID := run.ID
 	name := r.PathValue("name")
-	var runPack *pack.Pack
-	if api.db != nil {
-		var resolveErr error
-		runPack, resolveErr = api.resolveRunPack(r.Context(), run)
-		if resolveErr != nil {
-			writeError(w, http.StatusInternalServerError, codeInternal, resolveErr.Error())
-			return
-		}
+	if name == "final/fix-request.md" {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "use fix-request at final review to replace this artifact")
+		return
 	}
 	var planApproval pack.Approval
 	var hasPlanApproval bool
@@ -203,7 +199,7 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 	if isPlan {
 		requiredRunState = run.State
 	}
-	revision, err := api.art.Put(r.Context(), artifacts.PutParams{
+	putParams := artifacts.PutParams{
 		TenantID:                principal.TenantID,
 		UserID:                  principal.UserID,
 		RunID:                   runID,
@@ -213,32 +209,40 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 		Actor:                   artifacts.ActorHuman, // no Source: a human edit has no invocation
 		ExpectedCurrentRevision: req.ExpectedRevisionID,
 		RequiredRunState:        requiredRunState,
-	})
+	}
+	if isPlan {
+		putParams.AfterRevision = func(ctx context.Context, queries *sqlc.Queries, revision artifacts.Revision) error {
+			approval, approvalErr := queries.GetApproval(ctx, sqlc.GetApprovalParams{
+				TenantID: principal.TenantID, RunID: runID, Name: planApproval.Name,
+			})
+			if errors.Is(approvalErr, sql.ErrNoRows) {
+				return nil
+			}
+			if approvalErr != nil {
+				return approvalErr
+			}
+			if approval.Decision != "approved" || approval.ArtifactRevisionID.String == revision.ID {
+				return nil
+			}
+			nextState, transitionErr := engine.Next(engine.RunState(run.State), engine.EventPlanEdited)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			_, reopenErr := queries.ReopenPlanGate(ctx, sqlc.ReopenPlanGateParams{
+				ID: run.ID, TenantID: principal.TenantID,
+				CurrentStage: sql.NullString{String: planApproval.Stage, Valid: true},
+				NextState: string(nextState),
+			})
+			if errors.Is(reopenErr, sql.ErrNoRows) {
+				return artifacts.ErrRevisionConflict
+			}
+			return reopenErr
+		}
+	}
+	revision, err := api.art.Put(r.Context(), putParams)
 	if err != nil {
 		writeError(w, statusForArtifactStoreErr(err), codeForArtifactStoreErr(err), errForCaller(err))
 		return
-	}
-	if isPlan && (!hasCurrent || revision.ID != current.ID) {
-		approval, approvalErr := api.queries.GetApproval(r.Context(), sqlc.GetApprovalParams{
-			TenantID: principal.TenantID, RunID: runID, Name: planApproval.Name,
-		})
-		if approvalErr != nil && !errors.Is(approvalErr, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, codeInternal, approvalErr.Error())
-			return
-		}
-		if approvalErr == nil && approval.Decision == "approved" && approval.ArtifactRevisionID.String != revision.ID {
-			if _, transitionErr := engine.Next(engine.RunState(run.State), engine.EventPlanEdited); transitionErr != nil {
-				statusForTransition(w, transitionErr)
-				return
-			}
-			if _, reopenErr := api.queries.ReopenPlanGate(r.Context(), sqlc.ReopenPlanGateParams{
-				ID: run.ID, TenantID: principal.TenantID,
-				CurrentStage: sql.NullString{String: planApproval.Stage, Valid: true},
-			}); reopenErr != nil {
-				writeError(w, http.StatusInternalServerError, codeInternal, reopenErr.Error())
-				return
-			}
-		}
 	}
 	// The edit IS the approval at a human_edit gate. Record it on the manifest
 	// so the human decision trail carries who edited what and when. A plain

@@ -396,6 +396,24 @@ func (q *Queries) LockCurrentArtifactRevisionForName(ctx context.Context, arg Lo
 	return i, err
 }
 
+const lockRunForArtifactGateWrite = `-- name: LockRunForArtifactGateWrite :one
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+`
+
+type LockRunForArtifactGateWriteParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// A revision that changes a run gate takes an exclusive lock so its artifact
+// write and state transition commit together before another gate answer.
+func (q *Queries) LockRunForArtifactGateWrite(ctx context.Context, arg LockRunForArtifactGateWriteParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, lockRunForArtifactGateWrite, arg.ID, arg.TenantID)
+	var state string
+	err := row.Scan(&state)
+	return state, err
+}
+
 const lockRunForArtifactWrite = `-- name: LockRunForArtifactWrite :one
 SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE
 `

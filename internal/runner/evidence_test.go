@@ -65,6 +65,7 @@ func (store *recordingArtifactStore) Put(_ context.Context, params artifacts.Put
 	// real store: the bytes determine the hash.
 	return artifacts.Revision{
 		ID:          "rev-" + params.Name,
+		RunID:       params.RunID,
 		Name:        params.Name,
 		ContentHash: artifacts.Hash(params.Bytes),
 	}, nil
@@ -87,7 +88,11 @@ func (store *recordingArtifactStore) Get(_ context.Context, _ string, revisionID
 	// with Current's returned id for the same name.
 	for name := range store.currentByName {
 		if "rev-"+name == revisionID {
-			return artifacts.Revision{ID: revisionID, Name: name}, nil
+			for _, put := range store.puts {
+				if put.Name == name {
+					return artifacts.Revision{ID: revisionID, RunID: put.RunID, Name: name}, nil
+				}
+			}
 		}
 	}
 	return artifacts.Revision{}, artifacts.ErrNoCurrentRevision

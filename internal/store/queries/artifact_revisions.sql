@@ -51,6 +51,11 @@ WHERE run_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true;
 -- serialize only on their own (run_id, name).
 SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE;
 
+-- name: LockRunForArtifactGateWrite :one
+-- A revision that changes a run gate takes an exclusive lock so its artifact
+-- write and state transition commit together before another gate answer.
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE;
+
 -- name: LockCurrentArtifactRevisionForName :one
 -- The same lookup as CurrentArtifactRevisionForName, but taking a row lock so
 -- the read-decide-write sequence in artifacts.SQLStore.Put is serialized

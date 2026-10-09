@@ -445,6 +445,7 @@ export function RunPage({
         artifacts(runID),
       ]);
       setItem(data);
+      if (data.state !== "running" || data.pause_requested_at) setPauseError("");
       setHistory(attempts);
       setRevisions(artifactRows);
       if (["awaiting_final_review", "done", "cancelled"].includes(data.state)) {
@@ -559,6 +560,8 @@ export function RunPage({
         : item
           ? "Updated just now · polling every 3s"
           : "Loading…";
+  const sourceApproval = item?.route_graph?.approvals.find((approval) => approval.unlocks === "source_write");
+  const planRevision = sourceApproval ? revisions.filter((revision) => revision.name === `${sourceApproval.stage}/${sourceApproval.artifact}`).length : 0;
   return (
     <Shell
       navigate={navigate}
@@ -656,8 +659,8 @@ export function RunPage({
               {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
-          {pauseError && <div className="run-notice fail" role="alert"><strong>Pause was not accepted. The run keeps running.</strong><code>{pauseError}</code></div>}
-          <RouteBlock item={item} />
+          {pauseError && item.state === "running" && !item.pause_requested_at && <div className="run-notice fail" role="alert"><strong>Pause request was not accepted. Refresh the run before trying again.</strong><code>{pauseError}</code></div>}
+          <RouteBlock item={item} planRevision={planRevision} />
           <RunActionPanel
             item={item}
             history={history}

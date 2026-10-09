@@ -148,6 +148,11 @@ func (runner *Runner) buildTransitionContext(
 		Budget:      runPack.Budgets.FixCycles,
 		FixerStages: runPack.FixerStages(),
 	}
+	if record.ActiveFixRequestRevisionID.Valid {
+		// The automatic reviewer-loop budget does not limit a correction
+		// requested by the person who owns the final decision.
+		transitionContext.Budget = int(^uint(0) >> 1)
+	}
 
 	if result != nil {
 		transitionContext.Status = string(result.Status)

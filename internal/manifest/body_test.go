@@ -345,8 +345,8 @@ func TestMergeBodies_SequentialPatchesPreserveEarlierContribution(t *testing.T) 
 	if afterB.Artifacts == nil || len(afterB.Artifacts.Outputs) != 2 {
 		t.Errorf("Artifacts.Outputs: A's revision lost; got %+v", afterB.Artifacts)
 	}
-	if afterB.Checks == nil || len(afterB.Checks.Results) != 2 {
-		t.Errorf("Checks.Results: A's build result lost; got %+v", afterB.Checks)
+	if afterB.Checks == nil || len(afterB.Checks.Results) != 1 || afterB.Checks.Results[0].Name != "test" {
+		t.Errorf("Checks.Results: latest boundary was not retained; got %+v", afterB.Checks)
 	}
 	if len(afterB.Missing) != 3 {
 		t.Errorf("Missing: union wrong; got %+v", afterB.Missing)
@@ -864,7 +864,9 @@ func TestCarriesLegacySections(t *testing.T) {
 	}
 }
 
-func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
+// TestMergeBodies_CheckEvidenceReplacesPreviousBoundary: a failing recheck
+// replaces the earlier pass and remains bound to its own commit.
+func TestMergeBodies_CheckEvidenceReplacesPreviousBoundary(t *testing.T) {
 	t.Parallel()
 	base := Body{Checks: &CheckEvidence{
 		SetVersion: "v1", Commit: "c1", MandatoryPassed: true,
@@ -884,8 +886,8 @@ func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 	if merged.Checks.Commit != "c2" {
 		t.Errorf("Commit should take patch value, got %q", merged.Checks.Commit)
 	}
-	if !merged.Checks.MandatoryPassed {
-		t.Error("MandatoryPassed must be monotonic (OR): once true, stays true")
+	if merged.Checks.MandatoryPassed {
+		t.Error("latest failing check boundary must clear MandatoryPassed")
 	}
 	if len(merged.Checks.Results) != 2 {
 		t.Fatalf("expected 2 deduped results, got %d: %+v", len(merged.Checks.Results), merged.Checks.Results)
@@ -897,19 +899,16 @@ func TestMergeBodies_CheckEvidenceAppendsDedupAndMonotonicPass(t *testing.T) {
 	}
 }
 
-// TestMergeBodies_CheckEvidenceRanIsMonotonic pins the Ran OR-merge: once any
-// delivery-boundary run executed checks (Ran=true), a later partial patch must
-// not flip it back to false. Ran distinguishes "the gate ran" from "no checks
-// defined"; a re-run after resume that records an empty set must not erase the
-// fact that checks ran earlier. This mirrors MandatoryPassed's monotonicity.
-func TestMergeBodies_CheckEvidenceRanIsMonotonic(t *testing.T) {
+// TestMergeBodies_CheckEvidenceEmptyLatestBoundary: a new empty check set
+// records Ran=false for its commit even when the prior boundary ran checks.
+func TestMergeBodies_CheckEvidenceEmptyLatestBoundary(t *testing.T) {
 	t.Parallel()
 	base := Body{Checks: &CheckEvidence{Commit: "c1", Ran: true, MandatoryPassed: true}}
-	// Patch with Ran=false (e.g. a re-run resolved an empty set) must not clear it.
+	// A re-run resolved an empty set for the new commit.
 	patch := Body{Checks: &CheckEvidence{Commit: "c2", Ran: false}}
 	merged := mergeBodies(base, patch)
-	if !merged.Checks.Ran {
-		t.Error("Ran must be monotonic (OR): once true, a later patch must not flip it back to false")
+	if merged.Checks.Ran || merged.Checks.MandatoryPassed {
+		t.Error("latest empty boundary must replace prior check outcomes")
 	}
 	if merged.Checks.Commit != "c2" {
 		t.Errorf("Commit scalar should take patch value, got %q", merged.Checks.Commit)

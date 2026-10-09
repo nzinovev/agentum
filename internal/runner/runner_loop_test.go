@@ -84,6 +84,7 @@ func (store *fakeStore) UpdateRunStage(_ context.Context, arg sqlc.UpdateRunStag
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.record.State = arg.State
+	store.record.StopReason = arg.StopReason
 	if arg.State != "running" {
 		store.record.PauseRequestedAt = sql.NullTime{}
 	}

@@ -1126,7 +1126,7 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 		return nil
 	}
 
-	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, record, runPack)
+	startStage, resumeSession, halt, err := runner.entryPoint(ctx, job, record, runPack, continuation.Text)
 	if err != nil {
 		return runner.failRun(ctx, record, err)
 	}
@@ -1698,7 +1698,7 @@ type haltDecision struct {
 // transition halts (fix_budget_exhausted / verdict_unreadable) — those are
 // controlled pauses, not errors, so they must not flow through err (which drive
 // turns into failRun).
-func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.Run, runPack *pack.Pack) (stage, resume string, halt *haltDecision, err error) {
+func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.Run, runPack *pack.Pack, continuationText string) (stage, resume string, halt *haltDecision, err error) {
 	switch job.Kind {
 	case "run":
 		// A fresh run starts at the pack entry, unless a previous attempt set
@@ -1731,11 +1731,22 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 				// base_ref, an unavailable checkout, a drifted pack directory)
 				// has no session to resume. Continue starts at the pack entry.
 				// Its first invocation receives any text in the Task section.
-				return runPack.Entry, "", nil, nil
+				return currentStageOrFallback(record.CurrentStage, runPack.Entry), "", nil, nil
 			}
 			return "", "", nil, fmt.Errorf("find resume session: %w", latestErr)
 		}
-		return record.CurrentStage.String, latest.SessionID.String, nil, nil
+		currentStageID := currentStageOrFallback(record.CurrentStage, runPack.Entry)
+		if currentStage, found := runPack.Stages[currentStageID]; found && currentStage.Terminal() && continuationText != "" {
+			// A terminal marker has no agent invocation. Re-enter the preceding
+			// stage with a fresh session so the human's note reaches an agent
+			// before checks run again. The terminal marker never owned the
+			// preceding invocation's saved session.
+			return latest.Stage, "", nil, nil
+		}
+		if latest.Stage == currentStageID {
+			return currentStageID, latest.SessionID.String, nil, nil
+		}
+		return currentStageID, "", nil, nil
 	case "advance":
 		// Past the gate: resolve the current stage's transition through the SAME
 		// resolver the loop path uses (D3: one resolver, not two). A halt
@@ -1855,8 +1866,8 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 		if requestErr != nil {
 			return requestErr
 		}
-		if requested {
-			pauseStage := currentStageOrFallback(run.record.CurrentStage, stageID)
+		if requested && continuationText == "" {
+			pauseStage := stageID
 			return runner.applyPauseDecision(ctx, run.record, Decision{Action: ActionPause,
 				FSMEvent: engine.EventStopUser, StopReason: "user_pause"}, pauseStage)
 		}
@@ -2067,11 +2078,24 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// invocation: reaching it means the pipeline is complete. Enforce the
 	// orchestrator-owned project checks first (against the last post-stage
 	// checkpoint, i.e. the worktree HEAD), then fire the final gate. A mandatory
-	// check failure blocks delivery: the run fails rather than reaching the
-	// review gate, and the check evidence in the manifest is the record.
+	// check failure blocks delivery; a human-requested fix pauses for another
+	// pass, while an initial failure fails the run. The manifest records the
+	// check outcome for the current commit.
 	if stage.Terminal() {
-		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+		updatedRecord, stageErr := runner.store.UpdateRunStage(ctx, sqlc.UpdateRunStageParams{
+			ID: run.record.ID, TenantID: run.record.TenantID,
+			CurrentStage: nullStr(stageID), State: string(engine.StateRunning),
+		})
+		if stageErr != nil {
+			return stageOutcome{}, fmt.Errorf("pin terminal stage before checks: %w", stageErr)
+		}
+		run.record = updatedRecord
+		checksPaused, err := runner.runDeliveryChecks(ctx, run)
+		if err != nil {
 			return stageOutcome{}, err
+		}
+		if checksPaused {
+			return stageOutcome{done: true}, nil
 		}
 		requested, requestErr := runner.pauseRequested(ctx, run.record)
 		if requestErr != nil {
@@ -2080,7 +2104,7 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if requested {
 			return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, Decision{
 				Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "user_pause",
-			}, currentStageOrFallback(run.record.CurrentStage, stageID))
+			}, stageID)
 		}
 		if err := runner.reachTerminalStage(ctx, run.record, checkoutPathOf(run.record, run.project), stageID); err != nil {
 			return stageOutcome{}, err
@@ -2266,8 +2290,12 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// terminal stage, and terminal stages short-circuit to the branch above
 		// before invoking the adapter. Should the final outcome arise here
 		// anyway, the project checks still gate delivery.
-		if err := runner.runDeliveryChecks(ctx, run); err != nil {
+		checksPaused, err := runner.runDeliveryChecks(ctx, run)
+		if err != nil {
 			return stageOutcome{}, err
+		}
+		if checksPaused {
+			return stageOutcome{done: true}, nil
 		}
 		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.record, checkoutPathOf(run.record, run.project), stageID)
 	}
@@ -2532,13 +2560,20 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			Count: transitionIn.findingsCount,
 		}
 	}
-	if pack.EffectiveRole(stageID, stage) == "fixer" && runner.art != nil {
-		fixRevision, fixErr := runner.art.Current(ctx, run.record.TenantID, run.record.ID, "final/fix-request.md")
-		if fixErr == nil {
-			routingBlock.FixRequest = &routing.FixRequestRef{
-				Path:       filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, "final"), "fix-request.md"),
-				RevisionID: fixRevision.ID,
-			}
+	stageRole := pack.EffectiveRole(stageID, stage)
+	if (stageRole == "fixer" || stageRole == "reviewer") && run.record.ActiveFixRequestRevisionID.Valid {
+		if runner.art == nil {
+			runner.log.Error("active human fix request has no artifact store", "run", run.record.ID)
+			return invocationOutcome{adapterErr: true}
+		}
+		fixRevision, fixErr := runner.art.Get(ctx, run.record.TenantID, run.record.ActiveFixRequestRevisionID.String)
+		if fixErr != nil || fixRevision.RunID != run.record.ID || fixRevision.Name != "final/fix-request.md" {
+			runner.log.Error("load active human fix request", "run", run.record.ID, "revision", run.record.ActiveFixRequestRevisionID.String, "error", fixErr)
+			return invocationOutcome{adapterErr: true}
+		}
+		routingBlock.FixRequest = &routing.FixRequestRef{
+			Path:       filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, "final"), "fix-request.md"),
+			RevisionID: fixRevision.ID,
 		}
 	}
 	block := routing.Render(routingBlock)
