@@ -139,6 +139,7 @@ one of the two counters is non-zero on any given registration.
 | `GET` | `/runs` | ✅ | `?project_id=&limit=&offset=` → `200 Run[]`. Human-waiting states (`paused_open_questions`, `paused_gate`, `paused_user_stop`, `awaiting_final_review`) come first. Each group is ordered by `updated_at DESC, id DESC`; pagination follows that order. |
 | `GET` | `/runs/{id}` | ✅ | → `200 Run` / `404 not_found`. The stored route source, reason, decision time, fallback and triage invocation id accompany the selected `pipeline_pack`. `route_graph` contains the pack description, version, entry, budgets, approvals and entry-first ordered nodes with gates and transitions. A pinned pack that cannot resolve gives `route_resolve_error {code,message}` and no graph while the response stays `200`; the read does not log each poll. `open_questions` comes from the last stage invocation in `paused_open_questions`. `plan_edits {used,max}` comes from the pinned pack and accepted `ask_to_edit` jobs; it is omitted when the pinned checkout or pack cannot be read. `worktree {state,path,head,dirty,dirty_entries,restore_target,last_error}`, `branch_state`, `branch_tip`, and `branch_last_error` describe local resources. `publication_target_ref` identifies the remote tracking ref for an off-target base pause. Resource states are `not_created`, `present`, `removing`, or `removed`; `removing` comes from the latest pending or running deletion job. A failed job returns `last_error {code:"job_failed",message}` and leaves the resource present. |
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
+| `POST` | `/runs/{id}/pause` | ✅ | request a stop while `running` → `200 Run` with `pause_requested_at`; the runner finishes the current invocation and checkpoint before entering `paused_user_stop` with `user_pause`. Other states return `409 illegal_transition`. Requires `run:pause`. |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
 | `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions` / `publication`. `checks` holds the commit the checks ran against, `ran`, `mandatory_passed`, per-check `results` (`name`, `required`, `status`), and `config` — the project config that defined them (`file`, `present_at_base`, `base_hash`, and `checkout_change` when the source checkout's copy differed at the start of the run — `added`, `removed`, `modified`, or `unreadable` when it could not be read; `present_at_base: false` means the registry was empty). Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
@@ -148,6 +149,7 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/worktree/reconcile` | ✅ | resolve a `worktree_uncommitted_changes` pause: `{mode: "resume_session" \| "keep_as_checkpoint" \| "discard_to_checkpoint", expected_head, confirm_uncommitted_loss?}` → `200 Run` / `400 bad_input` / `409 illegal_transition`. Requires `run:reconcile`. |
 | `POST` | `/runs/{id}/worktree/discard` | ✅ | remove a terminal or explicitly-stopped run's working tree — the tree only, never the branch: `{expected_head, discard_uncommitted?}` → `202 Run` / `400 bad_input` / `409 illegal_transition`. A terminal run with an unreadable worktree uses `{discard_unreadable:true,discard_uncommitted:true}` after confirming loss of all files; the job confines deletion to the run's worktree path and refuses a tree whose HEAD becomes readable. Requires `run:discard-worktree`. |
 | `POST` | `/runs/{id}/continue` | ✅ | continue a `paused_user_stop` run before its first invocation. An optional `{"text":…}` reaches the first stage's Task section. Uses the same Continue handler and validation as the invocation route. |
+| `POST` | `/runs/{id}/fix-request` | ✅ | at `awaiting_final_review`, `{"text":"required correction","result_commit":"<reviewed SHA>"}` → `200 Run` and a new fixer job. The request becomes a revision of `final/fix-request.md`; review, mandatory checks, publication, and final review run again. A stale commit returns `409 conflict`; blank or oversized text returns `400 bad_input`; credential-shaped text returns `422 bad_input`. Requires `run:request-fix`. |
 
 `base_ref` is the git ref the run builds against — **required and explicit**;
 an absent or blank value is a `400 bad_input`. Name the target branch of the
@@ -233,8 +235,8 @@ human-decision evidence commit atomically, exactly as a `continue` does.
 FSM event (the run lands in `cancelled`, branch preserved) but records a
 `rejected` decision on `run_approvals` and seals the manifest with
 `SealRejected`, so a sealed record cannot describe a rejected result as a plain
-abort. At the plan gate nothing ever unlocked source-write, so there is no
-source change to undo. Idempotent: a repeat reject matching the recorded
+abort. At a reopened plan gate, earlier source changes remain on the run
+branch. Idempotent: a repeat reject matching the recorded
 decision returns `200`, a conflicting one returns `409`.
 
 The pre-final-review state is `awaiting_final_review` (the previous
@@ -271,6 +273,9 @@ gate".
   "base_ref": "main",
   "base_commit": "a1b2... full SHA the run branched from, set on first run",
   "result_commit": "c3d4... full SHA pinned at the final gate (the commit the human reviews); empty before the gate",
+  "previous_result_commit": "previous reviewed SHA while a requested fix is in progress",
+  "active_fix_request_revision_id": "current final/fix-request.md revision during a human fix cycle",
+  "pause_requested_at": "2026-07-05T... while a running pause is pending",
   "branch": "agentum/<run-id>",
   "created_at": "2026-07-05T...",
   "updated_at": "2026-07-05T..."
@@ -283,6 +288,9 @@ reason is present only while stopped; `error` is present only in `failed`.
 `cancel_reason` is `rejected_at_plan` or `rejected_at_final_review` for a
 rejected run, and `cancelled` for an ordinary cancellation.
 Only `GET /runs/{id}` includes `open_questions`.
+Only `GET /runs/{id}` includes `failed_checks` (required check names at
+`fix_checks_failed`) and `approved_plan_revision_id` (the superseded approval
+at `plan_revision_drift`).
 Only `GET /runs/{id}` includes `route_graph` and `route_resolve_error`.
 `route_fallback` appears only after fallback. The graph and error are mutually
 exclusive.
@@ -404,23 +412,24 @@ re-entry, inherited on a resume).
 
 ## Gate actions — stop-point → continue semantics
 
-Humans act only at stop points. The three stop conditions and their
-continue-semantics (from §3.2) map 1:1 to these endpoints:
+Humans act at stop points. These gate and pause reasons determine the next
+action:
 
 | Stop reason | What happened | Endpoint to continue | Continues same session? |
 |---|---|---|---|
 | `open_questions` | agent asked; needs answers | `POST .../continue` | yes — resume |
 | `gate` | gate passed | `POST .../advance` | **no** — next stage is a fresh invocation |
-| `user_stop` | user paused it | `POST .../continue` | yes — resume |
+| `user_pause` | user requested a pause | `POST .../continue` | only when the current stage owns the last saved session; otherwise a fresh invocation |
+| `fix_checks_failed` / `human_fix_feedback_required` | a human-requested fix needs another attempt | `POST .../continue` with new developer feedback | fresh fixer invocation |
 
 The three gate **actions** from §3.4:
 
 | Method | Path | Status | Action |
 |---|---|---|---|
-| `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | resume after `open_questions` / `user_stop` (session-id resume; enqueues a `continue` job). Optional body `{"text": …}` carries new user text to the resumed session — see [Continue request](#continue-request) |
+| `POST` | `/runs/{id}/invocations/{iid}/continue` | ✅ | continue from `paused_open_questions` or `paused_user_stop` (enqueues a `continue` job). Reuses the latest session only when it belongs to `current_stage`; otherwise starts that stage afresh. Optional `{"text": …}` reaches its Task section — see [Continue request](#continue-request). |
 | `POST` | `/runs/{id}/invocations/{iid}/advance` | ✅ | pass a `gate` → next stage runs (enqueues an `advance` job). An approval with `within_stage: true` resumes the same stage after the short plan is approved. At the pack's plan approval stage the advance IS the approval and takes `{"expected_revision_id": "<plan revision>"}` (the `X-Revision-Id` of the plan the human read): omitted while the plan has a revision → `428 precondition_missing`; no longer current → `409 conflict`; either way nothing is enqueued or approved. A within-stage approval requires a plan revision and returns `409 illegal_transition` when none exists. Elsewhere the body is optional. |
 | `POST` | `/runs/{id}/invocations/{iid}/approve` | ✅ | final approval at `awaiting_final_review` → run done + memory commits. Pins `result_commit` at the gate. Idempotent. |
-| `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve: the human edits the artifact directly; the edit is the approval. Epic 2 |
+| `POST` | `/runs/{id}/invocations/{iid}/edit` | stub | edit-and-approve action. Edit an artifact with `PUT` below. |
 | `POST` | `/runs/{id}/invocations/{iid}/ask-to-edit` | ✅ | **Request changes at the plan gate**: body `{"text": "remarks", "target_revision_id": "<plan revision>"}` — `text` required, ≤ 32 KiB, credential-scanned → `422`; `target_revision_id` follows the same `428`/`409` rule as `advance` at the plan gate. Valid only at `paused_gate` on the pack's `source_write` approval stage before the first grant. The planner's session re-runs with the remarks in its Task section, the revised plan becomes a new revision needing its own approval, and the run pauses at the gate again. Bounded by the pack's `budgets.ask_to_edit`; a spent budget is `409 edit_budget_exhausted`. Requires `run:ask-to-edit`. |
 | `POST` | `/runs/{id}/invocations/{iid}/add-context` | stub | additive guidance; agent resumes (does not regenerate). Epic 2 |
 
@@ -443,15 +452,22 @@ after the original request, between explicit markers, and it reaches only the
 first invocation the continue job resumes — never the fresh sessions of later
 stages. It grants no capability, approves no plan, and changes no checks.
 
+For `fix_checks_failed` and `human_fix_feedback_required`, new non-blank
+developer feedback is required on every Continue. At `fix_checks_failed`, the
+runner also includes the failed mandatory check names in that invocation's
+Task section; the names and feedback share the 32 KiB text limit.
+
 | Input or state | Status | Code |
 |---|---|---|
 | `paused_open_questions` / `paused_user_stop`, non-empty `text` | `200` | run resumes; the `continue` job stores `{"text": …}` |
-| empty body, `{}`, `null`, absent or whitespace-only `text` | `200` | run resumes; the job payload is `{}` |
+| empty body, `{}`, `null`, absent or whitespace-only `text` at other pauses | `200` | run resumes; the job payload is `{}` |
 | any other run state | `409` | `illegal_transition` |
 | malformed JSON, unknown field, non-string `text` (null included), a second JSON object | `400` | `bad_input`; no state change, no enqueue |
 | invalid UTF-8, or `text` over 32 KiB (decoded) or body over 256 KiB | `400` | `bad_input`; no truncation |
 | credential-shaped `text` (scanner reject) | `422` | `bad_input`; the text is not stored |
-| non-empty `text` after an invocation with no captured session | `409` | `illegal_transition`; no enqueue |
+| non-empty `text` with no current-stage session | `200` | a fresh invocation of the current stage receives the text in its Task section |
+| empty `text` at `fix_checks_failed` or `human_fix_feedback_required` | `400` | `bad_input`; new developer feedback is required |
+| `text` at `fix_checks_failed` that leaves no room for the failed check names | `400` | `bad_input`; no enqueue |
 | non-empty `text` at `paused_user_stop` before the first invocation | `200` | the note reaches the first stage's Task section |
 
 The text is not trimmed or rewritten on the way to the model; only the
@@ -470,7 +486,7 @@ revisions surface.
 | `GET` | `/runs/{id}/artifacts/revisions/{rid}` | ✅ | one revision (metadata only). |
 | `GET` | `/runs/{id}/artifacts/revisions/{rid}/content` | ✅ | streams the blob bytes. |
 | `GET` | `/runs/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | current revision of `(run, name)` + its content. `X-Revision-Id` header carries the revision id to use as `expected_revision_id` on a PUT. 404 `not_found` when no current revision. |
-| `PUT` | `/runs/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | edit-and-approve via artifact write — creates a new revision (`actor = human`, no source invocation). The edit IS the approval at a `human_edit` gate. |
+| `PUT` | `/runs/{id}/invocations/{iid}/artifacts/{name...}` | ✅ | creates a new revision (`actor = human`, no source invocation). At a `human_edit` gate the edit is the approval. Editing a previously approved source-write plan while paused or at final review reopens its approval as `paused_gate` / `plan_revision_drift`; approve the new revision with `advance` and `expected_revision_id`. The revision and gate transition commit together. `final/fix-request.md` must be changed through `fix-request` or feedback on Continue. |
 
 The artifact route uses `{name...}` (multi-segment) so orchestrator-built names
 like `plan/plan.md`, `review/verdict.json`, and `<stage>/result.json` are

@@ -26,3 +26,11 @@ WHERE tenant_id = $1 AND run_id = $2 AND name = $3;
 SELECT * FROM run_approvals
 WHERE tenant_id = $1 AND run_id = $2
 ORDER BY created_at ASC, id ASC;
+
+-- name: RebindPlanApproval :one
+-- RebindPlanApproval replaces the sole plan decision when a revised plan is
+-- approved or rejected. Decision history is not stored in this row.
+UPDATE run_approvals SET artifact_revision_id = $4, user_id = $5,
+    decision = sqlc.arg(decision), actor = 'human', created_at = now()
+WHERE tenant_id = $1 AND run_id = $2 AND name = $3 AND decision = 'approved'
+RETURNING *;

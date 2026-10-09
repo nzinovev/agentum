@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/nzinovev/agentum/internal/authz"
 	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
+	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
@@ -66,12 +68,9 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // handleArtifactPut PUT /api/v1/runs/{id}/invocations/{iid}/artifacts/{name}
 // Creates a new revision from the request body. A human edit has no source
 // invocation (actor = human), unlike a stage capture. When the run is paused at
-// a human gate, the edit IS the approval, so a successful PUT also records a
-// GateDecision{decision: "edited"} on the manifest — a plain AddEvidence, since
-// this handler performs no FSM transition and needs no shared transaction. The
-// decision is recorded only at a gate: a PUT issued while the run is running or
-// terminal is a legitimate artifact edit but not a gate decision, and recording
-// one would be a false claim in a record whose purpose is to be trustworthy.
+// a human gate, a successful PUT records a GateDecision{decision: "edited"}
+// on the manifest. An edit of an approved plan reopens its approval gate;
+// other artifact edits do not change the run state.
 //
 // Precondition policy: when the artifact already has a current revision, the
 // request MUST carry expected_revision_id naming it. This prevents a blind
@@ -94,14 +93,44 @@ func (api *API) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 // being collapsed into "no current revision" — the latter would disable the
 // precondition without a sign and let a blind overwrite through.
 func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
-	principal, runID, ok := requireRunRead(w, r)
+	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunEditArtifact, "GetRun(artifact-put)")
 	if !ok {
 		return
 	}
 	if !api.requireArtifactStore(w) {
 		return
 	}
+	runPack, resolveErr := api.resolveRunPack(r.Context(), run)
+	if resolveErr != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, resolveErr.Error())
+		return
+	}
+	api.putArtifactRevision(w, r, principal, run, runPack)
+}
+
+// putArtifactRevision validates and stores a revision after the route guard
+// resolved the run. Isolating it keeps request-shape tests independent of DB
+// setup while the production handler always uses requireRunForAction.
+func (api *API) putArtifactRevision(w http.ResponseWriter, r *http.Request, principal authz.Principal, run sqlc.Run, runPack *pack.Pack) {
+	runID := run.ID
 	name := r.PathValue("name")
+	if name == "final/fix-request.md" {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "use fix-request at final review to replace this artifact")
+		return
+	}
+	var planApproval pack.Approval
+	var hasPlanApproval bool
+	if runPack != nil {
+		planApproval, hasPlanApproval = runPack.SourceWriteApproval()
+	}
+	isPlan := hasPlanApproval && name == planApproval.Stage+"/"+planApproval.Artifact
+	if isPlan && engine.RunState(run.State) != engine.StatePausedGate &&
+		engine.RunState(run.State) != engine.StatePausedOpenQuestions &&
+		engine.RunState(run.State) != engine.StatePausedUserStop &&
+		engine.RunState(run.State) != engine.StateAwaitingFinalReview {
+		writeError(w, http.StatusConflict, codeIllegalTransition, "plan edits require a paused run or final review")
+		return
+	}
 
 	// Limit the read so a huge body cannot exhaust memory before the store's
 	// own limits run. The store sizes its own rows; this is just the transport.
@@ -166,7 +195,11 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	revision, err := api.art.Put(r.Context(), artifacts.PutParams{
+	requiredRunState := ""
+	if isPlan {
+		requiredRunState = run.State
+	}
+	putParams := artifacts.PutParams{
 		TenantID:                principal.TenantID,
 		UserID:                  principal.UserID,
 		RunID:                   runID,
@@ -175,7 +208,38 @@ func (api *API) handleArtifactPut(w http.ResponseWriter, r *http.Request) {
 		Bytes:                   []byte(req.Content),
 		Actor:                   artifacts.ActorHuman, // no Source: a human edit has no invocation
 		ExpectedCurrentRevision: req.ExpectedRevisionID,
-	})
+		RequiredRunState:        requiredRunState,
+	}
+	if isPlan {
+		putParams.AfterRevision = func(ctx context.Context, queries *sqlc.Queries, revision artifacts.Revision) error {
+			approval, approvalErr := queries.GetApproval(ctx, sqlc.GetApprovalParams{
+				TenantID: principal.TenantID, RunID: runID, Name: planApproval.Name,
+			})
+			if errors.Is(approvalErr, sql.ErrNoRows) {
+				return nil
+			}
+			if approvalErr != nil {
+				return approvalErr
+			}
+			if approval.Decision != "approved" || approval.ArtifactRevisionID.String == revision.ID {
+				return nil
+			}
+			nextState, transitionErr := engine.Next(engine.RunState(run.State), engine.EventPlanEdited)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			_, reopenErr := queries.ReopenPlanGate(ctx, sqlc.ReopenPlanGateParams{
+				ID: run.ID, TenantID: principal.TenantID,
+				CurrentStage: sql.NullString{String: planApproval.Stage, Valid: true},
+				NextState:    string(nextState),
+			})
+			if errors.Is(reopenErr, sql.ErrNoRows) {
+				return artifacts.ErrRevisionConflict
+			}
+			return reopenErr
+		}
+	}
+	revision, err := api.art.Put(r.Context(), putParams)
 	if err != nil {
 		writeError(w, statusForArtifactStoreErr(err), codeForArtifactStoreErr(err), errForCaller(err))
 		return
@@ -193,8 +257,7 @@ const maxArtifactEditBytes = 16 << 20 // 16 MiB
 
 // recordHumanEditDecision records a GateDecision{decision: edited} for a
 // successful human artifact edit — but only when the run is actually paused at
-// a human gate. The edit endpoint is available regardless of run state (a
-// reviewer may inspect or tweak an artifact at many points), but a
+// a human gate. Other artifacts can be edited outside a gate, but a
 // GateDecision claims a human passed a gate. Recording one on a PUT issued
 // while the run is `running`, far from any gate, would be a false claim in a
 // record whose entire purpose is to be trustworthy: a reader would conclude a

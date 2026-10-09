@@ -1515,6 +1515,15 @@ code {
 
 .run-action-panel { grid-template-columns: minmax(0, 1fr) 200px; gap: 24px; padding: 14px 18px; }
 .run-action-side { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pause-pending-chip { padding: 3px 8px; border: 1px dashed #d89a3a; border-radius: 5px; color: #e0b268; font-size: 11px; }
+.run-pause-box, .run-fix-card { margin-top: 12px; padding: 10px 12px; border: 1px dashed #4a3a20; border-radius: 6px; background: #1c170e; overflow-wrap: anywhere; }
+.run-pause-box strong, .run-fix-card strong { display: block; margin-bottom: 5px; color: #e0b268; font-size: 12px; }
+.run-pause-box small, .run-fix-card small { display: block; margin-top: 7px; color: var(--muted); }
+.run-fix-card p { white-space: pre-wrap; max-height: 120px; overflow: auto; }
+.run-fix-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 0; margin: 10px 0 0; list-style: none; }
+.run-fix-steps li { display: flex; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid #2a3139; border-radius: 5px; color: var(--muted); font-size: 11px; }
+.run-fix-steps li[aria-current=step] { border-color: #2b3d63; background: #121925; color: #8fb2f5; }
+.run-stop-meta { margin-top: 10px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .run-action-side .danger-ghost { margin-top: 8px; border-top-color: #4a2a2f; }
 .run-action-side small { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .danger-ghost { min-height: 32px; padding: 6px 12px; border: 1px solid #4a2a2f; border-radius: 6px; background: transparent; color: #e08a94; cursor: pointer; }

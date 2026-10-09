@@ -189,10 +189,22 @@ func (sqlStore *SQLStore) commitRevision(
 	// Serialize against a gate answer on the same run: it updates the run row
 	// before reading the revision it binds to, so this write lands wholly
 	// before that read or after the answer commits — never in between.
-	if lockErr := qtx.LockRunForArtifactWrite(ctx, sqlc.LockRunForArtifactWriteParams{
-		ID: params.RunID, TenantID: params.TenantID,
-	}); lockErr != nil {
+	var runState string
+	var lockErr error
+	if params.AfterRevision != nil {
+		runState, lockErr = qtx.LockRunForArtifactGateWrite(ctx, sqlc.LockRunForArtifactGateWriteParams{
+			ID: params.RunID, TenantID: params.TenantID,
+		})
+	} else {
+		runState, lockErr = qtx.LockRunForArtifactWrite(ctx, sqlc.LockRunForArtifactWriteParams{
+			ID: params.RunID, TenantID: params.TenantID,
+		})
+	}
+	if lockErr != nil {
 		return Revision{}, fmt.Errorf("artifacts: lock run: %w", lockErr)
+	}
+	if params.RequiredRunState != "" && runState != params.RequiredRunState {
+		return Revision{}, fmt.Errorf("%w: run state changed to %s", ErrRevisionConflict, runState)
 	}
 	prior, hasPrior, priorErr := lockCurrent(ctx, qtx, params)
 	if priorErr != nil {
@@ -203,10 +215,16 @@ func (sqlStore *SQLStore) commitRevision(
 		return Revision{}, planErr
 	}
 	if plan.noop {
-		// Identical content under the same (run, name): return the existing
-		// revision rather than growing the chain with a revision that changed
-		// nothing. The transaction rolls back; it only ever read.
-		return fromRow(plan.current), nil
+		revision := fromRow(plan.current)
+		if params.AfterRevision != nil {
+			if afterErr := params.AfterRevision(ctx, qtx, revision); afterErr != nil {
+				return Revision{}, fmt.Errorf("artifacts: apply revision gate: %w", afterErr)
+			}
+			if commitErr := tx.Commit(); commitErr != nil {
+				return Revision{}, fmt.Errorf("artifacts: commit revision tx: %w", commitErr)
+			}
+		}
+		return revision, nil
 	}
 
 	if plan.hasCurrent {
@@ -250,11 +268,17 @@ func (sqlStore *SQLStore) commitRevision(
 		}
 		return Revision{}, fmt.Errorf("artifacts: insert revision: %w", insertErr)
 	}
+	revision := fromRow(row)
+	if params.AfterRevision != nil {
+		if afterErr := params.AfterRevision(ctx, qtx, revision); afterErr != nil {
+			return Revision{}, fmt.Errorf("artifacts: apply revision gate: %w", afterErr)
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return Revision{}, fmt.Errorf("artifacts: commit revision tx: %w", err)
 	}
-	return fromRow(row), nil
+	return revision, nil
 }
 
 // lockCurrent reads the current revision of (run, name) under a row lock.

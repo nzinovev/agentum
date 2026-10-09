@@ -24,10 +24,10 @@ import (
 
 // handleInvocationContinue accepts Continue at an invocation or before the
 // first invocation through POST /api/v1/runs/{id}/continue.
-// Resume after open_questions or user_stop. The body is an optional
-// continuation. Text reaches the resumed session, or the first stage when a
-// user_stop occurred before any invocation. An empty body, {}, or null
-// continues without new text. Every body
+// Continue resumes after open_questions or user_stop. Text reaches the
+// next invocation in the current stage. It uses the captured session when
+// one exists and the routing block for a fresh invocation otherwise.
+// An empty body, {}, or null continues without new text. Every body
 // rule — strict shape, UTF-8, byte budgets, the credentials scan — is checked
 // before the FSM transition, so a refused body leaves the run untouched.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
@@ -74,32 +74,38 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
-	// A captured session receives text after an invocation. Before the first
-	// invocation, a user-stop note reaches the first stage's Task section.
-	// A read failure returns 500 because it cannot establish either case.
-	if continuation.Text != "" {
-		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
-			RunID: run.ID, TenantID: run.TenantID,
-		})
-		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
-			logUnexpected(api.log, latestErr, "LatestStageForRun(continue)")
-			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
+	fixRetry := run.StopReason == stopReasonFixChecksFailed || run.StopReason == "human_fix_feedback_required"
+	if fixRetry && continuation.Text == "" {
+		writeError(w, http.StatusBadRequest, codeBadInput, "new developer feedback is required before retrying the fix")
+		return
+	}
+	humanFeedback := continuation.Text
+	if run.StopReason == stopReasonFixChecksFailed {
+		// The fixer receives both the person's new feedback and the
+		// orchestrator's failed check names in the next Task section. The two
+		// share the continuation budget, so feedback that leaves no room for
+		// the names is refused instead of being sent without them.
+		checkContext := "Previous mandatory project checks failed."
+		if failed := api.failedMandatoryChecks(r.Context(), run); len(failed) > 0 {
+			checkContext = "Previous mandatory project checks failed: " + strings.Join(failed, ", ")
+		}
+		feedbackBudget := taskinput.MaxContinuationTextBytes - len(checkContext) - 1
+		if len(continuation.Text) > feedbackBudget {
+			writeError(w, http.StatusBadRequest, codeBadInput,
+				fmt.Sprintf("feedback exceeds %d bytes; the failed check names share the continuation budget", feedbackBudget))
 			return
 		}
-		// A NULL session after an invocation has no delivery target. A user
-		// stop before the first invocation uses the first stage instead.
-		if (errors.Is(latestErr, sql.ErrNoRows) && engine.RunState(run.State) != engine.StatePausedUserStop) ||
-			(latestErr == nil && (!latest.SessionID.Valid || latest.SessionID.String == "")) {
-			writeError(w, http.StatusConflict, codeIllegalTransition,
-				"continue with text requires a captured session to resume; the latest invocation has none")
-			return
-		}
+		continuation.Text = checkContext + "\n" + continuation.Text
 	}
 	payload, marshalErr := continuation.Marshal()
 	if marshalErr != nil {
 		// Unreachable for this shape; a 500 keeps an invariant break from
 		// being reported as the author's fault.
 		writeError(w, http.StatusInternalServerError, codeInternal, marshalErr.Error())
+		return
+	}
+	if fixRetry {
+		api.resumeHumanFixWithFeedback(w, r, principal, run, event, gate, humanFeedback, payload)
 		return
 	}
 	updated, err := api.applyResume(r, run, event, "continue", payload,
@@ -111,6 +117,80 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toRunResponse(updated))
+}
+
+// resumeHumanFixWithFeedback stores each new developer comment as a revision
+// before queuing the fixer. The revision, active pointer, state transition,
+// job, and decision commit together so a retry never runs on an older note.
+func (api *API) resumeHumanFixWithFeedback(w http.ResponseWriter, r *http.Request, principal authz.Principal, run sqlc.Run, event engine.RunEvent, gate, feedback string, payload []byte) {
+	if !api.requireArtifactStore(w) {
+		return
+	}
+	const artifactName = "final/fix-request.md"
+	current, currentErr := api.art.Current(r.Context(), principal.TenantID, run.ID, artifactName)
+	if currentErr != nil {
+		writeError(w, statusForArtifactStoreErr(currentErr), codeForArtifactStoreErr(currentErr), errForCaller(currentErr))
+		return
+	}
+	if !run.ActiveFixRequestRevisionID.Valid || current.ID != run.ActiveFixRequestRevisionID.String {
+		writeError(w, http.StatusConflict, codeConflict, "human fix request changed; refresh the run")
+		return
+	}
+	// The request that opened this fix cycle, not the root of the artifact's
+	// revision chain: an earlier fix request of the same run is that root, and
+	// a follow-up built on it would hand the fixer a request already handled.
+	if !run.FixRequestOriginRevisionID.Valid {
+		writeError(w, http.StatusConflict, codeConflict, "human fix request changed; refresh the run")
+		return
+	}
+	original, originErr := api.art.Get(r.Context(), principal.TenantID, run.FixRequestOriginRevisionID.String)
+	if originErr != nil || original.RunID != run.ID || original.Name != artifactName {
+		writeError(w, http.StatusInternalServerError, codeInternal, "could not read the original human fix request")
+		return
+	}
+	previous, readErr := api.art.GetBytes(r.Context(), principal.TenantID, original.ID)
+	if readErr != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, readErr.Error())
+		return
+	}
+	nextState, transitionErr := engine.Next(engine.RunState(run.State), event)
+	if transitionErr != nil {
+		statusForTransition(w, transitionErr)
+		return
+	}
+	// Keep the first request and this attempt's comment in the active artifact.
+	// Older follow-ups remain in the revision chain without making each retry
+	// grow the current artifact indefinitely.
+	content := append(append([]byte{}, previous...), []byte("\n\n## Developer follow-up\n\n"+feedback+"\n")...)
+	var updated sqlc.Run
+	_, putErr := api.art.Put(r.Context(), artifacts.PutParams{
+		TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
+		Name: artifactName, Kind: "human_fix_request", Bytes: content, Actor: artifacts.ActorHuman,
+		ExpectedCurrentRevision: current.ID, RequiredRunState: string(engine.StatePausedUserStop),
+		AfterRevision: func(ctx context.Context, queries *sqlc.Queries, revision artifacts.Revision) error {
+			_, applyErr := api.applyTransition(ctx, queries, principal, lifecycleTransition{
+				run: run, next: nextState, jobKind: "continue", jobPayload: payload,
+				decision: gateDecisionPatch(run, principal, gate, decisionContinued), policy: recordStrict,
+			})
+			if applyErr != nil {
+				return applyErr
+			}
+			var bindErr error
+			updated, bindErr = queries.SetActiveFixRequestRevision(ctx, sqlc.SetActiveFixRequestRevisionParams{
+				ID: run.ID, TenantID: principal.TenantID,
+				ActiveFixRequestRevisionID: sql.NullString{String: revision.ID, Valid: true},
+			})
+			if errors.Is(bindErr, sql.ErrNoRows) {
+				return artifacts.ErrRevisionConflict
+			}
+			return bindErr
+		},
+	})
+	if putErr != nil {
+		writeError(w, statusForArtifactStoreErr(putErr), codeForArtifactStoreErr(putErr), errForCaller(putErr))
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))
@@ -479,6 +559,7 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 	// not resolve (the run failed on that very pack, or its checkout moved)
 	// must not turn an illegal-state 409 into a 500.
 	rejectName := approvalNameFinalReview
+	var revisedPlan planApproval
 	if atPlanGate {
 		planName, nameErr := api.planApprovalName(r.Context(), run)
 		if nameErr != nil {
@@ -494,6 +575,15 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 			// than guessing. (Should not happen for the shipped pack, but a pack
 			// author may pause at a non-approval gate.)
 			rejectName = approvalNameFinalReview
+		}
+		if run.StopReason == "plan_revision_drift" {
+			var atApproval bool
+			var approvalErr error
+			revisedPlan, atApproval, approvalErr = api.planApprovalForStage(r.Context(), run, currentStageOr(run.CurrentStage, ""))
+			if approvalErr != nil || !atApproval {
+				writeError(w, http.StatusInternalServerError, codeInternal, "could not resolve the revised plan approval")
+				return
+			}
 		}
 	}
 	if !atFinalGate && !atPlanGate {
@@ -536,9 +626,30 @@ func (api *API) handleRejectRun(w http.ResponseWriter, r *http.Request) {
 		// with a 409-shape error instead of dropping the reject. This is
 		// the case the review flagged: reject at a non-approval paused_gate used
 		// to hardcode "plan", collide, and seal "approved".
-		if existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
+		existing, getErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
 			TenantID: run.TenantID, RunID: run.ID, Name: rejectName,
-		}); getErr == nil && existing.Decision != "rejected" {
+		})
+		if getErr != nil && !errors.Is(getErr, sql.ErrNoRows) {
+			return getErr
+		}
+		if getErr == nil && existing.Decision == "approved" && revisedPlan.name != "" {
+			currentPlan, revisionErr := qtx.CurrentArtifactRevisionForName(r.Context(), sqlc.CurrentArtifactRevisionForNameParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: revisedPlan.stage + "/" + revisedPlan.artifact,
+			})
+			if revisionErr != nil {
+				return revisionErr
+			}
+			if _, rebindErr := qtx.RebindPlanApproval(r.Context(), sqlc.RebindPlanApprovalParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: rejectName,
+				ArtifactRevisionID: sql.NullString{String: currentPlan.ID, Valid: true},
+				UserID:             principal.UserID, Decision: "rejected",
+			}); rebindErr != nil {
+				return rebindErr
+			}
+			updated = transitioned
+			return nil
+		}
+		if getErr == nil && existing.Decision != "rejected" {
 			return conflictingGateDecision{name: rejectName, existing: existing.Decision}
 		}
 		if _, createErr := qtx.CreateApproval(r.Context(), sqlc.CreateApprovalParams{
@@ -807,6 +918,22 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 				return staleRevisionError{expected: approval.expectedRevisionID, current: revisionID.String}
 			}
 			if approval.verifyOnly {
+				updated = transitioned
+				return nil
+			}
+			priorApproval, priorErr := qtx.GetApproval(r.Context(), sqlc.GetApprovalParams{
+				TenantID: run.TenantID, RunID: run.ID, Name: approval.name,
+			})
+			if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
+				return priorErr
+			}
+			if priorErr == nil && priorApproval.Decision == "approved" && priorApproval.ArtifactRevisionID != revisionID {
+				if _, rebindErr := qtx.RebindPlanApproval(r.Context(), sqlc.RebindPlanApprovalParams{
+					TenantID: run.TenantID, RunID: run.ID, Name: approval.name,
+					ArtifactRevisionID: revisionID, UserID: principal.UserID, Decision: "approved",
+				}); rebindErr != nil {
+					return rebindErr
+				}
 				updated = transitioned
 				return nil
 			}

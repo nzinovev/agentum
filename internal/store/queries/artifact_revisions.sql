@@ -41,7 +41,7 @@ SELECT * FROM artifact_revisions WHERE id = $1 AND tenant_id = $2;
 SELECT * FROM artifact_revisions
 WHERE run_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true;
 
--- name: LockRunForArtifactWrite :exec
+-- name: LockRunForArtifactWrite :one
 -- Take a share lock on the run row before writing one of its artifact
 -- revisions. A gate answer updates the run row before it reads the plan
 -- revision it binds to, so a concurrent write either commits before that read
@@ -49,7 +49,12 @@ WHERE run_id = $1 AND tenant_id = $2 AND name = $3 AND is_current = true;
 -- create has no revision row to lock and can land between the read and the
 -- commit. Share locks do not block each other: concurrent revision writes
 -- serialize only on their own (run_id, name).
-SELECT id FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE;
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE;
+
+-- name: LockRunForArtifactGateWrite :one
+-- A revision that changes a run gate takes an exclusive lock so its artifact
+-- write and state transition commit together before another gate answer.
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE;
 
 -- name: LockCurrentArtifactRevisionForName :one
 -- The same lookup as CurrentArtifactRevisionForName, but taking a row lock so

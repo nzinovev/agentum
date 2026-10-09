@@ -104,6 +104,63 @@ func TestEnsurePublicationIsIdempotentPerRun(t *testing.T) {
 	}
 }
 
+// TestPublicationUpdateWaitsForLiveAttempt: a new result remains queued while
+// the previous network attempt holds a lease, then claims the new commit.
+func TestPublicationUpdateWaitsForLiveAttempt(t *testing.T) {
+	handle := dbtest.Store(t)
+	runID := insertPublicationFixture(t, handle.Store.DB, "update-during-publish")
+	first := ensurePublication(t, handle.Queries, runID)
+	claimed, err := handle.Queries.ClaimPublication(t.Context(), sqlc.ClaimPublicationParams{
+		TenantID: publicationTestTenantID, RunID: runID, RequestID: first.RequestID,
+		LeaseOwner:     sql.NullString{String: "worker-a", Valid: true},
+		LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nextCommit = "abcdef0123456789abcdef0123456789abcdef01"
+	if _, err := handle.Queries.SetResultCommit(t.Context(), sqlc.SetResultCommitParams{
+		ID: runID, TenantID: publicationTestTenantID,
+		ResultCommit: sql.NullString{String: nextCommit, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Queries.RequestPublication(t.Context(), sqlc.RequestPublicationParams{
+		TenantID: publicationTestTenantID, RunID: runID,
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("active lease request error = %v, want no rows", err)
+	}
+	queued, err := handle.Queries.QueuePublicationUpdate(t.Context(), sqlc.QueuePublicationUpdateParams{
+		TenantID: publicationTestTenantID, RunID: runID,
+	})
+	if err != nil || queued.PendingCommit.String != nextCommit || queued.PublishedCommit != first.PublishedCommit {
+		t.Fatalf("queued update = %+v, err = %v", queued, err)
+	}
+	completed, err := handle.Queries.RecordPublicationSuccess(t.Context(), sqlc.RecordPublicationSuccessParams{
+		TenantID: publicationTestTenantID, RunID: runID, Attempts: claimed.Attempts,
+		LeaseOwner: claimed.LeaseOwner, TargetHost: "github.com", TargetOwner: "owner",
+		TargetRepository: "repo", BaseBranch: "main",
+		PrNumber: sql.NullInt32{Int32: 12, Valid: true},
+	})
+	if err != nil || completed.State != "pending" || completed.RequestID != first.RequestID+1 {
+		t.Fatalf("completed old attempt = %+v, err = %v", completed, err)
+	}
+	lost, err := handle.Queries.FindStalePublications(t.Context(), sqlc.FindStalePublicationsParams{
+		TenantID: publicationTestTenantID, Attempts: 10,
+	})
+	if err != nil || len(lost) != 1 || lost[0].ID != completed.ID {
+		t.Fatalf("deferred update not visible to reconciler: %+v, err = %v", lost, err)
+	}
+	next, err := handle.Queries.ClaimPublication(t.Context(), sqlc.ClaimPublicationParams{
+		TenantID: publicationTestTenantID, RunID: runID, RequestID: completed.RequestID,
+		LeaseOwner:     sql.NullString{String: "worker-b", Valid: true},
+		LeaseExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil || next.PublishedCommit != nextCommit || next.PendingCommit.Valid {
+		t.Fatalf("next attempt = %+v, err = %v", next, err)
+	}
+}
+
 // TestClaimPublicationExcludesASecondWorkerAndHonoursAnExpiredLease pins the
 // lease's two sides: while a live lease is held a second claim reads no row,
 // and once the lease has expired the row is claimable again — its worker

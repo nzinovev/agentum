@@ -27,6 +27,10 @@ Read and reconcile all of the following:
 4. The latest `implement` and `fix` handoffs, at the paths in the routing
    block's *Prior stage artifacts* section.
 5. `AGENTS.md`, applicable nested instructions, and the repository code itself.
+6. If the routing block has a *Human fix request to address* section, read that
+   artifact. Verify the requested correction against the current diff and
+   treat it as part of the human's final-review feedback. If it conflicts with
+   the approved plan, report the conflict as a blocker requiring plan revision.
 
 The routing block's *Project checks* section tells you which checks the
 orchestrator will run at the delivery boundary. Their future execution is not

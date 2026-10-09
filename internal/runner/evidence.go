@@ -752,7 +752,7 @@ func (runner *Runner) syncRevisionsIntoWorktree(ctx context.Context, run stageRu
 // from the final-review stage list: they must never enter checkpoint commits.
 func isArtifactDirKind(kind string) bool {
 	switch kind {
-	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat", "pr_description":
+	case "result_json", "verdict_json", "plan_md", "diff", "diff_stat", "pr_description", "human_fix_request":
 		return true
 	}
 	return false

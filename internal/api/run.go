@@ -45,28 +45,40 @@ type runResponse struct {
 	// PipelinePackOrigin says where the executed pack's bytes came from —
 	// builtin, project, or project+builtin — pinned with the base_commit the
 	// pack was read from. Empty until the run starts and resolves its pack.
-	PipelinePackOrigin   string            `json:"pipeline_pack_origin"`
-	Title                string            `json:"title"`
-	Description          string            `json:"description"`
-	Overrides            json.RawMessage   `json:"overrides"`
-	State                string            `json:"state"`
-	CurrentStage         string            `json:"current_stage"`
-	StopReason           string            `json:"stop_reason"`
-	Error                string            `json:"error"`
-	CancelReason         string            `json:"cancel_reason"`
-	OpenQuestions        *[]string         `json:"open_questions,omitempty"`
-	PlanEdits            *planEditBudget   `json:"plan_edits,omitempty"`
-	Worktree             *runWorktreeView  `json:"worktree,omitempty"`
-	BranchState          string            `json:"branch_state,omitempty"`
-	BranchTip            string            `json:"branch_tip,omitempty"`
-	BranchLastError      *runResourceError `json:"branch_last_error,omitempty"`
-	PublicationTargetRef string            `json:"publication_target_ref,omitempty"`
-	BaseRef              string            `json:"base_ref"`
-	BaseCommit           string            `json:"base_commit"`
-	ResultCommit         string            `json:"result_commit"`
-	Branch               string            `json:"branch"`
-	CreatedAt            string            `json:"created_at"`
-	UpdatedAt            string            `json:"updated_at"`
+	PipelinePackOrigin     string             `json:"pipeline_pack_origin"`
+	Title                  string             `json:"title"`
+	Description            string             `json:"description"`
+	Overrides              json.RawMessage    `json:"overrides"`
+	State                  string             `json:"state"`
+	CurrentStage           string             `json:"current_stage"`
+	StopReason             string             `json:"stop_reason"`
+	Error                  string             `json:"error"`
+	CancelReason           string             `json:"cancel_reason"`
+	OpenQuestions          *[]string          `json:"open_questions,omitempty"`
+	PlanEdits              *planEditBudget    `json:"plan_edits,omitempty"`
+	Worktree               *runWorktreeView   `json:"worktree,omitempty"`
+	BranchState            string             `json:"branch_state,omitempty"`
+	BranchTip              string             `json:"branch_tip,omitempty"`
+	BranchLastError        *runResourceError  `json:"branch_last_error,omitempty"`
+	PublicationTargetRef   string             `json:"publication_target_ref,omitempty"`
+	BaseRef                string             `json:"base_ref"`
+	BaseCommit             string             `json:"base_commit"`
+	ResultCommit           string             `json:"result_commit"`
+	PreviousResultCommit   string             `json:"previous_result_commit,omitempty"`
+	ActiveFixRequestID     string             `json:"active_fix_request_revision_id,omitempty"`
+	FailedChecks           []string           `json:"failed_checks,omitempty"`
+	PauseRequestedAt       string             `json:"pause_requested_at,omitempty"`
+	ApprovedPlanRevisionID string             `json:"approved_plan_revision_id,omitempty"`
+	Checkpoint             *runCheckpointView `json:"checkpoint,omitempty"`
+	Branch                 string             `json:"branch"`
+	CreatedAt              string             `json:"created_at"`
+	UpdatedAt              string             `json:"updated_at"`
+}
+
+type runCheckpointView struct {
+	Label  string `json:"label"`
+	Commit string `json:"commit"`
+	At     string `json:"at"`
 }
 
 func toRunResponse(run sqlc.Run) runResponse {
@@ -93,12 +105,17 @@ func toRunResponse(run sqlc.Run) runResponse {
 		BaseRef:                 run.BaseRef,
 		BaseCommit:              nullStringOr(run.BaseCommit),
 		ResultCommit:            nullStringOr(run.ResultCommit),
+		PreviousResultCommit:    nullStringOr(run.PreviousResultCommit),
+		ActiveFixRequestID:      nullStringOr(run.ActiveFixRequestRevisionID),
 		Branch:                  worktree.BranchFor(run.ID),
 		CreatedAt:               run.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:               run.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if run.RouteDecidedAt.Valid {
 		response.RouteDecidedAt = run.RouteDecidedAt.Time.UTC().Format(time.RFC3339Nano)
+	}
+	if run.PauseRequestedAt.Valid {
+		response.PauseRequestedAt = run.PauseRequestedAt.Time.UTC().Format(time.RFC3339Nano)
 	}
 	if run.RouteFallbackCode != "" {
 		response.RouteFallback = &runResourceError{Code: run.RouteFallbackCode, Message: run.RouteFallbackMessage}
@@ -361,6 +378,35 @@ func (api *API) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		logUnexpected(api.log, err, "populateRunReadState")
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return
+	}
+	if run.State == string(engine.StatePausedUserStop) || run.State == string(engine.StatePausedGate) {
+		checkpoint, checkpointErr := api.queries.LatestCheckpointForRun(r.Context(), sqlc.LatestCheckpointForRunParams{RunID: run.ID, TenantID: run.TenantID})
+		if checkpointErr == nil {
+			response.Checkpoint = &runCheckpointView{Label: checkpoint.Label, Commit: checkpoint.CommitSha, At: checkpoint.CreatedAt.UTC().Format(time.RFC3339Nano)}
+		} else if !errors.Is(checkpointErr, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, codeInternal, checkpointErr.Error())
+			return
+		}
+	}
+	if run.StopReason == stopReasonFixChecksFailed {
+		response.FailedChecks = api.failedMandatoryChecks(r.Context(), run)
+	}
+	if run.StopReason == "plan_revision_drift" {
+		approvalName, nameErr := api.planApprovalName(r.Context(), run)
+		if nameErr != nil {
+			writeError(w, http.StatusInternalServerError, codeInternal, nameErr.Error())
+			return
+		}
+		if approvalName != "" {
+			approval, approvalErr := api.queries.GetApproval(r.Context(), sqlc.GetApprovalParams{TenantID: run.TenantID, RunID: run.ID, Name: approvalName})
+			if approvalErr == nil {
+				response.ApprovedPlanRevisionID = nullStringOr(approval.ArtifactRevisionID)
+			}
+			if approvalErr != nil && !errors.Is(approvalErr, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, codeInternal, approvalErr.Error())
+				return
+			}
+		}
 	}
 	if run.State == string(engine.StatePausedOpenQuestions) {
 		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{RunID: run.ID, TenantID: run.TenantID})

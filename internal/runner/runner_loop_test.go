@@ -75,12 +75,19 @@ func (store *fakeStore) UpdateRunState(_ context.Context, arg sqlc.UpdateRunStat
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.record.State = arg.State
+	if arg.State != "running" {
+		store.record.PauseRequestedAt = sql.NullTime{}
+	}
 	return store.record, nil
 }
 func (store *fakeStore) UpdateRunStage(_ context.Context, arg sqlc.UpdateRunStageParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.record.State = arg.State
+	store.record.StopReason = arg.StopReason
+	if arg.State != "running" {
+		store.record.PauseRequestedAt = sql.NullTime{}
+	}
 	if arg.CurrentStage.Valid {
 		store.record.CurrentStage = arg.CurrentStage
 	}
@@ -269,6 +276,31 @@ func (store *fakeStore) EnsurePublication(_ context.Context, arg sqlc.EnsurePubl
 	}
 	store.publications = append(store.publications, row)
 	return row, nil
+}
+
+func (store *fakeStore) RequestPublication(_ context.Context, arg sqlc.RequestPublicationParams) (sqlc.RunPublication, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.publications) == 0 {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
+	if store.publications[0].State == "publishing" {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
+	store.publications[0].State = "pending"
+	store.publications[0].RequestID++
+	store.publications[0].PublishedCommit = store.record.ResultCommit.String
+	return store.publications[0], nil
+}
+
+func (store *fakeStore) QueuePublicationUpdate(_ context.Context, arg sqlc.QueuePublicationUpdateParams) (sqlc.RunPublication, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.publications) == 0 || store.publications[0].State != "publishing" {
+		return sqlc.RunPublication{}, sql.ErrNoRows
+	}
+	store.publications[0].PendingCommit = sql.NullString{String: store.record.ResultCommit.String, Valid: true}
+	return store.publications[0], nil
 }
 
 // approvalKey is the map key for fakeStore.approvals: runID + "/" + name.

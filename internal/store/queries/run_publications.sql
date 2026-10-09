@@ -21,13 +21,29 @@ SELECT * FROM run_publications
 WHERE tenant_id = $1 AND run_id = $2;
 
 -- name: RequestPublication :one
--- RequestPublication starts an explicit retry and invalidates older queued jobs.
--- A concurrent claim with a live lease refuses the request atomically.
+-- RequestPublication starts an explicit retry or a new result and invalidates
+-- older queued jobs. A live lease defers a new result through
+-- QueuePublicationUpdate instead of replacing the commit in flight.
 UPDATE run_publications
 SET state = 'pending', request_id = request_id + 1,
+	 published_commit = COALESCE((SELECT result_commit FROM runs WHERE runs.id = run_publications.run_id AND runs.tenant_id = run_publications.tenant_id), run_publications.published_commit),
+     pending_commit = NULL,
     lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-WHERE tenant_id = $1 AND run_id = $2
+WHERE run_publications.tenant_id = $1 AND run_publications.run_id = $2
   AND (state <> 'publishing' OR lease_expires_at IS NULL OR lease_expires_at < now())
+RETURNING *;
+
+-- name: QueuePublicationUpdate :one
+-- A new result can arrive while the prior publication holds a live lease.
+-- Keep that attempt's commit intact; its completion opens a pending request.
+UPDATE run_publications
+SET pending_commit = (SELECT result_commit FROM runs
+                      WHERE runs.id = run_publications.run_id AND runs.tenant_id = run_publications.tenant_id),
+    updated_at = now()
+WHERE run_publications.tenant_id = $1 AND run_publications.run_id = $2
+  AND state = 'publishing' AND lease_expires_at > now()
+  AND EXISTS (SELECT 1 FROM runs WHERE runs.id = run_publications.run_id
+              AND runs.tenant_id = run_publications.tenant_id AND runs.result_commit IS NOT NULL)
 RETURNING *;
 
 -- name: ClaimPublication :one
@@ -38,6 +54,8 @@ RETURNING *;
 -- NULL leases are recoverable because no worker holds a valid lease then.
 UPDATE run_publications
 SET state = 'publishing',
+    published_commit = COALESCE(pending_commit, published_commit),
+    pending_commit = NULL,
     attempts = attempts + 1,
     lease_owner = $3,
     lease_expires_at = $4,
@@ -52,11 +70,12 @@ RETURNING *;
 -- Record a completed publication: the frozen target (written only when the
 -- row does not carry one yet — the target is derived once and a later attempt
 -- must not re-derive it against a moved remote), the pull request identity,
--- and both outcome marks. State published requires branch_pushed_at and
--- published_at together; the lease is released. Only the current attempt
--- and lease owner can record the outcome.
+-- and both outcome marks. A waiting newer commit changes the state to pending
+-- for the reconciler; otherwise this attempt ends as published. Only the
+-- current attempt and lease owner can record the outcome.
 UPDATE run_publications
-SET state = 'published',
+SET state = CASE WHEN pending_commit IS NOT NULL THEN 'pending' ELSE 'published' END,
+    request_id = request_id + CASE WHEN pending_commit IS NOT NULL THEN 1 ELSE 0 END,
     draft_rejected = false,
     target_host = COALESCE(NULLIF(target_host, ''), $3),
     target_owner = COALESCE(NULLIF(target_owner, ''), $4),
@@ -79,13 +98,15 @@ RETURNING *;
 -- name: RecordPublicationFailure :one
 -- Record a refused publication: the reason code from the closed vocabulary,
 -- a safe diagnostic, and the state — failed when a retry can clear the
--- reason, blocked when it cannot. branch_pushed_at keeps an earlier
+-- reason, blocked when it cannot, or pending when a newer result waits.
+-- branch_pushed_at keeps an earlier
 -- successful push: an attempt can push the branch and still fail the pull
 -- request, and the row must keep the half that succeeded. The lease is
 -- released. A draft refusal survives other failures until a successful delivery.
 -- Only the current attempt and lease owner can record the outcome.
 UPDATE run_publications
-SET state = $3,
+SET state = CASE WHEN pending_commit IS NOT NULL THEN 'pending' ELSE $3 END,
+    request_id = request_id + CASE WHEN pending_commit IS NOT NULL THEN 1 ELSE 0 END,
     draft_rejected = draft_rejected OR sqlc.arg(draft_rejected)::boolean,
     last_error_code = $4,
     last_error_message = $5,

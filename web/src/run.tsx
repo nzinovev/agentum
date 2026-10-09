@@ -7,6 +7,7 @@ import {
   invocations,
   finalReview,
   publication,
+  postRun,
   savePlan,
   project,
   run,
@@ -237,7 +238,7 @@ function ArtifactViewer({
           <Problem error={saveError} title="Plan was not saved. Your edited text is kept." />)}
         {saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && <div className="run-current-plan"><strong>Current plan · revision {short(baseRevisionID, 8)}</strong>{currentPlan !== null ? <pre>{currentPlan}</pre> : <button className="secondary" disabled={saving} onClick={() => void reloadCurrentPlan()}>Reload current revision</button>}{!!revisionError && <Problem error={revisionError} title="Current revision could not be loaded." />}</div>}
         <textarea className="plan-editor" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={!!saveError} />
-        <div className="run-form-footer"><button className="primary" disabled={saving || !canEdit || draft === text || !draft.trim() || saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && currentPlan === null} onClick={() => void save()}>{saving ? "Saving…" : `Save as rev ${nextRevision}`}</button><button className="secondary" disabled={saving} onClick={stopEditing}>Discard changes</button><span>Saving creates a new revision. The run stays at the gate until you approve it.</span></div>
+        <div className="run-form-footer"><button className="primary" disabled={saving || !canEdit || draft === text || !draft.trim() || saveError instanceof ApiError && (saveError.status === 409 || saveError.status === 428) && currentPlan === null} onClick={() => void save()}>{saving ? "Saving…" : `Save as rev ${nextRevision}`}</button><button className="secondary" disabled={saving} onClick={stopEditing}>Discard changes</button><span>Saving creates a new revision. If this plan was approved, approve the new revision before source work resumes.</span></div>
       </> : kind === "md" ? (
         <div className="markdown">
           <ReactMarkdown skipHtml>{text}</ReactMarkdown>
@@ -434,6 +435,8 @@ export function RunPage({
   const [savedRevisionID, setSavedRevisionID] = useState("");
   const [cancelSignal, setCancelSignal] = useState(0);
   const [removalPending, setRemovalPending] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [pauseError, setPauseError] = useState("");
   const load = useCallback(async () => {
     try {
       const data = await run(runID);
@@ -442,6 +445,7 @@ export function RunPage({
         artifacts(runID),
       ]);
       setItem(data);
+      if (data.state !== "running" || data.pause_requested_at) setPauseError("");
       setHistory(attempts);
       setRevisions(artifactRows);
       if (["awaiting_final_review", "done", "cancelled"].includes(data.state)) {
@@ -449,8 +453,8 @@ export function RunPage({
           setReview(result);
           if (result.diff?.stat_revision_id) artifactContent(runID, result.diff.stat_revision_id).then(setStat).catch(() => setStat(""));
         }).catch(() => setReview(null));
-      }
-      if (["awaiting_final_review", "done", "cancelled"].includes(data.state)) publication(runID).then(setDelivery).catch(() => setDelivery({ state: "unavailable" }));
+      } else { setReview(null); setStat(""); }
+      if (["awaiting_final_review", "done", "cancelled"].includes(data.state) || data.state === "running" && !!data.previous_result_commit) publication(runID).then(setDelivery).catch(() => setDelivery({ state: "unavailable" }));
       setLastGood(new Date().toISOString());
       setStale(null);
       setError(null);
@@ -540,6 +544,14 @@ export function RunPage({
       setStarting(false);
     }
   };
+  const pause = async () => {
+    setPausing(true); setPauseError("");
+    try { await postRun(runID, "pause"); await load(); }
+    catch (caught) {
+      setPauseError(caught instanceof ApiError ? `${caught.status} ${caught.code} · ${caught.message}` : String(caught));
+      await load();
+    } finally { setPausing(false); }
+  };
   const poll =
     item && terminalStates.has(item.state) && !removalPending && !(["done", "cancelled"].includes(item.state) && item.branch_state === "present" && !item.result_commit) && !["pending", "publishing"].includes(delivery?.state || "")
       ? "Final state · polling stopped"
@@ -548,6 +560,8 @@ export function RunPage({
         : item
           ? "Updated just now · polling every 3s"
           : "Loading…";
+  const sourceApproval = item?.route_graph?.approvals.find((approval) => approval.unlocks === "source_write");
+  const planRevision = sourceApproval ? revisions.filter((revision) => revision.name === `${sourceApproval.stage}/${sourceApproval.artifact}`).length : 0;
   return (
     <Shell
       navigate={navigate}
@@ -613,6 +627,7 @@ export function RunPage({
               <h1>{item.title}</h1>
               <div className="run-meta">
                 <Badge state={item.state} />
+                {item.state === "running" && item.pause_requested_at && <span className="pause-pending-chip" role="status">Pause requested</span>}
                 <span>
                   Stage <code>{item.current_stage || (item.state === "running" && !item.route_source ? "choosing route" : "—")}{item.route_graph?.progress?.current_step && ` · ${item.route_graph.progress.current_step}`}</code>
                 </span>
@@ -640,10 +655,12 @@ export function RunPage({
                   {starting ? "Starting…" : "Start run"}
                 </button>
               )}
+              {item.state === "running" && <button className="secondary" disabled={!!stale || pausing || !!item.pause_requested_at} onClick={() => void pause()}>{pausing ? "Requesting…" : item.pause_requested_at ? "Pause requested" : "Pause run"}</button>}
               {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
-          <RouteBlock item={item} />
+          {pauseError && item.state === "running" && !item.pause_requested_at && <div className="run-notice fail" role="alert"><strong>Pause request was not accepted. Refresh the run before trying again.</strong><code>{pauseError}</code></div>}
+          <RouteBlock item={item} planRevision={planRevision} />
           <RunActionPanel
             item={item}
             history={history}
@@ -697,7 +714,7 @@ export function RunPage({
                 editing={editing}
                 startEditing={() => setEditing(true)}
                 latestInvocation={history.at(-1)}
-                canEdit={item.state === "paused_gate" && !stale}
+                canEdit={["paused_gate", "paused_open_questions", "paused_user_stop", "awaiting_final_review"].includes(item.state) && !stale}
                 stopEditing={() => setEditing(false)}
                 saved={(revision) => { setOpen(revision); void load().then(() => setSavedRevisionID(revision.id)); }}
                 refresh={load}
@@ -708,6 +725,7 @@ export function RunPage({
               <section className="facts"><h2 className="section-title">Result</h2>
                 <div className="fact"><span>publication</span><code>{delivery?.state || "—"}</code></div>
                 <div className="fact"><span>commit</span><code title={item.result_commit}>{short(item.result_commit, 8) || "—"}</code></div>
+                {item.previous_result_commit && <div className="fact"><span>previous result</span><code title={item.previous_result_commit}>{short(item.previous_result_commit, 8)}</code></div>}
                 <div className="fact"><span>checks</span><code>{review?.checks?.ran ? review.checks.mandatory_passed ? "required passed" : "failed" : "—"}</code></div>
                 <div className="fact"><span>reviewer</span><code>{review?.review?.verdict || "—"}</code></div>
                 <div className="fact"><span>changes</span><code>{review?.diff?.stat_revision_id ? "diff.stat" : "—"}</code></div>

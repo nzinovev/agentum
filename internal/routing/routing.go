@@ -101,6 +101,13 @@ type Block struct {
 	// fixer reads structured findings rather than a log. Nil for a stage not
 	// entered via a verdict edge.
 	ReviewFindings *ReviewRef
+	FixRequest     *FixRequestRef
+}
+
+// FixRequestRef points the fixer at a human revision from final review.
+type FixRequestRef struct {
+	Path       string
+	RevisionID string
 }
 
 // PlanRef points a post-approval stage at the approved plan. Path is the

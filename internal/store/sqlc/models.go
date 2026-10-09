@@ -89,32 +89,36 @@ type Project struct {
 }
 
 type Run struct {
-	ID                      string          `json:"id"`
-	TenantID                string          `json:"tenant_id"`
-	UserID                  string          `json:"user_id"`
-	ProjectID               string          `json:"project_id"`
-	PipelinePack            string          `json:"pipeline_pack"`
-	Title                   string          `json:"title"`
-	State                   string          `json:"state"`
-	CreatedAt               time.Time       `json:"created_at"`
-	UpdatedAt               time.Time       `json:"updated_at"`
-	CurrentStage            sql.NullString  `json:"current_stage"`
-	BaseRef                 string          `json:"base_ref"`
-	BaseCommit              sql.NullString  `json:"base_commit"`
-	ResultCommit            sql.NullString  `json:"result_commit"`
-	Description             string          `json:"description"`
-	Overrides               json.RawMessage `json:"overrides"`
-	CheckoutPath            string          `json:"checkout_path"`
-	PipelinePackOrigin      sql.NullString  `json:"pipeline_pack_origin"`
-	StopReason              string          `json:"stop_reason"`
-	Error                   string          `json:"error"`
-	CancelReason            string          `json:"cancel_reason"`
-	RouteSource             sql.NullString  `json:"route_source"`
-	RouteReason             string          `json:"route_reason"`
-	RouteFallbackCode       string          `json:"route_fallback_code"`
-	RouteFallbackMessage    string          `json:"route_fallback_message"`
-	RouteDecidedAt          sql.NullTime    `json:"route_decided_at"`
-	RouteTriageInvocationID sql.NullString  `json:"route_triage_invocation_id"`
+	ID                         string          `json:"id"`
+	TenantID                   string          `json:"tenant_id"`
+	UserID                     string          `json:"user_id"`
+	ProjectID                  string          `json:"project_id"`
+	PipelinePack               string          `json:"pipeline_pack"`
+	Title                      string          `json:"title"`
+	State                      string          `json:"state"`
+	CreatedAt                  time.Time       `json:"created_at"`
+	UpdatedAt                  time.Time       `json:"updated_at"`
+	CurrentStage               sql.NullString  `json:"current_stage"`
+	BaseRef                    string          `json:"base_ref"`
+	BaseCommit                 sql.NullString  `json:"base_commit"`
+	ResultCommit               sql.NullString  `json:"result_commit"`
+	Description                string          `json:"description"`
+	Overrides                  json.RawMessage `json:"overrides"`
+	CheckoutPath               string          `json:"checkout_path"`
+	PipelinePackOrigin         sql.NullString  `json:"pipeline_pack_origin"`
+	StopReason                 string          `json:"stop_reason"`
+	Error                      string          `json:"error"`
+	CancelReason               string          `json:"cancel_reason"`
+	RouteSource                sql.NullString  `json:"route_source"`
+	RouteReason                string          `json:"route_reason"`
+	RouteFallbackCode          string          `json:"route_fallback_code"`
+	RouteFallbackMessage       string          `json:"route_fallback_message"`
+	RouteDecidedAt             sql.NullTime    `json:"route_decided_at"`
+	RouteTriageInvocationID    sql.NullString  `json:"route_triage_invocation_id"`
+	PauseRequestedAt           sql.NullTime    `json:"pause_requested_at"`
+	PreviousResultCommit       sql.NullString  `json:"previous_result_commit"`
+	ActiveFixRequestRevisionID sql.NullString  `json:"active_fix_request_revision_id"`
+	FixRequestOriginRevisionID sql.NullString  `json:"fix_request_origin_revision_id"`
 }
 
 type RunApproval struct {
@@ -189,6 +193,7 @@ type RunPublication struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 	RequestID        int64          `json:"request_id"`
 	DraftRejected    bool           `json:"draft_rejected"`
+	PendingCommit    sql.NullString `json:"pending_commit"`
 }
 
 type StageInvocation struct {

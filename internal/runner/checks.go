@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/nzinovev/agentum/internal/checks"
+	"github.com/nzinovev/agentum/internal/engine"
 	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -18,25 +19,37 @@ import (
 // delivery boundary (a terminal stage reached, or a complete outcome that would
 // fire the final gate). It runs the resolved set against the worktree HEAD —
 // the post-stage checkpoint commit, which is also the commit that will become
-// result_commit — records the outcome as manifest evidence, and blocks delivery
-// when a mandatory check fails by failing the record. A nil executor (unit tests)
-// is a no-op. A resolution error (e.g. a pack referencing an unknown check name)
-// or a registry load error also fails the run: the pack is misconfigured for
-// this project.
-func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) error {
+// result_commit — records the outcome as manifest evidence, and blocks
+// delivery when a mandatory check fails. A human-requested fix pauses at its
+// fixer so Continue can try another correction; other mandatory failures fail
+// the run. The boolean reports that pause to the caller. A nil executor (unit
+// tests) is a no-op. A resolution error (e.g. a pack referencing an unknown
+// check name) or a registry load error fails the run: the pack is
+// misconfigured for this project.
+func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) (bool, error) {
 	if runner.checkExec == nil {
-		return nil
+		return false, nil
 	}
 	report, mandatoryPassed, err := runner.enforceProjectChecks(ctx, run)
 	if err != nil {
-		return runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
+		return false, runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
 	}
 	if !mandatoryPassed {
 		failed := report.FailedMandatory()
-		return runner.failRun(ctx, run.record,
+		if run.record.ActiveFixRequestRevisionID.Valid {
+			fixers := run.runPack.FixerStages()
+			if len(fixers) == 0 {
+				return false, runner.failRun(ctx, run.record, fmt.Errorf("human fix request has no fixer stage"))
+			}
+			return true, runner.applyPauseDecision(ctx, run.record, Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser,
+				StopReason: "fix_checks_failed",
+			}, fixers[0])
+		}
+		return false, runner.failRun(ctx, run.record,
 			fmt.Errorf("mandatory project check failed: %s", strings.Join(failed, ", ")))
 	}
-	return nil
+	return false, nil
 }
 
 // ErrDirtyTreeAtDeliveryBoundary is returned by enforceProjectChecks when the

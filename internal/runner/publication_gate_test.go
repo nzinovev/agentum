@@ -156,3 +156,24 @@ func TestFinalGatePublicationHookToleratesAnExistingRow(t *testing.T) {
 		t.Errorf("enqueued = %v, want [publish] — the existing row must not swallow the job", store.enqueued)
 	}
 }
+
+// TestFinalGatePublicationDefersActiveAttempt: the new result waits in the
+// publication row until a live attempt finishes, then recovery can enqueue it.
+func TestFinalGatePublicationDefersActiveAttempt(t *testing.T) {
+	store := newFakeStore(sqlc.Run{
+		ID: "T-pub-update", TenantID: "tn", UserID: "us", State: "running",
+		ResultCommit: sql.NullString{String: "new-result", Valid: true},
+	}, sqlc.Project{})
+	store.publications = append(store.publications, sqlc.RunPublication{
+		RunID: store.record.ID, Provider: "noop", State: "publishing",
+		PublishedCommit: "previous-result",
+	})
+	runnerInstance := gateRunner(store, PublicationHook{Enabled: true, Provider: "noop"})
+	if err := runnerInstance.transitionToFinalState(t.Context(), store.record, "", "review"); err != nil {
+		t.Fatal(err)
+	}
+	if store.publications[0].PendingCommit.String != "new-result" ||
+		store.publications[0].PublishedCommit != "previous-result" || len(store.enqueued) != 0 {
+		t.Fatalf("active publication was not deferred: %+v, jobs %v", store.publications[0], store.enqueued)
+	}
+}

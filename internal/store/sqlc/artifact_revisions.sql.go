@@ -396,8 +396,26 @@ func (q *Queries) LockCurrentArtifactRevisionForName(ctx context.Context, arg Lo
 	return i, err
 }
 
-const lockRunForArtifactWrite = `-- name: LockRunForArtifactWrite :exec
-SELECT id FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE
+const lockRunForArtifactGateWrite = `-- name: LockRunForArtifactGateWrite :one
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+`
+
+type LockRunForArtifactGateWriteParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// A revision that changes a run gate takes an exclusive lock so its artifact
+// write and state transition commit together before another gate answer.
+func (q *Queries) LockRunForArtifactGateWrite(ctx context.Context, arg LockRunForArtifactGateWriteParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, lockRunForArtifactGateWrite, arg.ID, arg.TenantID)
+	var state string
+	err := row.Scan(&state)
+	return state, err
+}
+
+const lockRunForArtifactWrite = `-- name: LockRunForArtifactWrite :one
+SELECT state FROM runs WHERE id = $1 AND tenant_id = $2 FOR SHARE
 `
 
 type LockRunForArtifactWriteParams struct {
@@ -412,7 +430,9 @@ type LockRunForArtifactWriteParams struct {
 // create has no revision row to lock and can land between the read and the
 // commit. Share locks do not block each other: concurrent revision writes
 // serialize only on their own (run_id, name).
-func (q *Queries) LockRunForArtifactWrite(ctx context.Context, arg LockRunForArtifactWriteParams) error {
-	_, err := q.db.ExecContext(ctx, lockRunForArtifactWrite, arg.ID, arg.TenantID)
-	return err
+func (q *Queries) LockRunForArtifactWrite(ctx context.Context, arg LockRunForArtifactWriteParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, lockRunForArtifactWrite, arg.ID, arg.TenantID)
+	var state string
+	err := row.Scan(&state)
+	return state, err
 }

@@ -28,6 +28,7 @@ UPDATE runs SET state = $3,
     stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
     error = CASE WHEN $3::text = 'failed' THEN sqlc.arg(error)::text ELSE '' END,
     cancel_reason = CASE WHEN $3::text = 'cancelled' THEN sqlc.arg(cancel_reason)::text ELSE '' END,
+    pause_requested_at = CASE WHEN $3::text = 'running' THEN pause_requested_at ELSE NULL END,
     updated_at = now()
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
@@ -38,8 +39,55 @@ RETURNING *;
 -- always set. Used by the runner as it walks the pack's stages.
 UPDATE runs SET current_stage = $3, state = $4,
     stop_reason = CASE WHEN $4::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
-    error = '', cancel_reason = '', updated_at = now()
+    error = '', cancel_reason = '',
+    pause_requested_at = CASE WHEN $4::text = 'running' THEN pause_requested_at ELSE NULL END,
+    updated_at = now()
 WHERE id = $1 AND tenant_id = $2
+RETURNING *;
+
+-- name: RequestRunPause :one
+-- A repeated request preserves the first timestamp while the runner finishes
+-- its current invocation and checkpoint.
+UPDATE runs SET pause_requested_at = COALESCE(pause_requested_at, now()), updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running'
+RETURNING *;
+
+-- name: ReopenPlanGate :one
+-- ReopenPlanGate stores the FSM result with the artifact edit in one transaction.
+-- The plan revision and the pause cannot become visible separately.
+UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
+    stop_reason = 'plan_revision_drift', pause_requested_at = NULL,
+    active_fix_request_revision_id = NULL, fix_request_origin_revision_id = NULL,
+    previous_result_commit = COALESCE(result_commit, previous_result_commit),
+    result_commit = NULL, updated_at = now()
+WHERE id = $1 AND tenant_id = $2
+  AND state IN ('paused_gate', 'paused_open_questions', 'paused_user_stop', 'awaiting_final_review')
+RETURNING *;
+
+-- name: ReopenFinalReviewForFix :one
+-- ReopenFinalReviewForFix enters the FSM result only when the accepted human
+-- revision is still current for the same reviewed commit. The same revision
+-- becomes the origin of this fix cycle: follow-up comments are appended to it,
+-- not to an earlier request the artifact's revision chain also holds.
+UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
+    previous_result_commit = result_commit, result_commit = NULL,
+    active_fix_request_revision_id = sqlc.arg(fix_revision_id),
+    fix_request_origin_revision_id = sqlc.arg(fix_revision_id),
+    stop_reason = '', pause_requested_at = NULL, updated_at = now()
+WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_review'
+  AND runs.result_commit = $4
+  AND EXISTS (SELECT 1 FROM artifact_revisions
+              WHERE artifact_revisions.run_id = runs.id AND artifact_revisions.tenant_id = runs.tenant_id
+                AND artifact_revisions.name = 'final/fix-request.md'
+                AND artifact_revisions.id = sqlc.arg(fix_revision_id)
+                AND artifact_revisions.is_current = true)
+RETURNING *;
+
+-- name: SetActiveFixRequestRevision :one
+-- Bind a retry's new human feedback revision in the same transaction that
+-- resumes the run, so the fixer and reviewer read the accepted comment.
+UPDATE runs SET active_fix_request_revision_id = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running'
 RETURNING *;
 
 -- name: SetBaseCommit :one

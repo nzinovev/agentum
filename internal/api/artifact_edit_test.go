@@ -11,6 +11,7 @@ import (
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
+	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
 
 // editArtifactStore is an artifacts.Store fake for the edit-endpoint tests.
@@ -79,9 +80,17 @@ func newEditAPI(store artifacts.Store) *API {
 
 func editRequest(method, target string, body string) *http.Request {
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.SetPathValue("id", "run-1")
+	request.SetPathValue("name", strings.SplitAfter(target, "/artifacts/")[1])
 	return request.WithContext(authz.WithPrincipal(request.Context(), authz.Principal{
 		TenantID: "tenant-1", UserID: "user-1",
 	}))
+}
+
+func putTestRevision(apiInst *API, recorder *httptest.ResponseRecorder, request *http.Request) {
+	apiInst.putArtifactRevision(recorder, request, authz.Principal{
+		TenantID: "tenant-1", UserID: "user-1",
+	}, sqlc.Run{ID: "run-1"}, nil)
 }
 
 // TestArtifactPut_SuccessfulEditCreatesHumanRevisionNoInvocation is the core D7
@@ -100,7 +109,7 @@ func TestArtifactPut_SuccessfulEditCreatesHumanRevisionNoInvocation(t *testing.T
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"new spec","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
@@ -132,7 +141,7 @@ func TestArtifactPut_RevisionConflictMapsTo409(t *testing.T) {
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"new spec","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", recorder.Code, recorder.Body.String())
@@ -158,7 +167,7 @@ func TestArtifactPut_SecretDetectedMapsTo422(t *testing.T) {
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"token: ghp_x","expected_revision_id":"rev-1"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body=%s", recorder.Code, recorder.Body.String())
@@ -200,7 +209,7 @@ func TestArtifactPut_MissingPreconditionWhenCurrentExistsMapsTo428(t *testing.T)
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"blind overwrite"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusPreconditionRequired {
 		t.Fatalf("status = %d, want 428; body=%s", recorder.Code, recorder.Body.String())
@@ -222,7 +231,7 @@ func TestArtifactPut_FirstCreateNeedsNoPrecondition(t *testing.T) {
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/new.md",
 		`{"content":"fresh artifact","kind":"spec"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 for a first create; body=%s", recorder.Code, recorder.Body.String())
@@ -247,7 +256,7 @@ func TestArtifactPut_TransientCurrentErrorFailsHard(t *testing.T) {
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/spec.md",
 		`{"content":"blind overwrite, no precondition"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for a transient Current error; body=%s", recorder.Code, recorder.Body.String())
@@ -268,7 +277,7 @@ func TestArtifactPut_PreconditionOnCreateMapsTo409(t *testing.T) {
 		"/api/v1/runs/run-1/invocations/inv-1/artifacts/new.md",
 		`{"content":"fresh","expected_revision_id":"rev-x"}`)
 	recorder := httptest.NewRecorder()
-	apiInst.handleArtifactPut(recorder, request)
+	putTestRevision(apiInst, recorder, request)
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", recorder.Code, recorder.Body.String())

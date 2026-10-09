@@ -221,10 +221,14 @@ count_term := "fix_cycles" ("<" | "<=" | ">" | ">=" | "==") (integer | "budget")
 
 ### The fix budget
 
-`budgets.fix_cycles: N` ⇒ the run may enter a fixer-role stage at most `N`
-times. The `N+1`-th entry is refused with a controlled stop
+`budgets.fix_cycles: N` ⇒ the automatic review loop may enter a fixer-role
+stage at most `N` times. The next automatic entry is refused with a controlled stop
 (`fix_budget_exhausted` → `paused_user_stop`); the branch, checkpoint commits,
 artifact revisions, and the unsealed manifest all stay exactly as they are.
+This cap applies to the automatic reviewer loop. A human fix request at final
+review and its follow-up attempts can enter the fixer beyond that cap, with
+new developer feedback required before each attempt after a failed check or
+another reviewer request.
 
 The budget binds **entries into fixer-role stages**, not back-edges in general:
 bounding the fixer entry stops immediately after a review (so the tree at the

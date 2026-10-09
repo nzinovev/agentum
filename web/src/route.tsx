@@ -15,7 +15,7 @@ const stateIcon: Record<string, string> = {
   not_reached: "◌", not_taken: "⊘",
 };
 
-export function RouteBlock({ item }: { item: Run }) {
+export function RouteBlock({ item, planRevision }: { item: Run; planRevision: number }) {
   const [expanded, setExpanded] = useState(false);
   const [transitionsOpen, setTransitionsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -47,7 +47,7 @@ export function RouteBlock({ item }: { item: Run }) {
         {item.pipeline_pack_origin && <span className="route-chip">{item.pipeline_pack_origin}</span>}
         <span className={"route-chip source-" + item.route_source}>{item.route_source === "fallback" && "▲ "}{sourceLabel}</span>
         {item.route_decided_at && <time title={exact(item.route_decided_at)}>{item.route_source === "request" ? "set at creation " : "stored "}{new Date(item.route_decided_at).toLocaleTimeString("en", { hour12: false })}</time>}
-        <span className={"route-now " + currentState} role="status">Now <code>{current}</code> {item.state}</span>
+        <span className={"route-now " + currentState} role="status">Now <code>{current}</code> {item.state === "running" && item.pause_requested_at ? "pause requested" : item.state}</span>
       </div></div>
       {item.route_fallback ? <div className="route-row"><span className="route-label">Why</span><div className="route-alert fallback" role="note"><strong>Triage did not return a usable route. The full route, {item.pipeline_pack}, is used.</strong><div><code>{item.route_fallback.code}</code></div><p id="route-reason" className={expanded ? "" : "route-clamped"}>{item.route_fallback.message}</p><button className="text-button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} aria-controls="route-reason">{expanded ? "Show less" : "Show full reason"}</button><button className="text-button" onClick={() => { void navigator.clipboard.writeText(item.route_fallback!.code + ": " + item.route_fallback!.message).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600); }); }}>{copied ? "Copied" : "Copy"}</button></div></div>
         : <div className="route-row"><span className="route-label">Why</span><div className="route-value route-reason"><p id="route-reason" className={expanded ? "" : "route-clamped"}>{item.route_reason}</p>{item.route_reason.length > 220 && <button className="text-button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} aria-controls="route-reason">{expanded ? "Show less" : "Show full reason"}</button>}</div></div>}
@@ -62,15 +62,18 @@ export function RouteBlock({ item }: { item: Run }) {
                 const passes = progress?.pass_sequences || [];
                 const approval = graph.approvals.find((candidate) => candidate.stage === node.id);
                 const plainNext = graph.nodes[index + 1]?.id;
+                const revisionLabel = item.state === "paused_gate" && item.stop_reason === "plan_revision_drift" && approval?.unlocks === "source_write" && item.current_stage === node.id
+                  ? `rev ${planRevision} · waiting for you` : "";
+                const progressLabel = revisionLabel || (state === "running" && item.pause_requested_at ? "Running · pause requested" : stateLabel[state] || state);
                 return <React.Fragment key={node.id}>
                   {index > 0 && <span className={graph.nodes[index - 1].transitions?.some((edge) => edge.to === node.id) ? "route-connector" : "route-connector hidden"} aria-hidden="true">{graph.approvals.some((candidate) => candidate.stage === graph.nodes[index - 1].id && !candidate.within_stage) ? "◆" : "→"}</span>}
                   <div className={"route-node " + state} role="listitem" tabIndex={0} title={node.id} aria-label={`${node.id}: ${stateLabel[state] || state}, ${passes.length} passes`} aria-current={item.current_stage === node.id ? "step" : undefined}>
                     <div className="route-node-title"><code>{node.id}</code>{node.id === graph.entry && <span>entry</span>}</div>
                     <div className="route-node-meta">{node.terminal ? "terminal" : `${node.role || "agent"} · ${approval?.within_stage ? "gate inside the stage" : node.gate.startsWith("human_") ? "human gate on exit" : node.gate}`}</div>
-                    <div className="route-node-state"><span>{stateIcon[state] || "◌"}</span> {stateLabel[state] || state}{state === "running" && passes.length > 1 ? ` · pass ${passes.length}` : ""}</div>
+                    <div className="route-node-state"><span>{stateIcon[state] || "◌"}</span> {progressLabel}{state === "running" && passes.length > 1 ? ` · pass ${passes.length}` : ""}</div>
                     {!!passes.length && <small>{passes.length} {passes.length === 1 ? "pass" : "passes"} · {passes.map((pass) => `#${pass}`).join(" ")}</small>}
                     {progress?.steps?.length ? <div className="route-node-steps">{progress.steps.map((step) => <div className={"route-step " + step.state} key={step.id}><span>{step.state === "approved" || step.state === "done" ? "✓" : step.state === "waiting" ? "◆" : "◌"}</span> {step.label}</div>)}</div> : approval && <div className="route-node-gate">◆ approve {approval.artifact} → {approval.unlocks}</div>}
-                    {node.final_review_gate && <div className="route-node-gate">◆ final human review · {state === "waiting" ? "waiting for you" : state === "accepted" ? "accepted" : state === "rejected" ? "rejected" : "not yet"}</div>}
+                    {node.final_review_gate && <div className="route-node-gate">◆ final human review · {item.state === "running" && item.previous_result_commit ? "returns here after checks" : state === "waiting" ? "waiting for you" : state === "accepted" ? "accepted" : state === "rejected" ? "rejected" : "not yet"}</div>}
                     {node.transitions?.filter((edge) => edge.condition || edge.to !== plainNext).map((edge) => <div className="route-node-edge" key={edge.to + edge.condition} title={edge.condition}>{graph.nodes.findIndex((candidate) => candidate.id === edge.to) < index ? "↩" : "→"} {edge.to} {edge.condition && <code>{edge.condition}</code>} {edgeCount(node.id, edge.to, edge.condition) > 0 && `×${edgeCount(node.id, edge.to, edge.condition)}`}</div>)}
                   </div>
                 </React.Fragment>;

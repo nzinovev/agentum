@@ -107,6 +107,14 @@ directly for the parts the patch omits. Say so in your verification gaps.{{end}}
 The previous review stage ({{.ReviewFindings.Stage}}) requested changes. There
 are {{.ReviewFindings.Count}} finding(s). Read them and address each:
   {{.ReviewFindings.Path}}
+{{end}}{{if .FixRequest}}
+
+## Human fix request to address
+
+A person sent this result back from final review. Read their request before
+you start:
+  {{.FixRequest.Path}}
+Revision: {{.FixRequest.RevisionID}}
 {{end}}
 
 ## Memory (project decisions, most recent first)

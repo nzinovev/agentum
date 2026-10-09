@@ -92,6 +92,12 @@ const (
 
 	// ActionRunStart moves a fresh run into the running pipeline.
 	ActionRunStart = "run:start"
+	// ActionRunPause records a stop request for a running run.
+	ActionRunPause = "run:pause"
+	// ActionRunRequestFix sends final-review feedback into the fixer stage.
+	ActionRunRequestFix = "run:request-fix"
+	// ActionRunEditArtifact writes a human-authored artifact revision.
+	ActionRunEditArtifact = "run:edit-artifact"
 
 	// ActionRunContinue resumes a paused run (open_questions / user_stop),
 	// optionally carrying new user text to the resumed session. Its own verb,

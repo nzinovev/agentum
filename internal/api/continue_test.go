@@ -411,10 +411,9 @@ func TestContinueHandler_InvalidInputChangesNothing(t *testing.T) {
 	}
 }
 
-// TestContinueHandler_TextWithoutCapturedSessionIsRefused: text rides the
-// captured session; with no session on the latest invocation the request is a
-// 409 before any enqueue, not a 200 onto a job that cannot deliver.
-func TestContinueHandler_TextWithoutCapturedSessionIsRefused(t *testing.T) {
+// TestContinueHandler_TextWithoutCapturedSessionIsAccepted: the queued note
+// reaches a fresh invocation when the previous attempt saved no session.
+func TestContinueHandler_TextWithoutCapturedSessionIsAccepted(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("database test")
@@ -423,62 +422,154 @@ func TestContinueHandler_TextWithoutCapturedSessionIsRefused(t *testing.T) {
 	runID := harness.insertPausedRun(t, false)
 
 	recorder := harness.callContinue(t, runID, `{"text":"an answer with nowhere to go"}`, true)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
 	}
-	if got := harness.runStateOf(t, runID); got != "paused_open_questions" {
-		t.Errorf("run state = %q, want paused_open_questions (refused before the transition)", got)
+	if got := harness.runStateOf(t, runID); got != "running" {
+		t.Errorf("run state = %q, want running", got)
 	}
-	if _, found := harness.latestContinuePayload(t, runID); found {
-		t.Error("a sessionless text continue enqueued a job")
-	}
-	// Without text the same run continues: the 409 is about the text, not the
-	// state.
-	emptyRecorder := harness.callContinue(t, runID, "", true)
-	if emptyRecorder.Code != http.StatusOK {
-		t.Fatalf("empty continue status = %d, want 200; body: %s", emptyRecorder.Code, emptyRecorder.Body.String())
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(string(payload), "an answer with nowhere to go") {
+		t.Errorf("continue job did not carry the note: %s", payload)
 	}
 }
 
-// TestContinueHandler_SessionReadFailureIsInternalError: a failed invocation
-// read is not an answer about the session — the session may exist while the
-// read could not see it. The handler answers a logged 500, never a 409 that
-// claims absence; a 409 would tell the author to give up on text that could
-// have been delivered, and the run must stay paused with the queue untouched.
-func TestContinueHandler_SessionReadFailureIsInternalError(t *testing.T) {
+// TestContinueHandler_QueuesTextWithoutReadingSession protects the handoff to
+// the runner: it selects a matching session after the job starts, so the API
+// can queue text without consulting the invocation table.
+func TestContinueHandler_QueuesTextWithoutReadingSession(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("database test")
 	}
 	harness := newContinueHarness(t)
 	runID := harness.insertPausedRun(t, true)
-	// Break only the invocation read: the guard's GetRun still answers, the
-	// session check's LatestStageForRun fails. Renaming the table in this
-	// test's throwaway database leaves every other table intact.
+	// Renaming the table in this test's throwaway database proves the API
+	// neither selects a session nor rejects the note before the job is queued.
 	if _, err := harness.db.ExecContext(t.Context(),
 		`ALTER TABLE stage_invocations RENAME TO stage_invocations_unreadable`); err != nil {
 		t.Fatal(err)
 	}
 	recorder := harness.callContinue(t, runID, `{"text":"an answer the read never saw"}`, true)
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
 	}
-	var decoded struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+	if got := harness.runStateOf(t, runID); got != "running" {
+		t.Errorf("run state = %q, want running", got)
 	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
-		t.Fatalf("decode error body: %v", err)
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(payload, "an answer the read never saw") {
+		t.Errorf("continue job did not retain the note: %q, found = %t", payload, found)
 	}
-	if decoded.Error.Code != codeInternal {
-		t.Errorf("code = %q, want %q", decoded.Error.Code, codeInternal)
+}
+
+// TestContinueAfterFailedFixRequiresNewFeedback protects the retry handoff:
+// the fixer receives new developer feedback alongside the failed mandatory
+// check names, which come from the manifest's checks section — the stop
+// reason is a fixed code and carries none. Feedback that leaves no room for
+// the names is refused, never sent without them.
+func TestContinueAfterFailedFixRequiresNewFeedback(t *testing.T) {
+	harness := newContinueHarness(t)
+	runID := harness.insertPausedRun(t, true)
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant,
+		CurrentStage: sql.NullString{String: "fix", Valid: true},
+		State:        "paused_user_stop", StopReason: "fix_checks_failed",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if got := harness.runStateOf(t, runID); got != "paused_open_questions" {
-		t.Errorf("run state = %q, want paused_open_questions (a failed read must not resume the run)", got)
+	if err := harness.api.mfst.AddEvidence(t.Context(), continueTestTenant, runID, manifest.Body{
+		Checks: &manifest.CheckEvidence{Ran: true, Results: []manifest.CheckResult{
+			{Name: "build", Required: true, Status: "fail"},
+			{Name: "unit", Required: true, Status: "pass"},
+			{Name: "lint", Required: true, Status: "fail"},
+			{Name: "docs", Status: "fail"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if _, found := harness.latestContinuePayload(t, runID); found {
-		t.Error("a failed session read enqueued a continue job")
+	originalRevision := harness.seedHumanFixRequest(t, runID)
+	oversized := harness.callContinue(t, runID, `{"text":"`+strings.Repeat("a", taskinput.MaxContinuationTextBytes)+`"}`, true)
+	if oversized.Code != http.StatusBadRequest {
+		t.Fatalf("feedback filling the whole budget: status = %d: %s", oversized.Code, oversized.Body.String())
+	}
+	if state := harness.runStateOf(t, runID); state != "paused_user_stop" {
+		t.Fatalf("state after oversized retry = %s", state)
+	}
+	empty := harness.callContinue(t, runID, `{}`, true)
+	if empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty retry status = %d: %s", empty.Code, empty.Body.String())
+	}
+	if state := harness.runStateOf(t, runID); state != "paused_user_stop" {
+		t.Fatalf("state after empty retry = %s", state)
+	}
+	response := harness.callContinue(t, runID, `{"text":"Cover the timeout path"}`, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("continue status = %d: %s", response.Code, response.Body.String())
+	}
+	payload, found := harness.latestContinuePayload(t, runID)
+	if !found || !strings.Contains(payload, "Previous mandatory project checks failed: build, lint") ||
+		!strings.Contains(payload, "Cover the timeout path") {
+		t.Fatalf("retry payload = %q, found = %t", payload, found)
+	}
+	harness.assertNewHumanFixRevision(t, runID, originalRevision, "Cover the timeout path")
+}
+
+// TestContinueAfterReviewerFixRequiresNewFeedback keeps a human-requested
+// correction paused until the developer writes another instruction.
+func TestContinueAfterReviewerFixRequiresNewFeedback(t *testing.T) {
+	harness := newContinueHarness(t)
+	runID := harness.insertPausedRun(t, true)
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant,
+		CurrentStage: sql.NullString{String: "fix", Valid: true},
+		State:        "paused_user_stop", StopReason: "human_fix_feedback_required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	originalRevision := harness.seedHumanFixRequest(t, runID)
+	if response := harness.callContinue(t, runID, `{}`, true); response.Code != http.StatusBadRequest {
+		t.Fatalf("empty retry status = %d: %s", response.Code, response.Body.String())
+	}
+	response := harness.callContinue(t, runID, `{"text":"Address reviewer RV-002"}`, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("retry status = %d: %s", response.Code, response.Body.String())
+	}
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(payload, "Address reviewer RV-002") {
+		t.Fatalf("retry payload = %q, found = %t", payload, found)
+	}
+	harness.assertNewHumanFixRevision(t, runID, originalRevision, "Address reviewer RV-002")
+}
+
+func (harness *continueHarness) seedHumanFixRequest(t *testing.T, runID string) string {
+	t.Helper()
+	harness.api.art = artifacts.NewSQLStore(artifacts.SQLStoreDeps{
+		DB: harness.db, Queries: harness.queries, Blobs: artifacts.NewBlobStore(t.TempDir()),
+	})
+	revision, err := harness.api.art.Put(t.Context(), artifacts.PutParams{
+		TenantID: continueTestTenant, UserID: continueTestUser, RunID: runID,
+		Name: "final/fix-request.md", Kind: "human_fix_request", Bytes: []byte("Original developer request"),
+		Actor: artifacts.ActorHuman,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.db.ExecContext(t.Context(),
+		`UPDATE runs SET active_fix_request_revision_id = $1, fix_request_origin_revision_id = $1
+		 WHERE id = $2 AND tenant_id = $3`,
+		revision.ID, runID, continueTestTenant); err != nil {
+		t.Fatal(err)
+	}
+	return revision.ID
+}
+
+func (harness *continueHarness) assertNewHumanFixRevision(t *testing.T, runID, originalRevision, newComment string) {
+	t.Helper()
+	run, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil || !run.ActiveFixRequestRevisionID.Valid || run.ActiveFixRequestRevisionID.String == originalRevision {
+		t.Fatalf("active human feedback after Continue = %+v, err = %v", run, err)
+	}
+	content, err := harness.api.art.GetBytes(t.Context(), continueTestTenant, run.ActiveFixRequestRevisionID.String)
+	if err != nil || !strings.Contains(string(content), "Original developer request") || !strings.Contains(string(content), newComment) {
+		t.Fatalf("feedback artifact = %q, err = %v", content, err)
 	}
 }
 

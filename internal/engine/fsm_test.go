@@ -27,16 +27,21 @@ func TestNext_LegalTransitions(t *testing.T) {
 		{StateRunning, EventCancel, StateCancelled},
 
 		{StatePausedOpenQuestions, EventContinue, StateRunning},
+		{StatePausedOpenQuestions, EventPlanEdited, StatePausedGate},
 		{StatePausedOpenQuestions, EventCancel, StateCancelled},
 
 		{StatePausedUserStop, EventContinue, StateRunning},
+		{StatePausedUserStop, EventPlanEdited, StatePausedGate},
 		{StatePausedUserStop, EventCancel, StateCancelled},
 
 		{StatePausedGate, EventAdvance, StateRunning},
+		{StatePausedGate, EventPlanEdited, StatePausedGate},
 		{StatePausedGate, EventAskToEdit, StateRunning},
 		{StatePausedGate, EventCancel, StateCancelled},
 
 		{StateAwaitingFinalReview, EventApprove, StateDone},
+		{StateAwaitingFinalReview, EventPlanEdited, StatePausedGate},
+		{StateAwaitingFinalReview, EventRequestFix, StateRunning},
 		{StateAwaitingFinalReview, EventCancel, StateCancelled},
 	}
 	for _, tc := range cases {
@@ -99,7 +104,7 @@ func TestNext_NoSpuriousEdges(t *testing.T) {
 	}
 	allEvents := []RunEvent{
 		EventStart, EventStopOpenQ, EventStopGate, EventStopUser,
-		EventContinue, EventAdvance, EventReachFinalGate,
+		EventContinue, EventAdvance, EventPlanEdited, EventRequestFix, EventReachFinalGate,
 		EventApprove, EventFail, EventCancel,
 	}
 	for _, s := range allStates {
