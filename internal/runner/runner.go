@@ -85,6 +85,8 @@ type Store interface {
 	// unique index making a second call a no-op. Called at the final gate;
 	// the publish job carries the attempt.
 	EnsurePublication(ctx context.Context, arg sqlc.EnsurePublicationParams) (sqlc.RunPublication, error)
+	RequestPublication(ctx context.Context, arg sqlc.RequestPublicationParams) (sqlc.RunPublication, error)
+	QueuePublicationUpdate(ctx context.Context, arg sqlc.QueuePublicationUpdateParams) (sqlc.RunPublication, error)
 	// CountUnfinishedJobsForRunExcluding backs the discard-worktree guard:
 	// how many pending-or-running jobs the run has besides the caller's own.
 	// Discarding a worktree while a driving job may still execute against it
@@ -335,8 +337,8 @@ func (runner *Runner) HandleRun(ctx context.Context, job sqlc.Job) error {
 	return runner.drive(ctx, job)
 }
 
-// HandleContinue serves the "continue" job kind: re-enter the current stage,
-// resuming its captured session.
+// HandleContinue re-enters the current stage. When the previous invocation
+// has no session id, a fresh invocation receives the note in its Task section.
 func (runner *Runner) HandleContinue(ctx context.Context, job sqlc.Job) error {
 	return runner.drive(ctx, job)
 }
@@ -354,6 +356,11 @@ func (runner *Runner) HandleAskToEdit(ctx context.Context, job sqlc.Job) error {
 // HandleAdvance serves the "advance" job kind: re-enter the loop past a gate
 // by resolving the current stage's transition.
 func (runner *Runner) HandleAdvance(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
+// HandleFixRequest starts a fixer from a human finding at final review.
+func (runner *Runner) HandleFixRequest(ctx context.Context, job sqlc.Job) error {
 	return runner.drive(ctx, job)
 }
 
@@ -1129,21 +1136,6 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	if halt != nil {
 		return runner.applyPauseDecision(ctx, record, halt.decision, halt.stageID)
 	}
-	freshContinue := false
-	if job.Kind == "continue" && continuation.Text != "" && resumeSession == "" {
-		_, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{RunID: record.ID, TenantID: record.TenantID})
-		freshContinue = errors.Is(latestErr, sql.ErrNoRows)
-		if latestErr != nil && !freshContinue {
-			return runner.failRun(ctx, record, fmt.Errorf("read continuation session: %w", latestErr))
-		}
-	}
-	if sessionFault := continuationSessionFault(continuation, resumeSession); sessionFault != nil && !freshContinue {
-		pauseErr := runner.pauseForUndeliverableContinuation(ctx, record, runPack, sessionFault)
-		if pauseErr != nil {
-			return runner.failRun(ctx, record, pauseErr)
-		}
-		return nil
-	}
 
 	run := stageRun{record: record, project: project, runPack: runPack, worktree: runWorktree, executionPlan: executionPlan}
 	// Read the source_write approval state ONCE for the whole run (ADR 0003 D3):
@@ -1229,10 +1221,7 @@ func (runner *Runner) enforcePolicyFloor(ctx context.Context, record sqlc.Run, r
 	return true
 }
 
-// continuationFault names why a continue job's user text cannot be delivered:
-// the stored payload is not a decodable continuation, or the text has no
-// captured session to resume. stopReason lands on the pause record; cause
-// carries the diagnosis to the log.
+// continuationFault carries a malformed payload's pause reason and cause.
 type continuationFault struct {
 	stopReason string
 	cause      error
@@ -1257,25 +1246,9 @@ func decodeContinuation(job sqlc.Job) (taskinput.Continuation, *continuationFaul
 	return continuation, nil
 }
 
-// continuationSessionFault reports text that cannot ride a captured session.
-// The caller skips this check for a run with no invocation yet; its first
-// stage receives the text in the Task section.
-func continuationSessionFault(continuation taskinput.Continuation, resumeSession string) *continuationFault {
-	if continuation.Text == "" || resumeSession != "" {
-		return nil
-	}
-	return &continuationFault{
-		stopReason: "resume_session_missing",
-		cause:      errors.New("no stage invocation with a captured session id exists to resume, so the continuation text has nowhere to be delivered"),
-	}
-}
-
 // pauseForUndeliverableContinuation stops the run in paused_user_stop with the
-// fault's stop_reason, without invoking the agent. The API refuses a text
-// continue after an invocation with no session before enqueueing. This is the runner's re-check for
-// the window between the two (a job that sat in the queue across a schema or
-// writer change). paused_user_stop keeps continue/cancel as the exits and the
-// stop_reason on the state-change event is the diagnosis.
+// fault's stop_reason before any invocation. A malformed queued payload cannot
+// be delivered even when the API normally validates requests before enqueueing.
 func (runner *Runner) pauseForUndeliverableContinuation(ctx context.Context, record sqlc.Run, runPack *pack.Pack, fault *continuationFault) error {
 	runner.log.Warn("continue payload undeliverable; pausing before any invocation",
 		"run", record.ID, "stop_reason", fault.stopReason, "error", fault.cause)
@@ -1618,20 +1591,20 @@ const dirtySummaryLimit = 25
 
 // recordCheckpoint captures an orchestrator-owned boundary SHA. Idempotent per
 // label — a retry after a crash that re-crosses the same boundary upserts
-// rather than duplicates. Best-effort: a checkpoint write failure is logged,
-// not fatal (the lineage and result_commit are independent of checkpoints).
-func (runner *Runner) recordCheckpoint(ctx context.Context, record sqlc.Run, label, commit string) {
+// rather than duplicates. Callers may treat a failed boundary as recoverable.
+func (runner *Runner) recordCheckpoint(ctx context.Context, record sqlc.Run, label, commit string) error {
 	if commit == "" {
-		return
+		return nil
 	}
 	if _, err := runner.store.CreateCheckpoint(ctx, sqlc.CreateCheckpointParams{
 		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
 		Label: label, CommitSha: commit,
 	}); err != nil {
 		runner.log.Warn("record checkpoint", "run", record.ID, "label", label, "error", err)
-		return
+		return fmt.Errorf("record checkpoint %s: %w", label, err)
 	}
 	runner.emit(ctx, record, EvCheckpointRecorded, map[string]any{"label": label, "commit": commit})
+	return nil
 }
 
 // recordStageCheckpoint commits the worktree's working state on the run branch
@@ -1643,18 +1616,16 @@ func (runner *Runner) recordCheckpoint(ctx context.Context, record sqlc.Run, lab
 // work would be discarded at the next Restore or at teardown. A stage that
 // produced no change records the unchanged HEAD as its checkpoint (Commit
 // returns created=false for a clean tree) rather than creating an empty
-// commit. A
-// commit failure is logged and skipped — the lineage anchor and result_commit
-// do not depend on it, but a checkpoint that cannot be created cannot claim
-// to have captured the boundary.
-func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) {
+// commit. A failed commit or checkpoint leaves the run at a recoverable stop;
+// it cannot claim to have captured the boundary.
+func (runner *Runner) recordStageCheckpoint(ctx context.Context, run stageRun, stageID string) error {
 	message := fmt.Sprintf("agentum: checkpoint after stage %s", stageID)
 	head, _, err := runner.wt.Commit(ctx, run.worktree.Root, message)
 	if err != nil {
 		runner.log.Warn("commit stage checkpoint", "run", run.record.ID, "stage", stageID, "error", err)
-		return
+		return fmt.Errorf("commit stage checkpoint: %w", err)
 	}
-	runner.recordCheckpoint(ctx, run.record, "post-"+stageID, head)
+	return runner.recordCheckpoint(ctx, run.record, "post-"+stageID, head)
 }
 
 // stageRun bundles the per-run state the loop and adapter invocation share.
@@ -1736,8 +1707,15 @@ func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.
 			return record.CurrentStage.String, "", nil, nil
 		}
 		return runPack.Entry, "", nil, nil
+	case "fix_request":
+		fixers := runPack.FixerStages()
+		if len(fixers) == 0 {
+			return "", "", nil, fmt.Errorf("fix request: pack has no fixer stage")
+		}
+		return fixers[0], "", nil, nil
 	case "continue", "reconcile", "ask_to_edit":
-		// Resume the current stage from its captured session id
+		// Resume the current stage from its captured session id when present.
+		// Without one, a fresh invocation receives the text in its Task section.
 		// (non-destructive). The reconcile job enters here too: the human's
 		// recovery decision named the tree state, and the resume continues
 		// from whatever the decision left in place. The ask_to_edit job
@@ -1873,6 +1851,15 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		requested, requestErr := runner.pauseRequested(ctx, run.record)
+		if requestErr != nil {
+			return requestErr
+		}
+		if requested {
+			pauseStage := currentStageOrFallback(run.record.CurrentStage, stageID)
+			return runner.applyPauseDecision(ctx, run.record, Decision{Action: ActionPause,
+				FSMEvent: engine.EventStopUser, StopReason: "user_pause"}, pauseStage)
+		}
 		outcome, err := runner.processStage(ctx, run, stageID, resumeSession, continuationText, transition)
 		if err != nil {
 			return err
@@ -1925,10 +1912,8 @@ type stageOutcome struct {
 // planApprovalForStage guard matches (current_stage == approval.Stage), the
 // approval row is written bound to the current plan revision, and entryPoint
 // resolves the approval stage's transition — the implementer runs with the
-// grant. For drift the approval row already exists (CreateApproval is a no-op
-// on conflict), so advance re-checks, drifts again, and pauses here once more
-// — never a skip, and cancel is the exit (drift cannot be cleared by advance:
-// re-editing the plan mints a revision the approval is not bound to). Note the
+// grant. For drift the handler rebinds the approval row to the current plan
+// revision before the advance job begins. Note the
 // retry is free only when the approval stage transitions straight into the
 // source-writing stage (the shipped pack's shape); with intermediate stages —
 // well-formed under the validator's layer-3 pass-through rule — each advance
@@ -1968,14 +1953,8 @@ func (runner *Runner) refuseSourceWriteBeforeApproval(ctx context.Context, run s
 			},
 		}
 	}
-	// Granted — but the approval binds to a plan revision. If the current
-	// revision of the approval artifact no longer matches the approved one,
-	// someone edited the plan AFTER approving it; the implementer would then
-	// work within a plan the human never saw. Same rewind: advance re-checks
-	// and pauses here again (the approval row exists, so the advance write is a
-	// no-op and the drift persists) — visible, bounded, and never a skip of the
-	// implementer. Cancel is the exit; reject 409s here because the plan gate
-	// was already decided approved.
+	// The approval row must name the current plan revision before source edits
+	// resume. A later edit rewinds to the plan gate for a new human approval.
 	if runner.detectPlanRevisionDrift(ctx, run) {
 		return &haltDecision{
 			stageID: approval.Stage,
@@ -2094,6 +2073,15 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		if err := runner.runDeliveryChecks(ctx, run); err != nil {
 			return stageOutcome{}, err
 		}
+		requested, requestErr := runner.pauseRequested(ctx, run.record)
+		if requestErr != nil {
+			return stageOutcome{}, requestErr
+		}
+		if requested {
+			return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "user_pause",
+			}, currentStageOrFallback(run.record.CurrentStage, stageID))
+		}
 		if err := runner.reachTerminalStage(ctx, run.record, checkoutPathOf(run.record, run.project), stageID); err != nil {
 			return stageOutcome{}, err
 		}
@@ -2176,10 +2164,25 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	// to send.
 	cleanBeforeCommit := runner.isClean(checkoutPathOf(run.record, run.project), run.record.ID)
 	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
-		runner.recordStageCheckpoint(ctx, run, stageID)
+		if checkpointErr := runner.recordStageCheckpoint(ctx, run, stageID); checkpointErr != nil {
+			return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "checkpoint_error",
+			}, stageID)
+		}
 		// The new checkpoint belongs in the manifest's git lineage. Best-effort;
 		// the manifest service is nil in unit tests.
 		runner.recordGitEvidence(ctx, run.record)
+	}
+	if outcome.result != nil && !outcome.adapterErr && !outcome.parseErr && !outcome.rejected {
+		requested, requestErr := runner.pauseRequested(ctx, run.record)
+		if requestErr != nil {
+			return stageOutcome{}, requestErr
+		}
+		if requested {
+			return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser, StopReason: "user_pause",
+			}, stageID)
+		}
 	}
 
 	// Build the transition context (verdict, status, fix-cycle counter, budget)
@@ -2361,25 +2364,60 @@ func (runner *Runner) schedulePublication(ctx context.Context, record sqlc.Run) 
 		runner.log.Warn("publication: reload run at gate", "run", record.ID, "error", err)
 		return
 	}
-	if _, err := runner.store.EnsurePublication(ctx, sqlc.EnsurePublicationParams{
+	publicationRow, err := runner.store.EnsurePublication(ctx, sqlc.EnsurePublicationParams{
 		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
 		Provider:        runner.publication.Provider,
 		RemoteBranch:    worktree.BranchFor(record.ID),
 		PublishedCommit: refreshed.ResultCommit.String,
-	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		// The empty return is the idempotent case — the row already exists
-		// (a re-entry into the final gate, or the explicit retry creating it
-		// first) — and the job below must still be enqueued. Same reading as
-		// the approval write and the API's retry.
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		publicationRow, err = runner.store.RequestPublication(ctx, sqlc.RequestPublicationParams{
+			TenantID: record.TenantID, RunID: record.ID,
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			_, err = runner.store.QueuePublicationUpdate(ctx, sqlc.QueuePublicationUpdateParams{
+				TenantID: record.TenantID, RunID: record.ID,
+			})
+			if err == nil {
+				// The active attempt owns the lease. Its completion changes the row
+				// to pending; the publication reconciler enqueues the new request.
+				return
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				// The active attempt finished between the two conditional writes.
+				publicationRow, err = runner.store.RequestPublication(ctx, sqlc.RequestPublicationParams{
+					TenantID: record.TenantID, RunID: record.ID,
+				})
+			}
+		}
+		if err != nil {
+			runner.log.Warn("publication: queue updated result", "run", record.ID, "error", err)
+			return
+		}
+	} else if err != nil {
 		runner.log.Warn("publication: create pending row", "run", record.ID, "error", err)
+		return
+	}
+	payload, err := json.Marshal(struct {
+		RequestID int64 `json:"request_id"`
+	}{publicationRow.RequestID})
+	if err != nil {
 		return
 	}
 	if _, err := runner.store.EnqueueJob(ctx, sqlc.EnqueueJobParams{
 		TenantID: record.TenantID, UserID: record.UserID,
-		RunID: record.ID, Kind: jobKindPublish, Payload: []byte("{}"),
+		RunID: record.ID, Kind: jobKindPublish, Payload: payload,
 	}); err != nil {
 		runner.log.Warn("publication: enqueue job", "run", record.ID, "error", err)
 	}
+}
+
+func (runner *Runner) pauseRequested(ctx context.Context, record sqlc.Run) (bool, error) {
+	current, err := runner.store.GetRun(ctx, sqlc.GetRunParams{ID: record.ID, TenantID: record.TenantID})
+	if err != nil {
+		return false, fmt.Errorf("read pause request: %w", err)
+	}
+	return current.State == string(engine.StateRunning) && current.PauseRequestedAt.Valid, nil
 }
 
 // invocationOutcome is invokeStage's verdict for one adapter run. The three
@@ -2492,6 +2530,15 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		routingBlock.ReviewFindings = &routing.ReviewRef{
 			Stage: transitionIn.from, Path: transitionIn.verdictPath,
 			Count: transitionIn.findingsCount,
+		}
+	}
+	if pack.EffectiveRole(stageID, stage) == "fixer" && runner.art != nil {
+		fixRevision, fixErr := runner.art.Current(ctx, run.record.TenantID, run.record.ID, "final/fix-request.md")
+		if fixErr == nil {
+			routingBlock.FixRequest = &routing.FixRequestRef{
+				Path:       filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, "final"), "fix-request.md"),
+				RevisionID: fixRevision.ID,
+			}
 		}
 	}
 	block := routing.Render(routingBlock)

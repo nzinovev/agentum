@@ -115,6 +115,8 @@ type Run struct {
 	RouteFallbackMessage    string          `json:"route_fallback_message"`
 	RouteDecidedAt          sql.NullTime    `json:"route_decided_at"`
 	RouteTriageInvocationID sql.NullString  `json:"route_triage_invocation_id"`
+	PauseRequestedAt        sql.NullTime    `json:"pause_requested_at"`
+	PreviousResultCommit    sql.NullString  `json:"previous_result_commit"`
 }
 
 type RunApproval struct {
@@ -189,6 +191,7 @@ type RunPublication struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 	RequestID        int64          `json:"request_id"`
 	DraftRejected    bool           `json:"draft_rejected"`
+	PendingCommit    sql.NullString `json:"pending_commit"`
 }
 
 type StageInvocation struct {

@@ -42,6 +42,8 @@ const (
 	EventContinue       RunEvent = "continue"    // resume an open-questions or user-stop pause
 	EventAdvance        RunEvent = "advance"     // pass a gate → next stage runs
 	EventAskToEdit      RunEvent = "ask_to_edit" // request changes at a plan gate → the planner re-runs with the remarks
+	EventPlanEdited     RunEvent = "plan_edited"
+	EventRequestFix     RunEvent = "request_fix"
 	EventReachFinalGate RunEvent = "reach_final_gate"
 	EventApprove        RunEvent = "approve" // final approval → commit memory, then done
 	EventFail           RunEvent = "fail"
@@ -64,21 +66,26 @@ var transitions = map[RunState]map[RunEvent]RunState{
 		EventCancel:         StateCancelled,
 	},
 	StatePausedOpenQuestions: {
-		EventContinue: StateRunning, // session-id resume
-		EventCancel:   StateCancelled,
+		EventContinue:   StateRunning,
+		EventPlanEdited: StatePausedGate,
+		EventCancel:     StateCancelled,
 	},
 	StatePausedUserStop: {
-		EventContinue: StateRunning, // session-id resume (non-destructive)
-		EventCancel:   StateCancelled,
+		EventContinue:   StateRunning,
+		EventPlanEdited: StatePausedGate,
+		EventCancel:     StateCancelled,
 	},
 	StatePausedGate: {
-		EventAdvance:   StateRunning, // next stage is a fresh invocation
-		EventAskToEdit: StateRunning, // request changes: the approval stage re-runs with the remarks
-		EventCancel:    StateCancelled,
+		EventPlanEdited: StatePausedGate,
+		EventAdvance:    StateRunning, // next stage is a fresh invocation
+		EventAskToEdit:  StateRunning, // request changes: the approval stage re-runs with the remarks
+		EventCancel:     StateCancelled,
 	},
 	StateAwaitingFinalReview: {
-		EventApprove: StateDone, // memory commits at run-done
-		EventCancel:  StateCancelled,
+		EventPlanEdited: StatePausedGate,
+		EventRequestFix: StateRunning,
+		EventApprove:    StateDone, // memory commits at run-done
+		EventCancel:     StateCancelled,
 	},
 }
 

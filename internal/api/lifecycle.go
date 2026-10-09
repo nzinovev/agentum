@@ -24,10 +24,10 @@ import (
 
 // handleInvocationContinue accepts Continue at an invocation or before the
 // first invocation through POST /api/v1/runs/{id}/continue.
-// Resume after open_questions or user_stop. The body is an optional
-// continuation. Text reaches the resumed session, or the first stage when a
-// user_stop occurred before any invocation. An empty body, {}, or null
-// continues without new text. Every body
+// Continue resumes after open_questions or user_stop. Text reaches the
+// next invocation in the current stage. It uses the captured session when
+// one exists and the routing block for a fresh invocation otherwise.
+// An empty body, {}, or null continues without new text. Every body
 // rule — strict shape, UTF-8, byte budgets, the credentials scan — is checked
 // before the FSM transition, so a refused body leaves the run untouched.
 func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request) {
@@ -74,24 +74,13 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
-	// A captured session receives text after an invocation. Before the first
-	// invocation, a user-stop note reaches the first stage's Task section.
-	// A read failure returns 500 because it cannot establish either case.
 	if continuation.Text != "" {
-		latest, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
+		_, latestErr := api.queries.LatestStageForRun(r.Context(), sqlc.LatestStageForRunParams{
 			RunID: run.ID, TenantID: run.TenantID,
 		})
 		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
 			logUnexpected(api.log, latestErr, "LatestStageForRun(continue)")
 			writeError(w, http.StatusInternalServerError, codeInternal, latestErr.Error())
-			return
-		}
-		// A NULL session after an invocation has no delivery target. A user
-		// stop before the first invocation uses the first stage instead.
-		if (errors.Is(latestErr, sql.ErrNoRows) && engine.RunState(run.State) != engine.StatePausedUserStop) ||
-			(latestErr == nil && (!latest.SessionID.Valid || latest.SessionID.String == "")) {
-			writeError(w, http.StatusConflict, codeIllegalTransition,
-				"continue with text requires a captured session to resume; the latest invocation has none")
 			return
 		}
 	}
@@ -807,6 +796,16 @@ func (api *API) applyResume(r *http.Request, run sqlc.Run, event engine.RunEvent
 				return staleRevisionError{expected: approval.expectedRevisionID, current: revisionID.String}
 			}
 			if approval.verifyOnly {
+				updated = transitioned
+				return nil
+			}
+			if run.StopReason == "plan_revision_drift" {
+				if _, rebindErr := qtx.RebindPlanApproval(r.Context(), sqlc.RebindPlanApprovalParams{
+					TenantID: run.TenantID, RunID: run.ID, Name: approval.name,
+					ArtifactRevisionID: revisionID, UserID: principal.UserID,
+				}); rebindErr != nil {
+					return rebindErr
+				}
 				updated = transitioned
 				return nil
 			}

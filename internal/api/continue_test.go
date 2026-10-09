@@ -411,10 +411,9 @@ func TestContinueHandler_InvalidInputChangesNothing(t *testing.T) {
 	}
 }
 
-// TestContinueHandler_TextWithoutCapturedSessionIsRefused: text rides the
-// captured session; with no session on the latest invocation the request is a
-// 409 before any enqueue, not a 200 onto a job that cannot deliver.
-func TestContinueHandler_TextWithoutCapturedSessionIsRefused(t *testing.T) {
+// TestContinueHandler_TextWithoutCapturedSessionIsAccepted: the queued note
+// reaches a fresh invocation when the previous attempt saved no session.
+func TestContinueHandler_TextWithoutCapturedSessionIsAccepted(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("database test")
@@ -423,20 +422,14 @@ func TestContinueHandler_TextWithoutCapturedSessionIsRefused(t *testing.T) {
 	runID := harness.insertPausedRun(t, false)
 
 	recorder := harness.callContinue(t, runID, `{"text":"an answer with nowhere to go"}`, true)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
 	}
-	if got := harness.runStateOf(t, runID); got != "paused_open_questions" {
-		t.Errorf("run state = %q, want paused_open_questions (refused before the transition)", got)
+	if got := harness.runStateOf(t, runID); got != "running" {
+		t.Errorf("run state = %q, want running", got)
 	}
-	if _, found := harness.latestContinuePayload(t, runID); found {
-		t.Error("a sessionless text continue enqueued a job")
-	}
-	// Without text the same run continues: the 409 is about the text, not the
-	// state.
-	emptyRecorder := harness.callContinue(t, runID, "", true)
-	if emptyRecorder.Code != http.StatusOK {
-		t.Fatalf("empty continue status = %d, want 200; body: %s", emptyRecorder.Code, emptyRecorder.Body.String())
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(string(payload), "an answer with nowhere to go") {
+		t.Errorf("continue job did not carry the note: %s", payload)
 	}
 }
 

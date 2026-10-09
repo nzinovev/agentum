@@ -13,6 +13,8 @@ import (
 const claimPublication = `-- name: ClaimPublication :one
 UPDATE run_publications
 SET state = 'publishing',
+    published_commit = COALESCE(pending_commit, published_commit),
+    pending_commit = NULL,
     attempts = attempts + 1,
     lease_owner = $3,
     lease_expires_at = $4,
@@ -21,7 +23,7 @@ WHERE tenant_id = $1 AND run_id = $2
   AND request_id = $5
   AND (state = 'pending' OR (state = 'publishing'
        AND (lease_expires_at IS NULL OR lease_expires_at < now())))
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type ClaimPublicationParams struct {
@@ -73,6 +75,7 @@ func (q *Queries) ClaimPublication(ctx context.Context, arg ClaimPublicationPara
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
@@ -82,7 +85,7 @@ INSERT INTO run_publications (tenant_id, user_id, run_id,
                               provider, remote_branch, published_commit, state)
 VALUES ($1, $2, $3, $4, $5, $6, 'pending')
 ON CONFLICT (run_id) DO NOTHING
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type EnsurePublicationParams struct {
@@ -139,12 +142,13 @@ func (q *Queries) EnsurePublication(ctx context.Context, arg EnsurePublicationPa
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
 
 const findStalePublications = `-- name: FindStalePublications :many
-SELECT publication.id, publication.tenant_id, publication.user_id, publication.run_id, publication.provider, publication.target_host, publication.target_owner, publication.target_repository, publication.base_branch, publication.remote_branch, publication.published_commit, publication.state, publication.pr_number, publication.pr_url, publication.pr_state, publication.branch_pushed_at, publication.published_at, publication.attempts, publication.last_error_code, publication.last_error_message, publication.lease_owner, publication.lease_expires_at, publication.created_at, publication.updated_at, publication.request_id, publication.draft_rejected FROM run_publications publication
+SELECT publication.id, publication.tenant_id, publication.user_id, publication.run_id, publication.provider, publication.target_host, publication.target_owner, publication.target_repository, publication.base_branch, publication.remote_branch, publication.published_commit, publication.state, publication.pr_number, publication.pr_url, publication.pr_state, publication.branch_pushed_at, publication.published_at, publication.attempts, publication.last_error_code, publication.last_error_message, publication.lease_owner, publication.lease_expires_at, publication.created_at, publication.updated_at, publication.request_id, publication.draft_rejected, publication.pending_commit FROM run_publications publication
 WHERE publication.tenant_id = $1
   AND publication.attempts < $2
   AND (SELECT COALESCE(sum(GREATEST(failed_job.attempts, 1)), 0)
@@ -218,6 +222,7 @@ func (q *Queries) FindStalePublications(ctx context.Context, arg FindStalePublic
 			&i.UpdatedAt,
 			&i.RequestID,
 			&i.DraftRejected,
+			&i.PendingCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -242,7 +247,7 @@ SET target_host = COALESCE(NULLIF(target_host, ''), $3),
 WHERE tenant_id = $1 AND run_id = $2 AND user_id = $7
   AND state = 'publishing' AND attempts = $8 AND lease_owner = $9
   AND lease_expires_at > now()
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type FreezePublicationTargetParams struct {
@@ -299,12 +304,13 @@ func (q *Queries) FreezePublicationTarget(ctx context.Context, arg FreezePublica
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
 
 const getPublicationForRun = `-- name: GetPublicationForRun :one
-SELECT id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected FROM run_publications
+SELECT id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit FROM run_publications
 WHERE tenant_id = $1 AND run_id = $2
 `
 
@@ -346,13 +352,69 @@ func (q *Queries) GetPublicationForRun(ctx context.Context, arg GetPublicationFo
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
+	)
+	return i, err
+}
+
+const queuePublicationUpdate = `-- name: QueuePublicationUpdate :one
+UPDATE run_publications
+SET pending_commit = (SELECT result_commit FROM runs
+                      WHERE runs.id = run_publications.run_id AND runs.tenant_id = run_publications.tenant_id),
+    updated_at = now()
+WHERE run_publications.tenant_id = $1 AND run_publications.run_id = $2
+  AND state = 'publishing' AND lease_expires_at > now()
+  AND EXISTS (SELECT 1 FROM runs WHERE runs.id = run_publications.run_id
+              AND runs.tenant_id = run_publications.tenant_id AND runs.result_commit IS NOT NULL)
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
+`
+
+type QueuePublicationUpdateParams struct {
+	TenantID string `json:"tenant_id"`
+	RunID    string `json:"run_id"`
+}
+
+// A new result can arrive while the prior publication holds a live lease.
+// Keep that attempt's commit intact; its completion opens a pending request.
+func (q *Queries) QueuePublicationUpdate(ctx context.Context, arg QueuePublicationUpdateParams) (RunPublication, error) {
+	row := q.db.QueryRowContext(ctx, queuePublicationUpdate, arg.TenantID, arg.RunID)
+	var i RunPublication
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.RunID,
+		&i.Provider,
+		&i.TargetHost,
+		&i.TargetOwner,
+		&i.TargetRepository,
+		&i.BaseBranch,
+		&i.RemoteBranch,
+		&i.PublishedCommit,
+		&i.State,
+		&i.PrNumber,
+		&i.PrUrl,
+		&i.PrState,
+		&i.BranchPushedAt,
+		&i.PublishedAt,
+		&i.Attempts,
+		&i.LastErrorCode,
+		&i.LastErrorMessage,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RequestID,
+		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
 
 const recordPublicationFailure = `-- name: RecordPublicationFailure :one
 UPDATE run_publications
-SET state = $3,
+SET state = CASE WHEN pending_commit IS NOT NULL THEN 'pending' ELSE $3 END,
+    request_id = request_id + CASE WHEN pending_commit IS NOT NULL THEN 1 ELSE 0 END,
     draft_rejected = draft_rejected OR $9::boolean,
     last_error_code = $4,
     last_error_message = $5,
@@ -365,7 +427,7 @@ SET state = $3,
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
   AND state = 'publishing' AND attempts = $7 AND lease_owner = $8
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type RecordPublicationFailureParams struct {
@@ -385,7 +447,8 @@ type RecordPublicationFailureParams struct {
 
 // Record a refused publication: the reason code from the closed vocabulary,
 // a safe diagnostic, and the state — failed when a retry can clear the
-// reason, blocked when it cannot. branch_pushed_at keeps an earlier
+// reason, blocked when it cannot, or pending when a newer result waits.
+// branch_pushed_at keeps an earlier
 // successful push: an attempt can push the branch and still fail the pull
 // request, and the row must keep the half that succeeded. The lease is
 // released. A draft refusal survives other failures until a successful delivery.
@@ -433,13 +496,15 @@ func (q *Queries) RecordPublicationFailure(ctx context.Context, arg RecordPublic
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
 
 const recordPublicationSuccess = `-- name: RecordPublicationSuccess :one
 UPDATE run_publications
-SET state = 'published',
+SET state = CASE WHEN pending_commit IS NOT NULL THEN 'pending' ELSE 'published' END,
+    request_id = request_id + CASE WHEN pending_commit IS NOT NULL THEN 1 ELSE 0 END,
     draft_rejected = false,
     target_host = COALESCE(NULLIF(target_host, ''), $3),
     target_owner = COALESCE(NULLIF(target_owner, ''), $4),
@@ -457,7 +522,7 @@ SET state = 'published',
     updated_at = now()
 WHERE tenant_id = $1 AND run_id = $2
   AND state = 'publishing' AND attempts = $10 AND lease_owner = $11
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type RecordPublicationSuccessParams struct {
@@ -477,9 +542,9 @@ type RecordPublicationSuccessParams struct {
 // Record a completed publication: the frozen target (written only when the
 // row does not carry one yet — the target is derived once and a later attempt
 // must not re-derive it against a moved remote), the pull request identity,
-// and both outcome marks. State published requires branch_pushed_at and
-// published_at together; the lease is released. Only the current attempt
-// and lease owner can record the outcome.
+// and both outcome marks. A waiting newer commit changes the state to pending
+// for the reconciler; otherwise this attempt ends as published. Only the
+// current attempt and lease owner can record the outcome.
 func (q *Queries) RecordPublicationSuccess(ctx context.Context, arg RecordPublicationSuccessParams) (RunPublication, error) {
 	row := q.db.QueryRowContext(ctx, recordPublicationSuccess,
 		arg.TenantID,
@@ -522,6 +587,7 @@ func (q *Queries) RecordPublicationSuccess(ctx context.Context, arg RecordPublic
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }
@@ -529,10 +595,12 @@ func (q *Queries) RecordPublicationSuccess(ctx context.Context, arg RecordPublic
 const requestPublication = `-- name: RequestPublication :one
 UPDATE run_publications
 SET state = 'pending', request_id = request_id + 1,
+	 published_commit = COALESCE((SELECT result_commit FROM runs WHERE runs.id = run_publications.run_id AND runs.tenant_id = run_publications.tenant_id), run_publications.published_commit),
+     pending_commit = NULL,
     lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-WHERE tenant_id = $1 AND run_id = $2
+WHERE run_publications.tenant_id = $1 AND run_publications.run_id = $2
   AND (state <> 'publishing' OR lease_expires_at IS NULL OR lease_expires_at < now())
-RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected
+RETURNING id, tenant_id, user_id, run_id, provider, target_host, target_owner, target_repository, base_branch, remote_branch, published_commit, state, pr_number, pr_url, pr_state, branch_pushed_at, published_at, attempts, last_error_code, last_error_message, lease_owner, lease_expires_at, created_at, updated_at, request_id, draft_rejected, pending_commit
 `
 
 type RequestPublicationParams struct {
@@ -540,8 +608,9 @@ type RequestPublicationParams struct {
 	RunID    string `json:"run_id"`
 }
 
-// RequestPublication starts an explicit retry and invalidates older queued jobs.
-// A concurrent claim with a live lease refuses the request atomically.
+// RequestPublication starts an explicit retry or a new result and invalidates
+// older queued jobs. A live lease defers a new result through
+// QueuePublicationUpdate instead of replacing the commit in flight.
 func (q *Queries) RequestPublication(ctx context.Context, arg RequestPublicationParams) (RunPublication, error) {
 	row := q.db.QueryRowContext(ctx, requestPublication, arg.TenantID, arg.RunID)
 	var i RunPublication
@@ -572,6 +641,7 @@ func (q *Queries) RequestPublication(ctx context.Context, arg RequestPublication
 		&i.UpdatedAt,
 		&i.RequestID,
 		&i.DraftRejected,
+		&i.PendingCommit,
 	)
 	return i, err
 }

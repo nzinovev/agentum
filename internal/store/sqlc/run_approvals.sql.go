@@ -137,3 +137,40 @@ func (q *Queries) ListApprovalsForRun(ctx context.Context, arg ListApprovalsForR
 	}
 	return items, nil
 }
+
+const rebindPlanApproval = `-- name: RebindPlanApproval :one
+UPDATE run_approvals SET artifact_revision_id = $4, user_id = $5, actor = 'human', created_at = now()
+WHERE tenant_id = $1 AND run_id = $2 AND name = $3 AND decision = 'approved'
+RETURNING id, tenant_id, run_id, name, decision, artifact_revision_id, actor, created_at, user_id
+`
+
+type RebindPlanApprovalParams struct {
+	TenantID           string         `json:"tenant_id"`
+	RunID              string         `json:"run_id"`
+	Name               string         `json:"name"`
+	ArtifactRevisionID sql.NullString `json:"artifact_revision_id"`
+	UserID             string         `json:"user_id"`
+}
+
+func (q *Queries) RebindPlanApproval(ctx context.Context, arg RebindPlanApprovalParams) (RunApproval, error) {
+	row := q.db.QueryRowContext(ctx, rebindPlanApproval,
+		arg.TenantID,
+		arg.RunID,
+		arg.Name,
+		arg.ArtifactRevisionID,
+		arg.UserID,
+	)
+	var i RunApproval
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.RunID,
+		&i.Name,
+		&i.Decision,
+		&i.ArtifactRevisionID,
+		&i.Actor,
+		&i.CreatedAt,
+		&i.UserID,
+	)
+	return i, err
+}

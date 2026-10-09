@@ -138,6 +138,9 @@ type PutParams struct {
 	// revision the user has seen should set it, so two editors racing on the
 	// same artifact produce a conflict instead of a lost update.
 	ExpectedCurrentRevision string
+	// RequiredRunState binds a human gate artifact to the run state observed
+	// under the store's run-row lock. Empty leaves ordinary stage writes alone.
+	RequiredRunState string
 }
 
 // Store is the durable artifact revisions store. Implementations keep the FS

@@ -315,11 +315,9 @@ func hasStopReason(events []sqlc.Event, wantReason string) bool {
 	return false
 }
 
-// TestRunner_ContinueTextWithoutSessionPausesWithoutInvoking: text with no
-// captured session has no delivery target. The run must stop in a managed
-// pause naming the fault — never start a fresh session the user never saw, and
-// never silently drop the text after a 200.
-func TestRunner_ContinueTextWithoutSessionPausesWithoutInvoking(t *testing.T) {
+// TestRunner_ContinueTextWithoutSessionStartsFreshInvocation: a note reaches
+// the current stage's routing block when no session id was captured.
+func TestRunner_ContinueTextWithoutSessionStartsFreshInvocation(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
 	if err := initRepoWithCommit(repo); err != nil {
@@ -350,14 +348,17 @@ func TestRunner_ContinueTextWithoutSessionPausesWithoutInvoking(t *testing.T) {
 	if err := New(Deps{Store: store, Packs: src, Adapter: adapter}).HandleContinue(t.Context(), continueWithText); err != nil {
 		t.Fatalf("continue job: %v", err)
 	}
-	if got := store.taskState(); got != "paused_user_stop" {
-		t.Fatalf("state = %q, want paused_user_stop (managed pause, not a failure)", got)
+	if got := store.taskState(); got != "awaiting_final_review" {
+		t.Fatalf("state = %q, want awaiting_final_review", got)
 	}
-	if len(adapter.invocations) != 0 {
-		t.Fatalf("adapter invoked %d time(s); the text-less session must stop before any invocation", len(adapter.invocations))
+	if len(adapter.invocations) != 1 {
+		t.Fatalf("adapter invoked %d time(s), want a fresh invocation", len(adapter.invocations))
 	}
-	if !hasStopReason(store.events, "resume_session_missing") {
-		t.Errorf("no run.state_changed event carries stop_reason resume_session_missing; events: %+v", store.events)
+	if adapter.invocations[0].ResumeSession != "" {
+		t.Errorf("ResumeSession = %q, want fresh session", adapter.invocations[0].ResumeSession)
+	}
+	if !strings.Contains(adapter.invocations[0].RoutingBlock, "an answer with nowhere to go") {
+		t.Error("the fresh invocation did not receive the note")
 	}
 }
 

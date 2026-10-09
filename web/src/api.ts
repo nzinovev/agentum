@@ -35,6 +35,10 @@ export type Run = {
   base_ref: string;
   base_commit: string;
   result_commit: string;
+  previous_result_commit?: string;
+  pause_requested_at?: string;
+  approved_plan_revision_id?: string;
+  checkpoint?: { label: string; commit: string; at: string };
   branch: string;
   pipeline_pack: string;
   pipeline_pack_origin: string;
@@ -84,6 +88,7 @@ export type Invocation = {
   cycle: number;
   stop_reason?: string;
   resume_of?: string;
+  session_id?: string;
   started_at: string;
   finished_at?: string;
 };

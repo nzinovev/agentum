@@ -189,10 +189,14 @@ func (sqlStore *SQLStore) commitRevision(
 	// Serialize against a gate answer on the same run: it updates the run row
 	// before reading the revision it binds to, so this write lands wholly
 	// before that read or after the answer commits — never in between.
-	if lockErr := qtx.LockRunForArtifactWrite(ctx, sqlc.LockRunForArtifactWriteParams{
+	runState, lockErr := qtx.LockRunForArtifactWrite(ctx, sqlc.LockRunForArtifactWriteParams{
 		ID: params.RunID, TenantID: params.TenantID,
-	}); lockErr != nil {
+	})
+	if lockErr != nil {
 		return Revision{}, fmt.Errorf("artifacts: lock run: %w", lockErr)
+	}
+	if params.RequiredRunState != "" && runState != params.RequiredRunState {
+		return Revision{}, fmt.Errorf("%w: run state changed to %s", ErrRevisionConflict, runState)
 	}
 	prior, hasPrior, priorErr := lockCurrent(ctx, qtx, params)
 	if priorErr != nil {

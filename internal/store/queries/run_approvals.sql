@@ -26,3 +26,8 @@ WHERE tenant_id = $1 AND run_id = $2 AND name = $3;
 SELECT * FROM run_approvals
 WHERE tenant_id = $1 AND run_id = $2
 ORDER BY created_at ASC, id ASC;
+
+-- name: RebindPlanApproval :one
+UPDATE run_approvals SET artifact_revision_id = $4, user_id = $5, actor = 'human', created_at = now()
+WHERE tenant_id = $1 AND run_id = $2 AND name = $3 AND decision = 'approved'
+RETURNING *;

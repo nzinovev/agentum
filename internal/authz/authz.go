@@ -91,7 +91,10 @@ const (
 	ActionRunRead = "run:read"
 
 	// ActionRunStart moves a fresh run into the running pipeline.
-	ActionRunStart = "run:start"
+	ActionRunStart        = "run:start"
+	ActionRunPause        = "run:pause"
+	ActionRunRequestFix   = "run:request-fix"
+	ActionRunEditArtifact = "run:edit-artifact"
 
 	// ActionRunContinue resumes a paused run (open_questions / user_stop),
 	// optionally carrying new user text to the resumed session. Its own verb,
