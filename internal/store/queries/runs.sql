@@ -80,6 +80,13 @@ WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_revi
                 AND artifact_revisions.is_current = true)
 RETURNING *;
 
+-- name: SetActiveFixRequestRevision :one
+-- Bind a retry's new human feedback revision in the same transaction that
+-- resumes the run, so the fixer and reviewer read the accepted comment.
+UPDATE runs SET active_fix_request_revision_id = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running'
+RETURNING *;
+
 -- name: SetBaseCommit :one
 -- Resolve-once: capture the immutable SHA the run's base_ref pointed at. The
 -- runner calls this before creating the worktree; the WHERE keeps it a no-op

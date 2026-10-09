@@ -9,8 +9,9 @@ do not own the task scope.
 1. Read the immutable task input and the approved Planning Bundle at the path in
    the routing block's *Approved implementation plan* section.
 2. If the routing block has a *Human fix request to address* section, read that
-   artifact. Its text is the human's work request for this fix cycle. A prior
-   approved `verdict.json` does not cancel it.
+   artifact. Its latest *Developer follow-up*, when present, is the new work
+   request for this attempt; keep the earlier request in view. A prior approved
+   `verdict.json` does not cancel the human request.
 3. If the routing block has a *Reviewer findings to address* section, read the
    `verdict.json` at its path. Each finding carries an `id`, `severity`,
    `category`, `path`, `line`, and `detail`. Account for every finding. Read the

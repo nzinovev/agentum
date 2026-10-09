@@ -461,9 +461,9 @@ func TestContinueHandler_QueuesTextWithoutReadingSession(t *testing.T) {
 	}
 }
 
-// TestContinueAfterFailedFixNamesChecks protects the retry handoff: the fixer
-// receives orchestrator check failures even without another human note.
-func TestContinueAfterFailedFixNamesChecks(t *testing.T) {
+// TestContinueAfterFailedFixRequiresNewFeedback protects the retry handoff:
+// the fixer receives new developer feedback alongside failed check names.
+func TestContinueAfterFailedFixRequiresNewFeedback(t *testing.T) {
 	harness := newContinueHarness(t)
 	runID := harness.insertPausedRun(t, true)
 	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
@@ -473,13 +473,82 @@ func TestContinueAfterFailedFixNamesChecks(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	response := harness.callContinue(t, runID, `{}`, true)
+	originalRevision := harness.seedHumanFixRequest(t, runID)
+	empty := harness.callContinue(t, runID, `{}`, true)
+	if empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty retry status = %d: %s", empty.Code, empty.Body.String())
+	}
+	if state := harness.runStateOf(t, runID); state != "paused_user_stop" {
+		t.Fatalf("state after empty retry = %s", state)
+	}
+	response := harness.callContinue(t, runID, `{"text":"Cover the timeout path"}`, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("continue status = %d: %s", response.Code, response.Body.String())
 	}
 	payload, found := harness.latestContinuePayload(t, runID)
-	if !found || !strings.Contains(payload, "Previous mandatory project checks failed: build, lint") {
+	if !found || !strings.Contains(payload, "Previous mandatory project checks failed: build, lint") ||
+		!strings.Contains(payload, "Cover the timeout path") {
 		t.Fatalf("retry payload = %q, found = %t", payload, found)
+	}
+	harness.assertNewHumanFixRevision(t, runID, originalRevision, "Cover the timeout path")
+}
+
+// TestContinueAfterReviewerFixRequiresNewFeedback keeps a human-requested
+// correction paused until the developer writes another instruction.
+func TestContinueAfterReviewerFixRequiresNewFeedback(t *testing.T) {
+	harness := newContinueHarness(t)
+	runID := harness.insertPausedRun(t, true)
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant,
+		CurrentStage: sql.NullString{String: "fix", Valid: true},
+		State:        "paused_user_stop", StopReason: "human_fix_feedback_required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	originalRevision := harness.seedHumanFixRequest(t, runID)
+	if response := harness.callContinue(t, runID, `{}`, true); response.Code != http.StatusBadRequest {
+		t.Fatalf("empty retry status = %d: %s", response.Code, response.Body.String())
+	}
+	response := harness.callContinue(t, runID, `{"text":"Address reviewer RV-002"}`, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("retry status = %d: %s", response.Code, response.Body.String())
+	}
+	if payload, found := harness.latestContinuePayload(t, runID); !found || !strings.Contains(payload, "Address reviewer RV-002") {
+		t.Fatalf("retry payload = %q, found = %t", payload, found)
+	}
+	harness.assertNewHumanFixRevision(t, runID, originalRevision, "Address reviewer RV-002")
+}
+
+func (harness *continueHarness) seedHumanFixRequest(t *testing.T, runID string) string {
+	t.Helper()
+	harness.api.art = artifacts.NewSQLStore(artifacts.SQLStoreDeps{
+		DB: harness.db, Queries: harness.queries, Blobs: artifacts.NewBlobStore(t.TempDir()),
+	})
+	revision, err := harness.api.art.Put(t.Context(), artifacts.PutParams{
+		TenantID: continueTestTenant, UserID: continueTestUser, RunID: runID,
+		Name: "final/fix-request.md", Kind: "human_fix_request", Bytes: []byte("Original developer request"),
+		Actor: artifacts.ActorHuman,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.db.ExecContext(t.Context(),
+		`UPDATE runs SET active_fix_request_revision_id = $1 WHERE id = $2 AND tenant_id = $3`,
+		revision.ID, runID, continueTestTenant); err != nil {
+		t.Fatal(err)
+	}
+	return revision.ID
+}
+
+func (harness *continueHarness) assertNewHumanFixRevision(t *testing.T, runID, originalRevision, newComment string) {
+	t.Helper()
+	run, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil || !run.ActiveFixRequestRevisionID.Valid || run.ActiveFixRequestRevisionID.String == originalRevision {
+		t.Fatalf("active human feedback after Continue = %+v, err = %v", run, err)
+	}
+	content, err := harness.api.art.GetBytes(t.Context(), continueTestTenant, run.ActiveFixRequestRevisionID.String)
+	if err != nil || !strings.Contains(string(content), "Original developer request") || !strings.Contains(string(content), newComment) {
+		t.Fatalf("feedback artifact = %q, err = %v", content, err)
 	}
 }
 

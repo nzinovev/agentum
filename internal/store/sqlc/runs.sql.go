@@ -559,6 +559,8 @@ type RequestRunPauseParams struct {
 	TenantID string `json:"tenant_id"`
 }
 
+// A repeated request preserves the first timestamp while the runner finishes
+// its current invocation and checkpoint.
 func (q *Queries) RequestRunPause(ctx context.Context, arg RequestRunPauseParams) (Run, error) {
 	row := q.db.QueryRowContext(ctx, requestRunPause, arg.ID, arg.TenantID)
 	var i Run
@@ -626,6 +628,57 @@ func (q *Queries) SelectRunRoute(ctx context.Context, arg SelectRunRouteParams) 
 		arg.RouteFallbackMessage,
 		arg.RouteTriageInvocationID,
 	)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
+		&i.CheckoutPath,
+		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
+		&i.RouteSource,
+		&i.RouteReason,
+		&i.RouteFallbackCode,
+		&i.RouteFallbackMessage,
+		&i.RouteDecidedAt,
+		&i.RouteTriageInvocationID,
+		&i.PauseRequestedAt,
+		&i.PreviousResultCommit,
+		&i.ActiveFixRequestRevisionID,
+	)
+	return i, err
+}
+
+const setActiveFixRequestRevision = `-- name: SetActiveFixRequestRevision :one
+UPDATE runs SET active_fix_request_revision_id = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running'
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id
+`
+
+type SetActiveFixRequestRevisionParams struct {
+	ID                         string         `json:"id"`
+	TenantID                   string         `json:"tenant_id"`
+	ActiveFixRequestRevisionID sql.NullString `json:"active_fix_request_revision_id"`
+}
+
+// Bind a retry's new human feedback revision in the same transaction that
+// resumes the run, so the fixer and reviewer read the accepted comment.
+func (q *Queries) SetActiveFixRequestRevision(ctx context.Context, arg SetActiveFixRequestRevisionParams) (Run, error) {
+	row := q.db.QueryRowContext(ctx, setActiveFixRequestRevision, arg.ID, arg.TenantID, arg.ActiveFixRequestRevisionID)
 	var i Run
 	err := row.Scan(
 		&i.ID,

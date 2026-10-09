@@ -74,9 +74,15 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
+	fixRetry := strings.HasPrefix(run.StopReason, "fix_checks_failed: ") || run.StopReason == "human_fix_feedback_required"
+	if fixRetry && continuation.Text == "" {
+		writeError(w, http.StatusBadRequest, codeBadInput, "new developer feedback is required before retrying the fix")
+		return
+	}
+	humanFeedback := continuation.Text
 	if strings.HasPrefix(run.StopReason, "fix_checks_failed: ") {
-		// The fixer needs the orchestrator's failed check names even when the
-		// human presses Continue without adding a second note.
+		// The fixer receives both the person's new feedback and the
+		// orchestrator's failed check names in the next Task section.
 		checkContext := "Previous mandatory project checks failed: " + strings.TrimPrefix(run.StopReason, "fix_checks_failed: ")
 		if len(checkContext)+len(continuation.Text)+1 <= taskinput.MaxContinuationTextBytes {
 			continuation.Text = strings.TrimSpace(checkContext + "\n" + continuation.Text)
@@ -89,6 +95,10 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, codeInternal, marshalErr.Error())
 		return
 	}
+	if fixRetry {
+		api.resumeHumanFixWithFeedback(w, r, principal, run, event, gate, humanFeedback, payload)
+		return
+	}
 	updated, err := api.applyResume(r, run, event, "continue", payload,
 		gateDecisionPatch(run, principal, gate, decisionContinued), planApproval{}, principal)
 	if err != nil {
@@ -98,6 +108,76 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toRunResponse(updated))
+}
+
+// resumeHumanFixWithFeedback stores each new developer comment as a revision
+// before queuing the fixer. The revision, active pointer, state transition,
+// job, and decision commit together so a retry never runs on an older note.
+func (api *API) resumeHumanFixWithFeedback(w http.ResponseWriter, r *http.Request, principal authz.Principal, run sqlc.Run, event engine.RunEvent, gate, feedback string, payload []byte) {
+	if !api.requireArtifactStore(w) {
+		return
+	}
+	const artifactName = "final/fix-request.md"
+	current, currentErr := api.art.Current(r.Context(), principal.TenantID, run.ID, artifactName)
+	if currentErr != nil {
+		writeError(w, statusForArtifactStoreErr(currentErr), codeForArtifactStoreErr(currentErr), errForCaller(currentErr))
+		return
+	}
+	if !run.ActiveFixRequestRevisionID.Valid || current.ID != run.ActiveFixRequestRevisionID.String {
+		writeError(w, http.StatusConflict, codeConflict, "human fix request changed; refresh the run")
+		return
+	}
+	original := current
+	for original.Prev != "" {
+		original, currentErr = api.art.Get(r.Context(), principal.TenantID, original.Prev)
+		if currentErr != nil || original.RunID != run.ID || original.Name != artifactName {
+			writeError(w, http.StatusInternalServerError, codeInternal, "could not read the original human fix request")
+			return
+		}
+	}
+	previous, readErr := api.art.GetBytes(r.Context(), principal.TenantID, original.ID)
+	if readErr != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, readErr.Error())
+		return
+	}
+	nextState, transitionErr := engine.Next(engine.RunState(run.State), event)
+	if transitionErr != nil {
+		statusForTransition(w, transitionErr)
+		return
+	}
+	// Keep the first request and this attempt's comment in the active artifact.
+	// Older follow-ups remain in the revision chain without making each retry
+	// grow the current artifact indefinitely.
+	content := append(append([]byte{}, previous...), []byte("\n\n## Developer follow-up\n\n"+feedback+"\n")...)
+	var updated sqlc.Run
+	_, putErr := api.art.Put(r.Context(), artifacts.PutParams{
+		TenantID: principal.TenantID, UserID: principal.UserID, RunID: run.ID,
+		Name: artifactName, Kind: "human_fix_request", Bytes: content, Actor: artifacts.ActorHuman,
+		ExpectedCurrentRevision: current.ID, RequiredRunState: string(engine.StatePausedUserStop),
+		AfterRevision: func(ctx context.Context, queries *sqlc.Queries, revision artifacts.Revision) error {
+			_, applyErr := api.applyTransition(ctx, queries, principal, lifecycleTransition{
+				run: run, next: nextState, jobKind: "continue", jobPayload: payload,
+				decision: gateDecisionPatch(run, principal, gate, decisionContinued), policy: recordStrict,
+			})
+			if applyErr != nil {
+				return applyErr
+			}
+			var bindErr error
+			updated, bindErr = queries.SetActiveFixRequestRevision(ctx, sqlc.SetActiveFixRequestRevisionParams{
+				ID: run.ID, TenantID: principal.TenantID,
+				ActiveFixRequestRevisionID: sql.NullString{String: revision.ID, Valid: true},
+			})
+			if errors.Is(bindErr, sql.ErrNoRows) {
+				return artifacts.ErrRevisionConflict
+			}
+			return bindErr
+		},
+	})
+	if putErr != nil {
+		writeError(w, statusForArtifactStoreErr(putErr), codeForArtifactStoreErr(putErr), errForCaller(putErr))
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))

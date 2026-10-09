@@ -2233,6 +2233,14 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 
 	switch decision.Action {
 	case ActionAdvance:
+		if run.record.ActiveFixRequestRevisionID.Valid &&
+			pack.EffectiveRole(stageID, stage) == "reviewer" &&
+			pack.EffectiveRole(decision.Transition.To, run.runPack.Stages[decision.Transition.To]) == "fixer" {
+			return stageOutcome{done: true}, runner.applyPauseDecision(ctx, run.record, Decision{
+				Action: ActionPause, FSMEvent: engine.EventStopUser,
+				StopReason: "human_fix_feedback_required",
+			}, decision.Transition.To)
+		}
 		// Fill the prospective cycle for the target invocation. The pure
 		// ResolveTransition leaves it zero (it cannot know the per-stage cycle
 		// without a store read, and deriving it from the fixer-set max would be
@@ -2561,6 +2569,24 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		}
 	}
 	stageRole := pack.EffectiveRole(stageID, stage)
+	if stageRole == "fixer" && run.record.ActiveFixRequestRevisionID.Valid && routingBlock.ReviewFindings == nil {
+		latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
+			RunID: run.record.ID, TenantID: run.record.TenantID,
+		})
+		if latestErr == nil {
+			previousStage, found := run.runPack.Stages[latest.Stage]
+			if found && pack.EffectiveRole(latest.Stage, previousStage) == "reviewer" {
+				verdict, unreadable, _ := runner.readVerdict(ctx, run.record, latest.Stage)
+				if !unreadable && verdict.Verdict == agent.VerdictChangesRequested {
+					routingBlock.ReviewFindings = &routing.ReviewRef{
+						Stage: latest.Stage,
+						Path:  filepath.Join(worktree.ArtifactDir(run.worktree.Root, run.record.ID, latest.Stage), agent.VerdictFileName),
+						Count: len(verdict.Findings),
+					}
+				}
+			}
+		}
+	}
 	if (stageRole == "fixer" || stageRole == "reviewer") && run.record.ActiveFixRequestRevisionID.Valid {
 		if runner.art == nil {
 			runner.log.Error("active human fix request has no artifact store", "run", run.record.ID)
