@@ -10,6 +10,16 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Operators can request a pause while a run is running.** The run records
+  the pending request, stops after the current invocation and checkpoint, and
+  accepts an optional note on Continue; a note also reaches a fresh
+  invocation when the current stage has no saved session. Use Pause run on
+  the run page or `POST /runs/{id}/pause`. (#57)
+- **Final review accepts a human fix request.** Submit required feedback with
+  the reviewed `result_commit`; the fixer receives the request artifact, then
+  review and checks run again and publication updates the draft PR. Failed
+  checks or another reviewer request pause for fresh developer feedback on
+  every new attempt, with no human fix-cycle limit. (#57)
 - **The run page now supports human decisions from plan approval through final review.**
   Before this, the browser showed progress and artifacts but could not complete
   a `backend-development` run. Open a run to decide the plan, answer questions,
@@ -81,6 +91,10 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Changed
+- **Editing an approved plan reopens its approval gate.** Operators can edit
+  the plan while paused or at final review; source writes stay locked until
+  `advance` names the new revision. Earlier branch work is retained, and
+  Reject run remains available at the reopened gate. (#57)
 - **Approve, reject, and cancel now leave the worktree and branch in place.**
   Before this, terminal teardown removed the worktree. Use the run page's
   confirmed Delete worktree and Delete branch actions when the local result
@@ -148,8 +162,8 @@ Once tagged releases begin, this project adheres to
   open question never reached the agent. The body is optional: an empty body,
   `{}`, `null`, or a whitespace-only `text` continues exactly as before, and
   existing callers do nothing. A malformed or over-budget body is a `400`, a
-  credential-shaped `text` a `422`, and a `text` with no captured session a
-  `409`. (#44)
+  credential-shaped `text` a `422`. A note with no current-stage session now
+  starts a fresh invocation of that stage. (#44, #57)
 - **The model-check registry is tenant-scoped.** Before this, keys were keyed
   by the bare header and check reads by the bare id, so a second tenant could
   hit a foreign key's `409`, receive a foreign check on a same-body replay,
@@ -387,7 +401,7 @@ Once tagged releases begin, this project adheres to
   bounded.** A condition is one term in a closed grammar (`verdict` /
   `status` / `fix_cycles`) — no boolean operators, no scripts — resolved
   first-match-wins by one resolver shared by both advance paths.
-  `budgets.fix_cycles: N` caps fixer entries; the `N+1`-th is a controlled
+  `budgets.fix_cycles: N` caps automatic fixer entries; the next is a controlled
   stop (`fix_budget_exhausted`) that tears nothing down, and an unparseable
   reviewer verdict pauses for a human (`verdict_unreadable`). Pack authors
   declare the conditions and the budget.

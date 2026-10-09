@@ -19,8 +19,9 @@ POST /runs/{id}/start  → running  (enqueues a `run` job)
    worker: stage loop — invoke adapter, parse result.json, evaluate stop
    ▸ paused_open_questions  → POST .../continue (resume, same session)
    ▸ paused_gate            → POST .../advance  (next stage, fresh session)
-   ▸ paused_user_stop       → POST .../continue (resume)
-   ▸ awaiting_final_review → POST .../approve  (run done)
+   ▸ paused_user_stop       → POST .../continue (same-stage session or fresh invocation)
+   ▸ awaiting_final_review → POST .../approve (run done) or /fix-request
+POST /runs/{id}/pause  → request a pause after the current invocation and checkpoint
 POST /runs/{id}/cancel → cancelled (aborts in-flight run)
 ```
 
@@ -164,7 +165,8 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | Job kind | Entry point | Triggered by |
 |---|---|---|
 | `run` | fresh run, first stage | `POST /runs/{id}/start` |
-| `continue` | resume after `open_questions` / `user_stop`; a stop before the first invocation starts at the pack entry | `POST .../continue` or `POST /runs/{id}/continue` before the first invocation |
+| `continue` | resume a pause at its current stage; a stop before the first invocation starts at the pack entry | `POST .../continue` or `POST /runs/{id}/continue` before the first invocation |
+| `fix_request` | enter the fixer after human feedback at final review | `POST /runs/{id}/fix-request` |
 | `advance` | next stage, fresh session | `POST .../advance` |
 | `reconcile` | apply a human recovery decision over uncommitted work, then resume the session | `POST /runs/{id}/worktree/reconcile` |
 | `discard_worktree` | remove a stopped/terminal run's working tree (tree only, branch survives) | `POST /runs/{id}/worktree/discard` |
@@ -177,13 +179,13 @@ before any invocation and renders it inside the routing block's Task section,
 after the original request. The text applies to the first invocation the job
 resumes and to nothing after it: once that invocation finishes, the loop
 carries no text into the next stage's fresh session. A payload the runner
-cannot deliver — an unreadable shape, or text after an invocation with no captured session id —
-stops the run in `paused_user_stop` with the stop reason
-(`continue_payload_unreadable` / `resume_session_missing`) instead of invoking
-the agent without the user's text. `run` and `advance` payloads are never
-interpreted as user text.
+cannot decode stops the run in `paused_user_stop` with
+`continue_payload_unreadable`. The runner resumes a saved session only when
+the latest invocation belongs to `current_stage`; otherwise it starts a fresh
+invocation of that stage with the text in its Task section. `run` and
+`advance` payloads are never interpreted as user text.
 
-`run` / `continue` / `advance` enter the shared **stage loop**:
+`run` / `continue` / `advance` / `fix_request` enter the shared **stage loop**:
 
 1. **Resolve** the pack + current stage (or `pack.Entry` on first run) → stage
    def (gate, prompt, tier).
@@ -203,7 +205,7 @@ interpreted as user text.
    - On a pause event → loop completes; run stays paused.
    - On advance → read the pack's transition; loop to step 1 with the next stage.
    - On `reach_final_gate` → run moves to `awaiting_final_review`; loop completes.
-   - On terminal → worker tears down the worktree; loop completes.
+   - On terminal → worker retains the worktree and branch; loop completes.
 
 The loop honors `ctx` cancellation throughout: a cancel job or shutdown
 cancels the active stage's ctx, the adapter kills the subprocess, the loop
@@ -246,6 +248,9 @@ happened.
 | `result.json` missing / invalid | `stop_user` | `paused_user_stop` | `parse_error` |
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
+| pause requested while running | `stop_user` after the current invocation and checkpoint | `paused_user_stop` | `user_pause` |
+| mandatory check fails during a human-requested fix | `stop_user` | `paused_user_stop` at the fixer | `fix_checks_failed` |
+| reviewer requests more changes during a human-requested fix | `stop_user` | `paused_user_stop` at the fixer | `human_fix_feedback_required` |
 | resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
 | a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_gate` | `paused_gate` (pinned to the **approval stage**, not the refused stage) | `plan_not_approved` |
 | the approved plan revision no longer matches the approval artifact's current revision (the plan was edited after approval, or the approval bound no revision and a plan revision exists now) | `stop_gate` | `paused_gate` (pinned to the **approval stage**) | `plan_revision_drift` |
@@ -266,9 +271,9 @@ A transition may carry a `condition` in the closed grammar (see
 the first matching edge in declaration order through one resolver, shared
 between the auto-advance path and the `advance` job. A reviewer stage sources a
 `verdict` condition and writes `verdict.json`; the orchestrator parses it (never
-the agent's prose) and routes on the `verdict` field. A fixer stage is
-budget-bound: `budgets.fix_cycles: N` ⇒ at most `N` fixer entries; the `N+1`-th
-is refused with `fix_budget_exhausted`.
+the agent's prose) and routes on the `verdict` field. A fixer stage in the
+automatic review loop is budget-bound: `budgets.fix_cycles: N` permits at most
+`N` automatic fixer entries; the next is refused with `fix_budget_exhausted`.
 
 The fix-cycle counter is durable — derived from `stage_invocations.cycle` (the
 0-based repeat index of a stage within the run), not process memory. It
@@ -284,6 +289,20 @@ bounded, not a runaway) or `cancel` (terminal, branch preserved).
 
 `plan_not_approved` and `plan_revision_drift` are the same controlled shape,
 and belong to the plan-approval lock below.
+
+At final review, a human can request a fix with required text and the
+`result_commit` being reviewed. Agentum stores the request as a revision of
+`final/fix-request.md` and points the fixer and reviewer to that active
+revision. The fixer works from the existing branch, then review and project
+checks run again. The updated commit is published before the next final
+review. At the next final review, publication updates the draft PR. A failed
+mandatory check pauses at `fix_checks_failed`; a reviewer
+request for another correction pauses at `human_fix_feedback_required`. Each
+Continue from either pause requires new developer feedback, records a new
+artifact revision for the current fix request, and starts another fixer
+attempt. The current request's original text and latest follow-up reach the
+fixer; follow-ups from earlier fix requests do not. These human-directed
+attempts have no fix-cycle limit.
 
 ### Plan-approval lock
 
@@ -324,17 +343,12 @@ recovery is exactly the ordinary plan-gate advance:
 - `plan_not_approved` → advance records the plan approval (the pause sits at
   the approval stage, so the handler's stage guard matches) and the
   implementer runs with the grant. Reject and cancel also work from this stop.
-- `plan_revision_drift` → the approval row already exists, so advance's write
-  is a no-op; the run re-checks, drifts again, and pauses at the same place —
-  never a skip, and cancel is the exit (reject returns 409: the plan gate was
-  already decided approved). Drift cannot be cleared by advance: re-editing the
-  plan mints a revision the approval is not bound to. The retry is free only
-  when the approval stage transitions straight into the source-writing stage
-  (the shipped pack's shape); with intermediate stages between them —
-  well-formed under the validator's pass-through rule — each advance re-runs
-  those stages before re-hitting the refusal, so each retry costs real
-  invocations. A pack author adding a stage between plan and implement
-  accepts that cost.
+- `plan_revision_drift` → a human edited the approved plan while the run was
+  paused or at final review. The artifact revision and gate reopen commit in
+  one transaction; the existing work and branch remain. Source-write is
+  withheld until `advance` names the new plan's `expected_revision_id` and
+  rebinds the approval row to it. The runner then continues under that plan.
+  Reject and cancel are also available at this gate.
 
 ### Orchestrator-produced delivery diff
 
@@ -882,8 +896,11 @@ as manifest evidence:
   project defines no checks) is a legitimate configuration recorded as
   `ran: false` so it is not misread as a gate that ran and cleared.
 
-A **mandatory failure blocks delivery**: instead of reaching the review gate, the
-run fails, and the check evidence in the sealed manifest is the record. Optional
+A **mandatory failure blocks delivery**: instead of reaching the review gate, an
+ordinary run fails and keeps its worktree, branch, and artifacts. During a
+human-requested fix, it pauses at the fixer with `fix_checks_failed`; the
+failed check names are available in `GET /runs/{id}.failed_checks` and the
+next invocation's Task section after a human supplies new feedback. Optional
 check failures are recorded as evidence but do not block. A successful run is the
 evidence available to the final reviewer. Reaching the delivery boundary without
 a resolved `base_commit` also fails the run — the anchor is required to load the

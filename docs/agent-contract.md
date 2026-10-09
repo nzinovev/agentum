@@ -41,6 +41,10 @@ context that are **not** pack-owned:
   the agent learns *what* the checks are from the resolved section below; it
   cannot change *which* checks gate delivery, and it has no say in how the run
   is configured.
+  A human's Continue text is appended to this Task section for the next
+  invocation only. A saved session is reused only when it belongs to the
+  run's current stage; otherwise the stage starts a fresh invocation with
+  that text.
 - **Pinned instruction files.** The repository's `AGENTS.md` and any files
   declared under `instructions:` in `.agentum.yaml`, pinned from the task's
   `base_commit`. These are read-only from the agent's perspective: the `edit`
@@ -185,6 +189,24 @@ exact revision through the routing block's "Approved implementation plan"
 section. The approval binds to the revision id the human saw; a later edit to
 the same artifact is detected as `plan_revision_drift`. See
 [docs/execution.md](execution.md) § "Plan-approval lock".
+
+Editing an approved plan during a pause or final review reopens its gate.
+The human advances with the new revision id before source writes resume;
+earlier work remains on the run branch.
+
+## Human fix request
+
+At final review, a person's required correction is stored as
+`final/fix-request.md` (kind `human_fix_request`). The orchestrator puts the
+active artifact's path and revision in both fixer and reviewer routing blocks.
+The fixer treats the human request as work to complete alongside actionable
+reviewer findings; the reviewer evaluates the correction against the request.
+If a mandatory check fails or review asks for another correction, the run
+pauses before another fixer attempt. Continue requires new developer feedback
+and records a new revision containing the original request for this fix cycle
+and the latest follow-up. The fixer also receives the failed check names when
+checks caused the pause. A new request at a later final review starts a new
+fix cycle; older requests are not included in its follow-ups.
 
 ## Delivery diff (reviewer stages and the final gate)
 
