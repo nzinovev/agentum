@@ -14,7 +14,9 @@ import (
 
 	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/authz"
+	"github.com/nzinovev/agentum/internal/checks"
 	"github.com/nzinovev/agentum/internal/engine"
+	"github.com/nzinovev/agentum/internal/manifest"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 	"github.com/nzinovev/agentum/internal/taskinput"
@@ -132,7 +134,7 @@ func (api *API) handleFixRequest(w http.ResponseWriter, r *http.Request) {
 			var reopenErr error
 			updated, reopenErr = queries.ReopenFinalReviewForFix(ctx, sqlc.ReopenFinalReviewForFixParams{
 				ID: run.ID, TenantID: principal.TenantID, CurrentStage: sql.NullString{String: fixerStage, Valid: true},
-				ResultCommit: run.ResultCommit,
+				ResultCommit:  run.ResultCommit,
 				FixRevisionID: sql.NullString{String: revision.ID, Valid: true}, NextState: string(nextState),
 			})
 			if reopenErr != nil {
@@ -157,6 +159,39 @@ func (api *API) handleFixRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toRunResponse(updated))
+}
+
+// stopReasonFixChecksFailed is the pause the runner records when mandatory
+// project checks fail on a human-requested fix. The reason is a fixed code;
+// the failed names stay in the manifest's checks section, the orchestrator's
+// own record of that delivery boundary.
+const stopReasonFixChecksFailed = "fix_checks_failed"
+
+// failedMandatoryChecks names the required checks the manifest records as not
+// passed at the latest delivery boundary. It returns nil when no manifest
+// service is wired or the section cannot be read: the names are context for
+// the person and the fixer, and the pause already says that checks failed.
+func (api *API) failedMandatoryChecks(ctx context.Context, run sqlc.Run) []string {
+	if api.mfst == nil {
+		return nil
+	}
+	body, _, _, err := api.mfst.Get(ctx, run.TenantID, run.ID)
+	if err != nil {
+		if !errors.Is(err, manifest.ErrNoManifest) {
+			logUnexpected(api.log, err, "manifest.Get(failed checks)")
+		}
+		return nil
+	}
+	if body.Checks == nil {
+		return nil
+	}
+	var failed []string
+	for _, result := range body.Checks.Results {
+		if result.Required && result.Status != string(checks.StatusPass) {
+			failed = append(failed, result.Name)
+		}
+	}
+	return failed
 }
 
 func firstFixerStage(runPack *pack.Pack) (string, bool) {

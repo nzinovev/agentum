@@ -462,18 +462,38 @@ func TestContinueHandler_QueuesTextWithoutReadingSession(t *testing.T) {
 }
 
 // TestContinueAfterFailedFixRequiresNewFeedback protects the retry handoff:
-// the fixer receives new developer feedback alongside failed check names.
+// the fixer receives new developer feedback alongside the failed mandatory
+// check names, which come from the manifest's checks section — the stop
+// reason is a fixed code and carries none. Feedback that leaves no room for
+// the names is refused, never sent without them.
 func TestContinueAfterFailedFixRequiresNewFeedback(t *testing.T) {
 	harness := newContinueHarness(t)
 	runID := harness.insertPausedRun(t, true)
 	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
 		ID: runID, TenantID: continueTestTenant,
 		CurrentStage: sql.NullString{String: "fix", Valid: true},
-		State:        "paused_user_stop", StopReason: "fix_checks_failed: build, lint",
+		State:        "paused_user_stop", StopReason: "fix_checks_failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.api.mfst.AddEvidence(t.Context(), continueTestTenant, runID, manifest.Body{
+		Checks: &manifest.CheckEvidence{Ran: true, Results: []manifest.CheckResult{
+			{Name: "build", Required: true, Status: "fail"},
+			{Name: "unit", Required: true, Status: "pass"},
+			{Name: "lint", Required: true, Status: "fail"},
+			{Name: "docs", Status: "fail"},
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	originalRevision := harness.seedHumanFixRequest(t, runID)
+	oversized := harness.callContinue(t, runID, `{"text":"`+strings.Repeat("a", taskinput.MaxContinuationTextBytes)+`"}`, true)
+	if oversized.Code != http.StatusBadRequest {
+		t.Fatalf("feedback filling the whole budget: status = %d: %s", oversized.Code, oversized.Body.String())
+	}
+	if state := harness.runStateOf(t, runID); state != "paused_user_stop" {
+		t.Fatalf("state after oversized retry = %s", state)
+	}
 	empty := harness.callContinue(t, runID, `{}`, true)
 	if empty.Code != http.StatusBadRequest {
 		t.Fatalf("empty retry status = %d: %s", empty.Code, empty.Body.String())
@@ -533,7 +553,8 @@ func (harness *continueHarness) seedHumanFixRequest(t *testing.T, runID string) 
 		t.Fatal(err)
 	}
 	if _, err := harness.db.ExecContext(t.Context(),
-		`UPDATE runs SET active_fix_request_revision_id = $1 WHERE id = $2 AND tenant_id = $3`,
+		`UPDATE runs SET active_fix_request_revision_id = $1, fix_request_origin_revision_id = $1
+		 WHERE id = $2 AND tenant_id = $3`,
 		revision.ID, runID, continueTestTenant); err != nil {
 		t.Fatal(err)
 	}

@@ -118,6 +118,7 @@ type Run struct {
 	PauseRequestedAt           sql.NullTime    `json:"pause_requested_at"`
 	PreviousResultCommit       sql.NullString  `json:"previous_result_commit"`
 	ActiveFixRequestRevisionID sql.NullString  `json:"active_fix_request_revision_id"`
+	FixRequestOriginRevisionID sql.NullString  `json:"fix_request_origin_revision_id"`
 }
 
 type RunApproval struct {

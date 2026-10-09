@@ -264,3 +264,75 @@ func TestFinalFixRequestQueuesFixer(t *testing.T) {
 		t.Fatalf("fix jobs = %d, err = %v", count, err)
 	}
 }
+
+// TestFixFollowUpBuildsOnTheCurrentRequest: every fix request of a run is a
+// revision of the same artifact, so the chain's root is the run's FIRST
+// request. A follow-up comment must extend the request that opened the current
+// fix cycle; built on the root, it would hand the fixer a request that was
+// already handled and drop the one the person is waiting on.
+func TestFixFollowUpBuildsOnTheCurrentRequest(t *testing.T) {
+	harness := newContinueHarness(t)
+	harness.api.packs = pack.NewProjectSource(pack.NewDirSource("../../packs"), nil)
+	harness.api.art = artifacts.NewSQLStore(artifacts.SQLStoreDeps{
+		DB: harness.db, Queries: harness.queries, Blobs: artifacts.NewBlobStore(t.TempDir()),
+	})
+	runID := harness.insertPausedRun(t, true)
+	requestFix := func(resultCommit, text string) {
+		t.Helper()
+		if _, err := harness.db.ExecContext(t.Context(),
+			`UPDATE runs SET state = 'awaiting_final_review', result_commit = $1, stop_reason = ''
+			 WHERE id = $2 AND tenant_id = $3`, resultCommit, runID, continueTestTenant); err != nil {
+			t.Fatal(err)
+		}
+		request := actionRequest(http.MethodPost, "/api/v1/runs/"+runID+"/fix-request", runID,
+			`{"text":"`+text+`","result_commit":"`+resultCommit+`"}`)
+		response := httptest.NewRecorder()
+		harness.api.handleFixRequest(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("fix request %q status = %d: %s", text, response.Code, response.Body.String())
+		}
+	}
+	requestFix("0123456789abcdef0123456789abcdef01234567", "Cover the failed retry path")
+	requestFix("1123456789abcdef0123456789abcdef01234567", "Rename the handler")
+	secondRequest, err := harness.api.art.Current(t.Context(), continueTestTenant, runID, "final/fix-request.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := harness.queries.GetRun(t.Context(), sqlc.GetRunParams{ID: runID, TenantID: continueTestTenant})
+	if err != nil || run.FixRequestOriginRevisionID.String != secondRequest.ID {
+		t.Fatalf("fix cycle origin = %q, want the second request %q, err = %v",
+			run.FixRequestOriginRevisionID.String, secondRequest.ID, err)
+	}
+	if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+		ID: runID, TenantID: continueTestTenant, CurrentStage: sql.NullString{String: "fix", Valid: true},
+		State: "paused_user_stop", StopReason: "human_fix_feedback_required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	followUps := []string{"Update its test too", "And the changelog"}
+	for _, followUp := range followUps {
+		if response := harness.callContinue(t, runID, `{"text":"`+followUp+`"}`, true); response.Code != http.StatusOK {
+			t.Fatalf("follow-up %q status = %d: %s", followUp, response.Code, response.Body.String())
+		}
+		if _, err := harness.queries.UpdateRunStage(t.Context(), sqlc.UpdateRunStageParams{
+			ID: runID, TenantID: continueTestTenant, CurrentStage: sql.NullString{String: "fix", Valid: true},
+			State: "paused_user_stop", StopReason: "human_fix_feedback_required",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, err := harness.api.art.Current(t.Context(), continueTestTenant, runID, "final/fix-request.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := harness.api.art.GetBytes(t.Context(), continueTestTenant, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The active artifact holds the current request and the latest comment
+	// only; the earlier follow-up stays in the revision chain.
+	if text := string(content); !strings.Contains(text, "Rename the handler") || !strings.Contains(text, "And the changelog") ||
+		strings.Contains(text, "Cover the failed retry path") || strings.Contains(text, "Update its test too") {
+		t.Fatalf("active fix request after follow-ups = %q", text)
+	}
+}

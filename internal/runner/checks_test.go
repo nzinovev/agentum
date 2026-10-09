@@ -64,7 +64,8 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 }
 
 // TestHumanFixCheckFailurePausesAtFixer keeps an unsuccessful human correction
-// available for another fixer pass with its failed check names on the stop.
+// available for another fixer pass. The stop reason is a fixed code: the
+// failed check names are read from the manifest, not parsed out of it.
 func TestHumanFixCheckFailurePausesAtFixer(t *testing.T) {
 	repo := seedRepoWithChecks(t,
 		"api: agentum/v1\nchecks:\n  - name: build\n    command: [\"false\"]\n    required: true\n")
@@ -93,7 +94,7 @@ func TestHumanFixCheckFailurePausesAtFixer(t *testing.T) {
 		t.Fatalf("checks paused = %t, err = %v", paused, checkErr)
 	}
 	if store.record.State != "paused_user_stop" || store.record.CurrentStage.String != "fix" ||
-		store.record.StopReason != "fix_checks_failed: build" {
+		store.record.StopReason != "fix_checks_failed" {
 		t.Fatalf("check failure stop = %+v", store.record)
 	}
 }

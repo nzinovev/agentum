@@ -74,19 +74,28 @@ func (api *API) handleInvocationContinue(w http.ResponseWriter, r *http.Request)
 		writeRequestBodyError(w, parseErr)
 		return
 	}
-	fixRetry := strings.HasPrefix(run.StopReason, "fix_checks_failed: ") || run.StopReason == "human_fix_feedback_required"
+	fixRetry := run.StopReason == stopReasonFixChecksFailed || run.StopReason == "human_fix_feedback_required"
 	if fixRetry && continuation.Text == "" {
 		writeError(w, http.StatusBadRequest, codeBadInput, "new developer feedback is required before retrying the fix")
 		return
 	}
 	humanFeedback := continuation.Text
-	if strings.HasPrefix(run.StopReason, "fix_checks_failed: ") {
+	if run.StopReason == stopReasonFixChecksFailed {
 		// The fixer receives both the person's new feedback and the
-		// orchestrator's failed check names in the next Task section.
-		checkContext := "Previous mandatory project checks failed: " + strings.TrimPrefix(run.StopReason, "fix_checks_failed: ")
-		if len(checkContext)+len(continuation.Text)+1 <= taskinput.MaxContinuationTextBytes {
-			continuation.Text = strings.TrimSpace(checkContext + "\n" + continuation.Text)
+		// orchestrator's failed check names in the next Task section. The two
+		// share the continuation budget, so feedback that leaves no room for
+		// the names is refused instead of being sent without them.
+		checkContext := "Previous mandatory project checks failed."
+		if failed := api.failedMandatoryChecks(r.Context(), run); len(failed) > 0 {
+			checkContext = "Previous mandatory project checks failed: " + strings.Join(failed, ", ")
 		}
+		feedbackBudget := taskinput.MaxContinuationTextBytes - len(checkContext) - 1
+		if len(continuation.Text) > feedbackBudget {
+			writeError(w, http.StatusBadRequest, codeBadInput,
+				fmt.Sprintf("feedback exceeds %d bytes; the failed check names share the continuation budget", feedbackBudget))
+			return
+		}
+		continuation.Text = checkContext + "\n" + continuation.Text
 	}
 	payload, marshalErr := continuation.Marshal()
 	if marshalErr != nil {
@@ -130,13 +139,17 @@ func (api *API) resumeHumanFixWithFeedback(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusConflict, codeConflict, "human fix request changed; refresh the run")
 		return
 	}
-	original := current
-	for original.Prev != "" {
-		original, currentErr = api.art.Get(r.Context(), principal.TenantID, original.Prev)
-		if currentErr != nil || original.RunID != run.ID || original.Name != artifactName {
-			writeError(w, http.StatusInternalServerError, codeInternal, "could not read the original human fix request")
-			return
-		}
+	// The request that opened this fix cycle, not the root of the artifact's
+	// revision chain: an earlier fix request of the same run is that root, and
+	// a follow-up built on it would hand the fixer a request already handled.
+	if !run.FixRequestOriginRevisionID.Valid {
+		writeError(w, http.StatusConflict, codeConflict, "human fix request changed; refresh the run")
+		return
+	}
+	original, originErr := api.art.Get(r.Context(), principal.TenantID, run.FixRequestOriginRevisionID.String)
+	if originErr != nil || original.RunID != run.ID || original.Name != artifactName {
+		writeError(w, http.StatusInternalServerError, codeInternal, "could not read the original human fix request")
+		return
 	}
 	previous, readErr := api.art.GetBytes(r.Context(), principal.TenantID, original.ID)
 	if readErr != nil {

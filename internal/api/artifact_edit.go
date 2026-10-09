@@ -231,7 +231,7 @@ func (api *API) putArtifactRevision(w http.ResponseWriter, r *http.Request, prin
 			_, reopenErr := queries.ReopenPlanGate(ctx, sqlc.ReopenPlanGateParams{
 				ID: run.ID, TenantID: principal.TenantID,
 				CurrentStage: sql.NullString{String: planApproval.Stage, Valid: true},
-				NextState: string(nextState),
+				NextState:    string(nextState),
 			})
 			if errors.Is(reopenErr, sql.ErrNoRows) {
 				return artifacts.ErrRevisionConflict

@@ -43,7 +43,7 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) (bool
 			}
 			return true, runner.applyPauseDecision(ctx, run.record, Decision{
 				Action: ActionPause, FSMEvent: engine.EventStopUser,
-				StopReason: "fix_checks_failed: " + strings.Join(failed, ", "),
+				StopReason: "fix_checks_failed",
 			}, fixers[0])
 		}
 		return false, runner.failRun(ctx, run.record,

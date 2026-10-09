@@ -111,7 +111,8 @@ are {{.ReviewFindings.Count}} finding(s). Read them and address each:
 
 ## Human fix request to address
 
-Read the human's requested changes before editing source:
+A person sent this result back from final review. Read their request before
+you start:
   {{.FixRequest.Path}}
 Revision: {{.FixRequest.RevisionID}}
 {{end}}

@@ -2569,7 +2569,11 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		}
 	}
 	stageRole := pack.EffectiveRole(stageID, stage)
-	if stageRole == "fixer" && run.record.ActiveFixRequestRevisionID.Valid && routingBlock.ReviewFindings == nil {
+	// A fixer entered without the edge that carried the findings — a Continue
+	// after a pause pinned on it, in the automatic loop or a human fix cycle —
+	// still owes the reviewer's requested changes. The latest invocation's
+	// verdict stands in for the lost edge.
+	if stageRole == "fixer" && routingBlock.ReviewFindings == nil {
 		latest, latestErr := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{
 			RunID: run.record.ID, TenantID: run.record.TenantID,
 		})

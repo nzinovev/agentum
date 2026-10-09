@@ -2,11 +2,13 @@ package runner
 
 import (
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nzinovev/agentum/internal/agent"
+	"github.com/nzinovev/agentum/internal/artifacts"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
 )
@@ -156,5 +158,58 @@ func TestPauseAfterContinueQueuesNoteBeforeStopping(t *testing.T) {
 	}
 	if store.record.State != "paused_user_stop" {
 		t.Fatalf("state after queued note and pause = %s", store.record.State)
+	}
+}
+
+// TestPauseBeforeFixerKeepsReviewerFindings: a pause pinned on the fixer loses
+// the review → fix edge, so Continue must point the fresh fixer invocation at
+// the reviewer's verdict from the durable artifact, with no human fix request
+// involved.
+func TestPauseBeforeFixerKeepsReviewerFindings(t *testing.T) {
+	repo := t.TempDir()
+	if err := initRepoWithCommit(repo); err != nil {
+		t.Fatal(err)
+	}
+	record := sqlc.Run{ID: "T-pause-before-fix", TenantID: "tn", UserID: "us", ProjectID: "P1",
+		State: "running", PipelinePack: "test@0.1.0",
+		CurrentStage: sql.NullString{String: "fix", Valid: true}}
+	project := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
+	store := newFakeStore(record, project)
+	store.invocations = append(store.invocations, sqlc.StageInvocation{
+		RunID: record.ID, TenantID: record.TenantID, Stage: "review",
+		SessionID: sql.NullString{String: "review-session", Valid: true},
+	})
+	verdictBytes, err := json.Marshal(changesRequested("retry path still fails"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactStore := newRecordingStore()
+	if _, err := artifactStore.Put(t.Context(), artifacts.PutParams{
+		TenantID: record.TenantID, UserID: record.UserID, RunID: record.ID,
+		Name: "review/" + agent.VerdictFileName, Kind: "verdict_json", Bytes: verdictBytes, Actor: artifacts.ActorAgent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingVerdictAdapter{
+		results: map[string]agent.ResultJSON{
+			"fix":    {SchemaVersion: "1", Status: agent.StatusComplete},
+			"review": {SchemaVersion: "1", Status: agent.StatusComplete},
+		},
+		reviewSequence: []agent.VerdictJSON{approvedVerdict("fixed")},
+	}
+	runner := New(Deps{Store: store, Packs: &staticSource{pk: branchPack(1)}, Adapter: adapter, Artifacts: artifactStore})
+	continuation, err := continueJob(record.ID, record.TenantID, record.UserID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.HandleContinue(t.Context(), continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(adapter.calls) == 0 || adapter.calls[0] != "fix" || adapter.invocations[0].ResumeSession != "" {
+		t.Fatalf("first invocation after Continue = %v, resume %q", adapter.calls, adapter.invocations[0].ResumeSession)
+	}
+	if !strings.Contains(adapter.invocations[0].RoutingBlock, "Reviewer findings to address") ||
+		strings.Contains(adapter.invocations[0].RoutingBlock, "Human fix request to address") {
+		t.Fatalf("fixer routing block = %s", adapter.invocations[0].RoutingBlock)
 	}
 }

@@ -65,7 +65,8 @@ type runResponse struct {
 	BaseCommit             string             `json:"base_commit"`
 	ResultCommit           string             `json:"result_commit"`
 	PreviousResultCommit   string             `json:"previous_result_commit,omitempty"`
-	ActiveFixRequestID      string             `json:"active_fix_request_revision_id,omitempty"`
+	ActiveFixRequestID     string             `json:"active_fix_request_revision_id,omitempty"`
+	FailedChecks           []string           `json:"failed_checks,omitempty"`
 	PauseRequestedAt       string             `json:"pause_requested_at,omitempty"`
 	ApprovedPlanRevisionID string             `json:"approved_plan_revision_id,omitempty"`
 	Checkpoint             *runCheckpointView `json:"checkpoint,omitempty"`
@@ -386,6 +387,9 @@ func (api *API) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, codeInternal, checkpointErr.Error())
 			return
 		}
+	}
+	if run.StopReason == stopReasonFixChecksFailed {
+		response.FailedChecks = api.failedMandatoryChecks(r.Context(), run)
 	}
 	if run.StopReason == "plan_revision_drift" {
 		approvalName, nameErr := api.planApprovalName(r.Context(), run)

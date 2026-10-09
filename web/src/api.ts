@@ -37,6 +37,7 @@ export type Run = {
   result_commit: string;
   previous_result_commit?: string;
   active_fix_request_revision_id?: string;
+  failed_checks?: string[];
   pause_requested_at?: string;
   approved_plan_revision_id?: string;
   checkpoint?: { label: string; commit: string; at: string };

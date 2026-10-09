@@ -57,7 +57,7 @@ RETURNING *;
 -- The plan revision and the pause cannot become visible separately.
 UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
     stop_reason = 'plan_revision_drift', pause_requested_at = NULL,
-    active_fix_request_revision_id = NULL,
+    active_fix_request_revision_id = NULL, fix_request_origin_revision_id = NULL,
     previous_result_commit = COALESCE(result_commit, previous_result_commit),
     result_commit = NULL, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
@@ -66,10 +66,13 @@ RETURNING *;
 
 -- name: ReopenFinalReviewForFix :one
 -- ReopenFinalReviewForFix enters the FSM result only when the accepted human
--- revision is still current for the same reviewed commit.
+-- revision is still current for the same reviewed commit. The same revision
+-- becomes the origin of this fix cycle: follow-up comments are appended to it,
+-- not to an earlier request the artifact's revision chain also holds.
 UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
     previous_result_commit = result_commit, result_commit = NULL,
     active_fix_request_revision_id = sqlc.arg(fix_revision_id),
+    fix_request_origin_revision_id = sqlc.arg(fix_revision_id),
     stop_reason = '', pause_requested_at = NULL, updated_at = now()
 WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_review'
   AND runs.result_commit = $4
