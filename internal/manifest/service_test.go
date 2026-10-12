@@ -2,8 +2,59 @@ package manifest
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/nzinovev/agentum/internal/dbtest"
 )
+
+// TestInitExistingManifest preserves evidence when the runner initializes a
+// manifest that the API already created for the same run.
+func TestInitExistingManifest(t *testing.T) {
+	t.Parallel()
+	handle := dbtest.Store(t)
+	const tenantID = "ac1132a1-6c04-42a8-9c88-361e94d42321"
+	const userID = "b559cd2e-74ae-44f6-a993-899235ef952d"
+	const insertRun = `
+		WITH inserted_project AS (
+			INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits,
+			                      repo_path, name, related_projects)
+			VALUES ($1, $2, 'manifest-init', '{}', '/tmp/manifest-init', 'manifest init', '{}')
+			RETURNING id
+		)
+		INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
+		                  title, description, overrides, base_ref)
+		SELECT $1, $2, inserted_project.id, 'backend-development',
+		       'fixture', 'fixture', '{}', 'main'
+		FROM inserted_project
+		RETURNING id`
+	var runID string
+	if err := handle.Store.DB.QueryRowContext(t.Context(), insertRun, tenantID, userID).Scan(&runID); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	service := New(Deps{DB: handle.Store.DB, Queries: handle.Queries})
+	if err := service.Init(t.Context(), tenantID, userID, runID); err != nil {
+		t.Fatalf("initial init: %v", err)
+	}
+	if err := service.AddEvidence(t.Context(), tenantID, runID, Body{
+		Input: &InputEvidence{RunID: runID, Revision: "created"},
+	}); err != nil {
+		t.Fatalf("add evidence: %v", err)
+	}
+	if err := service.Init(t.Context(), tenantID, userID, runID); err != nil {
+		t.Fatalf("repeated init: %v", err)
+	}
+	body, _, _, err := service.Get(t.Context(), tenantID, runID)
+	if err != nil {
+		t.Fatalf("get manifest: %v", err)
+	}
+	if body.Input == nil || body.Input.Revision != "created" {
+		t.Errorf("repeated init changed evidence: %+v", body.Input)
+	}
+	if err := service.Init(t.Context(), tenantID, "c61fda62-f55a-40ec-8323-29ded524632d", runID); err == nil || !strings.Contains(err.Error(), "different user") {
+		t.Errorf("init with a different user returned %v", err)
+	}
+}
 
 // TestMergeIntoLocked_DecodesAndMerges protects the AddEvidence write path: the
 // bytes read under the row lock must be decoded and the patch deep-merged into
