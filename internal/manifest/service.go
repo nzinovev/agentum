@@ -99,6 +99,20 @@ func (service *Service) Init(ctx context.Context, tenantID, userID, runID string
 	_, err = service.queries.InitManifest(ctx, sqlc.InitManifestParams{
 		TenantID: tenantID, UserID: userID, RunID: runID, Body: encoded,
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		// ON CONFLICT DO NOTHING returns no row when the API already created
+		// this run's manifest. Confirm the existing row belongs to this actor.
+		existing, lookupErr := service.queries.GetManifest(ctx, sqlc.GetManifestParams{
+			RunID: runID, TenantID: tenantID,
+		})
+		if lookupErr != nil {
+			return fmt.Errorf("manifest: verify existing row: %w", lookupErr)
+		}
+		if existing.UserID != userID {
+			return fmt.Errorf("manifest: existing row belongs to a different user")
+		}
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("manifest: init: %w", err)
 	}

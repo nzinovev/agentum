@@ -66,6 +66,8 @@ const (
 	// fakeDie exits non-zero before writing anything — the model check's
 	// error outcome.
 	fakeDie = "die"
+	// fakeProviderError emits a structured provider failure without a result file.
+	fakeProviderError = "provider-error"
 )
 
 // TestMain doubles as the fake agent's entry point. It must intercept before
@@ -163,6 +165,9 @@ func runFakeAgent(mode string) int {
 	case fakeDie:
 		fmt.Fprintln(os.Stderr, "fake model failure")
 		return 2
+	case fakeProviderError:
+		fmt.Println(`{"type":"error","sessionID":"ses_fake","error":{"name":"APIError","data":{"message":"subscription does not include this model","statusCode":429,"responseHeaders":{"set-cookie":"secret"}}}}`)
+		return 0
 	case fakeMute:
 		// Block long enough that every bounded waiter gives up first; the
 		// caller's kill is what ends this process.
@@ -279,6 +284,34 @@ func TestInvoke_SubprocessOutlivesInvokeReturn(t *testing.T) {
 	}
 	if result.Status != StatusComplete {
 		t.Errorf("status = %q, want complete", result.Status)
+	}
+}
+
+// TestInvoke_ReportsRuntimeFailure preserves the provider or process cause
+// when no result file exists and omits response headers from the error.
+func TestInvoke_ReportsRuntimeFailure(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		mode string
+		want string
+	}{
+		{name: "provider error", mode: fakeProviderError, want: "subscription does not include this model (HTTP 429)"},
+		{name: "process exit", mode: fakeDie, want: "exit status 2"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			adapter, invocation := fakeInvocation(t, testCase.mode, 0, caps.Profile{})
+			events, err := adapter.Invoke(t.Context(), invocation)
+			if err != nil {
+				t.Fatalf("Invoke: %v", err)
+			}
+			result, failed := drain(t, events)
+			if result != nil || failed == nil || !strings.Contains(failed.Error(), testCase.want) {
+				t.Fatalf("result = %+v, error = %v; want %q", result, failed, testCase.want)
+			}
+			if strings.Contains(failed.Error(), "result.json") || strings.Contains(failed.Error(), "set-cookie") {
+				t.Errorf("runtime error replaced or exposed headers: %v", failed)
+			}
+		})
 	}
 }
 

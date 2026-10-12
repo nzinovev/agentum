@@ -270,7 +270,7 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	// stdout EOF: the agent has finished (or been terminated). Wait closes the
 	// pipe, so it must come after the last read — and it must happen exactly
 	// once, which is why this is the only Wait call in the adapter.
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	close(reaped)
 	<-cancelWatcher
 
@@ -280,6 +280,14 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 	}
 	if err := state.scannerErr(scanner); err != nil {
 		ch <- Event{Kind: EventError, Err: fmt.Errorf("opencode stream read: %w", err)}
+		return
+	}
+	if state.runtimeErr != nil {
+		ch <- Event{Kind: EventError, Err: fmt.Errorf("opencode run model %q: %w", inv.Model.Options.Model, state.runtimeErr)}
+		return
+	}
+	if waitErr != nil {
+		ch <- Event{Kind: EventError, Err: fmt.Errorf("opencode run model %q: %w", inv.Model.Options.Model, waitErr)}
 		return
 	}
 
@@ -298,6 +306,7 @@ type invokeState struct {
 	snapshot    string
 	activity    []Activity
 	scannerErr_ error
+	runtimeErr  error
 }
 
 func (s *invokeState) scannerErr(sc *bufio.Scanner) error { return sc.Err() }
@@ -329,6 +338,7 @@ func (s *invokeState) ingest(line []byte) (*Event, bool) {
 		Type      string          `json:"type"`
 		SessionID string          `json:"sessionID"`
 		Part      json.RawMessage `json:"part"`
+		Error     json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(line, &env); err != nil {
 		// Not JSON at all — surface as a stream chunk so the UI still shows it.
@@ -371,11 +381,44 @@ func (s *invokeState) ingest(line []byte) (*Event, bool) {
 			s.accumulateFinish(p)
 		}
 		return nil, true
+	case "error":
+		if s.runtimeErr == nil {
+			s.runtimeErr = parseRuntimeError(env.Error)
+		}
+		return nil, true
 	default:
 		// Unknown event type: forward its raw form as an opaque stream chunk
 		// (forward-compatible — opencode will add types over time).
 		return &Event{Kind: EventStream, Chunk: fmt.Sprintf("[event:%s]", env.Type)}, true
 	}
+}
+
+func parseRuntimeError(raw json.RawMessage) error {
+	var reported struct {
+		Name    string `json:"name"`
+		Message string `json:"message"`
+		Data    struct {
+			Message    string `json:"message"`
+			StatusCode int    `json:"statusCode"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &reported); err != nil {
+		return errors.New("opencode reported an error")
+	}
+	message := strings.TrimSpace(reported.Data.Message)
+	if message == "" {
+		message = strings.TrimSpace(reported.Message)
+	}
+	if message == "" {
+		message = strings.TrimSpace(reported.Name)
+	}
+	if message == "" {
+		message = "opencode reported an error"
+	}
+	if reported.Data.StatusCode != 0 {
+		return fmt.Errorf("%s (HTTP %d)", message, reported.Data.StatusCode)
+	}
+	return errors.New(message)
 }
 
 func (s *invokeState) accumulateFinish(p stepFinishPart) {
