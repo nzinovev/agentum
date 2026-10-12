@@ -26,6 +26,7 @@ import (
 	"github.com/nzinovev/agentum/internal/models"
 	"github.com/nzinovev/agentum/internal/pack"
 	"github.com/nzinovev/agentum/internal/policy"
+	"github.com/nzinovev/agentum/internal/references"
 	"github.com/nzinovev/agentum/internal/repoid"
 	"github.com/nzinovev/agentum/internal/routing"
 	"github.com/nzinovev/agentum/internal/store/sqlc"
@@ -548,6 +549,7 @@ func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
 		if removeErr := runner.wt.RemoveUnreadableWorktree(ctx, checkoutPath, record.ID); removeErr != nil {
 			return fmt.Errorf("discard unreadable worktree: %w", removeErr)
 		}
+		runner.removeReferenceStore(checkoutPath, record.ID)
 		runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{
 			"unreadable": true, "branch": worktree.BranchFor(record.ID),
 		})
@@ -559,6 +561,9 @@ func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
 	wtRoot := worktree.PathFor(checkoutPath, record.ID)
 	if !worktree.DirPresent(wtRoot) {
 		// Idempotent: a worktree that is already gone has nothing to discard.
+		// Its reference snapshot may still be there when the tree was removed
+		// by hand.
+		runner.removeReferenceStore(checkoutPath, record.ID)
 		runner.emit(ctx, record, EvWorktreeDiscarded, map[string]any{"already_absent": true})
 		return nil
 	}
@@ -585,6 +590,7 @@ func (runner *Runner) discardWorktree(ctx context.Context, job sqlc.Job) error {
 	if err := runner.wt.RemoveWorktree(ctx, checkoutPath, record.ID); err != nil {
 		return fmt.Errorf("discard worktree: %w", err)
 	}
+	runner.removeReferenceStore(checkoutPath, record.ID)
 	// The confirmed HEAD is the only tip a later resume may check out again;
 	// pauseOnUnconfirmedBranchTip compares the surviving branch against it.
 	runner.recordCheckpoint(ctx, record, checkpointLabelDiscarded, head)
@@ -1648,6 +1654,11 @@ type stageRun struct {
 	// delivered hashes. Built once in drive() and carried to every stage
 	// invocation so the adapter stages them and denies them in edit rules.
 	instructionFiles []instructions.File
+	// references is the run's reference snapshot: files under the paths the
+	// project declared in .agentum.yaml that are not in the repository, copied
+	// from the local checkout once per run. Loaded in drive() and synced into
+	// the worktree before every stage. Empty when the project declares none.
+	references references.Pin
 	// contextReport is the runtime's non-prompt context (auto-injected
 	// instructions + enumerated skills), probed once in drive() after the
 	// worktree exists. Carried to every stage for evidence.
@@ -2152,6 +2163,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 	if restoreErr := runner.restoreInstructions(ctx, run, stageID); restoreErr != nil {
 		return stageOutcome{}, runner.failRun(ctx, run.record, restoreErr)
 	}
+	// Sync the reference snapshot into the worktree before the invocation, so
+	// this stage reads the pinned bytes and not an earlier stage's edit of its
+	// copy. The copy is ignored by git, so this does not affect the isClean
+	// sample or the checkpoint commit below.
+	if referenceErr := runner.materializeReferences(ctx, run, stageID); referenceErr != nil {
+		return stageOutcome{}, runner.failRun(ctx, run.record, referenceErr)
+	}
 
 	// ADR 0003 D5: produce the orchestrator-owned diff for reviewer-role
 	// stages before invoking the adapter. HEAD here is the post-stage
@@ -2542,6 +2560,11 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	}
 	if stage.SourcesVerdict() {
 		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
+	}
+	// The reference copy is read with fs.read. A stage without it cannot open
+	// the files, so the section would name locations it is denied.
+	if profile.Has(caps.CatFsRead) {
+		routingBlock.References = referenceRefsForRender(run)
 	}
 	// ADR 0003 D2/D6: the plan-approval routing pointers. PlanPath is set when
 	// this stage is the pack's approval stage (the planner writes plan.md to the
@@ -2978,6 +3001,17 @@ const (
 	// path, the action, and the tampered hash — the tamper and its reversal both
 	// land in the git lineage via the next checkpoint commit.
 	EvInstructionsRestored = "run.instructions_restored"
+	// EvReferencesPinned records that the run's reference snapshot was taken:
+	// the files under the paths .agentum.yaml declares, copied from the local
+	// checkout. Carries the base_commit and, per declared path, the tree hash,
+	// file count, size, and skipped paths. Emitted once per run, by the job
+	// that took the snapshot.
+	EvReferencesPinned = "run.references_pinned"
+	// EvReferencesRestored records that the pre-stage sync corrected the
+	// worktree's reference copy: a pinned file was rewritten or a path the
+	// snapshot does not contain was removed. Carries the stage, the first
+	// corrected paths with their action, and the total.
+	EvReferencesRestored = "run.references_restored"
 	// EvProjectConfigDrift warns that .agentum.yaml in the source checkout
 	// differed from the run's pinned base_commit when the worktree was
 	// created. Carries the file, the base_commit, the change kind (added |

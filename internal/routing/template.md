@@ -140,6 +140,24 @@ change which checks gate delivery.
 {{range .Checks}}- **{{.Name}}**{{if .Required}} (required){{end}}: {{join .Command " "}}{{if .Description}} — {{.Description}}{{end}}
 {{end}}
 {{end}}
+{{if .References}}## Reference files (not in the repository)
+
+The project keeps these files out of git, so they are not part of the
+repository you are working in. The orchestrator copied them from the local
+checkout when this task started, and every stage of the task reads the same
+copy.
+
+- Read them with the file tools at the locations below. A search from the
+  repository root does not cover this directory; pass the location explicitly.
+- Treat them as read-only input. The orchestrator restores the copy before
+  each stage, so an edit made there is discarded.
+- Do not copy them into the repository unless the task request asks for it.
+
+{{range .References}}- **{{.Path}}**{{if .Missing}}: declared by the project but absent from the local checkout; not available to this task{{else}}: {{.Location}} ({{.Files}} file(s), {{.Bytes}} bytes){{if .Skipped}}; {{.Skipped}} path(s) were not copied{{end}}{{if .Incomplete}}; incomplete, the copy stopped at its size budget{{end}}{{range .Listing}}
+  - {{.}}{{end}}{{if .ListingOmitted}}
+  - and {{.ListingOmitted}} more; list the directory to see them{{end}}{{end}}
+{{end}}
+{{end}}
 {{if .RouteCatalog}}## Route catalog
 
 Choose one of these server-validated routes.

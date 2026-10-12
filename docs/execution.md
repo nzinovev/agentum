@@ -800,7 +800,9 @@ volume bounded and matches the audit-trail intent.
 The stage loop emits: `run.state_changed`, `stage.started`, `stage.stopped`,
 `stage.telemetry`, `run.worktree_created`, `run.worktree_removed`, and
 `run.revisions_synced` (current revisions materialized into the
-worktree at stage start).
+worktree at stage start). A run whose project declares reference files also
+emits `run.references_pinned` once and `run.references_restored` whenever the
+pre-stage sync corrects the worktree copy.
 
 See `docs/api.md#events-sse` for the SSE contract.
 
@@ -836,6 +838,8 @@ api: agentum/v1
 instructions:               # optional: extra project-instruction files to pin
   - AGENTS.md
   - docs/conventions.md
+references:                 # optional: paths kept out of git, copied for each run
+  - design
 checks:
   - name: build
     command: ["go", "build", "./..."]
@@ -987,6 +991,64 @@ source, source/delivered hashes, delivered bytes, truncated flag),
 restorations, enumerated skills, the probe label, and the missing list.
 `DiffManifests` gains a `context` axis comparing path→delivered_hash and
 name→hash, so two runs differing only in their skill set are distinguishable.
+
+### Reference files
+
+A project can keep files out of git and still hand them to a run: design
+mockups, a backlog, vendor documentation. `references:` in `.agentum.yaml`
+lists their repo-relative paths, each a directory or a file. The list is read
+from `base_commit`, so a stage cannot add a path to the set its own run
+receives. The bytes come from the run's local checkout, because they exist
+nowhere else.
+
+**Snapshot.** The first job of a run copies the declared paths into a pristine
+store at `<checkout>/.agentum/refs/<run-id>/` (`prepareProjectContext`). Every
+later job of the run loads that store. An edit of the source directory after
+the run started does not reach the run; start a new run to pick it up. The
+store lies outside the worktree, where the agent's file tools are denied. It
+is removed when the run's worktree is discarded.
+
+**Delivery.** Before every stage invocation the runner syncs the store into
+`<worktree>/.agentum/<run-id>/refs/` (`materializeReferences`, next to
+`restoreInstructions`). A file a stage edited or deleted is rewritten, and a
+path it added is removed. Each sync that corrects the copy emits
+`run.references_restored`. An IO error fails the run. The copy sits under
+`.agentum/`, which the repository's local excludes cover, so it does not
+appear in `git status`, in a checkpoint commit, or in the delivery diff. A
+search from the repository root skips the directory for the same reason. The
+routing block's **Reference files** section therefore gives each copy's
+absolute location and lists up to 100 file names. The section is rendered for
+a stage whose profile grants `fs.read`.
+
+**What is not copied.** The snapshot records every path it leaves out, with
+one of these reasons:
+
+| Reason | The path |
+|---|---|
+| `tracked` | Exists in the `base_commit` tree. The worktree already holds the committed version, and the checkout's uncommitted edit of it stays out of the run. |
+| `not_regular` | Is a symlink, device, socket, or pipe. Symlinks are not followed. |
+| `reserved` | Is named `.git` or `.agentum`, at any depth. |
+| `secret_name` | Has a credential-shaped name under the artifact store's name rules: `.env`, `id_rsa`, `*.pem`, `.npmrc`. |
+| `secret_content` | Holds bytes that match an AWS access key, an AWS secret access key, a GitHub PAT, or a PEM private key block. |
+| `too_large` | Is over 1 MiB. |
+| `budget` | Is the file at which the snapshot reached 1000 files or 16 MiB. Nothing after it is copied. |
+| `unreadable` | Could not be read from the checkout. |
+
+A declared path that is absent from the checkout is recorded as `missing` and
+the run continues. The list itself is validated when `.agentum.yaml` is
+parsed: at most 8 paths, repo-relative, forward slashes, no `..`, not the
+repository root, not inside `.git` or `.agentum`, no path repeating or
+containing another. An invalid list fails the run at start, like any other
+malformed config.
+
+**Evidence.** The manifest's `context.references` carries one entry per
+declared path: `tree_hash` (sha256 over the copied files' sorted path and hash
+pairs), `files`, `bytes`, `missing`, `budget_exhausted`, the first 20 `skipped`
+paths, and `skipped_total`. `DiffManifests` reports `context-references` when
+a path's tree hash differs between two runs. The job that takes the snapshot
+emits `run.references_pinned` with the same entries. A snapshot that cannot be
+taken records an `EvidenceGap("context.references")`, and the run proceeds
+without reference files.
 
 ## Not done yet
 

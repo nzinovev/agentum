@@ -29,7 +29,7 @@ stages read earlier stages' outputs that way).
 
 ## Project context the agent sees
 
-Beyond the role-pure prompt from the pack, a stage receives three pieces of
+Beyond the role-pure prompt from the pack, a stage receives four pieces of
 context that are **not** pack-owned:
 
 - **The task request.** The routing block's **Task** section carries the
@@ -57,6 +57,15 @@ context that are **not** pack-owned:
   what they are so it can run them to check its own work. The agent's own claim
   that a check passed is **not** evidence — Agentum reads the result from its
   own executor. The agent cannot change which checks gate delivery.
+- **Reference files.** Paths declared under `references:` in `.agentum.yaml`
+  name project files that are not in the repository. The orchestrator copies
+  them from the local checkout when the task starts and places the copy at
+  `<worktree>/.agentum/<run-id>/refs/`. The routing block's **Reference
+  files** section gives the absolute location of each declared path and a
+  listing. A search from the repository root does not cover that directory, so
+  the agent passes the location explicitly. The copy is restored before every
+  stage: an edit made there is discarded. See
+  [Reference files](execution.md#reference-files).
 
 The enumerated set of skills the runtime has available (including the user's
 own in `~/.claude/skills/`) is recorded in the manifest but not surfaced to the

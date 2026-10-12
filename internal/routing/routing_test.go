@@ -286,3 +286,74 @@ func TestRender_TaskRequestIsFencedAsData(t *testing.T) {
 		t.Errorf("description must be reproduced verbatim; got:\n%s", rendered)
 	}
 }
+
+// TestRender_References: the section appears only when the run has reference
+// paths, names the absolute location of each copy with its listing, and marks
+// a missing, a partly skipped, and an incomplete path as such.
+func TestRender_References(t *testing.T) {
+	t.Parallel()
+	const location = "/wt/.agentum/T1/refs/design"
+	cases := []struct {
+		name       string
+		references []ReferenceRef
+		want       []string
+		absent     []string
+	}{
+		{
+			name:   "no references renders no section",
+			absent: []string{"## Reference files"},
+		},
+		{
+			name: "copied directory with listing",
+			references: []ReferenceRef{{
+				Path: "design", Location: location, Files: 2, Bytes: 12,
+				Listing: []string{"README.md", "system/tokens.css"},
+			}},
+			want: []string{
+				"## Reference files (not in the repository)",
+				"- **design**: " + location + " (2 file(s), 12 bytes)",
+				"  - README.md",
+				"  - system/tokens.css",
+				"pass the location explicitly",
+				"an edit made there is discarded",
+			},
+			absent: []string{"more; list the directory", "were not copied", "incomplete"},
+		},
+		{
+			name: "listing cap is stated",
+			references: []ReferenceRef{{
+				Path: "design", Location: location, Files: 150, Bytes: 9000,
+				Listing: []string{"README.md"}, ListingOmitted: 149,
+			}},
+			want: []string{"  - and 149 more; list the directory to see them"},
+		},
+		{
+			name:       "missing path",
+			references: []ReferenceRef{{Path: "design", Missing: true}},
+			want:       []string{"- **design**: declared by the project but absent from the local checkout"},
+			absent:     []string{"file(s)"},
+		},
+		{
+			name: "skipped and incomplete",
+			references: []ReferenceRef{{
+				Path: "design", Location: location, Files: 1000, Bytes: 5, Skipped: 3, Incomplete: true,
+			}},
+			want: []string{"; 3 path(s) were not copied", "; incomplete, the copy stopped at its size budget"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := Render(Block{Stage: "plan", Gate: "auto", ArtifactDir: "/x", References: testCase.references})
+			for _, fragment := range testCase.want {
+				if !strings.Contains(got, fragment) {
+					t.Errorf("Render missing %q in:\n%s", fragment, got)
+				}
+			}
+			for _, fragment := range testCase.absent {
+				if strings.Contains(got, fragment) {
+					t.Errorf("Render unexpectedly contains %q", fragment)
+				}
+			}
+		})
+	}
+}

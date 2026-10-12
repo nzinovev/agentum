@@ -61,6 +61,30 @@ func ArtifactDir(wtRoot, runID, stage string) string {
 	return filepath.Join(wtRoot, ".agentum", runID, ".ag-artifacts", stage)
 }
 
+// referencesSubdir is the directory name both reference locations end in.
+const referencesSubdir = "refs"
+
+// ReferenceRelDir returns the worktree-relative, forward-slash path of the
+// directory a run's reference files are materialized in:
+// .agentum/<run-id>/refs. It sits beside the artifact tree, so the same
+// exclude rule keeps it out of checkpoint commits and out of `git clean`.
+func ReferenceRelDir(runID string) string {
+	return ".agentum/" + runID + "/" + referencesSubdir
+}
+
+// ReferenceDir returns the absolute path of ReferenceRelDir inside a worktree.
+func ReferenceDir(wtRoot, runID string) string {
+	return filepath.Join(wtRoot, ".agentum", runID, referencesSubdir)
+}
+
+// ReferenceStoreDir returns the pristine reference snapshot of a run:
+// <repo>/.agentum/refs/<run-id>. It lies outside the run's worktree, so the
+// agent's file tools cannot reach it, and it survives a worktree that is
+// discarded and created again.
+func ReferenceStoreDir(repoPath, runID string) string {
+	return filepath.Join(repoPath, ".agentum", referencesSubdir, runID)
+}
+
 // Manager creates, inspects, reconciles, and removes per-run worktrees. It
 // carries no mutable state; methods are safe to call concurrently for different
 // run ids (git serializes worktree operations internally).
@@ -805,6 +829,20 @@ func (manager *Manager) RemoveWorktree(ctx context.Context, repoPath, runID stri
 	out, err := git(ctx, repoAbs, "worktree", "remove", "--force", wtPath)
 	if err != nil {
 		return fmt.Errorf("git worktree remove: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// RemoveReferenceStore deletes the pristine reference snapshot of a run. It is
+// called wherever the run's worktree is removed: the snapshot exists only to
+// feed that worktree. A store that is already absent is not an error.
+func (manager *Manager) RemoveReferenceStore(repoPath, runID string) error {
+	repoAbs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	if err := os.RemoveAll(ReferenceStoreDir(repoAbs, runID)); err != nil {
+		return fmt.Errorf("remove reference store: %w", err)
 	}
 	return nil
 }

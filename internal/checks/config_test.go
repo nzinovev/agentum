@@ -158,6 +158,56 @@ instructions:
 `,
 			wantErr: "at most",
 		},
+		{
+			name: "references without checks",
+			yaml: `
+api: agentum/v1
+references:
+  - design/
+  - notes/todo.md
+`,
+		},
+		{
+			name: "reference absolute path rejected",
+			yaml: `
+references:
+  - /home/operator/design
+`,
+			wantErr: "references[0]: reference path \"/home/operator/design\" must be repo-relative",
+		},
+		{
+			name: "reference parent escape rejected",
+			yaml: `
+references:
+  - ../design
+`,
+			wantErr: "escapes the repo root",
+		},
+		{
+			name: "reference to the repository root rejected",
+			yaml: `
+references:
+  - .
+`,
+			wantErr: "names the repository root",
+		},
+		{
+			name: "reference inside agentum state rejected",
+			yaml: `
+references:
+  - .agentum/worktrees
+`,
+			wantErr: "is inside .agentum",
+		},
+		{
+			name: "overlapping reference paths rejected",
+			yaml: `
+references:
+  - design
+  - design/system
+`,
+			wantErr: "repeats or overlaps",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,6 +260,36 @@ checks:
 	}
 	if !strings.Contains(err.Error(), "non-empty arg vector") {
 		t.Errorf("error should mention command problem, got %q", err.Error())
+	}
+}
+
+// TestReferencePaths: the registry returns the declared reference paths in
+// declaration order, and nil for a config or a registry that declares none.
+func TestReferencePaths(t *testing.T) {
+	registry, err := Parse([]byte(`
+api: agentum/v1
+references:
+  - design
+  - notes/todo.md
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := registry.ReferencePaths()
+	if len(paths) != 2 || paths[0] != "design" || paths[1] != "notes/todo.md" {
+		t.Fatalf("ReferencePaths = %v, want [design notes/todo.md]", paths)
+	}
+
+	undeclared, err := Parse([]byte("api: agentum/v1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := undeclared.ReferencePaths(); got != nil {
+		t.Fatalf("ReferencePaths without a declaration = %v, want nil", got)
+	}
+	var missing *Registry
+	if got := missing.ReferencePaths(); got != nil {
+		t.Fatalf("ReferencePaths on a nil registry = %v, want nil", got)
 	}
 }
 

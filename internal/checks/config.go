@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/nzinovev/agentum/internal/instructions"
+	"github.com/nzinovev/agentum/internal/references"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,12 +63,15 @@ type Definition struct {
 // ProjectConfig is the parsed `.agentum.yaml`. The checks registry is the
 // load-bearing section today; the instruction-paths list (ADR 0002) is the
 // project-owned declaration of which repo-relative files join the run's pinned
-// instruction set. The shape stays a top-level struct so future project-owned
+// instruction set. The references list declares repo-relative paths that are
+// not in the repository and that a run receives as a snapshot of the local
+// checkout. The shape stays a top-level struct so future project-owned
 // config lands here without reshaping the file.
 type ProjectConfig struct {
 	API          string       `yaml:"api"`
 	Checks       []Definition `yaml:"checks"`
 	Instructions []string     `yaml:"instructions"`
+	References   []string     `yaml:"references"`
 }
 
 // Registry is the validated, name-indexed set of check definitions the project
@@ -81,6 +85,7 @@ type Registry struct {
 	items            []Definition
 	byName           map[string]Definition
 	instructionPaths []string
+	referencePaths   []string
 	Revision         string
 }
 
@@ -127,6 +132,17 @@ func (registry *Registry) InstructionPaths() []string {
 	return registry.instructionPaths
 }
 
+// ReferencePaths returns the project-declared reference paths in declared
+// order. Callers must not mutate the slice; it shares storage with the
+// registry. A nil registry yields nil: the project declares no references and
+// a run receives none.
+func (registry *Registry) ReferencePaths() []string {
+	if registry == nil {
+		return nil
+	}
+	return registry.referencePaths
+}
+
 // LoadFromRepo reads the config from repoRoot/ConfigFile. A missing file is a
 // valid empty registry: it returns (nil, nil) — the project simply defines no
 // checks, which passes delivery. Any other read or parse error is returned.
@@ -160,6 +176,7 @@ func Parse(raw []byte) (*Registry, error) {
 		items:            cfg.Checks,
 		byName:           byName,
 		instructionPaths: cfg.Instructions,
+		referencePaths:   cfg.References,
 		Revision:         registryRevision(cfg.Checks),
 	}, nil
 }
@@ -174,6 +191,9 @@ func Parse(raw []byte) (*Registry, error) {
 //   - instruction paths are repo-relative, forward-slash, and unique
 //     (ADR 0002 D1); validated through instructions.ValidateDeclaredSet so the
 //     rule has one owner.
+//   - reference paths follow the same repo-relative rules and must not name
+//     the repository root, a reserved directory, or one another; validated
+//     through references.ValidateDeclaredSet.
 func validateConfig(cfg ProjectConfig) error {
 	var problems []string
 	if cfg.API != "" && cfg.API != APIVersion {
@@ -184,6 +204,7 @@ func validateConfig(cfg ProjectConfig) error {
 		problems = append(problems, validateDefinition(definition, index, seen)...)
 	}
 	problems = append(problems, instructions.ValidateDeclaredSet(cfg.Instructions)...)
+	problems = append(problems, references.ValidateDeclaredSet(cfg.References)...)
 	if len(problems) > 0 {
 		return fmt.Errorf("checks: invalid %s: %s", ConfigFile, strings.Join(problems, "; "))
 	}

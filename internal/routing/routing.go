@@ -70,6 +70,13 @@ type Block struct {
 	Checks       []CheckRef
 	RouteCatalog []RouteRef
 
+	// References are the project's reference files: paths declared in
+	// .agentum.yaml that are not in the repository, which the orchestrator
+	// copied into the worktree for this run. The section gives the agent the
+	// absolute location of each copy, because a search from the repository
+	// root does not reach the directory they live in. Empty renders nothing.
+	References []ReferenceRef
+
 	// VerdictPath is the absolute path to the verdict.json a verdict-sourcing
 	// stage must write. Empty for a stage that does not branch on verdict; when
 	// set, the template renders the verdict contract (the schema + the path),
@@ -151,6 +158,27 @@ type CheckRef struct {
 	Command     []string // the arg vector (no shell)
 	Description string   // human-readable purpose, when set
 	Required    bool     // true for a mandatory (baseline) check
+}
+
+// ReferenceRef is one declared reference path rendered into the routing
+// block. A plain struct on purpose: routing does not import the references
+// package, so the runner maps a snapshot entry onto this shape at render time.
+type ReferenceRef struct {
+	Path     string // the path as the project declared it, e.g. "design"
+	Location string // absolute path of the copy inside the worktree
+	Files    int    // number of files copied
+	Bytes    int64  // total size of the copied files
+	Skipped  int    // number of paths the snapshot left out
+	// Missing reports that the declared path was absent from the local
+	// checkout, so there is no copy to read.
+	Missing bool
+	// Incomplete reports that the snapshot stopped at its size or file-count
+	// budget before copying everything under the path.
+	Incomplete bool
+	// Listing names the copied files relative to Location, capped by the
+	// runner. ListingOmitted is how many names the cap left out.
+	Listing        []string
+	ListingOmitted int
 }
 
 // RouteRef is one candidate the triage invocation may choose.
