@@ -63,6 +63,12 @@ func (runner *Runner) prepareProjectContext(ctx context.Context, run *stageRun, 
 	}
 	run.resolvedChecks = resolvedChecksForRender(set)
 
+	// Take or load the reference snapshot: the declared paths that are not in
+	// the repository, copied from the local checkout. The declaration comes
+	// from the base_commit registry read above, so an agent cannot add a path
+	// to the set its own run receives.
+	runner.pinReferences(ctx, run, baseCommit, registry.ReferencePaths())
+
 	// Probe the runtime's non-prompt context (auto-injected instructions +
 	// enumerated skills). Comma-ok on the adapter so a typed-nil adapter is not
 	// a trap, and an adapter with no prober records "unsupported" rather than
@@ -204,6 +210,7 @@ func contextEvidenceSection(run stageRun) *manifest.ContextEvidence {
 		SkillsProbe:  run.contextReport.SkillsProbe,
 		Instructions: instructionRefsForEvidence(run.instructionFiles),
 		Skills:       skillRefsForManifest(run.contextReport.Skills),
+		References:   referenceRefsForEvidence(run.references),
 	}
 	for _, file := range run.instructionFiles {
 		if file.MissingAtCommit {

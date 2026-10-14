@@ -432,7 +432,7 @@ func diffMemory(left, right *MemorySlice) *SectionDelta {
 // config, different skills ⇒ the runs differ" answerable. The instruction axis
 // compares path → delivered_hash; the skill axis compares the name → hash set.
 // A change in either surfaces a delta; the absence of one side is itself
-// significant.
+// significant. The reference axis compares declared path → tree hash.
 func diffContext(left, right *ContextEvidence) *SectionDelta {
 	if left == nil || right == nil {
 		return eitherNilDelta(left == nil, right == nil, "context-missing")
@@ -443,7 +443,21 @@ func diffContext(left, right *ContextEvidence) *SectionDelta {
 	if !reflect.DeepEqual(indexSkills(left.Skills), indexSkills(right.Skills)) {
 		return newDelta("context-skills", "skill set differs")
 	}
+	if !reflect.DeepEqual(indexReferences(left.References), indexReferences(right.References)) {
+		return newDelta("context-references", "reference file set differs")
+	}
 	return nil
+}
+
+// indexReferences maps each declared reference path to the tree hash of the
+// files the run received under it. A missing path maps to the empty hash, so a
+// run that had the files and a run that did not are different inputs.
+func indexReferences(refs []ReferenceRef) map[string]string {
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		out[ref.Path] = ref.TreeHash
+	}
+	return out
 }
 
 // indexInstructions maps each instruction ref to its delivered hash, keyed by

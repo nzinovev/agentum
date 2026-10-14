@@ -120,6 +120,14 @@ instead of skipping — a skipped database test there would be a lost check.
   instruction set (`instructions:` in `.agentum.yaml` ∪ the runtime-injected
   `AGENTS.md`) is pinned from `base_commit` the same way: the agent cannot
   change which instructions or checks gate a run.
+- **Uncommitted project files reach an agent only as a snapshot.** A project
+  declares paths that are not in git under `references:` in `.agentum.yaml`,
+  read from `base_commit`. The runner copies them from the local checkout once
+  per run into `<checkout>/.agentum/refs/<run-id>/` and syncs that store into
+  `<worktree>/.agentum/<run-id>/refs/` before every stage
+  (`internal/references`). Never widen `external_directory` or grant a path
+  outside the worktree to deliver such files: the agent would read bytes the
+  manifest does not record and could write to the operator's originals.
 - **Publication runs as a separate queue handler.** The `publish` job in
   `internal/publication` receives durable delivery metadata and calls the
   provider registry in `internal/publish`. The runner and publisher coordinator

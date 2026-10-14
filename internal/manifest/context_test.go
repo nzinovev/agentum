@@ -214,3 +214,57 @@ func TestIndexHelpers(t *testing.T) {
 		t.Errorf("indexSkills = %v", skills)
 	}
 }
+
+// TestMergeContext_ReferencesAppendUniqueByPathAndTreeHash: reference refs
+// merge append-unique by (path, tree_hash, missing). A stage that reports the
+// same snapshot collapses, and a snapshot with other bytes adds an entry.
+func TestMergeContext_ReferencesAppendUniqueByPathAndTreeHash(t *testing.T) {
+	t.Parallel()
+	existing := &ContextEvidence{References: []ReferenceRef{
+		{Path: "design", TreeHash: "t1", Files: 49, Bytes: 400},
+	}}
+	patch := &ContextEvidence{References: []ReferenceRef{
+		{Path: "design", TreeHash: "t1", Files: 49, Bytes: 400}, // same snapshot → collapse
+		{Path: "design", TreeHash: "t2", Files: 50, Bytes: 410}, // other bytes → add
+		{Path: "notes", Missing: true},                          // new path → add
+	}}
+	merged := mergeContextEvidence(existing, patch)
+	if len(merged.References) != 3 {
+		t.Fatalf("got %d references, want 3: %+v", len(merged.References), merged.References)
+	}
+	if kept := mergeContextEvidence(existing, &ContextEvidence{}); len(kept.References) != 1 {
+		t.Fatalf("a patch without references dropped the existing ones: %+v", kept.References)
+	}
+}
+
+// TestDiffContext_ReferencesAxis: two runs differ on the context axis when a
+// declared reference path carried other bytes, or was present in one run and
+// missing in the other. Equal tree hashes produce no delta.
+func TestDiffContext_ReferencesAxis(t *testing.T) {
+	t.Parallel()
+	base := &ContextEvidence{References: []ReferenceRef{{Path: "design", TreeHash: "t1", Files: 49}}}
+	cases := []struct {
+		name       string
+		other      *ContextEvidence
+		wantReason string // empty = no delta
+	}{
+		{name: "same tree hash", other: &ContextEvidence{References: []ReferenceRef{{Path: "design", TreeHash: "t1", Files: 49}}}},
+		{name: "other bytes", other: &ContextEvidence{References: []ReferenceRef{{Path: "design", TreeHash: "t2", Files: 49}}}, wantReason: "context-references"},
+		{name: "missing in the other run", other: &ContextEvidence{References: []ReferenceRef{{Path: "design", Missing: true}}}, wantReason: "context-references"},
+		{name: "not declared in the other run", other: &ContextEvidence{}, wantReason: "context-references"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			delta := diffContext(base, testCase.other)
+			if testCase.wantReason == "" {
+				if delta != nil {
+					t.Fatalf("expected no delta, got %+v", delta)
+				}
+				return
+			}
+			if delta == nil || delta.Reason != testCase.wantReason {
+				t.Fatalf("expected delta %q, got %+v", testCase.wantReason, delta)
+			}
+		})
+	}
+}

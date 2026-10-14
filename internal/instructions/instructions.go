@@ -109,29 +109,38 @@ const (
 // that enforces it. Backslashes are rejected because the delivery channel and
 // the edit-deny patterns are written in forward-slash form; a mixed convention
 // would fail to match.
+func ValidatePath(path string) error {
+	return ValidateRepoRelativePath("instruction path", path)
+}
+
+// ValidateRepoRelativePath applies the repo-relative path rules to one path
+// declared in .agentum.yaml: non-empty, no surrounding whitespace, forward
+// slashes, not absolute, no ".." escape. noun names the kind of path in the
+// error text ("instruction path", "reference path"). Every list of declared
+// paths in the project config shares these rules, so they have one body.
 //
 // The path is normalised to forward slashes first, so the absolute-path and
 // escape checks are OS-independent: a unix-shaped "/etc/x" is rejected on
 // Windows too (filepath.IsAbs would not catch it there, since it expects a
 // drive letter), and a Windows-shaped "C:/x" is rejected on unix.
-func ValidatePath(path string) error {
+func ValidateRepoRelativePath(noun, path string) error {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return errors.New("instruction path is empty")
+		return fmt.Errorf("%s is empty", noun)
 	}
 	if path != trimmed {
-		return fmt.Errorf("instruction path %q has surrounding whitespace", path)
+		return fmt.Errorf("%s %q has surrounding whitespace", noun, path)
 	}
 	if strings.ContainsAny(path, "\\") {
-		return fmt.Errorf("instruction path %q must use forward slashes", path)
+		return fmt.Errorf("%s %q must use forward slashes", noun, path)
 	}
 	if isAbsoluteForwardSlash(path) {
-		return fmt.Errorf("instruction path %q must be repo-relative, not absolute", path)
+		return fmt.Errorf("%s %q must be repo-relative, not absolute", noun, path)
 	}
 	cleaned := filepath.Clean(filepath.FromSlash(path))
 	cleanedForward := filepath.ToSlash(cleaned)
 	if cleanedForward == ".." || strings.HasPrefix(cleanedForward, "../") {
-		return fmt.Errorf("instruction path %q escapes the repo root", path)
+		return fmt.Errorf("%s %q escapes the repo root", noun, path)
 	}
 	return nil
 }

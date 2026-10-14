@@ -39,6 +39,12 @@ type ContextEvidence struct {
 	// base_commit. Recorded, not fatal: a project that declares a path that
 	// does not exist yet still runs; the evidence records it.
 	Missing []string `json:"missing,omitempty"`
+	// References is the set of reference paths the run received as a snapshot
+	// of the local checkout, one entry per distinct (path, tree_hash) pair.
+	// Append-merged across stages, so the entries stay single while every job
+	// of the run reads the same snapshot, and a snapshot that had to be taken
+	// again appears as a second entry.
+	References []ReferenceRef `json:"references,omitempty"`
 	// ProjectConfig records which .agentum.yaml the run's checks come from
 	// and how the source checkout's copy compared at the start of work.
 	// First write wins: the comparison describes what the operator had when
@@ -113,6 +119,35 @@ type InstructionRef struct {
 	Truncated      bool   `json:"truncated,omitempty"`
 }
 
+// ReferenceRef is the evidence of one declared reference path: files that are
+// not in the repository and were copied from the local checkout for the run.
+// TreeHash is the sha256 over the copied files' sorted "path\0hash\n" lines.
+// Equal tree hashes in two runs mean both received the same bytes under the
+// path. File bodies and per-file hashes are not stored here.
+type ReferenceRef struct {
+	Path     string `json:"path"`
+	TreeHash string `json:"tree_hash,omitempty"`
+	Files    int    `json:"files"`
+	Bytes    int64  `json:"bytes"`
+	// Missing reports that the declared path did not exist in the checkout.
+	Missing bool `json:"missing,omitempty"`
+	// BudgetExhausted reports that the snapshot stopped at its size or
+	// file-count budget, so the copy under this path is incomplete.
+	BudgetExhausted bool `json:"budget_exhausted,omitempty"`
+	// Skipped lists the first paths the snapshot left out and why.
+	// SkippedTotal is the number of paths left out.
+	Skipped      []ReferenceSkip `json:"skipped,omitempty"`
+	SkippedTotal int             `json:"skipped_total,omitempty"`
+}
+
+// ReferenceSkip is one path a reference snapshot left out. Reason is one of
+// tracked, not_regular, reserved, secret_name, secret_content, too_large,
+// budget, unreadable.
+type ReferenceSkip struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
 // InstructionRestoration is one tamper reversal (ADR 0002 D4 layer 2). The
 // runner records a restoration whenever a pre-stage hash check found the
 // worktree instruction copy had drifted from the pin and rewrote or removed it.
@@ -158,6 +193,7 @@ func mergeContextEvidence(existing, patch *ContextEvidence) *ContextEvidence {
 		Skills:        appendUniqueSkillRef(existing.Skills, patch.Skills),
 		SkillsProbe:   worstSkillsProbe(existing.SkillsProbe, patch.SkillsProbe),
 		Missing:       appendUniqueString(existing.Missing, patch.Missing),
+		References:    appendUniqueReferenceRef(existing.References, patch.References),
 		ProjectConfig: existing.ProjectConfig,
 		ProjectPacks:  existing.ProjectPacks,
 	}
@@ -184,6 +220,22 @@ func appendUniqueInstructionRef(base, additions []InstructionRef) []InstructionR
 type instructionRefKey struct {
 	path          string
 	deliveredHash string
+}
+
+// appendUniqueReferenceRef appends reference refs not already in base, matched
+// by (path, tree_hash, missing). Every stage of a run reports the same
+// snapshot, so the refs collapse to one entry per declared path.
+func appendUniqueReferenceRef(base, additions []ReferenceRef) []ReferenceRef {
+	return appendUniqueKeyed(base, additions,
+		func(ref ReferenceRef) referenceRefKey {
+			return referenceRefKey{ref.Path, ref.TreeHash, ref.Missing}
+		}, nil)
+}
+
+type referenceRefKey struct {
+	path     string
+	treeHash string
+	missing  bool
 }
 
 // appendUniqueSkillRef appends skill refs not already in base, matched by

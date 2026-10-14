@@ -376,6 +376,16 @@ agent without project rules.
   (a permanent capability gap, not a degraded run). `skill.<name>` joins the
   capability vocabulary as an inert, unenforceable seam — like `mcp.<server>`
   — so narrowing becomes a config change later, not a model redesign.
+- **Reference files, copied and recorded.** `references:` in `.agentum.yaml`
+  declares paths that are not in the repository. The orchestrator copies them
+  from the local checkout once per run and syncs the copy into
+  `<worktree>/.agentum/<run-id>/refs/` before every stage, so plain `fs.read`
+  reaches them. `external_directory` stays `deny`: the source directory and
+  the pristine snapshot are outside the worktree and no profile grants a path
+  to them. Tracked files, symlinks, credential-named files, and files whose
+  bytes match a credential pattern are not copied. Each declared path's tree
+  hash lands in the manifest. See
+  [Reference files](execution.md#reference-files).
 - **Resolved checks rendered.** The routing block lists the resolved project
   checks (name, command, required) so the agent knows the build/test commands
   and can run them to check its own work. The agent learns *what* the checks

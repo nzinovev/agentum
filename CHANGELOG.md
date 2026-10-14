@@ -10,6 +10,12 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A run can read project files that are not in git.** Before this, a stage
+  saw only what `base_commit` contains, so design mockups or a backlog kept
+  out of the repository never reached an agent. List their repo-relative paths
+  under `references:` in `.agentum.yaml`, commit the file, and start a new
+  run: each stage finds a copy under `<worktree>/.agentum/<run-id>/refs/`.
+  Files over 1 MiB, symlinks, and credential-shaped files are not copied.
 - **Operators can request a pause while a run is running.** The run records
   the pending request, stops after the current invocation and checkpoint, and
   accepts an optional note on Continue; a note also reaches a fresh
