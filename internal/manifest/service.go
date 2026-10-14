@@ -301,6 +301,62 @@ func (service *Service) Seal(
 	return nil
 }
 
+// ErrCorrected is returned by ReopenFailedTx when the failure-sealed manifest
+// already carries corrections. Get serves the newest correction as the
+// authoritative body, so evidence a retried run wrote into the reopened row
+// would be shadowed by a snapshot taken before the retry.
+var ErrCorrected = errors.New("manifest: sealed manifest has corrections; it cannot be reopened")
+
+// ReopenFailedTx lifts the failure seal so a retried run records into the same
+// manifest, on the caller's transaction (the retry handler commits it together
+// with the transition, the job enqueue, and the human decision). An unsealed
+// manifest is left as it is: a run can fail before failRun manages to seal.
+// Any other seal reason returns ErrSealed — only a failed run may run again.
+// The seal-derived Missing list and completeness flag are cleared, because the
+// next seal derives them from the body the retry leaves behind.
+func (service *Service) ReopenFailedTx(ctx context.Context, qtx *sqlc.Queries, tenantID, runID string) error {
+	locked, err := qtx.GetManifestForUpdate(ctx, sqlc.GetManifestForUpdateParams{
+		RunID: runID, TenantID: tenantID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoManifest
+		}
+		return fmt.Errorf("manifest: lock for reopen: %w", err)
+	}
+	if !locked.SealedAt.Valid {
+		return nil
+	}
+	if locked.SealReason.String != string(SealFailed) {
+		return ErrSealed
+	}
+	_, latestErr := qtx.LatestManifestCorrection(ctx, sqlc.LatestManifestCorrectionParams{
+		ManifestID: locked.ID, TenantID: tenantID,
+	})
+	if latestErr == nil {
+		return ErrCorrected
+	}
+	if !errors.Is(latestErr, sql.ErrNoRows) {
+		return fmt.Errorf("manifest: read corrections for reopen: %w", latestErr)
+	}
+	body, err := decodeBody(locked.Body)
+	if err != nil {
+		return fmt.Errorf("manifest: decode body for reopen: %w", err)
+	}
+	body.Missing = nil
+	body.EvidenceComplete = nil
+	encoded, err := encodeBody(body)
+	if err != nil {
+		return fmt.Errorf("manifest: encode reopened body: %w", err)
+	}
+	if _, err := qtx.ReopenFailedManifest(ctx, sqlc.ReopenFailedManifestParams{
+		ID: locked.ID, TenantID: tenantID, Body: encoded,
+	}); err != nil {
+		return fmt.Errorf("manifest: reopen: %w", err)
+	}
+	return nil
+}
+
 // Correct adds a post-seal amendment as a linked correction row. The sealed
 // body is never edited; each correction's body is a full snapshot that already
 // includes every earlier correction. Correction N's body is correction N-1's

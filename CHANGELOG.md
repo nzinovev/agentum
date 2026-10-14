@@ -10,6 +10,12 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A failed run can be retried or closed.** Before this, `failed` was a
+  dead end: cancel returned `409` and the only way on was a new run. Use
+  Retry run on the run page or `POST /runs/{id}/retry` to resume the failed
+  stage from the kept worktree and checkpoints. Use Cancel run or
+  `POST /runs/{id}/cancel` to close it as `cancelled`. Retry is refused after
+  the run branch is deleted.
 - **A run can read project files that are not in git.** Before this, a stage
   saw only what `base_commit` contains, so design mockups or a backlog kept
   out of the repository never reached an agent. List their repo-relative paths

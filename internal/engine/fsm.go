@@ -5,6 +5,9 @@
 // Lifecycle vocabulary keeps terminal decisions separate from local deletion:
 //   - pause (StatePaused*) is non-terminal and resumable via continue/advance.
 //   - EventCancel is a terminal abort. The worktree and branch stay for review.
+//   - failed is terminal for execution, but a human may leave it: EventRetry
+//     re-enters running from the kept worktree and checkpoints, and
+//     EventCancel closes the run as cancelled. Nothing else moves it.
 //   - Branch deletion (worktree.DeleteBranch) is an explicit, idempotent cleanup
 //     action that lives outside this FSM — it operates on already-terminal runs
 //     and is audited separately. The FSM has no edge for it because it does not
@@ -47,11 +50,13 @@ const (
 	EventReachFinalGate RunEvent = "reach_final_gate"
 	EventApprove        RunEvent = "approve" // final approval → commit memory, then done
 	EventFail           RunEvent = "fail"
+	EventRetry          RunEvent = "retry" // re-run a failed run from its kept worktree and checkpoints
 	EventCancel         RunEvent = "cancel"
 )
 
 // transitions is the explicit table: map[from]map[event]to. Any (state, event)
-// not present is illegal and rejected. Terminal states have no outgoing edges.
+// not present is illegal and rejected. done and cancelled have no outgoing
+// edges; failed has only the two human exits, retry and cancel.
 var transitions = map[RunState]map[RunEvent]RunState{
 	StateCreated: {
 		EventStart:  StateRunning,
@@ -87,6 +92,10 @@ var transitions = map[RunState]map[RunEvent]RunState{
 		EventApprove:    StateDone, // memory commits at run-done
 		EventCancel:     StateCancelled,
 	},
+	StateFailed: {
+		EventRetry:  StateRunning,
+		EventCancel: StateCancelled,
+	},
 }
 
 // ErrIllegalTransition is returned when an event is not valid for the state.
@@ -109,7 +118,10 @@ func Next(from RunState, event RunEvent) (RunState, error) {
 	return "", &ErrIllegalTransition{From: from, Event: event}
 }
 
-// IsTerminal reports whether no further transitions are possible.
+// IsTerminal reports whether the run has stopped executing: no job drives it
+// and its local resources may be disposed of. failed counts as terminal even
+// though a human may still retry or cancel it — until that decision, nothing
+// runs, which is what every caller of IsTerminal asks about.
 func IsTerminal(s RunState) bool {
 	switch s {
 	case StateDone, StateFailed, StateCancelled:

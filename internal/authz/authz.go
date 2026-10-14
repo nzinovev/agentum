@@ -122,6 +122,12 @@ const (
 	ActionRunReject  = "run:reject"
 	ActionRunCancel  = "run:cancel"
 
+	// ActionRunRetry sends a failed run back into the pipeline from its kept
+	// worktree and checkpoints. Separate from run:start: a retry reopens the
+	// failure-sealed evidence record and re-spends agent time on a run a
+	// human has already seen fail.
+	ActionRunRetry = "run:retry"
+
 	// ActionRunPublish requests a publication attempt (or a repeat) for a
 	// run at the review gate. Reading the delivery state rides run:read on
 	// the same endpoints every run sub-resource uses. Kept separate from

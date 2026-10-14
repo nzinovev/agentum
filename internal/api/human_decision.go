@@ -18,6 +18,7 @@ const (
 	decisionRejected  = "rejected"
 	decisionEdited    = "edited"
 	decisionContinued = "continued"
+	decisionRetried   = "retried"
 )
 
 // Gate identifiers recorded on a GateDecision. These name the kind of gate the
@@ -34,6 +35,7 @@ const (
 	gateOpenQuestions = "open_questions"
 	gateUserStop      = "user_stop"
 	gateCancel        = "cancel"
+	gateRetry         = "retry" // a human sent a failed run back into the pipeline
 	gateHumanEdit     = "human_edit"
 )
 

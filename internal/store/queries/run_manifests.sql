@@ -42,6 +42,18 @@ SET sealed_at = now(), sealed_by = $3, seal_reason = $4, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND sealed_at IS NULL
 RETURNING *;
 
+-- name: ReopenFailedManifest :one
+-- Lift a failure seal so a retried run keeps recording into the same manifest.
+-- Only seal_reason = 'failed' is reopenable: a failed run is the one terminal
+-- state a human may send back into the pipeline, while a completed, cancelled,
+-- or rejected seal closes a run that can never run again. The body is replaced
+-- in the same statement so the seal-derived fields (missing,
+-- evidence_complete) do not outlive the seal they described.
+UPDATE run_manifests
+SET sealed_at = NULL, sealed_by = NULL, seal_reason = NULL, body = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND seal_reason = 'failed'
+RETURNING *;
+
 -- name: CreateManifestCorrection :one
 -- A post-seal amendment. The body is a full corrected manifest snapshot; the
 -- sealed row is never edited. `reason` explains why the correction was made.

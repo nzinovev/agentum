@@ -338,6 +338,17 @@ func (runner *Runner) HandleRun(ctx context.Context, job sqlc.Job) error {
 	return runner.drive(ctx, job)
 }
 
+// jobKindRetry is the job the retry endpoint enqueues for a failed run. The
+// runner enters it the way it enters a run job; its payload names the
+// failure the human chose to retry past.
+const jobKindRetry = "retry"
+
+// HandleRetry serves the "retry" job kind: drive a failed run again from its
+// kept worktree and checkpoints.
+func (runner *Runner) HandleRetry(ctx context.Context, job sqlc.Job) error {
+	return runner.drive(ctx, job)
+}
+
 // HandleContinue re-enters the current stage. When the previous invocation
 // has no session id, a fresh invocation receives the note in its Task section.
 func (runner *Runner) HandleContinue(ctx context.Context, job sqlc.Job) error {
@@ -908,6 +919,9 @@ func (runner *Runner) drive(ctx context.Context, job sqlc.Job) error {
 	}
 	if record.State == string(engine.StateCancelled) || record.State == string(engine.StateFailed) || record.State == string(engine.StateDone) || ctx.Err() != nil {
 		return nil
+	}
+	if job.Kind == jobKindRetry {
+		runner.emitRetried(ctx, record, job)
 	}
 	project, err := runner.store.GetProject(ctx, sqlc.GetProjectParams{ID: record.ProjectID, TenantID: record.TenantID})
 	if err != nil {
@@ -1711,9 +1725,11 @@ type haltDecision struct {
 // turns into failRun).
 func (runner *Runner) entryPoint(ctx context.Context, job sqlc.Job, record sqlc.Run, runPack *pack.Pack, continuationText string) (stage, resume string, halt *haltDecision, err error) {
 	switch job.Kind {
-	case "run":
+	case "run", jobKindRetry:
 		// A fresh run starts at the pack entry, unless a previous attempt set
-		// current_stage before a crash — resume there.
+		// current_stage before a crash — resume there. A retry enters the same
+		// way: the stage the run failed in, with a fresh session, because the
+		// failed attempt's session ended in the error being retried past.
 		if record.CurrentStage.Valid {
 			return record.CurrentStage.String, "", nil, nil
 		}
@@ -2875,6 +2891,19 @@ func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error)
 	return cause
 }
 
+// emitRetried records that a failed run re-entered the pipeline, carrying the
+// failure it left behind: the transition back to running cleared runs.error,
+// so the event is where the run's own history keeps the cause.
+func (runner *Runner) emitRetried(ctx context.Context, record sqlc.Run, job sqlc.Job) {
+	var payload struct {
+		PreviousError string `json:"previous_error"`
+	}
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		runner.log.Warn("decode retry payload", "run", record.ID, "error", err)
+	}
+	runner.emit(ctx, record, EvRunRetried, map[string]any{"previous_error": payload.PreviousError})
+}
+
 // recordSystemGateDecision writes the orchestrator's own gate decision into
 // the manifest's decisions section: a gate that could have stopped the work
 // and did not IS a decision, and the record must say the orchestrator made it
@@ -2943,6 +2972,7 @@ func (runner *Runner) isClean(repoPath, runID string) bool {
 // frames whatever string the events table carries.
 const (
 	EvRunStateChanged    = "run.state_changed"
+	EvRunRetried         = "run.retried"
 	EvStageStarted       = "stage.started"
 	EvStageStopped       = "stage.stopped"
 	EvWorktreeCreated    = "run.worktree_created"

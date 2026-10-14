@@ -656,7 +656,7 @@ export function RunPage({
                 </button>
               )}
               {item.state === "running" && <button className="secondary" disabled={!!stale || pausing || !!item.pause_requested_at} onClick={() => void pause()}>{pausing ? "Requesting…" : item.pause_requested_at ? "Pause requested" : "Pause run"}</button>}
-              {!terminalStates.has(item.state) && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
+              {(!terminalStates.has(item.state) || item.state === "failed") && <button className="secondary" disabled={!!stale} onClick={() => setCancelSignal((signal) => signal + 1)}>Cancel run</button>}
             </div>
           </div>
           {pauseError && item.state === "running" && !item.pause_requested_at && <div className="run-notice fail" role="alert"><strong>Pause request was not accepted. Refresh the run before trying again.</strong><code>{pauseError}</code></div>}

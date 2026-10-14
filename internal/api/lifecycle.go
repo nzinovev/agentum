@@ -752,17 +752,19 @@ func (api *API) handleInvocationApprove(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleCancelRun POST /api/v1/runs/{id}/cancel
-// Terminal abort: any non-terminal run → cancelled. The in-flight run (if any)
-// is aborted via the cancel registry, then the FSM transition + teardown-job
-// enqueue commit atomically. F.6.1: cancel is a terminal ABORT, distinct from
-// pause (non-terminal) and cleanup (explicit branch deletion). Teardown keeps
-// the worktree and branch available for review.
+// Terminal abort: any non-terminal run, or a failed one a human chose to close
+// instead of retrying → cancelled. The in-flight run (if any) is aborted via
+// the cancel registry, then the FSM transition + teardown-job enqueue commit
+// atomically. F.6.1: cancel is a terminal ABORT, distinct from pause
+// (non-terminal) and cleanup (explicit branch deletion). Teardown keeps the
+// worktree and branch available for review.
 func (api *API) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	principal, run, ok := api.requireRunForAction(w, r, authz.ActionRunCancel, "GetRun(cancel)")
 	if !ok {
 		return
 	}
-	if engine.IsTerminal(engine.RunState(run.State)) {
+	// The FSM decides, not IsTerminal: failed is terminal yet still closable.
+	if _, err := engine.Next(engine.RunState(run.State), engine.EventCancel); err != nil {
 		writeError(w, http.StatusConflict, codeIllegalTransition, "run is already terminal: "+run.State)
 		return
 	}
@@ -773,8 +775,9 @@ func (api *API) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Transactional outbox: abort transition + teardown enqueue in one tx. The
 	// cancel decision rides in the same tx under recordLenient: a sealed or
-	// missing manifest (Init is best-effort, and a crash may have sealed the
-	// manifest mid-flight) is absorbed so the cancel still lands — cancel is an
+	// missing manifest (Init is best-effort, a crash may have sealed the
+	// manifest mid-flight, and a failed run's manifest sealed at the failure)
+	// is absorbed so the cancel still lands — cancel is an
 	// emergency exit and must be the most tolerant handler. A real write error
 	// still fails the tx, which is correct: the transition did not commit.
 	decision := gateDecisionPatch(run, principal, gateCancel, decisionRejected)

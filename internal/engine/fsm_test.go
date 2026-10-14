@@ -43,6 +43,9 @@ func TestNext_LegalTransitions(t *testing.T) {
 		{StateAwaitingFinalReview, EventPlanEdited, StatePausedGate},
 		{StateAwaitingFinalReview, EventRequestFix, StateRunning},
 		{StateAwaitingFinalReview, EventCancel, StateCancelled},
+
+		{StateFailed, EventRetry, StateRunning},
+		{StateFailed, EventCancel, StateCancelled},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.from)+"--"+string(tc.event)+"-->", func(t *testing.T) {
@@ -71,6 +74,9 @@ func TestNext_RejectsIllegal(t *testing.T) {
 	}{
 		{"start on running", StateRunning, EventStart},
 		{"start on terminal done", StateDone, EventStart},
+		{"retry on done", StateDone, EventRetry},
+		{"retry on cancelled", StateCancelled, EventRetry},
+		{"retry on running", StateRunning, EventRetry},
 		{"approve on running (must reach final gate first)", StateRunning, EventApprove},
 	}
 	for _, tc := range cases {
@@ -105,7 +111,7 @@ func TestNext_NoSpuriousEdges(t *testing.T) {
 	allEvents := []RunEvent{
 		EventStart, EventStopOpenQ, EventStopGate, EventStopUser,
 		EventContinue, EventAdvance, EventPlanEdited, EventRequestFix, EventReachFinalGate,
-		EventApprove, EventFail, EventCancel,
+		EventApprove, EventFail, EventRetry, EventCancel,
 	}
 	for _, s := range allStates {
 		legalForState := map[RunEvent]bool{}
@@ -137,7 +143,9 @@ func TestIsTerminal(t *testing.T) {
 		if !IsTerminal(s) {
 			t.Errorf("IsTerminal(%q) = false, want true", s)
 		}
-		if _, ok := transitions[s]; ok && len(transitions[s]) > 0 {
+		// failed keeps the human exits (retry, cancel); every other terminal
+		// state is final.
+		if _, ok := transitions[s]; ok && len(transitions[s]) > 0 && s != StateFailed {
 			t.Errorf("terminal state %q must have no outgoing transitions", s)
 		}
 	}
