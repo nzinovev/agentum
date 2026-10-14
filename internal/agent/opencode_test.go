@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nzinovev/agentum/internal/caps"
 	"github.com/nzinovev/agentum/internal/models"
 )
 
@@ -98,10 +100,12 @@ func splitNDJSON(s string) []string {
 	return lines
 }
 
-// TestBuildOpencodeArgs_AggregateShape pins the argv contract: run --format
-// json --auto --dir <workdir> [--session <id>] [--model <model>] <message>.
-// The optional flags appear only when their selection field is populated — an
-// empty model emits no --model, and the runtime's own default applies.
+// TestBuildOpencodeArgs_AggregateShape pins the argv contract: run
+// --standalone --format json --auto [--session <id>] [--model <model>]
+// [--file <attachment>]... <message>. The optional flags appear only when their
+// field is populated — an empty model emits no --model, and the runtime's own
+// default applies. There is no directory flag: the working directory is the
+// process's own.
 func TestBuildOpencodeArgs_AggregateShape(t *testing.T) {
 	t.Parallel()
 	base := Invocation{
@@ -110,22 +114,22 @@ func TestBuildOpencodeArgs_AggregateShape(t *testing.T) {
 		RoutingBlock: "routing block",
 	}
 
-	argv := buildOpencodeArgs("opencode", base)
-	want := []string{"opencode", "run", "--format", "json", "--auto", "--dir", "/wt", "stage prompt\n\nrouting block"}
+	argv := buildOpencodeArgs("opencode", base, nil)
+	want := []string{"opencode", "run", "--standalone", "--format", "json", "--auto", "stage prompt\n\nrouting block"}
 	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("bare argv = %v; want %v", argv, want)
 	}
 
 	withModel := base
 	withModel.Model = models.Selection{Tier: "strong", Options: models.Options{Model: "prov/model"}}
-	argv = buildOpencodeArgs("opencode", withModel)
+	argv = buildOpencodeArgs("opencode", withModel, nil)
 	if index := indexOfArg(argv, "--model"); index < 0 || argv[index+1] != "prov/model" {
 		t.Errorf("argv = %v; want --model prov/model", argv)
 	}
 
 	withSession := withModel
 	withSession.ResumeSession = "sess-1"
-	argv = buildOpencodeArgs("opencode", withSession)
+	argv = buildOpencodeArgs("opencode", withSession, nil)
 	sessionIndex := indexOfArg(argv, "--session")
 	modelIndex := indexOfArg(argv, "--model")
 	if sessionIndex < 0 || modelIndex < 0 || sessionIndex > modelIndex {
@@ -133,6 +137,46 @@ func TestBuildOpencodeArgs_AggregateShape(t *testing.T) {
 	}
 	if got := argv[len(argv)-1]; got != "stage prompt\n\nrouting block" {
 		t.Errorf("last argv element = %q; want the prompt+routing message", got)
+	}
+
+	argv = buildOpencodeArgs("opencode", withSession, []string{"/cfg/pinned-0-AGENTS.md", "/cfg/pinned-1-rules.md"})
+	attached := []string{}
+	for index, arg := range argv {
+		if arg == "--file" {
+			attached = append(attached, argv[index+1])
+		}
+	}
+	if strings.Join(attached, ",") != "/cfg/pinned-0-AGENTS.md,/cfg/pinned-1-rules.md" {
+		t.Errorf("argv = %v; want one --file per attachment, in order", argv)
+	}
+	if got := argv[len(argv)-1]; got != "stage prompt\n\nrouting block" {
+		t.Errorf("last argv element = %q; the message must stay last after the attachments", got)
+	}
+}
+
+// TestInvoke_ChildPWDIsTheWorktree: opencode takes its working directory from
+// PWD, so the child must not inherit the parent's — a session would run in the
+// directory Agentum was started from instead of the worktree. Asserted from
+// the child's own environment.
+func TestInvoke_ChildPWDIsTheWorktree(t *testing.T) {
+	pwdPath := filepath.Join(t.TempDir(), "pwd")
+	t.Setenv(fakePwdDumpEnv, pwdPath)
+	t.Setenv("PWD", "/somewhere/else")
+	adapter, invocation := fakeInvocation(t, fakeWorks, 0, caps.Profile{})
+
+	events, err := adapter.Invoke(context.Background(), invocation)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if _, failed := drain(t, events); failed != nil {
+		t.Fatalf("run failed: %v", failed)
+	}
+	pwd, err := os.ReadFile(pwdPath)
+	if err != nil {
+		t.Fatalf("read dumped PWD: %v", err)
+	}
+	if string(pwd) != invocation.Workdir {
+		t.Errorf("child PWD = %q; want the worktree %q", pwd, invocation.Workdir)
 	}
 }
 
@@ -151,7 +195,7 @@ func indexOfArg(argv []string, flag string) int {
 // before any subprocess starts, and the error names BOTH the adapter id and
 // the option. A narrowed descriptor supplies the negative case, because
 // today's only option (model) is one this adapter declares — this is the
-// mechanism a future --variant option inherits.
+// mechanism every further option inherits.
 //
 // Cannot use t.Parallel: it narrows the package-level descriptor (restored on
 // cleanup), which other Describe() callers read.

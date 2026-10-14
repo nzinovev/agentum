@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +51,10 @@ const (
 	// with (JSON-encoded), so a test can assert the flags that reached the
 	// process — the contract the typed options render into.
 	fakeArgvDumpEnv = "AGENTUM_FAKE_ARGV"
+	// fakePwdDumpEnv names a file the fake writes its PWD into: opencode
+	// takes its working directory from PWD, so the child's own value is what
+	// decides which project a session runs in.
+	fakePwdDumpEnv = "AGENTUM_FAKE_PWD"
 )
 
 // Fake agent behaviours.
@@ -72,51 +80,118 @@ const (
 
 // TestMain doubles as the fake agent's entry point. It must intercept before
 // the testing framework parses flags, because the adapter invokes the binary
-// with opencode's argv ("run --format json …", "debug skill", or "--version"),
-// not with test flags. The debug-skill mode serves the ContextProber tests;
-// the version mode serves the readiness-probe tests.
+// with opencode's argv ("run --standalone …", "serve …", or "--version"), not
+// with test flags. The argv decides which side of the runtime the fake plays,
+// so an Invoke that probes the version and the catalog first reaches the
+// right fake for each call.
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == "models" {
-		os.Exit(runFakeModels(os.Getenv(fakeCatalogEnv)))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "serve":
+			os.Exit(runFakeServer())
+		case "--version":
+			os.Exit(runFakeVersion(os.Getenv(fakeVersionEnv)))
+		}
 	}
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeAgent(mode))
 	}
-	if os.Getenv(fakeDebugSkillEnv) != "" {
-		os.Exit(runFakeDebugSkill(os.Getenv(fakeDebugSkillEnv)))
-	}
-	if mode := os.Getenv(fakeVersionEnv); mode != "" {
-		os.Exit(runFakeVersion(mode))
-	}
+	// The fake server settles after one read; polling at the production
+	// pace would only slow every probe down.
+	settleInterval = 10 * time.Millisecond
 	os.Exit(m.Run())
 }
 
-// fakeDebugSkillEnv switches the test binary into the `opencode debug skill`
-// fake. Its value selects the behaviour: well-formed JSON, malformed JSON,
-// hang, or non-zero exit.
+// fakeListing is one listing answer the fake server gives: a status, a body,
+// or a refusal to answer at all.
+type fakeListing struct {
+	body string
+	// partial, when set, is the answer to the second read — a plugin that
+	// has registered some records but not all of them yet.
+	partial string
+	// exitCode, when non-zero, makes the server exit before it listens.
+	exitCode int
+	// hang makes the server never report an address.
+	hang bool
+}
+
+// runFakeServer plays `opencode serve`: it listens on a loopback port, prints
+// opencode's "server listening on" line, requires the basic-auth password from
+// OPENCODE_SERVER_PASSWORD, and answers the two listings from the modes in its
+// environment. Each listing answers with an empty envelope on its first read,
+// the way the real server answers before its plugins settle.
+func runFakeServer() int {
+	models := fakeModelsListing(os.Getenv(fakeCatalogEnv))
+	skills := fakeSkillListing(os.Getenv(fakeDebugSkillEnv))
+	// The process only knows which listing it serves once a request arrives,
+	// so a mode that refuses to start applies when either listing asks for it.
+	for _, listing := range []fakeListing{models, skills} {
+		if listing.exitCode != 0 {
+			fmt.Fprintln(os.Stderr, "fake runtime failure")
+			return listing.exitCode
+		}
+		if listing.hang {
+			time.Sleep(30 * time.Second)
+			return 0
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 1
+	}
+	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	var reads sync.Map
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, given, ok := r.BasicAuth()
+		if !ok || user != runtimeServerUser || given != password {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var listing fakeListing
+		switch r.URL.Path {
+		case modelListPath:
+			listing = models
+		case skillListPath:
+			listing = skills
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		count, _ := reads.LoadOrStore(r.URL.Path, new(atomic.Int32))
+		switch read := count.(*atomic.Int32).Add(1); {
+		case read == 1:
+			fmt.Fprint(w, `{"location":{"directory":"/wt"},"data":[]}`)
+		case read == 2 && listing.partial != "":
+			fmt.Fprint(w, listing.partial)
+		default:
+			fmt.Fprint(w, listing.body)
+		}
+	})
+	fmt.Printf("server listening on http://%s\n", listener.Addr())
+	_ = http.Serve(listener, handler)
+	return 0
+}
+
+// fakeDebugSkillEnv selects the behaviour of the skill-list fake: well-formed
+// JSON, malformed JSON, hang, or non-zero exit.
 const fakeDebugSkillEnv = "AGENTUM_FAKE_DEBUG_SKILL"
 
-// runFakeDebugSkill plays the `opencode debug skill` side of the ContextProber
-// contract: it writes a JSON array of skills to stdout and exits. The mode
-// selects malformed JSON, a hang, or a non-zero exit so the prober's failure
-// paths are exercised without a real opencode binary.
-func runFakeDebugSkill(mode string) int {
+// fakeSkillListing builds the skill-list side of the ContextProber contract:
+// the API's skill envelope, or a failure shape, by mode.
+func fakeSkillListing(mode string) fakeListing {
 	switch mode {
 	case fakeDebugMalformed:
-		fmt.Println(`[{not json`)
-		return 0
+		return fakeListing{body: `[{not json`}
+	case fakeDebugNoData:
+		return fakeListing{body: `{"location":{"directory":"/wt"}}`}
 	case fakeDebugExit:
-		fmt.Fprintln(os.Stderr, "fake debug error")
-		return 2
+		return fakeListing{exitCode: 2}
 	case fakeDebugHang:
-		// Block long enough that the probe's timeout fires and the process
-		// group is killed. The prober test shrinks probeTimeout so this is well
-		// within the test's budget.
-		time.Sleep(30 * time.Second)
-		return 0
+		return fakeListing{hang: true}
+	case fakeDebugSettling:
+		return fakeListing{body: fakeDebugSkillOutput, partial: fakeDebugSkillPartial}
 	default: // fakeDebugWellformed and any unknown mode
-		fmt.Println(fakeDebugSkillOutput)
-		return 0
+		return fakeListing{body: fakeDebugSkillOutput}
 	}
 }
 
@@ -124,17 +199,25 @@ func runFakeDebugSkill(mode string) int {
 const (
 	fakeDebugWellformed = "wellformed"
 	fakeDebugMalformed  = "malformed"
+	fakeDebugNoData     = "nodata"
+	fakeDebugSettling   = "settling"
 	fakeDebugExit       = "exit"
 	fakeDebugHang       = "hang"
 )
 
-// fakeDebugSkillOutput is the JSON array the well-formed fake emits. It carries
-// a marker body so a test can assert the body is hashed and discarded (never
-// returned in the SkillRef).
-const fakeDebugSkillOutput = `[
-  {"name":"customize-opencode","description":"Customize opencode","location":"<built-in>","content":"MARKER-BODY-SHOULD-NOT-LEAK"},
-  {"name":"user-skill","description":"A user skill","location":"/home/user/.claude/skills/user-skill","content":"user body"}
-]`
+// fakeDebugSkillPartial is the listing before the user's skills have loaded:
+// only the bundled one.
+const fakeDebugSkillPartial = `{"location":{"directory":"/wt"},"data":[
+  {"id":"customize-opencode","name":"customize-opencode","description":"Customize opencode","path":"/opt/opencode/skills/customize-opencode/SKILL.md","content":"MARKER-BODY-SHOULD-NOT-LEAK"}
+]}`
+
+// fakeDebugSkillOutput is the envelope the well-formed fake emits, in the
+// shape of `GET /api/skill`. It carries a marker body so a test can assert the
+// body is hashed and discarded (never returned in the SkillRef).
+const fakeDebugSkillOutput = `{"location":{"directory":"/wt"},"data":[
+  {"id":"customize-opencode","name":"customize-opencode","description":"Customize opencode","path":"/opt/opencode/skills/customize-opencode/SKILL.md","content":"MARKER-BODY-SHOULD-NOT-LEAK"},
+  {"id":"user-skill","name":"user-skill","description":"A user skill","path":"/home/user/.agents/skills/user-skill/SKILL.md","content":"user body"}
+]}`
 
 // runFakeAgent plays the agent side of the adapter contract.
 func runFakeAgent(mode string) int {
@@ -149,6 +232,9 @@ func runFakeAgent(mode string) int {
 	}
 	if dumpPath := os.Getenv(fakeConfigDumpEnv); dumpPath != "" {
 		_ = os.WriteFile(dumpPath, []byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), 0o600)
+	}
+	if pwdPath := os.Getenv(fakePwdDumpEnv); pwdPath != "" {
+		_ = os.WriteFile(pwdPath, []byte(os.Getenv("PWD")), 0o600)
 	}
 	if argvPath := os.Getenv(fakeArgvDumpEnv); argvPath != "" {
 		if raw, marshalErr := json.Marshal(os.Args); marshalErr == nil {

@@ -1,14 +1,12 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -44,9 +42,7 @@ type ContextReport struct {
 	AutoInstructions []string
 
 	// Skills is one entry per available skill, in the order the runtime reports
-	// them. Empty (not nil) when the probe ran and found none — but note
-	// opencode always ships at least one built-in skill, so an empty slice
-	// usually means the probe failed rather than "no skills."
+	// them. Empty (not nil) when the probe ran and found none.
 	Skills []SkillRef
 
 	// SkillsError carries the reason the skill probe failed (timeout, bad JSON,
@@ -66,7 +62,7 @@ type ContextReport struct {
 // of a record that already has a secret-scanning story).
 type SkillRef struct {
 	Name        string `json:"name"`
-	Location    string `json:"location"` // path, or "<built-in>"
+	Location    string `json:"location"` // absolute path of the skill file
 	Description string `json:"description"`
 	Hash        string `json:"hash"`  // sha256 hex of the skill body
 	Bytes       int    `json:"bytes"` // body size
@@ -88,8 +84,8 @@ var probeTimeout = 10 * time.Second
 // adapter seam.
 var autoInstructionBaseline = []string{"AGENTS.md"}
 
-// ProbeContext implements ContextProber for the opencode adapter. It probes
-// `opencode debug skill` with the invocation's working directory and a
+// ProbeContext implements ContextProber for the opencode adapter. It asks the
+// runtime's API for its skill list with the invocation's working directory and a
 // rendered deny-baseline + skill:allow config in OPENCODE_CONFIG_CONTENT, hashes
 // each skill body and discards it, and returns the static AutoInstructions
 // regardless of the subprocess outcome.
@@ -130,7 +126,7 @@ func (adapter *OpencodeAdapter) ProbeContext(ctx context.Context, inv Invocation
 
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	skills, skillsErr := adapter.runDebugSkill(probeCtx, inv.Workdir, env)
+	skills, skillsErr := adapter.runSkillList(probeCtx, inv.Workdir, env)
 	if skillsErr != nil {
 		report.SkillsError = skillsErr.Error()
 		report.SkillsProbe = classifyProbeError(skillsErr)
@@ -140,10 +136,10 @@ func (adapter *OpencodeAdapter) ProbeContext(ctx context.Context, inv Invocation
 	return report, nil
 }
 
-// runDebugSkill runs `opencode debug skill` and parses the JSON array of
-// {name, description, location, content} entries. There is no --dir flag
-// (Step-0 finding), so the working directory is set on the command itself. The
-// body of each skill is hashed and discarded; only the hash and byte size are
+// runSkillList reads the skill listing from a private runtime server started
+// in the invocation's working directory, once the listing has settled, and
+// parses the {data: [{name, description, path, content}]} envelope. The body
+// of each skill is hashed and discarded; only the hash and byte size are
 // returned. A timeout, a non-zero exit, or malformed JSON is returned as an
 // error — the caller classifies it into SkillsProbe.
 //
@@ -152,58 +148,57 @@ func (adapter *OpencodeAdapter) ProbeContext(ctx context.Context, inv Invocation
 // can read cmd.Process via signalProcessGroup. Starting the watcher before Start
 // — the shape a plain cmd.Run() would push toward — is a data race on
 // cmd.Process. Start, then watch, then Wait.
-func (adapter *OpencodeAdapter) runDebugSkill(ctx context.Context, workdir string, env []string) ([]SkillRef, error) {
-	args := []string{adapter.binary, "debug", "skill"}
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	setProcessGroup(cmd)
-	cmd.Dir = workdir
-	cmd.Env = env
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if startErr := cmd.Start(); startErr != nil {
-		return nil, fmt.Errorf("opencode debug skill: start: %w", startErr)
+func (adapter *OpencodeAdapter) runSkillList(ctx context.Context, workdir string, env []string) ([]SkillRef, error) {
+	server, err := adapter.startRuntimeServer(ctx, workdir, env)
+	if err != nil {
+		return nil, fmt.Errorf("opencode skill list: %w", err)
 	}
-	reaped := make(chan struct{})
-	watcherDone := watchCancellation(ctx, cmd, reaped)
-	runErr := cmd.Wait()
-	close(reaped)
-	<-watcherDone
-
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, fmt.Errorf("opencode debug skill: %w", ctxErr)
+	defer server.close()
+	body, err := server.settledGet(ctx, skillListPath, workdir, countSkills)
+	if err != nil {
+		return nil, fmt.Errorf("opencode skill list: %w", err)
 	}
-	if runErr != nil {
-		stderrText := stderr.String()
-		if stderrText != "" {
-			return nil, fmt.Errorf("opencode debug skill exited: %w: %s", runErr, stderrText)
-		}
-		return nil, fmt.Errorf("opencode debug skill exited: %w", runErr)
+	var listing skillListing
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return nil, fmt.Errorf("opencode skill list: decode: %w", err)
 	}
-
-	var raw []struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Location    string `json:"location"`
-		Content     string `json:"content"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
-		return nil, fmt.Errorf("opencode debug skill: decode: %w", err)
-	}
-	skills := make([]SkillRef, 0, len(raw))
-	for _, entry := range raw {
+	// countSkills refused an envelope without data, so Data is set here.
+	skills := make([]SkillRef, 0, len(*listing.Data))
+	for _, entry := range *listing.Data {
 		body := []byte(entry.Content)
 		skills = append(skills, SkillRef{
 			Name:        entry.Name,
-			Location:    entry.Location,
+			Location:    entry.Path,
 			Description: entry.Description,
 			Hash:        hashSkillBody(body),
 			Bytes:       len(body),
 		})
 	}
 	return skills, nil
+}
+
+// skillListing is the `GET /api/skill` envelope. Data is a pointer so an
+// envelope without it reads as a changed shape, not as "no skills": recording
+// it as an empty list would claim the agent saw none.
+type skillListing struct {
+	Data *[]struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Path        string `json:"path"`
+		Content     string `json:"content"`
+	} `json:"data"`
+}
+
+// countSkills is the settle check's view of a skill listing.
+func countSkills(body []byte) (int, error) {
+	var listing skillListing
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return 0, fmt.Errorf("decode: %w", err)
+	}
+	if listing.Data == nil {
+		return 0, fmt.Errorf("decode: no data field")
+	}
+	return len(*listing.Data), nil
 }
 
 // classifyProbeError turns a probe failure into a stable SkillsProbe label.

@@ -36,13 +36,13 @@ A **capability** is one of:
 
 | Category | Meaning | Enforcement (opencode) |
 |---|---|---|
-| `fs.read` | Read files in the worktree | opencode `read` / `glob` / `grep` / `list` / `lsp` rules, bounded by `external_directory: deny` |
+| `fs.read` | Read files in the worktree | opencode `read` / `glob` / `grep` / `lsp` rules, bounded by an `external_directory` deny |
 | `fs.write` | Write/edit source (scoped to the worktree) | opencode `edit` permission rule, scoped |
 | `artifact.write` | Write the per-stage artifact dir (`result.json` + declared artifacts) | opencode `edit` rule, scoped to the artifact dir — opencode has **no** separate `write` permission; write and patch are both governed by `edit` |
-| `exec.bash` | Run shell commands | opencode `bash` rule + deny patterns for delivery-ref mutation |
+| `exec.bash` | Run shell commands | opencode `shell` rule + deny patterns for delivery-ref mutation |
 | `git.read` | Inspect git state (log, status, diff) | Routed through `exec.bash` deny-pattern gate |
 | `git.write` | Mutate git inside the worktree (commit to the run branch) | Same as `exec.bash`; scoped to the worktree |
-| `net.fetch` | Outbound HTTP (web research) | opencode `webfetch` + `websearch` rules; without the grant the common network clients are also denied in `bash` |
+| `net.fetch` | Outbound HTTP (web research) | opencode `webfetch` + `websearch` rules; without the grant the common network clients are also denied in `shell` |
 | `secret.<name>` | Access a named credential | env scrub: the var is dropped unless the grant un-redacts it |
 
 `mcp.<server>` is **not enforceable in v1.** opencode addresses MCP tools by
@@ -148,6 +148,21 @@ per-invocation grant that survives the full intersection.
 
 ## Enforcement (opencode adapter)
 
+The adapter drives opencode 2 or newer. The version probe reads the runtime's
+version at boot; an older runtime is reported as unsupported and `Invoke`
+refuses to start on it.
+
+Every opencode subprocess runs with `--standalone`, a private server inside
+the process. Without it, opencode 2 hands the run to its shared background
+service, which was started with its own environment and ignores the child's
+`OPENCODE_CONFIG_CONTENT`: the permission config and the credential scrub would
+both be void while the audit trail still recorded them. Verified on 2.0.29: a
+`"*"` deny delivered to the background service did not stop a shell write.
+Each subprocess also gets `PWD` set to its working directory, because opencode
+takes its working directory from `PWD`, not from the process's own; an
+inherited `PWD` would run the session in the directory Agentum was started
+from.
+
 Before the opencode subprocess starts, the adapter materializes the effective
 profile into four concrete controls:
 
@@ -167,13 +182,14 @@ profile into four concrete controls:
      refuses to start — an absolute scope would be a rule that never matches.
      The absolute paths remain in the *audit*
      profile, which is evidence, not configuration.
-   - **Deny by default.** The config opens with the `"*": "deny"` catch-all,
-     which overrides opencode's own built-in `{permission:"*", pattern:"*",
-     action:"allow"}`. A tool this adapter does not model — a future opencode
-     tool, an MCP tool — is therefore refused rather than inherited. Every documented
-     permission key is then set explicitly: opencode *merges* config sources and
-     overrides only conflicting keys, so any key left unset would fall through
-     to the operator's global config or the repository's own `opencode.json`.
+   - **Deny by default.** The config is opencode's native ordered
+     `permissions` list, and it opens with the
+     `{"action": "*", "resource": "*", "effect": "deny"}` catch-all. A tool this
+     adapter does not model — a future opencode tool, CodeMode's `execute`, an
+     MCP tool — is therefore refused rather than inherited. Every action the
+     adapter models is then decided explicitly: opencode *merges* config
+     sources, so an action left out would fall through to the operator's global
+     config or the repository's own `opencode.json`.
    - **Delivered where the repository cannot override it.** The config is
      rendered to a per-invocation temp directory outside the worktree (passed as
      `OPENCODE_CONFIG` for the audit trail) *and* inlined into
@@ -185,17 +201,16 @@ profile into four concrete controls:
      never appears in `git status` (which drives the `auto_if_clean` gate; the
      file would otherwise enter the delivery diff).
    - **Rule order is explicit.** opencode resolves permission rules with the
-     **last match winning**, so every scoped rule list emits its `deny` baseline
-     first and the granted scopes after. The rendering uses an ordered list, not
-     a Go map, because `encoding/json` sorts map keys.
-   - **Bash denies are patterns, not substrings.** opencode matches bash rules
+     **last match winning**, so each scoped action emits its `deny` baseline
+     first and the granted scopes after.
+   - **Shell denies are patterns, not substrings.** opencode matches shell rules
      as wildcard patterns against the parsed command, so every delivery-ref deny
      ends in `*` (`git push*`, `git reset --hard*`, `git branch -D*`,
      `git update-ref*`, `git rebase*`, `git worktree*`, `git checkout agentum/*`,
      `git config credential*`, `git config --global*`). A bare `git push` would
      match only the argument-less command and let `git push origin HEAD`
      through. Without `net.fetch`, the common network clients (`curl*`, `wget*`,
-     `ssh*`, `scp*`, `nc*`) are denied too, so `bash: allow` does not restore
+     `ssh*`, `scp*`, `nc*`) are denied too, so a `shell` allow does not restore
      the network access the `webfetch` deny removed.
 2. **Credential-scrubbed environment.** The child process receives an
    environment built from the parent minus a deny list of credential-bearing
@@ -256,6 +271,7 @@ Two test layers verify the claims above:
 | Verified against opencode | Date | Result |
 |---|---|---|
 | 1.18.10 | 2026-08-03 | All four live contracts pass (stream/resume, artifact allow, source deny, implementer allow) |
+| 2.0.29 | 2026-10-14 | All live contracts pass (`TestOpencodeLive_*` and `TestOpencodeLiveContext_*`, 9/9, model `zai-coding-plan/glm-5-turbo`) with the native `permissions` list, `--standalone`, and `PWD` set to the worktree: stream/resume, artifact allow, source deny, implementer allow, `AGENTS.md` injection, the pinned copy as an attachment, the `AGENTS.md` edit deny, skill enumeration, and no escalation through a skill |
 | — | pending | Pre-approval stage denies source write — a `source_write` approval is pending, so `SourceWriteCategories` is withheld; an implementer-role stage is refused an `fs.write` / `git.write` / `exec.bash` action against the live opencode binary. The live contract could not run in this environment; the unit tests over the rendered profile pin the withheld set. |
 
 ## What is saved as audit evidence
@@ -355,22 +371,29 @@ agent without project rules.
   validated) ∪ the runtime-injected `AGENTS.md` baseline. No discovery, no
   globbing — a closed, declared set. Bytes are pinned from `base_commit` (the
   agent-immutability seam), capped at 64 KiB/file and 192 KiB/set with a
-  recorded truncation marker, and delivered to the adapter through the same
-  config channel as the permission map. The pin's `SourceHash` is over the
+  recorded truncation marker, and staged by the adapter outside the worktree,
+  next to the permission config. opencode 2 parses the config's `instructions`
+  key but never loads the files it names, so the staged copies reach the model
+  as `--file` attachments to the message instead. The pin's `SourceHash` is over the
   original base_commit bytes; `DeliveredHash` is over the post-truncate bytes,
   so truncation is an attributable fact.
 - **Tampering, two layers.** The `edit` deny rule stops an agent rewriting
   `AGENTS.md` (or any declared path) via the edit tool; a pre-stage hash check
   (CRLF-normalised, so a `core.autocrlf=true` checkout is not a false positive)
-  stops a `bash`-side rewrite and restores the pinned bytes. Each restoration
+  stops a `shell`-side rewrite and restores the pinned bytes. Each restoration
   emits `run.instructions_restored` and lands in the manifest context section;
   the rewrite is orchestrator-authored, so the next checkpoint commit shows it
   as a revert.
 - **Skills, allowed and recorded.** `skill` resolves to `allow` — a skill grants
-  knowledge, not reach; it still meets the same `bash`/`edit`/`net` rules.
-  `opencode debug skill` is probed once per run (after the worktree exists),
-  with its own 10s timeout and process-group kill, and each skill's name,
-  location, and content hash land in the manifest (bodies are never stored).
+  knowledge, not reach; it still meets the same `shell`/`edit`/`net` rules.
+  The skill list is probed once per run (after the worktree exists) from a
+  private `opencode serve` started in the worktree with the invocation's
+  environment, with its own 10s timeout and process-group kill. opencode
+  answers before its plugins finish loading — measured on 2.0.29: no skills
+  at 300ms, the built-in ones at 430ms, all of them at 680ms — so the probe
+  polls `GET /api/skill` until the list is non-empty and unchanged for about a
+  second. Each skill's name, location, and content hash land in the manifest
+  (bodies are never stored).
   A failed probe records an `EvidenceGap("context.skills")`, making
   `evidence_complete` false; an adapter with no prober records `unsupported`
   (a permanent capability gap, not a degraded run). `skill.<name>` joins the

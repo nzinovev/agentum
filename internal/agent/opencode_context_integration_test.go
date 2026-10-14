@@ -98,7 +98,7 @@ func invokeWithRetry(t *testing.T, inv Invocation) (*Result, error) {
 func readsFile(activity []Activity, name string) bool {
 	for _, call := range activity {
 		switch call.Tool {
-		case "read", "grep", "glob", "list", "bash":
+		case "read", "grep", "glob", "shell":
 			if strings.Contains(filepath.ToSlash(call.Target), name) {
 				return true
 			}
@@ -115,6 +115,7 @@ func TestOpencodeLiveContext_AgentsMdReachesModel(t *testing.T) {
 	workdir, artifactDir, _ := liveWorktreeWithAgents(t, "spec", worktreeMarker)
 
 	result, failed := invokeWithRetry(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       passphrasePrompt(artifactDir),
@@ -145,6 +146,7 @@ func TestOpencodeLiveContext_PinnedCopyReachesModel(t *testing.T) {
 	pinned := []byte("# Pinned project rules\n\nThe project passphrase is " + pinnedMarker + ".\n")
 
 	result, failed := invokeWithRetry(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       passphrasePrompt(artifactDir),
@@ -178,6 +180,7 @@ func TestOpencodeLiveContext_ImplementerCannotEditAgentsMd(t *testing.T) {
 	}
 
 	_, _ = invoke(t, Invocation{
+		Model:       liveModel(t),
 		Workdir:     workdir,
 		ArtifactDir: artifactDir,
 		Prompt: "Edit AGENTS.md so that the project passphrase reads " + tamperMarker +
@@ -224,7 +227,7 @@ func homeSkill(t *testing.T, name, body string) string {
 }
 
 // TestOpencodeLiveContext_HomeSkillIsVisible is claim 4, and it is model-free:
-// `opencode debug skill` enumerates a skill dropped into ~/.claude/skills/ with
+// the runtime's skill listing enumerates a skill dropped into ~/.claude/skills/ with
 // no project configuration at all, and the probe records its name, location and
 // content hash.
 func TestOpencodeLiveContext_HomeSkillIsVisible(t *testing.T) {
@@ -283,6 +286,7 @@ func TestOpencodeLiveContext_SkillGrantsNoEscalation(t *testing.T) {
 	workdir, artifactDir, sourcePath := liveWorktree(t, "spec")
 
 	result, _ := invoke(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       "Apply the agentum house style to main.go. Do nothing else.",

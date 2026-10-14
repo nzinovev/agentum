@@ -91,11 +91,10 @@ func (unknown *UnknownModel) Error() string {
 		message += " (did you mean " + strings.Join(quoted, ", ") + "?)"
 	}
 	if unknown.Source != "" {
-		listCommand := unknown.Source
-		if provider != "" {
-			listCommand += " " + provider
-		}
-		message += "; list them with: " + listCommand
+		// The command as the adapter recorded it, verbatim: whether it takes a
+		// provider filter is the runtime's syntax, not this package's (opencode
+		// 2 dropped the one opencode 1 accepted).
+		message += "; list them with: " + unknown.Source
 	}
 	return message
 }

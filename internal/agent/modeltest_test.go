@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,17 +175,12 @@ func TestTestModel_RunsUnderADenyBaselineConfig(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("the check must hand the runtime a permission config: %v", readErr)
 	}
-	var handed struct {
-		Permission map[string]any `json:"permission"`
-	}
-	if err := json.Unmarshal(raw, &handed); err != nil {
-		t.Fatalf("decode handed config %q: %v", raw, err)
-	}
+	permissions := decodePermissions(t, raw)
 	// The reach a hijacked check would need: commands, edits, the network, and
 	// anything outside the throwaway directory.
-	for _, key := range []string{"*", "bash", "edit", "webfetch", "external_directory"} {
-		if handed.Permission[key] != "deny" {
-			t.Errorf("permission[%q] = %v; a model check must be granted nothing", key, handed.Permission[key])
+	for _, key := range []string{"*", "shell", "edit", "webfetch", "external_directory"} {
+		if permissions[key] != actionDeny {
+			t.Errorf("permission[%q] = %v; a model check must be granted nothing", key, permissions[key])
 		}
 	}
 }

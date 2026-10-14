@@ -79,16 +79,41 @@ func mustRenderWithInstructions(t *testing.T, profile caps.Profile, subst scopeS
 	return indented
 }
 
-// decodePermissions returns the raw permission object from a rendered config.
-func decodePermissions(t *testing.T, rendered []byte) map[string]any {
+// decodeRules returns the ordered permission list from a rendered config.
+func decodeRules(t *testing.T, rendered []byte) []permissionRule {
 	t.Helper()
 	var envelope struct {
-		Permission map[string]any `json:"permission"`
+		Permissions []permissionRule `json:"permissions"`
 	}
 	if err := json.Unmarshal(rendered, &envelope); err != nil {
 		t.Fatalf("parse rendered config: %v", err)
 	}
-	return envelope.Permission
+	return envelope.Permissions
+}
+
+// decodePermissions folds the rendered permission list into one value per
+// action: the bare effect for an action decided by a single whole-action rule,
+// otherwise a resource→effect map. Order is lost in the map; the tests that
+// depend on order read decodeRules directly.
+func decodePermissions(t *testing.T, rendered []byte) map[string]any {
+	t.Helper()
+	grouped := map[string][]permissionRule{}
+	for _, rule := range decodeRules(t, rendered) {
+		grouped[rule.Action] = append(grouped[rule.Action], rule)
+	}
+	folded := make(map[string]any, len(grouped))
+	for action, rules := range grouped {
+		if len(rules) == 1 && rules[0].Resource == anyPath {
+			folded[action] = rules[0].Effect
+			continue
+		}
+		byResource := make(map[string]any, len(rules))
+		for _, rule := range rules {
+			byResource[rule.Resource] = rule.Effect
+		}
+		folded[action] = byResource
+	}
+	return folded
 }
 
 // --- the matching contract -------------------------------------------------
@@ -196,15 +221,15 @@ func TestPermissionScope_RefusesScopeOutsideWorktree(t *testing.T) {
 
 // --- rendered config -------------------------------------------------------
 
-// permissionKeys is every key the rendered config must carry. opencode merges
-// config sources and overrides only conflicting keys, so a key this adapter
-// omits falls through to the operator's global config or the project's own
-// opencode.json — widening the profile.
+// permissionKeys is every action the rendered config must decide. opencode
+// merges config sources, so an action this adapter omits falls through to the
+// operator's global config or the project's own opencode.json — widening the
+// profile.
 var permissionKeys = []string{
-	"*", "read", "glob", "grep", "list", "lsp",
-	"edit", "bash", "webfetch", "websearch",
-	"task", "skill", "external_directory",
-	"question", "doom_loop", "todowrite",
+	"*", "read", "glob", "grep", "lsp",
+	"edit", "shell", "webfetch", "websearch",
+	"subagent", "skill", "external_directory",
+	"question", "doom_loop",
 }
 
 func TestRenderConfig_SetsEveryPermissionKey(t *testing.T) {
@@ -230,9 +255,6 @@ func TestRenderConfig_DenyByDefault(t *testing.T) {
 	subst := testSubst(t.TempDir())
 	permissions := decodePermissions(t, mustRender(t, caps.Profile{}, subst))
 	for key, value := range permissions {
-		if key == "todowrite" {
-			continue // session-local bookkeeping with no reach
-		}
 		if key == "skill" {
 			if value != actionAllow {
 				t.Errorf("empty profile: skill = %v, want allow (knowledge, not reach)", value)
@@ -258,7 +280,7 @@ func TestRenderConfig_WildcardBaselineIsDeny(t *testing.T) {
 	if permissions["*"] != actionDeny {
 		t.Errorf("wildcard baseline = %v, want deny", permissions["*"])
 	}
-	for _, key := range []string{"task", "external_directory"} {
+	for _, key := range []string{"subagent", "external_directory"} {
 		if permissions[key] != actionDeny {
 			t.Errorf("%s = %v, want deny (no capability token grants it)", key, permissions[key])
 		}
@@ -279,8 +301,8 @@ func TestRenderConfig_AnalystWritesArtifactsButNotSource(t *testing.T) {
 	if permissions["read"] != actionAllow {
 		t.Errorf("analyst read = %v, want allow", permissions["read"])
 	}
-	if permissions["bash"] != actionDeny {
-		t.Errorf("analyst bash = %v, want deny", permissions["bash"])
+	if permissions["shell"] != actionDeny {
+		t.Errorf("analyst shell = %v, want deny", permissions["shell"])
 	}
 
 	rules, ok := permissions["edit"].(map[string]any)
@@ -319,32 +341,41 @@ func TestRenderConfig_ImplementerWritesTheWorktree(t *testing.T) {
 }
 
 // TestRenderConfig_DenyBaselinePrecedesAllows: opencode resolves permission
-// rules with the last match winning, so the deny baseline must be emitted
-// before the allows. Asserted on the raw bytes because that ordering is exactly
-// what a Go map would destroy.
+// rules with the last match winning, so the wildcard deny must open the list
+// and each action's own deny baseline must precede its allows.
 func TestRenderConfig_DenyBaselinePrecedesAllows(t *testing.T) {
 	t.Parallel()
 	subst := testSubst(t.TempDir())
-	rendered := string(mustRender(t, implementerProfile(t), subst))
-	baseline := strings.Index(rendered, `"*": "deny"`)
-	if baseline < 0 {
-		t.Fatalf("edit deny baseline not found in rendered config:\n%s", rendered)
+	rules := decodeRules(t, mustRender(t, implementerProfile(t), subst))
+	if len(rules) == 0 || rules[0] != (permissionRule{Action: anyPath, Resource: anyPath, Effect: actionDeny}) {
+		t.Fatalf("first rule = %+v, want the wildcard deny baseline", rules)
 	}
-	allow := strings.Index(rendered, `": "allow"`)
-	if allow < 0 {
-		t.Fatalf("no allow rule found in rendered config:\n%s", rendered)
+	firstEditDeny, firstEditAllow := -1, -1
+	for index, rule := range rules {
+		if rule.Action != permissionEdit {
+			continue
+		}
+		if rule.Effect == actionDeny && rule.Resource == anyPath && firstEditDeny < 0 {
+			firstEditDeny = index
+		}
+		if rule.Effect == actionAllow && firstEditAllow < 0 {
+			firstEditAllow = index
+		}
 	}
-	if baseline > allow {
-		t.Errorf("deny baseline at %d comes after the first allow at %d; last-match-wins would deny the granted scope", baseline, allow)
+	if firstEditDeny < 0 || firstEditAllow < 0 {
+		t.Fatalf("edit rules missing a deny baseline or an allow: %+v", rules)
+	}
+	if firstEditDeny > firstEditAllow {
+		t.Errorf("edit deny baseline at %d comes after the first allow at %d; last-match-wins would deny the granted scope", firstEditDeny, firstEditAllow)
 	}
 }
 
-// decodeBashRules extracts the bash rule map from a rendered config.
+// decodeBashRules extracts the shell rule map from a rendered config.
 func decodeBashRules(t *testing.T, rendered []byte) map[string]string {
 	t.Helper()
-	raw, ok := decodePermissions(t, rendered)["bash"].(map[string]any)
+	raw, ok := decodePermissions(t, rendered)["shell"].(map[string]any)
 	if !ok {
-		t.Fatalf("bash rule is not a map: %v", decodePermissions(t, rendered)["bash"])
+		t.Fatalf("shell rule is not a map: %v", decodePermissions(t, rendered)["shell"])
 	}
 	out := make(map[string]string, len(raw))
 	for key, value := range raw {
@@ -651,49 +682,21 @@ func countEnv(env []string, key string) int {
 
 // --- ADR 0002: instruction channel (skill allow, edit deny, staging) --------
 
-// editRuleOrder decodes the rendered config and returns the `edit` patterns in
-// emitted JSON order. opencode resolves permission rules last-match-wins, so the
-// order is load-bearing — a map[string]any decode would lose it.
+// editRuleOrder returns the `edit` resources in emitted order, or nil when
+// edit is decided by one whole-action rule. opencode resolves permission rules
+// last-match-wins, so the order is load-bearing.
 func editRuleOrder(t *testing.T, rendered []byte) []string {
 	t.Helper()
-	var envelope struct {
-		Permission struct {
-			Edit *json.RawMessage `json:"edit"`
-		} `json:"permission"`
-	}
-	if err := json.Unmarshal(rendered, &envelope); err != nil {
-		t.Fatalf("parse rendered config: %v", err)
-	}
-	if envelope.Permission.Edit == nil {
-		return nil
-	}
-	// edit may be a plain string ("deny") or an object. Only the object case
-	// has an order to inspect.
-	var plain string
-	if err := json.Unmarshal(*envelope.Permission.Edit, &plain); err == nil {
-		return nil
-	}
-	var ordered []string
-	if err := json.Unmarshal(*envelope.Permission.Edit, &ordered); err == nil {
-		return ordered
-	}
-	// Fall back to a manual scan of the raw bytes for keys.
-	raw := string(*envelope.Permission.Edit)
-	var keys []string
-	inKey := false
-	start := 0
-	for i := 0; i < len(raw); i++ {
-		if raw[i] == '"' && (i == 0 || raw[i-1] != '\\') {
-			if !inKey {
-				start = i + 1
-				inKey = true
-			} else {
-				keys = append(keys, raw[start:i])
-				inKey = false
-			}
+	var resources []string
+	for _, rule := range decodeRules(t, rendered) {
+		if rule.Action == permissionEdit {
+			resources = append(resources, rule.Resource)
 		}
 	}
-	return keys
+	if len(resources) == 1 && resources[0] == anyPath {
+		return nil
+	}
+	return resources
 }
 
 // TestRenderConfig_SkillIsAllowedForEveryProfile (ADR 0002 D5): skill resolves
@@ -718,7 +721,7 @@ func TestRenderConfig_SkillIsAllowedForEveryProfile(t *testing.T) {
 // TestEditRules_InstructionDeniesAreLastAndDistinct (ADR 0002 D4 layer 1):
 // declared instruction paths and the name guard land AFTER the granted scope
 // allows so last-match-wins makes them win, and they never collide with a scope
-// pattern (ruleList.add would keep a colliding pattern's old position).
+// pattern.
 func TestEditRules_InstructionDeniesAreLastAndDistinct(t *testing.T) {
 	t.Parallel()
 	subst := testSubst(t.TempDir())
@@ -796,8 +799,8 @@ func indexOf(slice []string, value string) int {
 }
 
 // TestEditRules_NoWriteProfileHasNoInstructionRules (ADR 0002 D4 trap): when
-// the profile grants no write at all, `edit` is the bare string "deny" and there
-// is no rule list to append instruction denies to. An analyst (artifact.write
+// the profile grants no write at all, `edit` is one whole-action deny and there
+// is no allow for instruction denies to override. An analyst (artifact.write
 // only) DOES take the rule list branch, so instruction denies DO land there.
 func TestEditRules_NoWriteProfileHasNoInstructionRules(t *testing.T) {
 	t.Parallel()
@@ -806,7 +809,7 @@ func TestEditRules_NoWriteProfileHasNoInstructionRules(t *testing.T) {
 		[]string{"AGENTS.md"})
 	emptyPerms := decodePermissions(t, emptyRendered)
 	if emptyPerms["edit"] != actionDeny {
-		t.Errorf("empty profile edit = %v, want bare \"deny\" (no rule list)", emptyPerms["edit"])
+		t.Errorf("empty profile edit = %v, want one whole-action deny", emptyPerms["edit"])
 	}
 	// Analyst takes the rule-list branch (artifact.write). Instruction denies
 	// must appear there even though the analyst cannot write source.
@@ -818,10 +821,11 @@ func TestEditRules_NoWriteProfileHasNoInstructionRules(t *testing.T) {
 	}
 }
 
-// TestStageInstructionFiles_WritesContentAndUsesForwardSlashes (ADR 0002 D3 +
-// Step-0 finding): prepareEnforcement stages each pinned instruction file into
-// the per-invocation config directory, lists its absolute forward-slash path
-// under `instructions`, and the directory is removed by cleanup.
+// TestStageInstructionFiles_WritesContentAndUsesForwardSlashes (ADR 0002 D3):
+// prepareEnforcement stages each pinned instruction file into the
+// per-invocation config directory, returns its absolute forward-slash path as
+// an attachment, keeps it out of the config's `instructions` (opencode 2 never
+// loads that key), and the directory is removed by cleanup.
 func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -842,18 +846,13 @@ func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) 
 	}
 	defer plan.cleanup()
 
-	// The rendered config lists both files under instructions, with forward
-	// slashes.
-	var envelope struct {
-		Instructions []string `json:"instructions"`
+	if strings.Contains(string(plan.config), `"instructions"`) {
+		t.Errorf("config carries an instructions key; the files travel as attachments:\n%s", plan.config)
 	}
-	if err := json.Unmarshal(plan.config, &envelope); err != nil {
-		t.Fatalf("parse config: %v", err)
+	if len(plan.attachments) != 2 {
+		t.Fatalf("attachments = %v, want 2 entries", plan.attachments)
 	}
-	if len(envelope.Instructions) != 2 {
-		t.Fatalf("instructions = %v, want 2 entries", envelope.Instructions)
-	}
-	for _, listed := range envelope.Instructions {
+	for _, listed := range plan.attachments {
 		if strings.Contains(listed, "\\") {
 			t.Errorf("instruction path %q contains a backslash (Step-0: forward slashes resolve)", listed)
 		}
@@ -863,7 +862,7 @@ func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) 
 	}
 	// The pinned files exist in the config directory during the run, with the
 	// pinned content.
-	for _, listed := range envelope.Instructions {
+	for _, listed := range plan.attachments {
 		if _, err := os.Stat(listed); err != nil {
 			t.Errorf("pinned instruction %q not staged in config dir: %v", listed, err)
 		}
@@ -877,7 +876,7 @@ func TestStageInstructionFiles_WritesContentAndUsesForwardSlashes(t *testing.T) 
 
 // TestStageInstructionFiles_EmptyContentNotStaged: a file truncated to zero by
 // the total budget (or missing at the commit) delivers nothing and is not
-// staged, to avoid a noise instructions entry opencode would still try to read.
+// staged, to avoid an empty attachment.
 func TestStageInstructionFiles_EmptyContentNotStaged(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -896,14 +895,8 @@ func TestStageInstructionFiles_EmptyContentNotStaged(t *testing.T) {
 		t.Fatalf("prepareEnforcement: %v", err)
 	}
 	defer plan.cleanup()
-	var envelope struct {
-		Instructions []string `json:"instructions"`
-	}
-	if err := json.Unmarshal(plan.config, &envelope); err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	if len(envelope.Instructions) != 1 {
-		t.Errorf("instructions = %v, want only the non-empty file staged", envelope.Instructions)
+	if len(plan.attachments) != 1 {
+		t.Errorf("attachments = %v, want only the non-empty file staged", plan.attachments)
 	}
 }
 
@@ -932,8 +925,8 @@ func TestStageInstructionFiles_EditDeniesAGENTSForImplementer(t *testing.T) {
 
 // TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash: a withheld
 // implementer profile — the one a stage sees before a human
-// approves the plan — must deny bash outright (exec.bash was withheld, so
-// bashRules returns the bare "deny") and deny every edit except the artifact
+// approves the plan — must deny the shell outright (exec.bash was withheld, so
+// shellRules returns one whole-action deny) and deny every edit except the artifact
 // floor that lets the stage write result.json. Withholding only fs.write would
 // still allow writing source, since bash allows shell redirects; exec.bash is
 // withheld alongside it. The artifact floor still permits result.json, which
@@ -960,11 +953,11 @@ func TestBuildOpencodeConfig_WithheldSourceWriteDeniesEditAndBash(t *testing.T) 
 	}
 	rendered := mustRender(t, withheld, testSubst(dir))
 	permissions := decodePermissions(t, rendered)
-	// bash must be the bare string "deny" — exec.bash was withheld, so bashRules
-	// returns actionDeny rather than a rule list. This is the load-bearing
-	// assertion: a withheld profile cannot run any command.
-	if permissions["bash"] != actionDeny {
-		t.Errorf("bash = %v, want bare %q (withheld profile must deny every command)", permissions["bash"], actionDeny)
+	// shell must be one whole-action deny — exec.bash was withheld, so
+	// shellRules returns no allow at all. This is the load-bearing assertion:
+	// a withheld profile cannot run any command.
+	if permissions["shell"] != actionDeny {
+		t.Errorf("shell = %v, want %q (withheld profile must deny every command)", permissions["shell"], actionDeny)
 	}
 	// edit is a rule list (or bare deny) whose deny baseline is present, so no
 	// worktree edit survives. fs.write was withheld, so the implementer's

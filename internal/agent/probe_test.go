@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nzinovev/agentum/internal/caps"
 )
 
 // fakeVersionEnv switches the test binary into the `--version` fake. Its value
@@ -20,7 +22,7 @@ import (
 const (
 	fakeVersionEnv        = "AGENTUM_FAKE_VERSION"
 	fakeVersionCounterEnv = "AGENTUM_FAKE_VERSION_COUNTER"
-	fakeVersionDefaultOut = "1.18.11\n"
+	fakeVersionDefaultOut = "opencode v2.0.29\n"
 )
 
 // runFakeVersion plays the runtime's `--version` side of the readiness-probe
@@ -48,6 +50,9 @@ func runFakeVersion(mode string) int {
 		return 0
 	case "banner":
 		fmt.Println("opencode — the everything agent")
+		return 0
+	case "v1":
+		fmt.Println("1.18.11")
 		return 0
 	default: // "print" and any unknown mode
 		fmt.Print(fakeVersionDefaultOut)
@@ -84,16 +89,16 @@ func probeCount(t *testing.T, counterPath string) int {
 	return count
 }
 
-// TestProbe_RecordsTheRuntimeVersion: a fake printing 1.18.11 yields
-// Ready=true with that version and the adapter's id.
+// TestProbe_RecordsTheRuntimeVersion: a fake printing `opencode v2.0.29`
+// yields Ready=true with the version alone and the adapter's id.
 func TestProbe_RecordsTheRuntimeVersion(t *testing.T) {
 	adapter, _ := fakeVersionAdapter(t, "print")
 	readiness := adapter.Probe(context.Background())
 	if !readiness.Ready {
 		t.Fatalf("readiness = %+v; want Ready", readiness)
 	}
-	if readiness.RuntimeVersion != "1.18.11" {
-		t.Errorf("RuntimeVersion = %q; want 1.18.11", readiness.RuntimeVersion)
+	if readiness.RuntimeVersion != "v2.0.29" {
+		t.Errorf("RuntimeVersion = %q; want v2.0.29", readiness.RuntimeVersion)
 	}
 	if readiness.AdapterID != AdapterOpencode {
 		t.Errorf("AdapterID = %q; want %q", readiness.AdapterID, AdapterOpencode)
@@ -154,8 +159,8 @@ func TestProbe_SurvivesACancelledCaller(t *testing.T) {
 	if !readiness.Ready {
 		t.Fatalf("readiness = %+v; want Ready despite the caller's cancelled context", readiness)
 	}
-	if readiness.RuntimeVersion != "1.18.11" {
-		t.Errorf("RuntimeVersion = %q; want 1.18.11", readiness.RuntimeVersion)
+	if readiness.RuntimeVersion != "v2.0.29" {
+		t.Errorf("RuntimeVersion = %q; want v2.0.29", readiness.RuntimeVersion)
 	}
 	// And the poisoned answer is not what later callers see either.
 	if again := adapter.Probe(context.Background()); !again.Ready {
@@ -222,6 +227,44 @@ func TestProbe_UnparseableOutputHasADistinctReason(t *testing.T) {
 	}
 }
 
+// TestProbe_RuntimeOlderThanTwoIsUnsupported: an opencode 1 binary answers
+// with a readable version, so the probe knows it cannot drive it — not ready,
+// marked Unsupported (which Invoke refuses on), and the version still
+// recorded for the evidence.
+func TestProbe_RuntimeOlderThanTwoIsUnsupported(t *testing.T) {
+	adapter, _ := fakeVersionAdapter(t, "v1")
+	readiness := adapter.Probe(context.Background())
+	if readiness.Ready || !readiness.Unsupported {
+		t.Fatalf("readiness = %+v; want not ready and unsupported", readiness)
+	}
+	if readiness.RuntimeVersion != "1.18.11" {
+		t.Errorf("RuntimeVersion = %q; want the version that was refused", readiness.RuntimeVersion)
+	}
+	if !strings.Contains(readiness.Reason, "requires 2.0 or newer") {
+		t.Errorf("Reason = %q; want it to name the minimum version", readiness.Reason)
+	}
+}
+
+// TestInvoke_RefusesUnsupportedRuntime: a runtime the probe identified as too
+// old is refused before the stage subprocess starts.
+func TestInvoke_RefusesUnsupportedRuntime(t *testing.T) {
+	counterPath := filepath.Join(t.TempDir(), "run-count")
+	t.Setenv(fakeRunCounterEnv, counterPath)
+	adapter, invocation := fakeInvocation(t, fakeWorks, 0, caps.Profile{})
+	t.Setenv(fakeVersionEnv, "v1")
+
+	events, err := adapter.Invoke(context.Background(), invocation)
+	if err == nil || events != nil {
+		t.Fatalf("Invoke = (%v, %v); want a refusal and no channel", events, err)
+	}
+	if !strings.Contains(err.Error(), "unsupported runtime version") {
+		t.Errorf("error = %v; want the unsupported-version reason", err)
+	}
+	if _, statErr := os.Stat(counterPath); !os.IsNotExist(statErr) {
+		t.Error("the stage subprocess ran despite the refusal")
+	}
+}
+
 // TestProbe_HangIsKilledAtTimeout: a runtime that produces nothing and never
 // exits is killed at the probe timeout, yields a distinct reason, and leaves
 // no child behind (the cancellation watcher stops only after the process is
@@ -259,6 +302,7 @@ func TestParseVersionOutput(t *testing.T) {
 		{"  1.18.11  \n", "1.18.11", ""},
 		{"1.18.11\nextra line\n", "1.18.11", ""},
 		{"v2.0.0\n", "v2.0.0", ""},
+		{"opencode v2.0.29\n", "v2.0.29", ""},
 		{"", "", "empty output"},
 		{"   \n", "", "empty output"},
 		{"opencode — everything agent\n", "", "unparseable"},

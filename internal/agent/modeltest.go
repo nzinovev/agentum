@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -174,13 +173,15 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 		check.Reason = fmt.Sprintf("binary %q not found", adapter.binary)
 		return check
 	}
-	args := []string{bin, "run", "--format", "json", "--auto"}
+	// --standalone for the reason buildOpencodeArgs gives: the shared
+	// background service would ignore this child's config and environment.
+	args := []string{bin, "run", "--standalone", "--format", "json", "--auto"}
 	args = appendModelOptionArgs(args, selection.Options)
 	args = append(args, modelTestPrompt)
 	cmd := exec.CommandContext(testCtx, args[0], args[1:]...)
 	setProcessGroup(cmd)
 	cmd.Dir = workdir
-	cmd.Env = buildChildEnv(checkProfile, "", compactConfig)
+	cmd.Env = withWorkingDirectory(buildChildEnv(checkProfile, "", compactConfig), workdir)
 
 	stdout, pipeErr := cmd.StdoutPipe()
 	if pipeErr != nil {
@@ -188,7 +189,8 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 		check.Reason = fmt.Sprintf("stdout pipe: %v", pipeErr)
 		return check
 	}
-	cmd.Stderr = io.Discard
+	stderrTail := newTailBuffer(stderrTailLimit)
+	cmd.Stderr = stderrTail
 
 	started := time.Now()
 	if startErr := cmd.Start(); startErr != nil {
@@ -254,7 +256,7 @@ func (adapter *OpencodeAdapter) TestModel(ctx context.Context, selection models.
 	if !stopped && check.Outcome != ModelCheckTimeout {
 		check.Outcome = ModelCheckError
 		if waitErr != nil {
-			check.Reason = fmt.Sprintf("exit: %v", waitErr)
+			check.Reason = withStderr(fmt.Errorf("exit: %w", waitErr), stderrTail).Error()
 		} else {
 			check.Reason = "no output before exit"
 		}

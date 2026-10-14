@@ -43,7 +43,7 @@ func shrinkProbeTimeout(t *testing.T) {
 
 // TestProbeContext_WellformedParsesAndDiscardsBody (ADR 0002 D6): the prober
 // parses the JSON array of skills, hashes each body, and NEVER returns the body
-// itself. The built-in skill (location "<built-in>") and a user skill both land
+// itself. A bundled skill and a user skill both land
 // in the report with name, location, description, hash, and bytes.
 func TestProbeContext_WellformedParsesAndDiscardsBody(t *testing.T) {
 	adapter, inv := fakeProbeInvocation(t, fakeDebugWellformed)
@@ -65,8 +65,8 @@ func TestProbeContext_WellformedParsesAndDiscardsBody(t *testing.T) {
 	}
 	// The built-in skill is reported with its location.
 	builtin := report.Skills[0]
-	if builtin.Name != "customize-opencode" || builtin.Location != "<built-in>" {
-		t.Errorf("built-in skill = %+v, want name=customize-opencode location=<built-in>", builtin)
+	if builtin.Name != "customize-opencode" || builtin.Location != "/opt/opencode/skills/customize-opencode/SKILL.md" {
+		t.Errorf("bundled skill = %+v, want name=customize-opencode with its path as the location", builtin)
 	}
 	if builtin.Hash == "" || builtin.Bytes == 0 {
 		t.Errorf("built-in skill hash/bytes empty: %+v", builtin)
@@ -99,6 +99,40 @@ func TestProbeContext_MalformedJSONIsAFailureNotAPanic(t *testing.T) {
 	}
 	if len(report.AutoInstructions) == 0 {
 		t.Error("AutoInstructions empty though probe failed — baseline must survive")
+	}
+}
+
+// TestProbeContext_WaitsForTheListingToSettle: the runtime answers before its
+// plugins finish loading — empty first, then only its bundled skill. The probe
+// records the settled list, not the first non-empty answer.
+func TestProbeContext_WaitsForTheListingToSettle(t *testing.T) {
+	adapter, inv := fakeProbeInvocation(t, fakeDebugSettling)
+	report, err := adapter.ProbeContext(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("ProbeContext: %v", err)
+	}
+	if report.SkillsProbe != ContextProbeOK {
+		t.Fatalf("SkillsProbe = %q (%s), want ok", report.SkillsProbe, report.SkillsError)
+	}
+	if len(report.Skills) != 2 {
+		t.Errorf("Skills = %d entries, want the 2 of the settled listing", len(report.Skills))
+	}
+}
+
+// TestProbeContext_EnvelopeWithoutDataIsAFailure: an answer without the data
+// field is a changed shape, not an empty skill list — recording "no skills"
+// would claim the agent saw none.
+func TestProbeContext_EnvelopeWithoutDataIsAFailure(t *testing.T) {
+	adapter, inv := fakeProbeInvocation(t, fakeDebugNoData)
+	report, err := adapter.ProbeContext(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("ProbeContext returned error: %v", err)
+	}
+	if report.SkillsProbe != ContextProbeFailedPrefix+"json" {
+		t.Errorf("SkillsProbe = %q, want %q", report.SkillsProbe, ContextProbeFailedPrefix+"json")
+	}
+	if report.Skills != nil {
+		t.Errorf("Skills = %v, want none recorded", report.Skills)
 	}
 }
 

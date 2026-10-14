@@ -5,7 +5,7 @@ keys, provider endpoints, or base URLs. You install and configure the coding
 agent (`opencode`) yourself, exactly as you would if you were running it
 standalone. Agentum's only model-handling job is to decide which **model
 string** — and, on tiers that declare one, which **variant** — reaches the
-agent binary's `--model` / `--variant` flags.
+agent binary's `--model` flag.
 
 The intended UX: clone, `make run`, and Agentum works — because your opencode is
 already configured on your machine.
@@ -15,8 +15,8 @@ already configured on your machine.
 1. A pack's stage names a **tier** (`fast`, `strong`, `reasoning`) — a portable
    label, not a concrete model. (See `docs/pack-format.md`.)
 2. At run time Agentum resolves the tier to a model string and an optional
-   variant, and passes `--model <string>` (plus `--variant <value>` when set)
-   to the agent subprocess.
+   variant, and passes `--model <string>` (`--model <string>#<variant>` when a
+   variant is set) to the agent subprocess.
 3. The **agent binary** resolves that string to a real provider + endpoint +
    credentials using **your** configuration (`opencode auth`, env vars, …).
 
@@ -61,8 +61,9 @@ default: strong
 ```
 
 A tier value is either a bare model string (above) or a `{model, variant}`
-mapping. `variant` is the runtime's reasoning-effort setting, passed to the
-agent's `--variant` flag; the two forms mix freely in one file:
+mapping. `variant` is the runtime's reasoning-effort setting, passed as the
+`#variant` suffix of the agent's `--model` value; the two forms mix freely in
+one file:
 
 ```yaml
 tiers:
@@ -152,7 +153,8 @@ built-in defaults", which is the common case.
 
 The model string is the one input that reaches the runtime verbatim, so it is
 checked against the runtime's own model listing: the adapter probes
-the listing once per process (memoized, sticky including a
+the listing (`GET /api/model` on a private `opencode serve`, read once it has
+settled — the runtime answers before its plugins finish loading) once per process (memoized, sticky including a
 failure — installing or fixing the runtime requires a restart) and every resolved
 selection is validated against it. Three points refuse, in order of how early
 they catch the mistake:
@@ -165,23 +167,23 @@ they catch the mistake:
 
 The refusal names the tier, the model, and the adapter, and carries its fix:
 a near spelling (edit distance ≤ 3, at most three candidates, nearest first)
-and the listing command for the provider. An unknown provider enumerates the
+and the listing command. An unknown provider enumerates the
 known providers instead — the likely cause is a misspelled prefix, and thirty
 model names would hide it.
 
 ```
-unknown model "zai-coding-plan/glm-5.3-hispeed" (did you mean "zai-coding-plan/glm-5.3-highspeed"?); list them with: opencode models zai-coding-plan
+unknown model "zai-coding-plan/glm-5.3-hispeed" (did you mean "zai-coding-plan/glm-5.3-highspeed"?); list them with: opencode models
 ```
 
 ### The variant vocabulary
 
-A configured variant is checked against the same listing, because the runtime
-does not check it itself: `--variant hgih` runs as if it read `--variant high`,
-with no warning and no error, and the only sign of the typo would be every run
-answering at the wrong effort. The listing declares each model's variant
-vocabulary (`opencode models <provider> --verbose`, the `variants` field), so
-the check asks the runtime rather than maintaining a list here — a new provider
-arrives with its own vocabulary. The refusal enumerates it:
+A configured variant is checked against the same listing. opencode 2 refuses
+an unknown variant itself, but only when the stage runs, after the run has
+started; opencode 1 silently ran `--variant hgih` as `high`. The listing
+declares each model's variant vocabulary (the `variants` field of
+`GET /api/model`), so the check asks the runtime rather than maintaining a list
+here — a new provider arrives with its own vocabulary. The refusal enumerates
+it:
 
 ```
 validate models config, tier "strong": execution adapter "opencode": model "zai-coding-plan/glm-5.3" declares no variant "medium" (declares: high, low, max)

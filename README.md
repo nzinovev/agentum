@@ -7,7 +7,8 @@ assembling prompts, running agents, gating output for humans, accumulating
 memory across runs, and enforcing tool-capability boundaries. You install and
 configure your coding agent (opencode, …) yourself; Agentum coordinates runs,
 governance, memory, and audit. The executor is a registry entry, not a
-hard-coded name: Agentum ships the opencode adapter today, and the model, its
+hard-coded name: Agentum ships the opencode adapter today (opencode 2.0 or
+newer), and the model, its
 parameters, and the runtime's version are evidence on every recorded
 invocation.
 

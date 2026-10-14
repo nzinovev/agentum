@@ -952,7 +952,7 @@ nothing unless the worktree copy is controlled. An `edit` deny rule stops an
 agent rewriting `AGENTS.md` (or any declared path) via the edit tool — plus a
 `**/AGENTS.md` name guard, because the runtime injects that filename from
 anywhere in the tree and a nested copy the project never declared could otherwise
-reach the model. A pre-stage hash check stops a `bash`-side rewrite and restores
+reach the model. A pre-stage hash check stops a `shell`-side rewrite and restores
 the pinned ORIGINAL bytes (not the truncated delivery form). The check runs
 strictly before each stage invocation (`restoreInstructions`), never between the
 `isClean` sample and the checkpoint commit (the load-bearing ordering for the
@@ -966,10 +966,13 @@ both in the git lineage. A restore IO error fails the run, mirroring a dirty
 tree at the delivery boundary.
 
 **Skills, allowed and recorded.** `skill` resolves to `allow`: a skill grants
-knowledge, not reach, and still meets the same `bash`/`edit`/`net` rules.
-`opencode debug skill` is probed once per run (after the worktree exists), with
-its own 10s timeout and process-group kill, and each skill's name, location, and
-content hash land in the manifest context section (bodies never stored). A
+knowledge, not reach, and still meets the same `shell`/`edit`/`net` rules.
+The skill list is probed once per run (after the worktree exists) from a
+private `opencode serve` in the worktree, with its own 10s timeout and
+process-group kill. opencode answers before its plugins have loaded every
+skill, so the probe polls until the list is non-empty and unchanged for about a
+second. Each skill's name, location, and content hash land in the manifest
+context section (bodies never stored). A
 failed probe records an `EvidenceGap("context.skills")`, making
 `evidence_complete` false. `skill.<name>` is an inert capability token: no role
 grants it, and a grant is unenforceable (the opencode adapter does not list it

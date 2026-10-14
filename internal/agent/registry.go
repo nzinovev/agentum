@@ -90,10 +90,12 @@ func (descriptor Descriptor) clone() Descriptor {
 // behaviour, not a claim this build makes for it.
 var opencodeDescriptor = Descriptor{
 	ID: AdapterOpencode,
-	// 1.1.0: the argv grew --variant and the declared option set grew with
-	// it — the bump is what keeps the adapter-version diff axis saying
-	// "same adapter, different observable behaviour" across this change.
-	AdapterVersion:   "1.1.0",
+	// 2.0.0: the adapter speaks opencode 2 — a standalone server per call,
+	// the variant as a model suffix, the native permission list, pinned
+	// instructions as attachments, and the API listings for models and
+	// skills. The bump keeps the adapter-version diff axis saying "same
+	// adapter, different observable behaviour" across this change.
+	AdapterVersion:   "2.0.0",
 	Binary:           "opencode",
 	ModelOptions:     []models.OptionName{models.OptionModel, models.OptionVariant},
 	EnumeratesModels: true,

@@ -108,7 +108,7 @@ func TestCatalog_ValidateTypoSuggestsNearestSpelling(t *testing.T) {
 	if strings.Contains(typo.Error(), "glm-5.3-flash") {
 		t.Errorf("typo message suggests a name outside the distance bound: %q", typo.Error())
 	}
-	if !strings.Contains(typo.Error(), "list them with: runtime models zai-coding-plan") {
+	if !strings.Contains(typo.Error(), "list them with: runtime models") {
 		t.Errorf("typo message does not name the listing command: %q", typo.Error())
 	}
 
@@ -119,7 +119,7 @@ func TestCatalog_ValidateTypoSuggestsNearestSpelling(t *testing.T) {
 	if strings.Contains(alien.Error(), "did you mean") {
 		t.Errorf("alien model got a suggestion anyway: %q", alien.Error())
 	}
-	if !strings.Contains(alien.Error(), "list them with: runtime models zai-coding-plan") {
+	if !strings.Contains(alien.Error(), "list them with: runtime models") {
 		t.Errorf("alien model message does not name the listing command: %q", alien.Error())
 	}
 }
@@ -135,7 +135,7 @@ func TestCatalog_ValidateSourceComesFromTheCatalog(t *testing.T) {
 	if err == nil {
 		t.Fatal("unknown model accepted")
 	}
-	if !strings.Contains(err.Error(), "list them with: some-other-runtime models zai-coding-plan") {
+	if !strings.Contains(err.Error(), "list them with: some-other-runtime models") {
 		t.Errorf("message does not use the catalog's Source: %q", err.Error())
 	}
 }
