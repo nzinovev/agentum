@@ -103,7 +103,7 @@ func TestDescribe_ReturnedTiersAreACopy(t *testing.T) {
 }
 
 // TestDescribe_DefaultTiersDeclareNoVariant: a run without models.yaml passes
-// no --variant — not because the flag is suppressed, but because no default
+// no variant suffix — not because the suffix is suppressed, but because no default
 // tier declares one. Which effort a fresh install runs at is the runtime's own
 // behaviour; a default growing a variant would silently move every clean
 // install to a different effort, and this is the test that falls.
@@ -119,9 +119,9 @@ func TestDescribe_DefaultTiersDeclareNoVariant(t *testing.T) {
 			t.Errorf("default tier %q declares variant %q; defaults must leave the effort to the runtime",
 				tierName, selection.Options.Variant)
 		}
-		argv := buildOpencodeArgs("opencode", Invocation{Model: selection})
-		if positionOf(argv, "--variant") >= 0 {
-			t.Errorf("argv for default tier %q carries --variant: %v", tierName, argv)
+		argv := buildOpencodeArgs("opencode", Invocation{Model: selection}, nil)
+		if modelPos := positionOf(argv, "--model"); modelPos < 0 || strings.Contains(argv[modelPos+1], "#") {
+			t.Errorf("argv for default tier %q carries a variant suffix: %v", tierName, argv)
 		}
 	}
 }
@@ -139,28 +139,26 @@ func TestOpencodeDescriptor_DeclaredOptionsMatchArgv(t *testing.T) {
 
 	// Enumerate what buildOpencodeArgs emits, by selection shape.
 	emits := map[models.OptionName]bool{}
-	baseline := buildOpencodeArgs("opencode", Invocation{})
+	baseline := buildOpencodeArgs("opencode", Invocation{}, nil)
 	if positionOf(baseline, "--model") >= 0 {
 		emits[models.OptionModel] = true
 	}
-	if positionOf(baseline, "--variant") >= 0 {
-		emits[models.OptionVariant] = true
-	}
 	withModel := buildOpencodeArgs("opencode", Invocation{
 		Model: models.Selection{Options: models.Options{Model: "provider/model"}},
-	})
+	}, nil)
 	if positionOf(withModel, "--model") < 0 {
 		t.Fatal("a populated model option must emit --model")
 	}
 	emits[models.OptionModel] = true
 	withVariant := buildOpencodeArgs("opencode", Invocation{
 		Model: models.Selection{Options: models.Options{Model: "provider/model", Variant: "high"}},
-	})
-	if positionOf(withVariant, "--model") < 0 {
+	}, nil)
+	modelPos := positionOf(withVariant, "--model")
+	if modelPos < 0 {
 		t.Fatal("a variant never travels without its model")
 	}
-	if positionOf(withVariant, "--variant") < 0 {
-		t.Fatal("a populated variant option must emit --variant")
+	if withVariant[modelPos+1] != "provider/model#high" {
+		t.Fatalf("a populated variant option must render as the model suffix; argv = %v", withVariant)
 	}
 	emits[models.OptionVariant] = true
 

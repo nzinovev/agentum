@@ -14,53 +14,43 @@ import (
 	"github.com/nzinovev/agentum/internal/models"
 )
 
-// The variant option's contract: the flags reach the process as one adjacent
-// pair, every refusal happens before a subprocess exists, and the catalog
+// The variant option's contract: it reaches the process as the suffix of the
+// model value, every refusal happens before a subprocess exists, and the catalog
 // decides the vocabulary question. The fixture catalog ("ok" mode) carries the
 // three variants states: muse (declares high, max), glm-5.3 (declares none),
 // glm-4.7 (vocabulary unknown).
 
-// TestBuildOpencodeArgs_VariantFollowsModel: --variant is emitted only behind
-// a --model, immediately after it, and never on its own — the flag qualifies
-// the model, and a bare variant has nothing to qualify.
+// TestBuildOpencodeArgs_VariantFollowsModel: the variant renders only as the
+// `#variant` suffix of a --model value — it qualifies the model, and a bare
+// variant has nothing to qualify.
 func TestBuildOpencodeArgs_VariantFollowsModel(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name        string
-		options     models.Options
-		wantModel   bool
-		wantVariant bool
+		name      string
+		options   models.Options
+		wantModel string
 	}{
-		{"model and variant", models.Options{Model: "p/m", Variant: "high"}, true, true},
-		{"model without variant", models.Options{Model: "p/m"}, true, false},
-		{"empty variant is no flag", models.Options{Model: "p/m", Variant: ""}, true, false},
-		{"no model no variant", models.Options{}, false, false},
-		{"variant without model is no flag pair", models.Options{Variant: "high"}, false, false},
+		{"model and variant", models.Options{Model: "p/m", Variant: "high"}, "p/m#high"},
+		{"model without variant", models.Options{Model: "p/m"}, "p/m"},
+		{"empty variant is no suffix", models.Options{Model: "p/m", Variant: ""}, "p/m"},
+		{"no model no variant", models.Options{}, ""},
+		{"variant without model is no flag", models.Options{Variant: "high"}, ""},
 	}
 	for _, testCase := range cases {
-		argv := buildOpencodeArgs("opencode", Invocation{Model: models.Selection{Options: testCase.options}})
+		argv := buildOpencodeArgs("opencode", Invocation{Model: models.Selection{Options: testCase.options}}, nil)
 		modelPos := positionOf(argv, "--model")
-		variantPos := positionOf(argv, "--variant")
-		if testCase.wantModel && modelPos < 0 {
-			t.Errorf("%s: --model missing from %v", testCase.name, argv)
-			continue
-		}
-		if !testCase.wantModel && modelPos >= 0 {
-			t.Errorf("%s: --model emitted for %+v: %v", testCase.name, testCase.options, argv)
-			continue
-		}
-		if !testCase.wantVariant {
-			if variantPos >= 0 {
-				t.Errorf("%s: --variant must not be emitted for %+v: %v", testCase.name, testCase.options, argv)
+		if testCase.wantModel == "" {
+			if modelPos >= 0 {
+				t.Errorf("%s: --model emitted for %+v: %v", testCase.name, testCase.options, argv)
 			}
 			continue
 		}
-		if variantPos != modelPos+2 {
-			t.Errorf("%s: --variant at %d; want --model position + 2 (%d) in %v",
-				testCase.name, variantPos, modelPos+2, argv)
+		if modelPos < 0 {
+			t.Errorf("%s: --model missing from %v", testCase.name, argv)
+			continue
 		}
-		if argv[variantPos+1] != testCase.options.Variant {
-			t.Errorf("%s: --variant value = %q; want %q", testCase.name, argv[variantPos+1], testCase.options.Variant)
+		if argv[modelPos+1] != testCase.wantModel {
+			t.Errorf("%s: --model value = %q; want %q", testCase.name, argv[modelPos+1], testCase.wantModel)
 		}
 	}
 }
@@ -105,7 +95,7 @@ func readDumpedArgv(t *testing.T, argvPath string) []string {
 }
 
 // TestInvoke_VariantReachesTheSubprocessArgv: a tier with a variant runs the
-// runtime with `--model M --variant V` exactly — asserted from the child's own
+// runtime with `--model M#V` exactly — asserted from the child's own
 // record of its argv, not from what the caller passed.
 func TestInvoke_VariantReachesTheSubprocessArgv(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv.json")
@@ -124,17 +114,14 @@ func TestInvoke_VariantReachesTheSubprocessArgv(t *testing.T) {
 	}
 	argv := readDumpedArgv(t, argvPath)
 	modelPos := positionOf(argv, "--model")
-	if modelPos < 0 || argv[modelPos+1] != "opencode/muse-spark-1.3-contributor-free" {
-		t.Fatalf("argv carries no --model pair: %v", argv)
-	}
-	if variantPos := positionOf(argv, "--variant"); variantPos != modelPos+2 || argv[variantPos+1] != "high" {
-		t.Errorf("argv = %v; want --variant high immediately after --model", argv)
+	if modelPos < 0 || argv[modelPos+1] != "opencode/muse-spark-1.3-contributor-free#high" {
+		t.Fatalf("argv = %v; want --model opencode/muse-spark-1.3-contributor-free#high", argv)
 	}
 }
 
 // TestInvoke_TierWithoutVariantKeepsTodayArgv: a selection without a variant
-// produces exactly the argv shape that predates the option — no --variant, no
-// empty flag.
+// produces exactly the argv shape that predates the option — no suffix, not
+// even a bare `#`.
 func TestInvoke_TierWithoutVariantKeepsTodayArgv(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv.json")
 	t.Setenv(fakeCatalogEnv, "ok")
@@ -149,13 +136,12 @@ func TestInvoke_TierWithoutVariantKeepsTodayArgv(t *testing.T) {
 		t.Fatalf("run failed: %v", failed)
 	}
 	argv := readDumpedArgv(t, argvPath)
-	if positionOf(argv, "--model") < 0 {
-		t.Errorf("argv carries no --model: %v", argv)
+	modelPos := positionOf(argv, "--model")
+	if modelPos < 0 {
+		t.Fatalf("argv carries no --model: %v", argv)
 	}
-	for _, arg := range argv {
-		if strings.HasPrefix(arg, "--variant") {
-			t.Errorf("argv carries %q for a variant-less selection: %v", arg, argv)
-		}
+	if strings.Contains(argv[modelPos+1], "#") {
+		t.Errorf("argv carries a variant suffix for a variant-less selection: %v", argv)
 	}
 }
 
@@ -216,7 +202,7 @@ func TestInvoke_UndeclaredVariantValueRefusedByVocabulary(t *testing.T) {
 
 // TestTestModel_VariantEchoedAndInTheArgv: the diagnostic check runs the same
 // pair the tier declared — ModelCheck.Variant carries it, and the child's own
-// argv records both flags adjacent.
+// argv records it as the model suffix.
 func TestTestModel_VariantEchoedAndInTheArgv(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv.json")
 	counterPath := filepath.Join(t.TempDir(), "model-check-count")
@@ -246,11 +232,8 @@ func TestTestModel_VariantEchoedAndInTheArgv(t *testing.T) {
 	}
 	argv := readDumpedArgv(t, argvPath)
 	modelPos := positionOf(argv, "--model")
-	if modelPos < 0 {
-		t.Fatalf("check argv carries no --model: %v", argv)
-	}
-	if variantPos := positionOf(argv, "--variant"); variantPos != modelPos+2 || argv[variantPos+1] != "high" {
-		t.Errorf("check argv = %v; want --variant high immediately after --model", argv)
+	if modelPos < 0 || argv[modelPos+1] != "opencode/muse-spark-1.3-contributor-free#high" {
+		t.Errorf("check argv = %v; want --model opencode/muse-spark-1.3-contributor-free#high", argv)
 	}
 }
 

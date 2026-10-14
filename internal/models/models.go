@@ -76,7 +76,8 @@ type Config struct {
 type OptionName string
 
 // OptionModel selects the model string passed to the runtime's --model flag.
-// OptionVariant selects the reasoning-effort setting passed to --variant.
+// OptionVariant selects the reasoning-effort setting, rendered as the
+// `#variant` suffix of the model.
 const (
 	OptionModel   OptionName = "model"
 	OptionVariant OptionName = "variant"

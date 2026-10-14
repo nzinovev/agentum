@@ -12,8 +12,9 @@ import (
 	"testing"
 )
 
-// TestProbe_LiveRuntimeVersionMatchesCLI: the probed runtime version equals
-// what `opencode --version` prints on this machine.
+// TestProbe_LiveRuntimeVersionMatchesCLI: the probed runtime version is the
+// version `opencode --version` prints on this machine, without the program
+// name opencode 2 puts in front of it.
 func TestProbe_LiveRuntimeVersionMatchesCLI(t *testing.T) {
 	if _, err := exec.LookPath("opencode"); err != nil {
 		t.Skipf("opencode not on PATH: %v", err)
@@ -26,7 +27,7 @@ func TestProbe_LiveRuntimeVersionMatchesCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run opencode --version: %v", err)
 	}
-	want := strings.TrimSpace(string(out))
+	want := strings.TrimPrefix(strings.TrimSpace(string(out)), "opencode ")
 	if readiness.RuntimeVersion != want {
 		t.Errorf("probed version = %q, CLI prints %q", readiness.RuntimeVersion, want)
 	}

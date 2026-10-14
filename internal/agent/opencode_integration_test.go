@@ -29,7 +29,28 @@ import (
 	"time"
 
 	"github.com/nzinovev/agentum/internal/caps"
+	"github.com/nzinovev/agentum/internal/models"
 )
+
+// liveModelEnv names the model the live tests run on, as provider/model.
+// Unset, they run on the adapter's default tier, which needs no paid
+// provider.
+const liveModelEnv = "AGENTUM_LIVE_MODEL"
+
+// liveModel is the selection every live invocation carries: Invoke refuses an
+// empty model, as it does in production.
+func liveModel(t *testing.T) models.Selection {
+	t.Helper()
+	if model := os.Getenv(liveModelEnv); model != "" {
+		return models.Selection{Tier: "live", Options: models.Options{Model: model}}
+	}
+	descriptor := NewOpencodeAdapter("opencode").Describe()
+	selection, err := models.Resolve(nil, descriptor.DefaultTiers, "")
+	if err != nil {
+		t.Fatalf("resolve the default tier: %v", err)
+	}
+	return selection
+}
 
 // requireOpencode skips the test when no opencode binary is installed.
 func requireOpencode(t *testing.T) {
@@ -138,6 +159,7 @@ func TestOpencodeLive_InvokeStreamResult(t *testing.T) {
 	routing := "## Stage\nspec\n\n" + ResultContractPreamble(artifactDir)
 
 	first, failed := invoke(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       contractPrompt(artifactDir),
@@ -156,6 +178,7 @@ func TestOpencodeLive_InvokeStreamResult(t *testing.T) {
 	t.Logf("first run: session=%s status=%q tokens=%d", first.SessionID, first.Status, first.Telemetry.Tokens.Total)
 
 	second, failed := invoke(t, Invocation{
+		Model:         liveModel(t),
 		Workdir:       workdir,
 		ArtifactDir:   artifactDir,
 		Prompt:        contractPrompt(artifactDir),
@@ -185,6 +208,7 @@ func TestOpencodeLive_AnalystWritesItsArtifact(t *testing.T) {
 	workdir, artifactDir, sourcePath := liveWorktree(t, "spec")
 
 	result, failed := invoke(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       contractPrompt(artifactDir),
@@ -212,6 +236,7 @@ func TestOpencodeLive_AnalystCannotEditSource(t *testing.T) {
 	workdir, artifactDir, sourcePath := liveWorktree(t, "spec")
 
 	_, _ = invoke(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       "Edit main.go so that main prints hello. Do nothing else.",
@@ -229,6 +254,7 @@ func TestOpencodeLive_ImplementerEditsSource(t *testing.T) {
 	workdir, artifactDir, sourcePath := liveWorktree(t, "implement")
 
 	_, _ = invoke(t, Invocation{
+		Model:        liveModel(t),
 		Workdir:      workdir,
 		ArtifactDir:  artifactDir,
 		Prompt:       "Edit main.go so that main prints hello. Do nothing else.",

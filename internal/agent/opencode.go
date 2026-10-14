@@ -102,6 +102,13 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	if err := adapter.validateInvocation(inv); err != nil {
 		return nil, err
 	}
+	// A runtime whose version is known to be too old would fail on the first
+	// flag it no longer has, after the run had already been recorded as
+	// started. A probe that could not read the version does not block: "could
+	// not check" never becomes "unsupported".
+	if readiness := adapter.Probe(ctx); readiness.Unsupported {
+		return nil, fmt.Errorf("%s%s", adapter.errPrefix(), readiness.Reason)
+	}
 	plan, err := adapter.prepareEnforcement(inv)
 	if err != nil {
 		return nil, err
@@ -119,7 +126,7 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	// context cmd is bound to and kills the agent the moment Invoke returns.
 	control := newRunControl(ctx, plan.timeout.hard)
 
-	args := buildOpencodeArgs(bin, inv)
+	args := buildOpencodeArgs(bin, inv, plan.attachments)
 	cmd := exec.CommandContext(control.ctx, args[0], args[1:]...)
 	setProcessGroup(cmd)
 	cmd.Dir = inv.Workdir
@@ -128,7 +135,7 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	// explicitly also means the child never inherits interactive-shell extras
 	// the parent may have carried, and it is how the permission config reaches
 	// opencode (OPENCODE_CONFIG_CONTENT).
-	cmd.Env = plan.env
+	cmd.Env = withWorkingDirectory(plan.env, inv.Workdir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -136,8 +143,11 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 		plan.cleanup()
 		return nil, fmt.Errorf("%sstdout pipe: %w", adapter.errPrefix(), err)
 	}
-	// stderr is discarded for MVP; the print-logs flag is the debug path later.
-	cmd.Stderr = io.Discard
+	// Only the tail of stderr is kept: it is where opencode explains an exit
+	// it reports nowhere else (an unknown flag, a broken config), and without
+	// it the run records a bare exit status.
+	stderrTail := newTailBuffer(stderrTailLimit)
+	cmd.Stderr = stderrTail
 
 	if err := cmd.Start(); err != nil {
 		control.release()
@@ -146,7 +156,7 @@ func (adapter *OpencodeAdapter) Invoke(ctx context.Context, inv Invocation) (<-c
 	}
 
 	ch := make(chan Event, 16)
-	go adapter.run(control, cmd, stdout, inv, ch, plan)
+	go adapter.run(control, cmd, stdout, stderrTail, inv, ch, plan)
 	return ch, nil
 }
 
@@ -217,7 +227,7 @@ func (adapter *OpencodeAdapter) Supported() []caps.Category {
 	return append([]caps.Category(nil), opencodeSupported...)
 }
 
-func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, inv Invocation, ch chan<- Event, plan enforcementPlan) {
+func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout io.Reader, stderrTail *tailBuffer, inv Invocation, ch chan<- Event, plan enforcementPlan) {
 	// Ownership of the run context and of the materialized enforcement plan
 	// transfers here from Invoke. Both are released only after the process is
 	// reaped: the rendered config backs the child's permission set for as long
@@ -287,7 +297,7 @@ func (adapter *OpencodeAdapter) run(control *runControl, cmd *exec.Cmd, stdout i
 		return
 	}
 	if waitErr != nil {
-		ch <- Event{Kind: EventError, Err: fmt.Errorf("opencode run model %q: %w", inv.Model.Options.Model, waitErr)}
+		ch <- Event{Kind: EventError, Err: withStderr(fmt.Errorf("opencode run model %q: %w", inv.Model.Options.Model, waitErr), stderrTail)}
 		return
 	}
 
@@ -422,7 +432,7 @@ func parseRuntimeError(raw json.RawMessage) error {
 }
 
 func (s *invokeState) accumulateFinish(p stepFinishPart) {
-	s.telemetry.Tokens.Total += p.Tokens.Total
+	s.telemetry.Tokens.Total += p.Tokens.sum()
 	s.telemetry.Tokens.Input += p.Tokens.Input
 	s.telemetry.Tokens.Output += p.Tokens.Output
 	s.telemetry.Tokens.Reasoning += p.Tokens.Reasoning
@@ -459,38 +469,51 @@ func assembleResult(inv Invocation, s *invokeState) (*Result, error) {
 	}, nil
 }
 
-// buildOpencodeArgs assembles the argv: ["opencode", "run", "--format", "json",
-// "--auto", "--dir", workdir, ...optional, <message>]. Model options are read
+// buildOpencodeArgs assembles the argv: ["opencode", "run", "--standalone",
+// "--format", "json", "--auto", ...optional, <message>]. Model options are read
 // from the typed selection field by field — there is no path where a caller
 // appends a string to argv.
-func buildOpencodeArgs(bin string, inv Invocation) []string {
-	args := []string{bin, "run", "--format", "json", "--auto", "--dir", inv.Workdir}
+//
+// --standalone is the enforcement, not a tuning flag. Without it opencode
+// hands the run to its shared background service, which was started with its
+// own environment and ignores the OPENCODE_CONFIG_CONTENT this child carries:
+// the permission config and the credential scrub would both be void while the
+// audit trail still recorded them. The private server lives inside this
+// process, so the process-group kill stops it too.
+//
+// The working directory is the process's own (cmd.Dir); opencode has no flag
+// for it. Each attachment is a pinned instruction file staged outside the
+// worktree, passed with --file because opencode 2 parses the config's
+// `instructions` key but never loads the files it names.
+func buildOpencodeArgs(bin string, inv Invocation, attachments []string) []string {
+	args := []string{bin, "run", "--standalone", "--format", "json", "--auto"}
 	if inv.ResumeSession != "" {
 		args = append(args, "--session", inv.ResumeSession)
 	}
 	args = appendModelOptionArgs(args, inv.Model.Options)
+	for _, attachment := range attachments {
+		args = append(args, "--file", attachment)
+	}
 	args = append(args, inv.Prompt+"\n\n"+inv.RoutingBlock)
 	return args
 }
 
-// appendModelOptionArgs appends the model option flags: --model, then
-// --variant immediately behind it when one is set. The variant qualifies the
-// model that precedes it — without a model the flag does not exist, which is
-// why the nesting is not two independent ifs — and a process listing then
-// shows one decision, not two. An empty variant never yields a flag, not even
-// an empty one. The ONE caller-facing contract: options must already be
-// validated and declared (models.Options.Validate, SupportedBy); this helper
-// only renders argv and is shared by Invoke and the model check so the two
-// cannot drift apart.
+// appendModelOptionArgs appends the model option flag. opencode spells the
+// variant as a suffix of the model (`provider/model#variant`), so a variant
+// without a model has nowhere to go and the two render as one argument. An
+// empty variant never yields a suffix, not even a bare `#`. The ONE
+// caller-facing contract: options must already be validated and declared
+// (models.Options.Validate, SupportedBy); this helper only renders argv and is
+// shared by Invoke and the model check so the two cannot drift apart.
 func appendModelOptionArgs(args []string, options models.Options) []string {
 	if options.Model == "" {
 		return args
 	}
-	args = append(args, "--model", options.Model)
+	model := options.Model
 	if options.Variant != "" {
-		args = append(args, "--variant", options.Variant)
+		model += "#" + options.Variant
 	}
-	return args
+	return append(args, "--model", model)
 }
 
 func (adapter *OpencodeAdapter) validateInvocation(inv Invocation) error {
@@ -659,6 +682,16 @@ type stepFinishPart struct {
 	Snapshot string     `json:"snapshot"`
 }
 
+// sum is the step's token total. opencode 2 no longer reports `total`, so it
+// is the sum of the parts; a reported total still wins, because it is the
+// runtime's own figure.
+func (tokens tokensPart) sum() int64 {
+	if tokens.Total != 0 {
+		return tokens.Total
+	}
+	return tokens.Input + tokens.Output + tokens.Reasoning + tokens.Cache.Read + tokens.Cache.Write
+}
+
 type tokensPart struct {
 	Total     int64 `json:"total"`
 	Input     int64 `json:"input"`
@@ -668,4 +701,50 @@ type tokensPart struct {
 		Read  int64 `json:"read"`
 		Write int64 `json:"write"`
 	} `json:"cache"`
+}
+
+// stderrTailLimit bounds how much of a runtime's stderr an error carries:
+// enough for the last message, not enough to copy a transcript into a run's
+// error column.
+const stderrTailLimit = 2048
+
+// tailBuffer keeps the last limit bytes written to it. A subprocess writes
+// stderr from its own goroutine inside os/exec, so writes and reads are
+// serialized.
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func newTailBuffer(limit int) *tailBuffer {
+	return &tailBuffer{limit: limit}
+}
+
+func (tail *tailBuffer) Write(chunk []byte) (int, error) {
+	tail.mu.Lock()
+	defer tail.mu.Unlock()
+	tail.data = append(tail.data, chunk...)
+	if overflow := len(tail.data) - tail.limit; overflow > 0 {
+		tail.data = append([]byte(nil), tail.data[overflow:]...)
+	}
+	return len(chunk), nil
+}
+
+func (tail *tailBuffer) String() string {
+	tail.mu.Lock()
+	defer tail.mu.Unlock()
+	return strings.TrimSpace(string(tail.data))
+}
+
+// withStderr appends the runtime's last stderr output to err, when there is
+// any.
+func withStderr(err error, stderrTail *tailBuffer) error {
+	if stderrTail == nil {
+		return err
+	}
+	if text := stderrTail.String(); text != "" {
+		return fmt.Errorf("%w: %s", err, text)
+	}
+	return err
 }

@@ -103,6 +103,12 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Changed
+- **Agentum now requires opencode 2.** opencode 2 removed flags and listings
+  the adapter used, so every stage and triage failed with `exit status 1`.
+  Upgrade opencode to 2.0 or newer; on an older runtime Agentum logs
+  `execution runtime not ready` at boot and refuses to start a stage. A
+  tier's variant is now sent as `--model <model>#<variant>`. A failed stage
+  error now ends with the last lines opencode wrote to stderr.
 - **Editing an approved plan reopens its approval gate.** Operators can edit
   the plan while paused or at final review; source writes stay locked until
   `advance` names the new revision. Earlier branch work is retained, and

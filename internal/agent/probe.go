@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,10 @@ type Readiness struct {
 	RuntimeVersion string
 	// Reason says why the adapter is not ready; empty when Ready.
 	Reason string
+	// Unsupported marks a runtime that answered with a version this adapter
+	// cannot drive. Unlike a failed probe, that is known rather than unknown,
+	// so Invoke refuses to start on it.
+	Unsupported bool
 	// CheckedAt is when the probe ran (once per process — see Probe).
 	CheckedAt time.Time
 }
@@ -48,8 +53,8 @@ func (readiness Readiness) Label() string {
 //
 // The probe reuses the context probe's machinery verbatim — the scrubbed child
 // environment from buildChildEnv, probeTimeout, and the process-group kill —
-// because the no-output hang is a property of the binary itself, not of the
-// `debug skill` subcommand.
+// because the no-output hang is a property of the binary itself, not of any
+// one subcommand.
 //
 // ctx contributes its values but not its cancellation (see runVersionProbe):
 // the memoized answer outlives the caller that happened to ask first, so it
@@ -133,13 +138,39 @@ func (adapter *OpencodeAdapter) runVersionProbe(ctx context.Context) Readiness {
 		readiness.Reason = parseErr.Error()
 		return readiness
 	}
+	if supportErr := checkRuntimeVersion(version); supportErr != nil {
+		readiness.RuntimeVersion = version
+		readiness.Reason = supportErr.Error()
+		readiness.Unsupported = true
+		return readiness
+	}
 	readiness.Ready = true
 	readiness.RuntimeVersion = version
 	return readiness
 }
 
+// minRuntimeMajor is the oldest opencode major version the adapter drives.
+// opencode 2 changed the CLI (no --dir or --variant, `run` delegating to a
+// background service), the permission schema, and the listings the adapter
+// reads, and the adapter speaks only the new surface.
+const minRuntimeMajor = 2
+
+// checkRuntimeVersion refuses a runtime older than minRuntimeMajor.
+func checkRuntimeVersion(version string) error {
+	majorText, _, _ := strings.Cut(strings.TrimPrefix(version, "v"), ".")
+	major, err := strconv.Atoi(majorText)
+	if err != nil {
+		return fmt.Errorf("unparseable version %q", version)
+	}
+	if major < minRuntimeMajor {
+		return fmt.Errorf("unsupported runtime version %s: requires %d.0 or newer", version, minRuntimeMajor)
+	}
+	return nil
+}
+
 // parseVersionOutput extracts the runtime version from `--version` output:
-// trim whitespace, take the first line, require a version-shaped token. Output
+// trim whitespace, take the first line, drop a leading program name (opencode
+// 2 prints `opencode v2.0.29`), and require a version-shaped token. Output
 // that is empty, or whose first line does not look like a version, is an
 // unparseable probe result rather than a recorded false version.
 func parseVersionOutput(output string) (string, error) {
@@ -152,6 +183,9 @@ func parseVersionOutput(output string) (string, error) {
 		firstLine = firstLine[:index]
 	}
 	firstLine = strings.TrimSpace(firstLine)
+	if fields := strings.Fields(firstLine); len(fields) == 2 && fields[0] == opencodeDescriptor.Binary {
+		firstLine = fields[1]
+	}
 	if !isVersionShaped(firstLine) {
 		return "", fmt.Errorf("unparseable output %q", firstLine)
 	}

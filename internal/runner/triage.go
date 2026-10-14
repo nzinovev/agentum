@@ -26,7 +26,10 @@ const routeDefaultPack = pack.DefaultPipelinePack
 
 const defaultTriageCloseTimeout = 10 * time.Second
 
-const triagePrompt = `Choose the best pipeline pack for the task. Use only the task and catalog below. Do not edit source. Write result.json with schema_version "1", status "complete", and summary containing ONLY a JSON object with keys "pack" and "reason". The pack must be one catalog name. The reason must be a brief explanation specific to the task. If no choice is possible, use status "blocked".`
+// triagePrompt spells out that summary is a string holding JSON text, with an
+// example: asked for "a JSON object" in summary, models write the object
+// itself, which the result contract refuses.
+const triagePrompt = `Choose the best pipeline pack for the task. Use only the task and catalog below. Do not edit source. Write result.json with schema_version "1", status "complete", and summary set to a STRING whose text is a JSON object with keys "pack" and "reason" — for example "summary": "{\"pack\": \"<catalog name>\", \"reason\": \"<why>\"}". The pack must be one catalog name. The reason must be a brief explanation specific to the task. If no choice is possible, use status "blocked".`
 
 type routeCatalog interface {
 	ListBuiltin(context.Context) ([]pack.Meta, error)

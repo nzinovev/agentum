@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,49 +13,48 @@ import (
 	"github.com/nzinovev/agentum/internal/models"
 )
 
-// fakeCatalogEnv switches the test binary into the `models --verbose` fake.
-// Its value selects the behaviour; the counter file (fakeCatalogCounterEnv)
-// records how many times the fake executed, which is how the memoization test
-// proves the second Catalog spawned nothing.
+// fakeCatalogEnv selects the behaviour of the model-listing fake. The counter
+// file (fakeCatalogCounterEnv) records how many times the fake executed, which
+// is how the memoization test proves the second Catalog spawned nothing.
 const (
 	fakeCatalogEnv        = "AGENTUM_FAKE_CATALOG"
 	fakeCatalogCounterEnv = "AGENTUM_FAKE_CATALOG_COUNTER"
 )
 
-// fakeCatalogOutput is the reference listing: three records covering the three
-// states of the variants field (declared, declared-empty, absent) plus the
-// unknown fields a real listing carries and a decoder must ignore.
-const fakeCatalogOutput = `opencode/muse-spark-1.3-contributor-free
-{
-  "id": "muse-spark-1.3-contributor-free",
-  "providerID": "opencode",
-  "status": "active",
-  "limit": {"context": 160000, "output": 32000},
-  "capabilities": {"reasoning": true, "tools": true},
-  "variants": {
-    "high": {"reasoningEffort": "high"},
-    "max": {"reasoningEffort": "max"}
-  }
-}
-zai-coding-plan/glm-5.3
-{
-  "id": "glm-5.3",
-  "providerID": "zai-coding-plan",
-  "status": "active",
-  "variants": {}
-}
-zai/glm-4.7
-{
-  "id": "glm-4.7",
-  "providerID": "zai",
-  "status": "active"
-}
-`
+// fakeCatalogRecords are the reference listing's records, in the shape of
+// `GET /api/model`: three records covering the three states of the variants
+// field (declared, declared-empty, absent) plus the unknown fields a real
+// listing carries and a decoder must ignore — the provider settings with an
+// API key among them.
+const fakeCatalogRecords = `{
+    "id": "muse-spark-1.3-contributor-free",
+    "providerID": "opencode",
+    "status": "active",
+    "settings": {"apiKey": "SECRET-SHOULD-NOT-LEAK"},
+    "limit": {"context": 160000, "output": 32000},
+    "variants": [
+      {"id": "max", "settings": {"reasoningEffort": "max"}},
+      {"id": "high", "settings": {"reasoningEffort": "high"}}
+    ]
+  },
+  {
+    "id": "glm-5.3",
+    "providerID": "zai-coding-plan",
+    "status": "active",
+    "variants": []
+  },
+  {
+    "id": "glm-4.7",
+    "providerID": "zai",
+    "status": "active"
+  }`
 
-// runFakeModels plays the runtime's `models --verbose` side of the catalog
-// probe contract. The mode is selected through the environment because the
-// probe controls the argv, not the tests.
-func runFakeModels(mode string) int {
+const fakeCatalogOutput = `{"location":{"directory":"/wt"},"data":[` + fakeCatalogRecords + `]}`
+
+// fakeModelsListing builds the model-listing side of the catalog probe
+// contract by mode. The counter records how many servers the probe started,
+// which is how the memoization test proves the second Catalog spawned nothing.
+func fakeModelsListing(mode string) fakeListing {
 	if counterPath := os.Getenv(fakeCatalogCounterEnv); counterPath != "" {
 		count := 0
 		if raw, err := os.ReadFile(counterPath); err == nil {
@@ -68,36 +66,21 @@ func runFakeModels(mode string) int {
 	}
 	switch mode {
 	case "unreadable":
-		fmt.Print(fakeCatalogOutput)
-		fmt.Println("zai-coding-plan/broken")
-		fmt.Println("{")
-		fmt.Println(`  "id": "broken",`)
-		fmt.Println(`  "variants": {`) // JSON ends mid-object: the record must not decode
-		return 0
+		return fakeListing{body: `{"data":[` + fakeCatalogRecords + `, {"id": "broken", "providerID": "zai", "variants": [{"settings": {}}]}]}`}
 	case "noid":
-		fmt.Println("zai-coding-plan/anonymous")
-		fmt.Println("{")
-		fmt.Println(`  "id": "anonymous",`)
-		fmt.Println(`  "status": "active"`) // providerID absent
-		fmt.Println("}")
-		return 0
+		return fakeListing{body: `{"data":[{"id": "anonymous", "status": "active"}]}`}
+	case "malformed":
+		return fakeListing{body: `{"data":[{"id": "cut-off",`}
 	case "empty":
-		return 0
-	case "headers":
-		fmt.Println("zai-coding-plan/glm-5.3")
-		fmt.Println("zai/glm-4.7")
-		return 0
+		return fakeListing{body: `{"data":[]}`}
+	case "nodata":
+		return fakeListing{body: `{"location":{"directory":"/wt"}}`}
 	case "exit":
-		fmt.Fprintln(os.Stderr, "fake runtime failure")
-		return 2
+		return fakeListing{exitCode: 2}
 	case "hang":
-		// Block long enough that the probe's timeout fires and the process
-		// group is killed; the catalog test shrinks probeTimeout.
-		time.Sleep(30 * time.Second)
-		return 0
+		return fakeListing{hang: true}
 	default: // "ok" and any unknown mode
-		fmt.Print(fakeCatalogOutput)
-		return 0
+		return fakeListing{body: fakeCatalogOutput}
 	}
 }
 
@@ -195,6 +178,9 @@ func TestCatalog_UnreadableRecordInvalidatesTheWholeCatalog(t *testing.T) {
 	if catalog.Reason != "unreadable records: 1 of 4" {
 		t.Errorf("Reason = %q; want unreadable records: 1 of 4", catalog.Reason)
 	}
+	if strings.Contains(catalog.Reason, "SECRET") {
+		t.Errorf("Reason = %q; a record's settings must never reach the reason", catalog.Reason)
+	}
 	if len(catalog.Models) != 0 {
 		t.Errorf("Models = %v; a partially read catalog is never handed out", catalog.Models)
 	}
@@ -218,19 +204,20 @@ func TestCatalog_RecordWithoutIdentityIsUnreadable(t *testing.T) {
 	}
 }
 
-// TestCatalog_OutputWithoutRecordsIsNotAnEmptyCatalog: an empty answer, or one
-// with only header lines, means the listing could not be read — never that
+// TestCatalog_OutputWithoutRecordsIsNotAnEmptyCatalog: a listing that stays
+// empty until the deadline, or an envelope without records, means the listing could not be read — never that
 // the runtime runs nothing.
 func TestCatalog_OutputWithoutRecordsIsNotAnEmptyCatalog(t *testing.T) {
-	t.Run("empty output", func(t *testing.T) {
+	t.Run("listing that never fills", func(t *testing.T) {
+		shrinkProbeTimeout(t)
 		adapter, _ := fakeCatalogAdapter(t, "empty")
 		catalog := adapter.Catalog(context.Background())
-		if catalog.Available || catalog.Reason != "empty output" {
-			t.Errorf("catalog = available:%v reason:%q; want unavailable with the empty-output reason", catalog.Available, catalog.Reason)
+		if catalog.Available || catalog.Reason != "no records" {
+			t.Errorf("catalog = available:%v reason:%q; want unavailable with the no-records reason", catalog.Available, catalog.Reason)
 		}
 	})
-	t.Run("headers only", func(t *testing.T) {
-		adapter, _ := fakeCatalogAdapter(t, "headers")
+	t.Run("envelope without data", func(t *testing.T) {
+		adapter, _ := fakeCatalogAdapter(t, "nodata")
 		catalog := adapter.Catalog(context.Background())
 		if catalog.Available || catalog.Reason != "no records" {
 			t.Errorf("catalog = available:%v reason:%q; want unavailable with the no-records reason", catalog.Available, catalog.Reason)
@@ -339,13 +326,13 @@ func TestCatalog_MissingBinaryIsAProbeResultNotAnError(t *testing.T) {
 	}
 }
 
-// TestParseCatalogOutput pins the pure reader: framing lines are skipped, an
-// unterminated object at EOF still counts as its (failing) record, and the
-// reason carries the unreadable-of-total counts.
+// TestParseCatalogOutput pins the pure reader: records are read and sorted, a
+// listing that does not decode is unreadable as a whole, and the reason never
+// carries a record's content.
 func TestParseCatalogOutput(t *testing.T) {
 	t.Parallel()
 	t.Run("records are read and sorted", func(t *testing.T) {
-		parsed := parseCatalogOutput("b/z\n{\n  \"id\": \"z\",\n  \"providerID\": \"b\"\n}\na/y\n{\n  \"id\": \"y\",\n  \"providerID\": \"a\"\n}\n")
+		parsed := parseCatalogOutput(`{"data":[{"id":"z","providerID":"b"},{"id":"y","providerID":"a"}]}`)
 		if parsed.problem != "" {
 			t.Fatalf("problem = %q; want none", parsed.problem)
 		}
@@ -353,10 +340,13 @@ func TestParseCatalogOutput(t *testing.T) {
 			t.Errorf("models = %+v; want sorted [a/y b/z]", parsed.models)
 		}
 	})
-	t.Run("unterminated object at EOF is one unreadable record", func(t *testing.T) {
-		parsed := parseCatalogOutput("{\n  \"id\": \"z\",\n  \"providerID\": \"b\"\n")
-		if parsed.problem != "unreadable records: 1 of 1" {
-			t.Errorf("problem = %q; want unreadable records: 1 of 1", parsed.problem)
+	t.Run("a listing cut off mid-record is unreadable", func(t *testing.T) {
+		parsed := parseCatalogOutput(`{"data":[{"id":"z","providerID":"b","settings":{"apiKey":"SECRET`)
+		if !strings.HasPrefix(parsed.problem, "unreadable listing") {
+			t.Errorf("problem = %q; want unreadable listing", parsed.problem)
+		}
+		if strings.Contains(parsed.problem, "SECRET") {
+			t.Errorf("problem = %q; the record's content leaked into the reason", parsed.problem)
 		}
 	})
 	t.Run("blank output is empty output", func(t *testing.T) {

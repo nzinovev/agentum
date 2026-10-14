@@ -16,18 +16,18 @@ import (
 // can technically enforce for a local invocation. Each entry maps to a concrete
 // enforcement mechanism in this file:
 //
-//   - fs.read → opencode `read`/`glob`/`grep`/`list`/`lsp` permission rules,
-//     bounded by `external_directory: deny` so reads cannot leave the project.
+//   - fs.read → opencode `read`/`glob`/`grep`/`lsp` permission rules,
+//     bounded by an `external_directory` deny so reads cannot leave the project.
 //   - fs.write / artifact.write → opencode `edit` permission rules, scoped to
 //     the granted paths. opencode has no separate `write` permission: the write
 //     and patch tools are both governed by `edit`.
-//   - exec.bash → opencode `bash` permission rules, with deny patterns that
+//   - exec.bash → opencode `shell` permission rules, with deny patterns that
 //     protect delivery refs (git push / reset --hard / branch -D / update-ref /
 //     rebase) the agent must never touch.
 //   - git.read / git.write → enforced through exec.bash deny patterns; read is
 //     always available alongside bash, write is the same path.
 //   - net.fetch → opencode `webfetch` / `websearch` permission rules, plus the
-//     bash deny patterns for the common network clients when it is not granted.
+//     shell deny patterns for the common network clients when it is not granted.
 //   - secret → env scrub: credential-bearing vars are stripped from the child
 //     environment unless the profile grants the matching secret.<name>.
 //
@@ -68,6 +68,7 @@ type enforcementPlan struct {
 	subst            scopeSubst   // the scope substitutions applied
 	audit            caps.Profile // the substituted profile recorded for audit
 	instructionPaths []string     // repo-relative paths denied in edit rules (D4)
+	attachments      []string     // staged pinned instruction files, passed with --file
 }
 
 // cleanup removes the per-invocation config directory. Idempotent and
@@ -127,19 +128,16 @@ func (adapter *OpencodeAdapter) prepareEnforcement(inv Invocation) (enforcementP
 	}
 
 	// Stage each pinned instruction file into the config directory and collect
-	// its absolute, forward-slash path. Step-0 finding (ADR 0002): opencode
-	// resolves ABSOLUTE instructions entries, so placing the pinned copies
-	// outside the worktree (where the agent cannot reach them) is both the
-	// tamper-proof location and a working delivery path. Delivery only adds —
-	// the runtime's own AGENTS.md injection still happens — but after D4's edit
-	// deny + the runner's pre-stage hash check the two copies are byte-identical.
-	instructionAbsPaths, stageErr := stageInstructionFiles(configDir, inv.Instructions, errPrefix)
+	// its absolute, forward-slash path for a --file attachment. Outside the
+	// worktree the agent cannot reach the pinned copies, and opencode reads an
+	// attachment itself, so external_directory stays denied. Delivery only adds
+	// — the runtime's own AGENTS.md injection still happens — but after the
+	// edit deny and the runner's pre-stage hash check the two copies are
+	// byte-identical.
+	attachments, stageErr := stageInstructionFiles(configDir, inv.Instructions, errPrefix)
 	if stageErr != nil {
 		_ = os.RemoveAll(configDir)
 		return enforcementPlan{}, stageErr
-	}
-	if len(instructionAbsPaths) > 0 {
-		config.Instructions = instructionAbsPaths
 	}
 
 	compact, indented, renderErr := renderOpencodeConfigBytes(config)
@@ -161,12 +159,13 @@ func (adapter *OpencodeAdapter) prepareEnforcement(inv Invocation) (enforcementP
 		subst:            subst,
 		audit:            substituted,
 		instructionPaths: instructionRelPaths,
+		attachments:      attachments,
 	}, nil
 }
 
 // stageInstructionFiles writes each pinned instruction file into the per-
 // invocation config directory and returns the absolute, forward-slash paths to
-// list under opencode's `instructions`. Files are named by index and basename
+// attach to the message. Files are named by index and basename
 // so two declared paths that happen to share a basename do not clobber each
 // other. Mode 0600 matches the config file itself; cleanup removes the whole
 // directory.
@@ -232,103 +231,92 @@ func substituteScopes(profile caps.Profile, subst scopeSubst) caps.Profile {
 }
 
 // opencodeConfig is the subset of the opencode config schema this adapter
-// writes: the permission map, plus the pinned project-instruction files the
-// adapter itself staged. Everything else (providers, models, themes) stays the
-// operator's business.
+// writes: the permission rules and nothing else. Providers, models, and
+// themes stay the operator's business.
 //
-// Instructions is NOT a permission key — it adds context (the pinned copies of
-// AGENTS.md and the project's declared instruction files) rather than widening a
-// permission. It therefore does not violate the "every permission key is set
-// explicitly" rule on opencodePermissionRules, which governs reach, not context.
+// The pinned instruction files are deliberately not listed under
+// `instructions`: opencode 2 parses that key and never loads it, so a config
+// carrying it would claim a delivery that does not happen. They travel as
+// message attachments instead (see buildOpencodeArgs).
 type opencodeConfig struct {
-	Schema       string                  `json:"$schema"`
-	Permission   opencodePermissionRules `json:"permission"`
-	Instructions []string                `json:"instructions,omitempty"`
+	Schema      string           `json:"$schema"`
+	Permissions []permissionRule `json:"permissions"`
 }
 
-// Permission actions, as opencode spells them.
+// permissionRule is one entry of opencode's ordered permission list. opencode
+// evaluates the list in order with the LAST matching rule winning, so the
+// wildcard baseline comes first and every later rule is an override.
+type permissionRule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
+}
+
+// Permission effects, as opencode spells them.
 const (
 	actionAllow = "allow"
 	actionDeny  = "deny"
 )
 
-// opencodePermissionRules is the per-tool permission map, mirroring opencode's
-// documented permission keys (https://opencode.ai/docs/permissions/).
-//
-// Two rules govern this struct:
-//
-//  1. EVERY key is set explicitly. opencode merges config sources and only
-//     overrides conflicting keys, so a key this adapter omits falls through to
-//     the operator's global config or the project's own opencode.json — which
-//     would widen the profile we just computed.
-//  2. Field order is the emitted JSON order, and opencode resolves permission
-//     rules with the LAST match winning. The wildcard baseline therefore comes
-//     first; every specific key after it is an override.
-//
-// Values are either a plain action string or an ordered pattern→action map
-// (ruleList), which is why the refined keys are typed `any`.
-type opencodePermissionRules struct {
-	// Wildcard is the deny-by-default baseline. It covers tools this adapter
-	// does not model, tools a future opencode adds, and MCP tools whose names
-	// it cannot enumerate. Verified to override opencode's own built-in
-	// {permission:"*", pattern:"*", action:"allow"} default.
-	Wildcard string `json:"*"`
+// Permission actions, as opencode 2 names them. Every one of them is emitted
+// explicitly, even when the wildcard would already deny it: opencode merges
+// config sources, and a rule this adapter leaves out falls through to the
+// operator's global config or the project's own opencode.json.
+const (
+	// permissionAny is the deny-by-default baseline. It covers tools this
+	// adapter does not model, tools a future opencode adds (CodeMode's
+	// `execute` is one), and MCP tools whose names it cannot enumerate.
+	permissionAny = "*"
 
 	// Read-shaped tools. All follow fs.read; external_directory is what keeps
 	// them inside the project.
-	Read string `json:"read"`
-	Glob string `json:"glob"`
-	Grep string `json:"grep"`
-	List string `json:"list"`
-	LSP  string `json:"lsp"`
+	permissionRead = "read"
+	permissionGlob = "glob"
+	permissionGrep = "grep"
+	permissionLSP  = "lsp"
 
-	// Edit governs write, edit, and patch alike — opencode has no separate
-	// `write` permission.
-	Edit any `json:"edit"`
-	// Bash is "allow with deny patterns" when exec.bash is granted.
-	Bash any `json:"bash"`
+	// permissionEdit governs the write, edit, and patch tools alike — opencode
+	// has no separate write permission.
+	permissionEdit = "edit"
+	// permissionShell is "allow with deny patterns" when exec.bash is granted.
+	permissionShell = "shell"
 
 	// Outbound network.
-	WebFetch  string `json:"webfetch"`
-	WebSearch string `json:"websearch"`
+	permissionWebFetch  = "webfetch"
+	permissionWebSearch = "websearch"
 
 	// Reach the capability model has no token for, so deny is the only
 	// answer: a subagent runs outside the profile we computed, and
-	// external_directory is the containment boundary for every read-shaped tool
-	// above.
+	// external_directory is the containment boundary for every read-shaped
+	// tool above.
 	//
-	// Skill is the exception. A skill grants knowledge, not reach:
-	// an agent that reads a skill telling it to run a command or write a file
-	// still meets the same bash and edit rules below, so nothing escalates. In
-	// the single-owner threat model this codebase claims (accidental agent
+	// Skill is the exception. A skill grants knowledge, not reach: an agent
+	// that reads a skill telling it to run a command or write a file still
+	// meets the same shell and edit rules, so nothing escalates. In the
+	// single-owner threat model this codebase claims (accidental agent
 	// actions, not a hostile process), the skills on the machine are the
 	// operator's own. Skills are therefore allowed unconditionally; the
-	// protection that replaces a blanket deny is visibility — the runner probes
-	// `opencode debug skill` once per run and records each skill's name,
-	// location, and content hash in the manifest (ContextProber, ADR 0002 D6).
-	Task              string `json:"task"`
-	Skill             string `json:"skill"`
-	ExternalDirectory string `json:"external_directory"`
+	// protection that replaces a blanket deny is visibility — the runner
+	// probes the runtime's skill list once per run and records each skill's
+	// name, location, and content hash in the manifest (ContextProber).
+	permissionSubagent          = "subagent"
+	permissionSkill             = "skill"
+	permissionExternalDirectory = "external_directory"
 
 	// Unattended runs have nobody to answer a question, and a doom loop is a
 	// stuck agent burning budget.
-	Question string `json:"question"`
-	DoomLoop string `json:"doom_loop"`
-
-	// Session-local bookkeeping with no reach outside the run.
-	TodoWrite string `json:"todowrite"`
-}
+	permissionQuestion = "question"
+	permissionDoomLoop = "doom_loop"
+)
 
 // buildOpencodeConfig renders the deny-by-default opencode permission config
 // for an effective profile. Anything the profile does not grant resolves to
 // "deny"; granted categories resolve to "allow", with the profile's scopes
 // encoded as per-path / per-command refinement. instructionPaths are the
-// absolute, forward-slash paths of the pinned instruction files the adapter has
-// staged into the per-invocation config directory; they are
-// listed under `instructions` so opencode loads the pinned bytes alongside the
-// runtime's own AGENTS.md injection. Returns an error when a granted path scope
-// cannot be expressed as a rule opencode will match — the invocation must not
-// start on a profile the runtime would ignore.
+// repo-relative paths of the pinned instruction files, used only for the
+// edit-deny rules. Returns an error when a granted path scope cannot be
+// expressed as a rule opencode will match — the invocation must not start on
+// a profile the runtime would ignore.
 func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPaths []string) (opencodeConfig, error) {
 	edit, editErr := editRules(profile, subst, instructionPaths)
 	if editErr != nil {
@@ -336,40 +324,31 @@ func buildOpencodeConfig(profile caps.Profile, subst scopeSubst, instructionPath
 	}
 	readable := profile.Has(caps.CatFsRead)
 	network := profile.Has(caps.CatNetFetch)
-	// NOTE: config.Instructions is NOT set here. instructionPaths here are the
-	// repo-relative paths used only to build the edit-deny rules;
-	// the `instructions` entries that reach opencode must be ABSOLUTE paths to
-	// the staged pinned copies, which prepareEnforcement sets after staging.
-	// Setting both would leave a dead branch that ships worktree-relative paths
-	// (agent-writable) whenever the staged list is empty — a caller bug that
-	// would point opencode at the worktree copy.
+
+	rules := []permissionRule{wholeAction(permissionAny, actionDeny)}
+	for _, action := range []string{permissionRead, permissionGlob, permissionGrep, permissionLSP} {
+		rules = append(rules, wholeAction(action, actionFor(readable)))
+	}
+	rules = append(rules, edit...)
+	rules = append(rules, shellRules(profile)...)
+	rules = append(rules,
+		wholeAction(permissionWebFetch, actionFor(network)),
+		wholeAction(permissionWebSearch, actionFor(network)),
+		wholeAction(permissionSubagent, actionDeny),
+		wholeAction(permissionSkill, actionAllow),
+		wholeAction(permissionExternalDirectory, actionDeny),
+		wholeAction(permissionQuestion, actionDeny),
+		wholeAction(permissionDoomLoop, actionDeny),
+	)
 	return opencodeConfig{
-		Schema: "https://opencode.ai/config.json",
-		Permission: opencodePermissionRules{
-			Wildcard: actionDeny,
-
-			Read: actionFor(readable),
-			Glob: actionFor(readable),
-			Grep: actionFor(readable),
-			List: actionFor(readable),
-			LSP:  actionFor(readable),
-
-			Edit: edit,
-			Bash: bashRules(profile),
-
-			WebFetch:  actionFor(network),
-			WebSearch: actionFor(network),
-
-			Task:              actionDeny,
-			Skill:             actionAllow,
-			ExternalDirectory: actionDeny,
-
-			Question: actionDeny,
-			DoomLoop: actionDeny,
-
-			TodoWrite: actionAllow,
-		},
+		Schema:      "https://opencode.ai/config.json",
+		Permissions: rules,
 	}, nil
+}
+
+// wholeAction is the rule that decides an action for every resource.
+func wholeAction(action, effect string) permissionRule {
+	return permissionRule{Action: action, Resource: anyPath, Effect: effect}
 }
 
 // renderOpencodeConfigBytes marshals one config value twice: compact for the
@@ -396,60 +375,8 @@ func actionFor(granted bool) string {
 	return actionDeny
 }
 
-// ruleList is an ordered pattern→action list rendered as a JSON object.
-//
-// It exists because opencode evaluates permission rules in file order with the
-// last match winning, and Go's encoding/json sorts map keys. A map would put
-// the deny baseline wherever the alphabet happened to place it — correct today
-// by luck, wrong the first time a pattern starts with a different
-// character.
-type ruleList struct {
-	patterns []string
-	actions  map[string]string
-}
-
-func newRuleList() *ruleList {
-	return &ruleList{actions: map[string]string{}}
-}
-
-// add appends a rule. A repeated pattern keeps its original position and takes
-// the new action — position is what matters for resolution, and re-stating a
-// pattern is a caller bug we would rather resolve deterministically than panic
-// on.
-func (rules *ruleList) add(pattern, action string) *ruleList {
-	if _, exists := rules.actions[pattern]; !exists {
-		rules.patterns = append(rules.patterns, pattern)
-	}
-	rules.actions[pattern] = action
-	return rules
-}
-
-// MarshalJSON emits the rules as a JSON object in insertion order.
-func (rules *ruleList) MarshalJSON() ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	for index, pattern := range rules.patterns {
-		if index > 0 {
-			buf.WriteByte(',')
-		}
-		key, err := json.Marshal(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("encode permission pattern %q: %w", pattern, err)
-		}
-		buf.Write(key)
-		buf.WriteByte(':')
-		value, err := json.Marshal(rules.actions[pattern])
-		if err != nil {
-			return nil, fmt.Errorf("encode permission action for %q: %w", pattern, err)
-		}
-		buf.Write(value)
-	}
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
-}
-
-// editRules maps fs.write and artifact.write onto opencode's `edit` key. Both
-// live here because opencode routes the write and patch tools through `edit`;
+// editRules maps fs.write and artifact.write onto opencode's `edit` action.
+// Both live here because opencode routes the write and patch tools through `edit`;
 // there is no separate `write` permission, so an analyst that could only
 // "write" its artifact dir would in fact be unable to produce result.json.
 //
@@ -473,32 +400,26 @@ func (rules *ruleList) MarshalJSON() ([]byte, error) {
 // pre-stage hash check, not here — see internal/instructions and the runner's
 // restore step.
 //
-// Two traps: ruleList.add keeps a repeated pattern's original POSITION while
-// taking the new action, so an instruction pattern colliding with a granted
-// scope pattern would land in the wrong place. Assert (in tests) that the deny
-// patterns are distinct from the scope patterns. And when the profile grants no
-// write at all, `edit` is the bare string "deny" and no rule list exists —
-// adding instruction denies there is both unnecessary and a type error, so this
-// branch is skipped.
-func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string) (any, error) {
+// When the profile grants no write at all, `edit` is one whole-action deny and
+// the instruction denies are skipped: there is no allow for them to override.
+func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string) ([]permissionRule, error) {
 	scopes := append(
 		scopesFor(profile, caps.CatArtifactWrite),
 		scopesFor(profile, caps.CatFsWrite)...,
 	)
 	if len(scopes) == 0 {
-		return actionDeny, nil
+		return []permissionRule{wholeAction(permissionEdit, actionDeny)}, nil
 	}
-	rules := newRuleList().add(anyPath, actionDeny)
+	rules := []permissionRule{wholeAction(permissionEdit, actionDeny)}
 	for _, scope := range scopes {
 		pattern, err := permissionScope(scope, subst.worktree)
 		if err != nil {
 			return nil, err
 		}
-		rules.add(pattern, actionAllow)
+		rules = append(rules, permissionRule{Action: permissionEdit, Resource: pattern, Effect: actionAllow})
 	}
 	// Instruction denies come last so last-match-wins makes them win over the
-	// granted scopes. De-duplicate to keep the rule list readable and to avoid
-	// re-stating a pattern (which ruleList.add would keep in its old position).
+	// granted scopes. De-duplicated to keep the rule list readable.
 	//
 	// Each path gets an EXACT deny. A path whose basename matches a
 	// runtime-injected filename (the autoInstructionBaseline set, e.g.
@@ -515,13 +436,13 @@ func editRules(profile caps.Profile, subst scopeSubst, instructionPaths []string
 		basename := forwardSlashBase(path)
 		exact := forwardSlashClean(path)
 		if !seen[exact] {
-			rules.add(exact, actionDeny)
+			rules = append(rules, permissionRule{Action: permissionEdit, Resource: exact, Effect: actionDeny})
 			seen[exact] = true
 		}
 		if isRuntimeInjectedBasename(basename) {
 			guard := "**/" + basename
 			if !seen[guard] {
-				rules.add(guard, actionDeny)
+				rules = append(rules, permissionRule{Action: permissionEdit, Resource: guard, Effect: actionDeny})
 				seen[guard] = true
 			}
 		}
@@ -570,7 +491,8 @@ const anyPath = "*"
 // profile and one that denies every write while looking correct in the
 // audit trail. Verified against opencode 1.18.10: with the agent passing an
 // absolute filePath, a relative pattern covering it allowed the write and an
-// absolute pattern covering the same file denied it.
+// absolute pattern covering the same file denied it. Re-checked on 2.0.29: a
+// relative `artifacts/**` allow still admits a write there and nowhere else.
 //
 // A scope that does not resolve under the worktree cannot be expressed at all,
 // and is an error rather than a dropped grant: the invocation must not
@@ -630,20 +552,20 @@ func scopesFor(profile caps.Profile, category caps.Category) []string {
 	return out
 }
 
-// bashRules builds the bash rule list: allow by default (the role granted
+// shellRules builds the shell rule list: allow by default (the role granted
 // exec.bash), then deny the patterns that would mutate delivery refs, reach a
 // credential helper, or open the network the profile did not grant.
-func bashRules(profile caps.Profile) any {
+func shellRules(profile caps.Profile) []permissionRule {
 	if !profile.Has(caps.CatExecBash) {
-		return actionDeny
+		return []permissionRule{wholeAction(permissionShell, actionDeny)}
 	}
-	rules := newRuleList().add(anyPath, actionAllow)
+	rules := []permissionRule{wholeAction(permissionShell, actionAllow)}
 	for _, pattern := range deniedBashPatterns {
-		rules.add(pattern, actionDeny)
+		rules = append(rules, permissionRule{Action: permissionShell, Resource: pattern, Effect: actionDeny})
 	}
 	if !profile.Has(caps.CatNetFetch) {
 		for _, pattern := range networkBashPatterns {
-			rules.add(pattern, actionDeny)
+			rules = append(rules, permissionRule{Action: permissionShell, Resource: pattern, Effect: actionDeny})
 		}
 	}
 	return rules
@@ -778,6 +700,24 @@ func buildChildEnv(profile caps.Profile, configPath string, configContent []byte
 		filtered = append(filtered, "OPENCODE_CONFIG_CONTENT="+string(configContent))
 	}
 	return filtered
+}
+
+// withWorkingDirectory returns env with PWD naming dir. opencode takes its
+// working directory from PWD, not from the process's actual one: a child that
+// inherited the parent's PWD runs its session in the directory Agentum was
+// started from — a different project, with that project's AGENTS.md and the
+// worktree outside external_directory. Setting cmd.Dir alone is therefore not
+// enough; every opencode subprocess with a working directory goes through
+// here.
+func withWorkingDirectory(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "PWD=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "PWD="+dir)
 }
 
 // grantedSecretEnvVars returns the set of env var names the profile's
