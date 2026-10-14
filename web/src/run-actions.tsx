@@ -158,6 +158,9 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   const disabled = busy || stale || editing || !!notice && notice.tone === "work";
   // Mirrors the server's retry guard: the checkpoints a retry resumes from live on the run branch.
   const retryable = item.state === "failed" && item.branch_state !== "removed" && item.branch_state !== "removing" && item.worktree?.state !== "removing";
+  // A run that stopped before the runner created its worktree has no local resources to keep or delete.
+  const noLocalResources = (item.worktree?.state || "not_created") === "not_created" && (item.branch_state || "not_created") === "not_created";
+  const resourcesNote = noLocalResources ? "No worktree or branch was created." : item.worktree?.state === "removed" && item.branch_state === "removed" ? "The worktree and branch were deleted." : "The worktree and branch are kept until you delete them.";
   const previousState = useRef(item.state);
   const previousSavedRevision = useRef(savedRevisionID);
   useEffect(() => {
@@ -305,8 +308,8 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     paused_user_stop: reason === "user_pause" ? "The current invocation finished and its checkpoint was saved. Leave a note or continue." : reason === "base_not_on_target" ? "The base carries commits that the publication target branch does not have." : "Review the reason and choose how to continue.",
     awaiting_final_review: `Result commit ${short(item.result_commit, 7)} on ${item.branch}.`,
     done: `Result commit ${short(item.result_commit, 7)}. Local resources are kept.`,
-    failed: retryable ? `Retry restarts ${item.current_stage || "the run"} from its last checkpoint. The worktree and branch are kept until you delete them.` : "The run branch was deleted, so the run cannot be retried.",
-    cancelled: item.base_commit ? "The worktree and branch are kept until you delete them." : "No worktree or branch was created.",
+    failed: !retryable ? "The run branch was deleted, so the run cannot be retried." : noLocalResources ? `Retry starts the run again. ${resourcesNote}` : `Retry restarts ${item.current_stage || "the run"} from its last checkpoint. ${resourcesNote}`,
+    cancelled: resourcesNote,
   };
   const dialogTitles: Record<DialogKind, string> = { cancel: "Cancel this run?", reject_plan: "Reject the plan and end the run?", approve_result: "Accept the result?", reject_result: "Reject the result?", discard: "Delete the worktree?", cleanup: "Delete the branch?" };
   const dialogActions: Record<DialogKind, string> = { cancel: "Cancel run", reject_plan: "Reject run", approve_result: "Approve result", reject_result: "Reject run", discard: "Delete worktree", cleanup: "Delete branch" };
@@ -366,7 +369,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     </section>
     {dialog && <div className="run-dialog-scrim" role="presentation"><div className="run-dialog" role="dialog" aria-modal="true" aria-label={dialogTitles[dialog]} aria-busy={busy}>
       <h2>{dialogTitles[dialog]}</h2><p>Run “{item.title}”</p>
-      {(dialog === "cancel" || dialog.startsWith("reject")) && <p>The run ends. Its worktree and branch stay until you delete them.</p>}
+      {(dialog === "cancel" || dialog.startsWith("reject")) && <p>{noLocalResources ? "The run ends. No worktree or branch was created." : "The run ends. Its worktree and branch stay until you delete them."}</p>}
       {dialog === "approve_result" && <p>Publication continues on its own.</p>}
       {dialog === "discard" && <p>{item.worktree?.head ? "Delete this local worktree. The branch and artifacts remain." : "The worktree cannot be read. Delete its files and Git registration without checking HEAD or uncommitted changes. The branch and artifacts remain."}</p>}
       {dialog === "cleanup" && <p>Delete the local branch after its worktree has been removed.</p>}

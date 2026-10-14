@@ -134,6 +134,10 @@ Once tagged releases begin, this project adheres to
   already pinned keep their recorded `base_ref`/`base_commit`.
 
 ### Fixed
+- **Delete worktree on a done, cancelled, or failed run returns `202`.**
+  Before this, it returned `500 internal` ("could not record the discard
+  decision") because the run's manifest was already sealed. Nothing to do;
+  press Delete worktree again. (#61)
 - **A missing checkout or unreadable pinned pack no longer blocks the run page.**
   Before this, `GET /runs/{id}` returned `500` and hid Continue and Cancel.
   The read omits `plan_edits` until the pinned pack can be resolved; restore

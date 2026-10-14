@@ -95,7 +95,7 @@ const (
 	recordStrict recordPolicy = iota
 	// recordLenient absorbs ErrSealed / ErrNoManifest (returns nil so runInTx
 	// commits the transition without the decision); any other write error still
-	// fails. Used by cancel.
+	// fails. Used by cancel, and by a worktree discard on a terminal run.
 	recordLenient
 )
 

@@ -343,3 +343,35 @@ func TestWorktreeDiscardEndpoint_Guards(t *testing.T) {
 		t.Fatalf("payload = %+v, want the confirmed request", decoded)
 	}
 }
+
+// TestWorktreeDiscardEndpoint_AcceptsSealedTerminalRun: a terminal run's
+// manifest is sealed before any human can ask to delete its tree — teardown
+// seals done and cancelled runs, failRun seals failed ones. The discard must
+// still be accepted; the run.worktree_discarded event and the job row are its
+// record once the manifest no longer takes decisions.
+func TestWorktreeDiscardEndpoint_AcceptsSealedTerminalRun(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state string
+		seal  manifest.SealReason
+	}{
+		{state: "cancelled", seal: manifest.SealCancelled},
+		{state: "done", seal: manifest.SealCompleted},
+		{state: "failed", seal: manifest.SealFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			t.Parallel()
+			harness := newWorktreeHarness(t)
+			runID := harness.insertWorktreeFixtureRun(t, tc.state)
+			if err := harness.api.mfst.Seal(t.Context(), continueTestTenant, continueTestUser, runID, tc.seal); err != nil {
+				t.Fatal(err)
+			}
+			head := harness.headFor(t, runID)
+			recorder := harness.callWorktreeAction(t, "discard", runID, `{"expected_head":"`+head+`"}`)
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("discard status = %d, body %s; want 202", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
