@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -168,5 +169,88 @@ func TestCorrectionChain_PreservesEarlierCorrections(t *testing.T) {
 	}
 	if len(second.Missing) != 1 || second.Missing[0] != "memory" {
 		t.Errorf("sealed body's missing section lost in chain: %+v", second.Missing)
+	}
+}
+
+// TestReopenFailedTx_OnlyLiftsAnUncorrectedFailureSeal pins which records a
+// retry may reopen. A failure seal is lifted and its derived fields go with
+// it; a completed seal belongs to a run that can never run again; a corrected
+// failure seal would leave the correction shadowing everything the retry
+// writes; an unsealed manifest (the run failed before failRun sealed it) is
+// left untouched.
+func TestReopenFailedTx_OnlyLiftsAnUncorrectedFailureSeal(t *testing.T) {
+	t.Parallel()
+	const tenantID = "ac1132a1-6c04-42a8-9c88-361e94d42321"
+	const userID = "b559cd2e-74ae-44f6-a993-899235ef952d"
+	cases := []struct {
+		name       string
+		seal       SealReason
+		correct    bool
+		wantErr    error
+		wantSealed bool
+	}{
+		{name: "failed seal reopens", seal: SealFailed},
+		{name: "completed seal refused", seal: SealCompleted, wantErr: ErrSealed, wantSealed: true},
+		{name: "corrected failure refused", seal: SealFailed, correct: true, wantErr: ErrCorrected, wantSealed: true},
+		{name: "unsealed is a no-op"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handle := dbtest.Store(t)
+			const insertRun = `
+				WITH inserted_project AS (
+					INSERT INTO projects (tenant_id, user_id, repo_identity, repo_root_commits,
+					                      repo_path, name, related_projects)
+					VALUES ($1, $2, 'manifest-reopen-' || $3, '{}', '/tmp/manifest-reopen', 'manifest reopen', '{}')
+					RETURNING id
+				)
+				INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
+				                  title, description, overrides, base_ref, state)
+				SELECT $1, $2, inserted_project.id, 'backend-development',
+				       'fixture', 'fixture', '{}', 'main', 'failed'
+				FROM inserted_project
+				RETURNING id`
+			var runID string
+			if err := handle.Store.DB.QueryRowContext(t.Context(), insertRun, tenantID, userID, tc.name).Scan(&runID); err != nil {
+				t.Fatalf("insert run: %v", err)
+			}
+			service := New(Deps{DB: handle.Store.DB, Queries: handle.Queries})
+			if err := service.Init(t.Context(), tenantID, userID, runID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seal != "" {
+				if err := service.Seal(t.Context(), tenantID, userID, runID, tc.seal); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.correct {
+				if err := service.Correct(t.Context(), tenantID, userID, runID, "fixture", Body{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tx, err := handle.Store.DB.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			reopenErr := service.ReopenFailedTx(t.Context(), handle.Queries.WithTx(tx), tenantID, runID)
+			if !errors.Is(reopenErr, tc.wantErr) {
+				t.Fatalf("ReopenFailedTx error = %v, want %v", reopenErr, tc.wantErr)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			body, seal, _, err := service.Get(t.Context(), tenantID, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seal.Sealed != tc.wantSealed {
+				t.Errorf("sealed = %v, want %v", seal.Sealed, tc.wantSealed)
+			}
+			if !tc.wantSealed && (body.EvidenceComplete != nil || len(body.Missing) != 0) {
+				t.Errorf("unsealed body keeps seal-derived fields: complete=%v missing=%v", body.EvidenceComplete, body.Missing)
+			}
+		})
 	}
 }

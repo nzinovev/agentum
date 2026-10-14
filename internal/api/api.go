@@ -244,6 +244,7 @@ func (api *API) Register(mux interface {
 	mux.HandleFunc("POST /api/v1/runs/{id}/pause", api.handlePauseRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/fix-request", api.handleFixRequest)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", api.handleCancelRun)
+	mux.HandleFunc("POST /api/v1/runs/{id}/retry", api.handleRetryRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/reject", api.handleRejectRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cleanup", api.handleCleanupRun)
 

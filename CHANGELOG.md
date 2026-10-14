@@ -10,6 +10,12 @@ Once tagged releases begin, this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A failed run can be retried or closed.** Before this, `failed` was a
+  dead end: cancel returned `409` and the only way on was a new run. Use
+  Retry run on the run page or `POST /runs/{id}/retry` to resume the failed
+  stage from the kept worktree and checkpoints. Use Cancel run or
+  `POST /runs/{id}/cancel` to close it as `cancelled`. Retry is refused after
+  the run branch is deleted. (#61)
 - **A run can read project files that are not in git.** Before this, a stage
   saw only what `base_commit` contains, so design mockups or a backlog kept
   out of the repository never reached an agent. List their repo-relative paths
@@ -128,6 +134,10 @@ Once tagged releases begin, this project adheres to
   already pinned keep their recorded `base_ref`/`base_commit`.
 
 ### Fixed
+- **Delete worktree on a done, cancelled, or failed run returns `202`.**
+  Before this, it returned `500 internal` ("could not record the discard
+  decision") because the run's manifest was already sealed. Nothing to do;
+  press Delete worktree again. (#61)
 - **A missing checkout or unreadable pinned pack no longer blocks the run page.**
   Before this, `GET /runs/{id}` returned `500` and hid Continue and Cancel.
   The read omits `plan_edits` until the pinned pack can be resolved; restore

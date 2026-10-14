@@ -204,8 +204,17 @@ func (api *API) handleWorktreeDiscard(w http.ResponseWriter, r *http.Request) {
 		}); enqueueErr != nil {
 			return enqueueErr
 		}
+		// A terminal run's manifest is sealed before anyone can ask for this
+		// (teardown seals done and cancelled runs, failRun seals failed ones),
+		// so the decision cannot land there; the run.worktree_discarded event
+		// and the job row record it instead. A paused run's manifest is open,
+		// and its decision must land.
+		policy := recordStrict
+		if engine.IsTerminal(lockedState) {
+			policy = recordLenient
+		}
 		if recordErr := api.recordHumanDecisionTx(r.Context(), qtx, principal, run.ID,
-			gateDecisionPatch(run, principal, gateWorktreeDiscard, "discarded"), recordStrict); recordErr != nil {
+			gateDecisionPatch(run, principal, gateWorktreeDiscard, "discarded"), policy); recordErr != nil {
 			return recordErr
 		}
 		enqueued = true

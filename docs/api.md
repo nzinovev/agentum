@@ -141,7 +141,8 @@ one of the two counters is non-zero on any given registration.
 | `POST` | `/runs/{id}/start` | ✅ | `created → running` (enqueues a run job) → `200 Run` / `409 illegal_transition` |
 | `POST` | `/runs/{id}/pause` | ✅ | request a stop while `running` → `200 Run` with `pause_requested_at`; the runner finishes the current invocation and checkpoint before entering `paused_user_stop` with `user_pause`. Other states return `409 illegal_transition`. Requires `run:pause`. |
 | `POST` | `/runs/{id}/reject` | ✅ | terminal reject at either human gate (plan `paused_gate` or final `awaiting_final_review`). Reuses cancel semantics (lands in `cancelled`, branch survives) but records a `rejected` decision and seals the manifest `SealRejected`. Idempotent: a repeat reject matching the recorded decision returns `200`. → `200 Run` / `409 illegal_transition` |
-| `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
+| `POST` | `/runs/{id}/cancel` | ✅ | any non-terminal run, or a `failed` one → `cancelled` (terminal abort; branch survives) → `200 Run` / `409 illegal_transition` |
+| `POST` | `/runs/{id}/retry` | ✅ | no body. `failed → running` from the kept worktree and checkpoints: a `retry` job re-enters the failed stage with a fresh session, or the pack entry when the run failed before its first stage → `200 Run`. Refusals: a run not in `failed`, a pending or running job, or a branch `cleanup` that was not refused → `409 illegal_transition`; a manifest sealed for another reason, or one with corrections → `409 conflict`. Requires `run:retry`. |
 | `GET` | `/runs/{id}/final-review` | ✅ | the reviewable payload — `200` in `awaiting_final_review` **and** in terminal states (`done` / `cancelled` / `failed`); `409 illegal_transition` before the gate. Carries `plan` / `git` / `diff` / `stages` / `review` / `checks` / `manifest` / `decisions` / `publication`. `checks` holds the commit the checks ran against, `ran`, `mandatory_passed`, per-check `results` (`name`, `required`, `status`), and `config` — the project config that defined them (`file`, `present_at_base`, `base_hash`, and `checkout_change` when the source checkout's copy differed at the start of the run — `added`, `removed`, `modified`, or `unreadable` when it could not be read; `present_at_base: false` means the registry was empty). Each decision carries `actor` (`human \| agent \| system`) and `user_id` (whose name it was taken under) — "who let this through" is the question the section answers, and a system-passed automatic gate must never read as the run author approving. |
 | `GET` | `/runs/{id}/publication` | ✅ | → `200 Publication`; requires `run:read`. See [Publication](#publication). |
 | `POST` | `/runs/{id}/publish` | ✅ | no body → `202 Publication` after enqueue; requires `run:publish`; `409` on a failed precondition. |
@@ -187,13 +188,17 @@ its worktree in a different copy.
 
 `cancel` is a terminal abort. The in-flight run is aborted. Teardown records
 `result_commit` and seals the manifest while keeping the worktree and branch.
+Cancel also closes a `failed` run; its manifest keeps the `failed` seal.
 `approve` and `reject` use the same resource retention. A person deletes the
 worktree with `worktree/discard`, then deletes the branch with `cleanup`.
 
 A **failure keeps the worktree**. `failed` keeps the working tree,
 the branch, and the checkpoints exactly as the error left them — the uncommitted
 files may be the only copy of a partially executed stage's work, and a person
-decides what to salvage. Removing that tree afterwards is the explicit,
+decides what to salvage. `POST /runs/{id}/retry` resumes the run from them.
+The retry lifts the manifest's `failed` seal, so the resumed run records into
+the same manifest. `runs.error` is cleared; the `retry` job payload and the
+`run.retried` event keep it as `previous_error`. Removing that tree afterwards is the explicit,
 audited `POST /runs/{id}/worktree/discard` (tree only; the branch survives;
 `cleanup` remains the branch-deleting verb). The endpoint requires a terminal
 or explicitly stopped run with no active job, the worktree's current HEAD

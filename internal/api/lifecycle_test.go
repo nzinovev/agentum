@@ -70,6 +70,7 @@ func TestHumanDecisionPatch_MapsEachActionToItsGateAndDecision(t *testing.T) {
 		{"continue resumes open_questions as continued", "spec", gateOpenQuestions, decisionContinued, "bob"},
 		{"continue resumes user_stop as continued", "spec", gateUserStop, decisionContinued, "bob"},
 		{"cancel rejects via cancel gate", "impl", gateCancel, decisionRejected, "carol"},
+		{"retry sends a failed run back as retried", "impl", gateRetry, decisionRetried, "carol"},
 		{"human edit records edited at human_edit gate", "spec", gateHumanEdit, decisionEdited, "alice"},
 	}
 	for _, testCase := range tests {

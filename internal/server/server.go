@@ -214,6 +214,7 @@ func New(cfg config.Config, log *slog.Logger, dataStore *store.Store) (*Server, 
 	// other, and this table is the whole connection between them.
 	handlerMux := jobs.NewMux(map[string]jobs.Handler{
 		"run":              jobs.HandlerFunc(runnerInst.HandleRun),
+		"retry":            jobs.HandlerFunc(runnerInst.HandleRetry),
 		"continue":         jobs.HandlerFunc(runnerInst.HandleContinue),
 		"advance":          jobs.HandlerFunc(runnerInst.HandleAdvance),
 		"fix_request":      jobs.HandlerFunc(runnerInst.HandleFixRequest),

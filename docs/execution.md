@@ -165,6 +165,7 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | Job kind | Entry point | Triggered by |
 |---|---|---|
 | `run` | fresh run, first stage | `POST /runs/{id}/start` |
+| `retry` | a failed run's current stage, fresh session; the pack entry when it failed before its first stage | `POST /runs/{id}/retry` |
 | `continue` | resume a pause at its current stage; a stop before the first invocation starts at the pack entry | `POST .../continue` or `POST /runs/{id}/continue` before the first invocation |
 | `fix_request` | enter the fixer after human feedback at final review | `POST /runs/{id}/fix-request` |
 | `advance` | next stage, fresh session | `POST .../advance` |
@@ -172,6 +173,10 @@ calls `Runner.Handle`, which dispatches by `kind`:
 | `discard_worktree` | remove a stopped/terminal run's working tree (tree only, branch survives) | `POST /runs/{id}/worktree/discard` |
 | `cancel` | no-op (cancel handler aborts ctx + drives FSM directly) | `POST /runs/{id}/cancel` |
 | `teardown` | record `result_commit` and seal the terminal manifest | enqueued by `approve` / `cancel` / `reject` |
+
+A `retry` job's payload is `{"previous_error": …}`, the `runs.error` the
+retry cleared. The runner emits it as the `run.retried` event before the run
+re-enters the pipeline.
 
 A `continue` job's payload carries the user's continuation text
 (`{"text": …}`; `{}` when the continue carried none). The runner decodes it
@@ -405,12 +410,13 @@ that can't enqueue rolls back the transition):
 | Endpoint | FSM transition | Enqueued kind |
 |---|---|---|
 | `POST /runs/{id}/start` | `created → running` | `run` |
+| `POST /runs/{id}/retry` | `failed → running` | `retry` |
 | `POST .../continue` | `paused_*→ running` | `continue` |
 | `POST .../advance` | `paused_gate → running` | `advance` |
 | `POST /runs/{id}/worktree/reconcile` | `paused_user_stop → running` | `reconcile` |
 | `POST /runs/{id}/worktree/discard` | none (tree disposal, no state change) | `discard_worktree` |
 | `POST .../approve` | `awaiting_final_review → done` | `teardown` |
-| `POST /runs/{id}/cancel` | `*→ cancelled` | `teardown` |
+| `POST /runs/{id}/cancel` | non-terminal or `failed` `→ cancelled` | `teardown` |
 
 A `run` / `continue` / `advance` job is "advance until pause/terminal." Only one
 such job per run should be live at a time — enforced by the FSM (you can't
@@ -449,8 +455,17 @@ delete the worktree or the `agentum/<run-id>` branch. Teardown is enqueued by:
 - `handleCancelRun` / `handleRejectRun` — after the run moves to `cancelled`.
 
 `failed` does not enqueue teardown. It keeps the working tree, branch, and
-checkpoints as the error left them. A failed run is not resumable. A person
-reviews the local result, then starts a new run from a chosen commit.
+checkpoints as the error left them. A person decides what happens next:
+
+| Decision | Endpoint | Result |
+|---|---|---|
+| Retry | `POST /runs/{id}/retry` | `failed → running`; a `retry` job re-enters the failed stage with a fresh session |
+| Close | `POST /runs/{id}/cancel` | `failed → cancelled`; teardown records `result_commit`; the manifest keeps `seal_reason = failed` |
+| Dispose | `worktree/discard`, then `cleanup` | the tree, then the branch, are deleted; the run stays `failed` |
+
+Retry returns `409 illegal_transition` while the run has a pending or running
+job, and after a branch `cleanup` that was not refused. The checkpoints a
+retry resumes from live on that branch.
 
 The teardown job captures the tip of
 `agentum/<run-id>` as `result_commit` on the run's row — the immutable record of
@@ -1229,6 +1244,7 @@ race whatever the bytes say.
 | Init | `POST /runs` creates a manifest row (empty body) | API |
 | Add evidence | `internal/manifest.Service.AddEvidence` merges keys as the runner resolves pack / base_commit / prompts / model / artifacts / git lineage / human-gate decisions. The merge base is the body read under the row lock inside the write transaction, so two concurrent writes cannot lose each other's contribution. | runner / API |
 | Seal | At terminal state, `Seal(reason)` derives `body.missing` and `body.evidence_complete` from the body under the row lock and freezes it. `reason` ∈ `{completed, interrupted, cancelled, failed}` | runner (`teardown` / `failRun`) |
+| Reopen | `POST /runs/{id}/retry` lifts a `failed` seal in the retry transaction and clears `body.missing` and `body.evidence_complete`; the next seal derives them again. Any other seal reason, or a manifest with corrections, returns `409 conflict`. | API |
 | Correct | `POST /runs/{id}/manifest/corrections` adds a linked correction row with a fresh body snapshot. Corrections chain: correction N's body is correction N-1's body with the patch merged in, so the newest correction is the authoritative state by construction. | API |
 
 **Concurrency.** `AddEvidence` computes its merge from the body read under the

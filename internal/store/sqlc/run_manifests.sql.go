@@ -265,6 +265,43 @@ func (q *Queries) ListManifestCorrections(ctx context.Context, arg ListManifestC
 	return items, nil
 }
 
+const reopenFailedManifest = `-- name: ReopenFailedManifest :one
+UPDATE run_manifests
+SET sealed_at = NULL, sealed_by = NULL, seal_reason = NULL, body = $3, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND seal_reason = 'failed'
+RETURNING id, tenant_id, user_id, run_id, body, sealed_at, sealed_by, seal_reason, created_at, updated_at
+`
+
+type ReopenFailedManifestParams struct {
+	ID       string          `json:"id"`
+	TenantID string          `json:"tenant_id"`
+	Body     json.RawMessage `json:"body"`
+}
+
+// Lift a failure seal so a retried run keeps recording into the same manifest.
+// Only seal_reason = 'failed' is reopenable: a failed run is the one terminal
+// state a human may send back into the pipeline, while a completed, cancelled,
+// or rejected seal closes a run that can never run again. The body is replaced
+// in the same statement so the seal-derived fields (missing,
+// evidence_complete) do not outlive the seal they described.
+func (q *Queries) ReopenFailedManifest(ctx context.Context, arg ReopenFailedManifestParams) (RunManifest, error) {
+	row := q.db.QueryRowContext(ctx, reopenFailedManifest, arg.ID, arg.TenantID, arg.Body)
+	var i RunManifest
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.RunID,
+		&i.Body,
+		&i.SealedAt,
+		&i.SealedBy,
+		&i.SealReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const sealManifest = `-- name: SealManifest :one
 UPDATE run_manifests
 SET sealed_at = now(), sealed_by = $3, seal_reason = $4, updated_at = now()
