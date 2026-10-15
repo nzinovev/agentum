@@ -435,7 +435,7 @@ action:
 | `open_questions` | agent asked; needs answers | `POST .../continue` | yes — resume |
 | `gate` | gate passed | `POST .../advance` | **no** — next stage is a fresh invocation |
 | `user_pause` | user requested a pause | `POST .../continue` | only when the current stage owns the last saved session; otherwise a fresh invocation |
-| `fix_checks_failed` / `human_fix_feedback_required` | a human-requested fix needs another attempt | `POST .../continue` with new developer feedback | fresh fixer invocation |
+| `fix_checks_failed` / `human_fix_feedback_required` | a human-requested fix needs another attempt (for checks: they still failed after the automatic check-feedback round) | `POST .../continue` with new developer feedback | fresh fixer invocation |
 
 The three gate **actions** from §3.4:
 

@@ -1168,3 +1168,33 @@ func TestMergeBodies_PublicationPatchReplacesTheSection(t *testing.T) {
 		t.Errorf("an empty patch dropped the publication section: %+v", merged2.Publication)
 	}
 }
+
+// A failed check run the agent was sent back to fix stays in the record after
+// a later run passes, without its output: the latest run is the delivery
+// evidence, the earlier ones say how the run got there.
+func TestMergeCheckEvidenceKeepsEarlierRunsWithoutOutput(t *testing.T) {
+	t.Parallel()
+	failed := &CheckEvidence{Commit: "c1", Ran: true, Results: []CheckResult{{Name: "build", Status: "fail", Stdout: "out", Stderr: "boom"}}}
+	passed := &CheckEvidence{Commit: "c2", Ran: true, MandatoryPassed: true, Results: []CheckResult{{Name: "build", Status: "pass", Stdout: "ok"}}}
+	again := &CheckEvidence{Commit: "c3", Ran: true, MandatoryPassed: true}
+
+	merged := mergeCheckEvidence(mergeCheckEvidence(mergeCheckEvidence(nil, failed), passed), again)
+	if merged.Commit != "c3" || !merged.MandatoryPassed {
+		t.Fatalf("latest snapshot = %+v, want c3", merged)
+	}
+	if len(merged.Previous) != 2 || merged.Previous[0].Commit != "c1" || merged.Previous[1].Commit != "c2" {
+		t.Fatalf("previous = %+v, want c1 then c2", merged.Previous)
+	}
+	earlier := merged.Previous[0].Results[0]
+	if earlier.Status != "fail" || earlier.Stdout != "" || earlier.Stderr != "" {
+		t.Errorf("earlier result = %+v, want status kept and output dropped", earlier)
+	}
+	if failed.Results[0].Stderr != "boom" {
+		t.Error("merging must not strip the output from the caller's snapshot")
+	}
+	for _, previous := range merged.Previous {
+		if previous.Previous != nil {
+			t.Errorf("a previous snapshot must not nest its own history: %+v", previous)
+		}
+	}
+}

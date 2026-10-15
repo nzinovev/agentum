@@ -73,26 +73,33 @@ func TestResponseJSONTagsHaveNoTaskToken(t *testing.T) {
 		errorBody{},
 		manifest.Diff{},
 	}
+	visited := map[reflect.Type]bool{}
 	for _, root := range roots {
-		walkJSONTags(t, reflect.TypeOf(root), reflect.TypeOf(root).String())
+		walkJSONTags(t, reflect.TypeOf(root), reflect.TypeOf(root).String(), visited)
 	}
 }
 
 // walkJSONTags descends through pointers, slices, arrays, and maps into every
 // struct reachable from rootType and checks each field's json tag name. Tag
 // names are split on "_" and compared as tokens, mirroring the route guard's
-// whole-segment rule.
-func walkJSONTags(t *testing.T, typeOfValue reflect.Type, path string) {
+// whole-segment rule. visited stops the walk at a struct already checked, so
+// a recursive type (a manifest section holding its own earlier snapshots)
+// ends instead of descending forever.
+func walkJSONTags(t *testing.T, typeOfValue reflect.Type, path string, visited map[reflect.Type]bool) {
 	t.Helper()
 	switch typeOfValue.Kind() {
 	case reflect.Pointer, reflect.Slice, reflect.Array:
-		walkJSONTags(t, typeOfValue.Elem(), path)
+		walkJSONTags(t, typeOfValue.Elem(), path, visited)
 		return
 	case reflect.Map:
-		walkJSONTags(t, typeOfValue.Key(), path+"[key]")
-		walkJSONTags(t, typeOfValue.Elem(), path+"[value]")
+		walkJSONTags(t, typeOfValue.Key(), path+"[key]", visited)
+		walkJSONTags(t, typeOfValue.Elem(), path+"[value]", visited)
 		return
 	case reflect.Struct:
+		if visited[typeOfValue] {
+			return
+		}
+		visited[typeOfValue] = true
 	default:
 		return
 	}
@@ -108,7 +115,7 @@ func walkJSONTags(t *testing.T, typeOfValue reflect.Type, path string) {
 				t.Errorf("%s: json tag %q carries the reserved token %q; the vocabulary word is \"run\"", fieldPath, tagName, token)
 			}
 		}
-		walkJSONTags(t, field.Type, fieldPath)
+		walkJSONTags(t, field.Type, fieldPath, visited)
 	}
 }
 

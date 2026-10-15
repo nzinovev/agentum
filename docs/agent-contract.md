@@ -56,7 +56,11 @@ context that are **not** pack-owned:
   orchestrator runs these itself at the delivery boundary; the agent is told
   what they are so it can run them to check its own work. The agent's own claim
   that a check passed is **not** evidence — Agentum reads the result from its
-  own executor. The agent cannot change which checks gate delivery.
+  own executor. The agent cannot change which checks gate delivery. When a
+  mandatory check fails on the commit the agent produced, the orchestrator
+  sends the agent back once: the same section then shows each failed check's
+  status, exit code, and the end of its output. The checks run again when that
+  invocation ends, and a second failure stands.
 - **Reference files.** Paths declared under `references:` in `.agentum.yaml`
   name project files that are not in the repository. The orchestrator copies
   them from the local checkout when the task starts and places the copy at
@@ -210,8 +214,9 @@ At final review, a person's required correction is stored as
 active artifact's path and revision in both fixer and reviewer routing blocks.
 The fixer treats the human request as work to complete alongside actionable
 reviewer findings; the reviewer evaluates the correction against the request.
-If a mandatory check fails or review asks for another correction, the run
-pauses before another fixer attempt. Continue requires new developer feedback
+If a mandatory check still fails after the automatic check-feedback round, or
+review asks for another correction, the run pauses before another fixer
+attempt. Continue requires new developer feedback
 and records a new revision containing the original request for this fix cycle
 and the latest follow-up. The fixer also receives the failed check names when
 checks caused the pause. A new request at a later final review starts a new

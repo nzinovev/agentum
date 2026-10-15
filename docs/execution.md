@@ -254,7 +254,7 @@ happened.
 | adapter returned `EventError` | `stop_user` | `paused_user_stop` | `adapter_error` |
 | declared artifact path escapes the worktree | `stop_user` | `paused_user_stop` | `artifact_rejected` |
 | pause requested while running | `stop_user` after the current invocation and checkpoint | `paused_user_stop` | `user_pause` |
-| mandatory check fails during a human-requested fix | `stop_user` | `paused_user_stop` at the fixer | `fix_checks_failed` |
+| mandatory check fails during a human-requested fix, after the automatic check-feedback round | `stop_user` | `paused_user_stop` at the fixer | `fix_checks_failed` |
 | reviewer requests more changes during a human-requested fix | `stop_user` | `paused_user_stop` at the fixer | `human_fix_feedback_required` |
 | resolved transition targets a fixer stage, but the fix budget is spent | `stop_user` | `paused_user_stop` | `fix_budget_exhausted` |
 | a source-writing stage (effective role implementer or fixer) entered while the run's `source_write` approval is absent | `stop_gate` | `paused_gate` (pinned to the **approval stage**, not the refused stage) | `plan_not_approved` |
@@ -300,8 +300,9 @@ At final review, a human can request a fix with required text and the
 `final/fix-request.md` and points the fixer and reviewer to that active
 revision. The fixer works from the existing branch, then review and project
 checks run again. The updated commit is published before the next final
-review. At the next final review, publication updates the draft PR. A failed
-mandatory check pauses at `fix_checks_failed`; a reviewer
+review. At the next final review, publication updates the draft PR. A
+mandatory check that still fails after the automatic check-feedback round
+(see [When checks run](#when-checks-run)) pauses at `fix_checks_failed`; a reviewer
 request for another correction pauses at `human_fix_feedback_required`. Each
 Continue from either pause requires new developer feedback, records a new
 artifact revision for the current fix request, and starts another fixer
@@ -916,10 +917,33 @@ as manifest evidence:
   project defines no checks) is a legitimate configuration recorded as
   `ran: false` so it is not misread as a gate that ran and cleared.
 
-A **mandatory failure blocks delivery**: instead of reaching the review gate, an
-ordinary run fails and keeps its worktree, branch, and artifacts. Its
-`failure_log` lists each failed check's command, status, and output tail. During a
-human-requested fix, it pauses at the fixer with `fix_checks_failed`; the
+A **mandatory failure blocks delivery**, after one automatic attempt to fix it.
+The first mandatory failure in a delivery attempt goes back to the agent that
+wrote the code:
+
+1. The runner picks the latest invocation of an implementer or fixer stage. The
+   reviewer usually ran last, but it cannot write.
+2. That stage runs again and resumes its saved session. Without a saved
+   session, it starts a fresh one. The routing block's Project checks section
+   lists each failed mandatory check with its status, exit code, and the end
+   of its output: at most 8 KiB per check and 24 KiB in total.
+3. When the stage finishes, its work is committed as a checkpoint and the run
+   goes straight back to the terminal stage. The checks run again; review does
+   not, and the human sees the change at final review.
+
+The round is recorded as a `run.check_feedback_sent` event and as a
+`project_checks_failed` transition. It does not spend `fix_cycles`. A delivery
+attempt is the span between two moves of the run into `running` by a person:
+start, Continue, retry, advance, or a fix request. Each gets one round; the
+runner cannot grant itself another. A run with no implementer or fixer
+invocation gets no round.
+
+A mandatory failure after the round stands. An ordinary run fails and keeps
+its worktree, branch, and artifacts. Its `failure_log` lists each failed
+check's command, status, and output tail. The manifest's `checks` section is
+the latest run; `checks.previous` keeps the earlier runs in this run, without
+their output. During a human-requested fix, it pauses at the fixer with
+`fix_checks_failed`; the
 failed check names are available in `GET /runs/{id}.failed_checks` and the
 next invocation's Task section after a human supplies new feedback. Optional
 check failures are recorded as evidence but do not block. A successful run is the

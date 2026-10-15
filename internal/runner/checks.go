@@ -15,39 +15,60 @@ import (
 	"github.com/nzinovev/agentum/internal/taskinput"
 )
 
+// deliveryOutcome is what the delivery boundary tells the loop when it does
+// not end in failure: paused means the run stopped for a person; feedback
+// means a writing stage runs once more to fix the failed checks.
+type deliveryOutcome struct {
+	paused   bool
+	feedback *checkFeedbackEntry
+}
+
 // runDeliveryChecks enforces the orchestrator-owned project checks at the final
 // delivery boundary (a terminal stage reached, or a complete outcome that would
 // fire the final gate). It runs the resolved set against the worktree HEAD —
 // the post-stage checkpoint commit, which is also the commit that will become
 // result_commit — records the outcome as manifest evidence, and blocks
-// delivery when a mandatory check fails. A human-requested fix pauses at its
-// fixer so Continue can try another correction; other mandatory failures fail
-// the run. The boolean reports that pause to the caller. A nil executor (unit
-// tests) is a no-op. A resolution error (e.g. a pack referencing an unknown
-// check name) or a registry load error fails the run: the pack is
-// misconfigured for this project.
-func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) (bool, error) {
+// delivery when a mandatory check fails.
+//
+// The first mandatory failure of a delivery attempt is sent back to the agent
+// that wrote the code (claimCheckFeedback), and the run returns to returnStage
+// to check again; an empty returnStage disables that round. Once the round is
+// spent, a human-requested fix pauses at its fixer so Continue can try another
+// correction, and other failures fail the run. A nil executor (unit tests) is
+// a no-op. A resolution error (e.g. a pack referencing an unknown check name)
+// or a registry load error fails the run: the pack is misconfigured for this
+// project.
+func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun, returnStage string) (deliveryOutcome, error) {
 	if runner.checkExec == nil {
-		return false, nil
+		return deliveryOutcome{}, nil
 	}
 	report, mandatoryPassed, err := runner.enforceProjectChecks(ctx, run)
 	if err != nil {
-		return false, runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
+		return deliveryOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
 	}
-	if !mandatoryPassed {
-		if run.record.ActiveFixRequestRevisionID.Valid {
-			fixers := run.runPack.FixerStages()
-			if len(fixers) == 0 {
-				return false, runner.failRun(ctx, run.record, fmt.Errorf("human fix request has no fixer stage"))
-			}
-			return true, runner.applyPauseDecision(ctx, run.record, Decision{
-				Action: ActionPause, FSMEvent: engine.EventStopUser,
-				StopReason: "fix_checks_failed",
-			}, fixers[0])
+	if mandatoryPassed {
+		return deliveryOutcome{}, nil
+	}
+	if returnStage != "" {
+		entry, claimErr := runner.claimCheckFeedback(ctx, run, report, returnStage)
+		if claimErr != nil {
+			return deliveryOutcome{}, runner.failRun(ctx, run.record, claimErr)
 		}
-		return false, runner.failRun(ctx, run.record, &mandatoryChecksFailedError{report: report})
+		if entry != nil {
+			return deliveryOutcome{feedback: entry}, nil
+		}
 	}
-	return false, nil
+	if run.record.ActiveFixRequestRevisionID.Valid {
+		fixers := run.runPack.FixerStages()
+		if len(fixers) == 0 {
+			return deliveryOutcome{}, runner.failRun(ctx, run.record, fmt.Errorf("human fix request has no fixer stage"))
+		}
+		return deliveryOutcome{paused: true}, runner.applyPauseDecision(ctx, run.record, Decision{
+			Action: ActionPause, FSMEvent: engine.EventStopUser,
+			StopReason: "fix_checks_failed",
+		}, fixers[0])
+	}
+	return deliveryOutcome{}, runner.failRun(ctx, run.record, &mandatoryChecksFailedError{report: report})
 }
 
 // ErrDirtyTreeAtDeliveryBoundary is returned by enforceProjectChecks when the

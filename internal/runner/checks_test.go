@@ -87,9 +87,10 @@ func TestHumanFixCheckFailurePausesAtFixer(t *testing.T) {
 	project := sqlc.Project{ID: "P1", TenantID: "tn", RepoPath: repo, Name: "P"}
 	store := newFakeStore(record, project)
 	runner := New(Deps{Store: store, Packs: &staticSource{pk: runPack}, CheckExec: checks.NewExecutor(checks.ExecutorDeps{})})
-	paused, checkErr := runner.runDeliveryChecks(t.Context(), stageRun{record: record, project: project, runPack: runPack, worktree: checkout})
-	if checkErr != nil || !paused {
-		t.Fatalf("checks paused = %t, err = %v", paused, checkErr)
+	store.record.CheckFeedbackUsed = true // the automatic round is already spent
+	delivery, checkErr := runner.runDeliveryChecks(t.Context(), stageRun{record: record, project: project, runPack: runPack, worktree: checkout}, "done")
+	if checkErr != nil || !delivery.paused {
+		t.Fatalf("checks paused = %t, err = %v", delivery.paused, checkErr)
 	}
 	if store.record.State != "paused_user_stop" || store.record.CurrentStage.String != "fix" ||
 		store.record.StopReason != "fix_checks_failed" {

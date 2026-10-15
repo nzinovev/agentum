@@ -11,6 +11,60 @@ import (
 	"encoding/json"
 )
 
+const claimCheckFeedbackRound = `-- name: ClaimCheckFeedbackRound :one
+UPDATE runs SET check_feedback_used = true, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running' AND check_feedback_used = false
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
+`
+
+type ClaimCheckFeedbackRoundParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+}
+
+// Spend the run's one automatic round of sending failed project checks back
+// to the writing agent. No row means the round was already spent in this
+// delivery attempt, so the failure stands.
+func (q *Queries) ClaimCheckFeedbackRound(ctx context.Context, arg ClaimCheckFeedbackRoundParams) (Run, error) {
+	row := q.db.QueryRowContext(ctx, claimCheckFeedbackRound, arg.ID, arg.TenantID)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.UserID,
+		&i.ProjectID,
+		&i.PipelinePack,
+		&i.Title,
+		&i.State,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CurrentStage,
+		&i.BaseRef,
+		&i.BaseCommit,
+		&i.ResultCommit,
+		&i.Description,
+		&i.Overrides,
+		&i.CheckoutPath,
+		&i.PipelinePackOrigin,
+		&i.StopReason,
+		&i.Error,
+		&i.CancelReason,
+		&i.RouteSource,
+		&i.RouteReason,
+		&i.RouteFallbackCode,
+		&i.RouteFallbackMessage,
+		&i.RouteDecidedAt,
+		&i.RouteTriageInvocationID,
+		&i.PauseRequestedAt,
+		&i.PreviousResultCommit,
+		&i.ActiveFixRequestRevisionID,
+		&i.FixRequestOriginRevisionID,
+		&i.FailureLog,
+		&i.CheckFeedbackUsed,
+	)
+	return i, err
+}
+
 const countActiveRunsOnCheckout = `-- name: CountActiveRunsOnCheckout :one
 SELECT count(*) FROM runs
 WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
@@ -39,7 +93,7 @@ INSERT INTO runs (tenant_id, user_id, project_id, pipeline_pack,
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', NULLIF($9::text, ''),
         CASE WHEN $9::text = 'request' THEN 'pipeline_pack was set in POST /runs. Triage did not run for this run.' ELSE '' END,
         CASE WHEN $9::text = 'request' THEN now() ELSE NULL END)
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type CreateRunParams struct {
@@ -99,12 +153,13 @@ func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (Run, erro
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
 
 const findOrphanedRunningRuns = `-- name: FindOrphanedRunningRuns :many
-SELECT runningrun.id, runningrun.tenant_id, runningrun.user_id, runningrun.project_id, runningrun.pipeline_pack, runningrun.title, runningrun.state, runningrun.created_at, runningrun.updated_at, runningrun.current_stage, runningrun.base_ref, runningrun.base_commit, runningrun.result_commit, runningrun.description, runningrun.overrides, runningrun.checkout_path, runningrun.pipeline_pack_origin, runningrun.stop_reason, runningrun.error, runningrun.cancel_reason, runningrun.route_source, runningrun.route_reason, runningrun.route_fallback_code, runningrun.route_fallback_message, runningrun.route_decided_at, runningrun.route_triage_invocation_id, runningrun.pause_requested_at, runningrun.previous_result_commit, runningrun.active_fix_request_revision_id, runningrun.fix_request_origin_revision_id, runningrun.failure_log FROM runs runningRun
+SELECT runningrun.id, runningrun.tenant_id, runningrun.user_id, runningrun.project_id, runningrun.pipeline_pack, runningrun.title, runningrun.state, runningrun.created_at, runningrun.updated_at, runningrun.current_stage, runningrun.base_ref, runningrun.base_commit, runningrun.result_commit, runningrun.description, runningrun.overrides, runningrun.checkout_path, runningrun.pipeline_pack_origin, runningrun.stop_reason, runningrun.error, runningrun.cancel_reason, runningrun.route_source, runningrun.route_reason, runningrun.route_fallback_code, runningrun.route_fallback_message, runningrun.route_decided_at, runningrun.route_triage_invocation_id, runningrun.pause_requested_at, runningrun.previous_result_commit, runningrun.active_fix_request_revision_id, runningrun.fix_request_origin_revision_id, runningrun.failure_log, runningrun.check_feedback_used FROM runs runningRun
 WHERE runningRun.tenant_id = $1
   AND runningRun.state = 'running'
   AND NOT EXISTS (
@@ -162,6 +217,7 @@ func (q *Queries) FindOrphanedRunningRuns(ctx context.Context, tenantID string) 
 			&i.ActiveFixRequestRevisionID,
 			&i.FixRequestOriginRevisionID,
 			&i.FailureLog,
+			&i.CheckFeedbackUsed,
 		); err != nil {
 			return nil, err
 		}
@@ -177,7 +233,7 @@ func (q *Queries) FindOrphanedRunningRuns(ctx context.Context, tenantID string) 
 }
 
 const getRun = `-- name: GetRun :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log FROM runs WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used FROM runs WHERE id = $1 AND tenant_id = $2
 `
 
 type GetRunParams struct {
@@ -220,12 +276,13 @@ func (q *Queries) GetRun(ctx context.Context, arg GetRunParams) (Run, error) {
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
 
 const getRunForUpdate = `-- name: GetRunForUpdate :one
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used FROM runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE
 `
 
 type GetRunForUpdateParams struct {
@@ -271,12 +328,13 @@ func (q *Queries) GetRunForUpdate(ctx context.Context, arg GetRunForUpdateParams
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
 
 const listRunsByProject = `-- name: ListRunsByProject :many
-SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log FROM runs
+SELECT id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used FROM runs
 WHERE tenant_id = $1 AND project_id = $2
 ORDER BY CASE WHEN state IN ('paused_open_questions', 'paused_gate', 'paused_user_stop', 'awaiting_final_review') THEN 0 ELSE 1 END,
          updated_at DESC, id DESC
@@ -336,6 +394,7 @@ func (q *Queries) ListRunsByProject(ctx context.Context, arg ListRunsByProjectPa
 			&i.ActiveFixRequestRevisionID,
 			&i.FixRequestOriginRevisionID,
 			&i.FailureLog,
+			&i.CheckFeedbackUsed,
 		); err != nil {
 			return nil, err
 		}
@@ -354,7 +413,7 @@ const rebindActiveCheckouts = `-- name: RebindActiveCheckouts :many
 UPDATE runs SET checkout_path = $4, updated_at = now()
 WHERE tenant_id = $1 AND project_id = $2 AND checkout_path = $3
   AND state NOT IN ('done', 'failed', 'cancelled')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type RebindActiveCheckoutsParams struct {
@@ -414,6 +473,7 @@ func (q *Queries) RebindActiveCheckouts(ctx context.Context, arg RebindActiveChe
 			&i.ActiveFixRequestRevisionID,
 			&i.FixRequestOriginRevisionID,
 			&i.FailureLog,
+			&i.CheckFeedbackUsed,
 		); err != nil {
 			return nil, err
 		}
@@ -431,6 +491,7 @@ func (q *Queries) RebindActiveCheckouts(ctx context.Context, arg RebindActiveChe
 const reopenFinalReviewForFix = `-- name: ReopenFinalReviewForFix :one
 UPDATE runs SET state = $5, current_stage = $3,
     previous_result_commit = result_commit, result_commit = NULL,
+    check_feedback_used = false,
     active_fix_request_revision_id = $6,
     fix_request_origin_revision_id = $6,
     stop_reason = '', pause_requested_at = NULL, updated_at = now()
@@ -441,7 +502,7 @@ WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_revi
                 AND artifact_revisions.name = 'final/fix-request.md'
                 AND artifact_revisions.id = $6
                 AND artifact_revisions.is_current = true)
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type ReopenFinalReviewForFixParams struct {
@@ -499,6 +560,7 @@ func (q *Queries) ReopenFinalReviewForFix(ctx context.Context, arg ReopenFinalRe
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -511,7 +573,7 @@ UPDATE runs SET state = $4, current_stage = $3,
     result_commit = NULL, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
   AND state IN ('paused_gate', 'paused_open_questions', 'paused_user_stop', 'awaiting_final_review')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type ReopenPlanGateParams struct {
@@ -563,6 +625,7 @@ func (q *Queries) ReopenPlanGate(ctx context.Context, arg ReopenPlanGateParams) 
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -570,7 +633,7 @@ func (q *Queries) ReopenPlanGate(ctx context.Context, arg ReopenPlanGateParams) 
 const requestRunPause = `-- name: RequestRunPause :one
 UPDATE runs SET pause_requested_at = COALESCE(pause_requested_at, now()), updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND state = 'running'
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type RequestRunPauseParams struct {
@@ -615,6 +678,7 @@ func (q *Queries) RequestRunPause(ctx context.Context, arg RequestRunPauseParams
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -624,7 +688,7 @@ UPDATE runs SET pipeline_pack = $3, route_source = $4, route_reason = $5,
     route_fallback_code = $6, route_fallback_message = $7,
     route_triage_invocation_id = $8, route_decided_at = now(), updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND route_source IS NULL AND state IN ('created', 'running')
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SelectRunRouteParams struct {
@@ -682,6 +746,7 @@ func (q *Queries) SelectRunRoute(ctx context.Context, arg SelectRunRouteParams) 
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -689,7 +754,7 @@ func (q *Queries) SelectRunRoute(ctx context.Context, arg SelectRunRouteParams) 
 const setActiveFixRequestRevision = `-- name: SetActiveFixRequestRevision :one
 UPDATE runs SET active_fix_request_revision_id = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND state = 'running'
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SetActiveFixRequestRevisionParams struct {
@@ -735,6 +800,7 @@ func (q *Queries) SetActiveFixRequestRevision(ctx context.Context, arg SetActive
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -742,7 +808,7 @@ func (q *Queries) SetActiveFixRequestRevision(ctx context.Context, arg SetActive
 const setBaseCommit = `-- name: SetBaseCommit :one
 UPDATE runs SET base_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND base_commit IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SetBaseCommitParams struct {
@@ -792,6 +858,7 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (R
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -799,7 +866,7 @@ func (q *Queries) SetBaseCommit(ctx context.Context, arg SetBaseCommitParams) (R
 const setCheckoutPath = `-- name: SetCheckoutPath :one
 UPDATE runs SET checkout_path = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND checkout_path = ''
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SetCheckoutPathParams struct {
@@ -850,6 +917,7 @@ func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -857,7 +925,7 @@ func (q *Queries) SetCheckoutPath(ctx context.Context, arg SetCheckoutPathParams
 const setPipelinePackOrigin = `-- name: SetPipelinePackOrigin :one
 UPDATE runs SET pipeline_pack_origin = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2 AND pipeline_pack_origin IS NULL
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SetPipelinePackOriginParams struct {
@@ -907,6 +975,7 @@ func (q *Queries) SetPipelinePackOrigin(ctx context.Context, arg SetPipelinePack
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -914,7 +983,7 @@ func (q *Queries) SetPipelinePackOrigin(ctx context.Context, arg SetPipelinePack
 const setResultCommit = `-- name: SetResultCommit :one
 UPDATE runs SET result_commit = $3, updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type SetResultCommitParams struct {
@@ -960,6 +1029,7 @@ func (q *Queries) SetResultCommit(ctx context.Context, arg SetResultCommitParams
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
@@ -971,7 +1041,7 @@ UPDATE runs SET current_stage = $3, state = $4,
     pause_requested_at = CASE WHEN $4::text = 'running' THEN pause_requested_at ELSE NULL END,
     updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type UpdateRunStageParams struct {
@@ -1026,12 +1096,18 @@ func (q *Queries) UpdateRunStage(ctx context.Context, arg UpdateRunStageParams) 
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }
 
 const updateRunState = `-- name: UpdateRunState :one
 UPDATE runs SET state = $3,
+    -- A person moving the run back to running (start, continue, retry) opens a
+    -- new delivery attempt, which gets its own check-feedback round. Only
+    -- the API resumes a run through this query; the runner never re-enters
+    -- running here, so its own loop cannot refill the round.
+    check_feedback_used = CASE WHEN $3::text = 'running' AND state <> 'running' THEN false ELSE check_feedback_used END,
     stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN $4::text ELSE '' END,
     error = CASE WHEN $3::text = 'failed' THEN $5::text ELSE '' END,
     failure_log = CASE WHEN $3::text = 'failed' THEN $6::text ELSE '' END,
@@ -1039,7 +1115,7 @@ UPDATE runs SET state = $3,
     pause_requested_at = CASE WHEN $3::text = 'running' THEN pause_requested_at ELSE NULL END,
     updated_at = now()
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log
+RETURNING id, tenant_id, user_id, project_id, pipeline_pack, title, state, created_at, updated_at, current_stage, base_ref, base_commit, result_commit, description, overrides, checkout_path, pipeline_pack_origin, stop_reason, error, cancel_reason, route_source, route_reason, route_fallback_code, route_fallback_message, route_decided_at, route_triage_invocation_id, pause_requested_at, previous_result_commit, active_fix_request_revision_id, fix_request_origin_revision_id, failure_log, check_feedback_used
 `
 
 type UpdateRunStateParams struct {
@@ -1095,6 +1171,7 @@ func (q *Queries) UpdateRunState(ctx context.Context, arg UpdateRunStateParams) 
 		&i.ActiveFixRequestRevisionID,
 		&i.FixRequestOriginRevisionID,
 		&i.FailureLog,
+		&i.CheckFeedbackUsed,
 	)
 	return i, err
 }

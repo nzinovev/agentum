@@ -120,6 +120,7 @@ type Run struct {
 	ActiveFixRequestRevisionID sql.NullString  `json:"active_fix_request_revision_id"`
 	FixRequestOriginRevisionID sql.NullString  `json:"fix_request_origin_revision_id"`
 	FailureLog                 string          `json:"failure_log"`
+	CheckFeedbackUsed          bool            `json:"check_feedback_used"`
 }
 
 type RunApproval struct {

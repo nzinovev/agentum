@@ -67,8 +67,13 @@ type Block struct {
 	// The agent learns WHAT the checks are; it cannot change WHICH checks gate
 	// delivery. Empty renders nothing. The runner maps checks.Item onto this
 	// plain struct so routing has no checks-package import.
-	Checks       []CheckRef
-	RouteCatalog []RouteRef
+	Checks []CheckRef
+	// CheckFailures, when set, carries the mandatory checks that failed on
+	// the invocation's own checkpoint, with their output, into the Project
+	// checks section. It is set only on the one invocation the orchestrator
+	// sends back to fix them.
+	CheckFailures *CheckFailuresRef
+	RouteCatalog  []RouteRef
 
 	// References are the project's reference files: paths declared in
 	// .agentum.yaml that are not in the repository, which the orchestrator
@@ -158,6 +163,23 @@ type CheckRef struct {
 	Command     []string // the arg vector (no shell)
 	Description string   // human-readable purpose, when set
 	Required    bool     // true for a mandatory (baseline) check
+}
+
+// CheckFailuresRef is the orchestrator's report of failed mandatory checks on
+// one commit, rendered for the agent that wrote it.
+type CheckFailuresRef struct {
+	Commit string // the checkpoint commit the checks ran on
+	Failed []CheckFailure
+}
+
+// CheckFailure is one failed mandatory check. Output is the tail of the
+// check's stderr and stdout, already capped by the runner.
+type CheckFailure struct {
+	Name     string
+	Status   string // fail, timeout, or error
+	ExitCode int
+	Reason   string // the executor's cause for timeout or error
+	Output   string
 }
 
 // ReferenceRef is one declared reference path rendered into the routing
