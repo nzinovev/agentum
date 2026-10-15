@@ -35,7 +35,6 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) (bool
 		return false, runner.failRun(ctx, run.record, fmt.Errorf("project checks: %w", err))
 	}
 	if !mandatoryPassed {
-		failed := report.FailedMandatory()
 		if run.record.ActiveFixRequestRevisionID.Valid {
 			fixers := run.runPack.FixerStages()
 			if len(fixers) == 0 {
@@ -46,8 +45,7 @@ func (runner *Runner) runDeliveryChecks(ctx context.Context, run stageRun) (bool
 				StopReason: "fix_checks_failed",
 			}, fixers[0])
 		}
-		return false, runner.failRun(ctx, run.record,
-			fmt.Errorf("mandatory project check failed: %s", strings.Join(failed, ", ")))
+		return false, runner.failRun(ctx, run.record, &mandatoryChecksFailedError{report: report})
 	}
 	return false, nil
 }

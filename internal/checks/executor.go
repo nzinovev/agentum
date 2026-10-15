@@ -232,14 +232,18 @@ func (executor *Executor) outputCap(definition Definition) int {
 	return executor.defaultMaxOutput
 }
 
-// limitedBuffer is a byte buffer that stops storing after cap bytes. The process
-// keeps running (and writing) once the cap is hit; the excess is dropped so a
-// check that emits gigabytes cannot balloon memory or the manifest. Truncated is
-// true when output was dropped.
+// limitedBuffer keeps at most cap bytes of a stream: the first half and the
+// last half, with the dropped middle replaced by a marker. Both ends matter: a
+// compiler names the first error at the top, a test runner prints its failures
+// and summary at the bottom, and the tail is what a person or an agent reads to
+// decide the fix. The process keeps running (and writing) once the cap is hit;
+// the middle is discarded as it streams so a check that emits gigabytes cannot
+// balloon memory or the manifest.
 type limitedBuffer struct {
-	cap       int
-	truncated bool
-	buf       bytes.Buffer
+	cap     int
+	head    bytes.Buffer
+	tail    []byte
+	dropped int64
 }
 
 func newLimitedBuffer(cap int) *limitedBuffer {
@@ -250,30 +254,42 @@ func newLimitedBuffer(cap int) *limitedBuffer {
 }
 
 func (buffer *limitedBuffer) Write(chunk []byte) (int, error) {
-	if buffer.cap > 0 && buffer.buf.Len() >= buffer.cap {
-		buffer.truncated = true
+	if buffer.cap <= 0 {
+		return buffer.head.Write(chunk)
+	}
+	headCap := buffer.cap / 2
+	tailCap := buffer.cap - headCap
+	rest := chunk
+	if room := headCap - buffer.head.Len(); room > 0 {
+		taken := min(room, len(rest))
+		buffer.head.Write(rest[:taken])
+		rest = rest[taken:]
+	}
+	if len(rest) == 0 {
 		return len(chunk), nil
 	}
-	if buffer.cap <= 0 {
-		return buffer.buf.Write(chunk)
-	}
-	remaining := buffer.cap - buffer.buf.Len()
-	if len(chunk) > remaining {
-		buffer.truncated = true
-	}
-	written, err := buffer.buf.Write(chunk[:min(remaining, len(chunk))])
-	if err != nil {
-		return written, err
+	buffer.tail = append(buffer.tail, rest...)
+	// Compact only once the tail holds twice its cap, so a stream of small
+	// writes costs amortized O(1) per byte instead of a copy per write.
+	if len(buffer.tail) > 2*tailCap {
+		excess := len(buffer.tail) - tailCap
+		buffer.dropped += int64(excess)
+		buffer.tail = append(buffer.tail[:0], buffer.tail[excess:]...)
 	}
 	return len(chunk), nil
 }
 
 func (buffer *limitedBuffer) String() string {
-	out := buffer.buf.String()
-	if buffer.truncated {
-		out += "\n...[truncated]"
+	tail := buffer.tail
+	dropped := buffer.dropped
+	if tailCap := buffer.cap - buffer.cap/2; buffer.cap > 0 && len(tail) > tailCap {
+		dropped += int64(len(tail) - tailCap)
+		tail = tail[len(tail)-tailCap:]
 	}
-	return out
+	if dropped == 0 {
+		return buffer.head.String() + string(tail)
+	}
+	return buffer.head.String() + fmt.Sprintf("\n...[truncated %d bytes]...\n", dropped) + string(tail)
 }
 
 // scrubbedEnv returns the current environment with provider credentials and

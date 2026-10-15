@@ -27,6 +27,7 @@ LIMIT $3 OFFSET $4;
 UPDATE runs SET state = $3,
     stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
     error = CASE WHEN $3::text = 'failed' THEN sqlc.arg(error)::text ELSE '' END,
+    failure_log = CASE WHEN $3::text = 'failed' THEN sqlc.arg(failure_log)::text ELSE '' END,
     cancel_reason = CASE WHEN $3::text = 'cancelled' THEN sqlc.arg(cancel_reason)::text ELSE '' END,
     pause_requested_at = CASE WHEN $3::text = 'running' THEN pause_requested_at ELSE NULL END,
     updated_at = now()
@@ -39,7 +40,7 @@ RETURNING *;
 -- always set. Used by the runner as it walks the pack's stages.
 UPDATE runs SET current_stage = $3, state = $4,
     stop_reason = CASE WHEN $4::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
-    error = '', cancel_reason = '',
+    error = '', failure_log = '', cancel_reason = '',
     pause_requested_at = CASE WHEN $4::text = 'running' THEN pause_requested_at ELSE NULL END,
     updated_at = now()
 WHERE id = $1 AND tenant_id = $2

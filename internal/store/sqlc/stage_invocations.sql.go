@@ -16,7 +16,7 @@ import (
 const createStageInvocation = `-- name: CreateStageInvocation :one
 INSERT INTO stage_invocations (tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, capability_profile, cycle, kind)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11::text = '' THEN 'stage' ELSE $11::text END)
-RETURNING id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind
+RETURNING id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind, error
 `
 
 type CreateStageInvocationParams struct {
@@ -65,6 +65,7 @@ func (q *Queries) CreateStageInvocation(ctx context.Context, arg CreateStageInvo
 		&i.CapabilityProfile,
 		&i.Cycle,
 		&i.Kind,
+		&i.Error,
 	)
 	return i, err
 }
@@ -98,7 +99,7 @@ func (q *Queries) FinishStageInvocation(ctx context.Context, arg FinishStageInvo
 }
 
 const getStageInvocation = `-- name: GetStageInvocation :one
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations WHERE id = $1 AND tenant_id = $2
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind, error FROM stage_invocations WHERE id = $1 AND tenant_id = $2
 `
 
 type GetStageInvocationParams struct {
@@ -126,12 +127,13 @@ func (q *Queries) GetStageInvocation(ctx context.Context, arg GetStageInvocation
 		&i.CapabilityProfile,
 		&i.Cycle,
 		&i.Kind,
+		&i.Error,
 	)
 	return i, err
 }
 
 const latestStageForRun = `-- name: LatestStageForRun :one
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind, error FROM stage_invocations
 WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence DESC
 LIMIT 1
@@ -162,12 +164,13 @@ func (q *Queries) LatestStageForRun(ctx context.Context, arg LatestStageForRunPa
 		&i.CapabilityProfile,
 		&i.Cycle,
 		&i.Kind,
+		&i.Error,
 	)
 	return i, err
 }
 
 const listStageInvocationsForRun = `-- name: ListStageInvocationsForRun :many
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind, error FROM stage_invocations
 WHERE run_id = $1 AND tenant_id = $2 AND kind = 'stage'
 ORDER BY sequence ASC
 `
@@ -205,6 +208,7 @@ func (q *Queries) ListStageInvocationsForRun(ctx context.Context, arg ListStageI
 			&i.CapabilityProfile,
 			&i.Cycle,
 			&i.Kind,
+			&i.Error,
 		); err != nil {
 			return nil, err
 		}
@@ -220,7 +224,7 @@ func (q *Queries) ListStageInvocationsForRun(ctx context.Context, arg ListStageI
 }
 
 const listUnfinishedTriageInvocationsForRun = `-- name: ListUnfinishedTriageInvocationsForRun :many
-SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind FROM stage_invocations
+SELECT id, tenant_id, user_id, run_id, stage, sequence, session_id, resume_of, stop_reason, pending_edits, result, started_at, finished_at, capability_profile, cycle, kind, error FROM stage_invocations
 WHERE run_id = $1 AND tenant_id = $2 AND kind = 'triage' AND finished_at IS NULL
 ORDER BY started_at ASC
 `
@@ -257,6 +261,7 @@ func (q *Queries) ListUnfinishedTriageInvocationsForRun(ctx context.Context, arg
 			&i.CapabilityProfile,
 			&i.Cycle,
 			&i.Kind,
+			&i.Error,
 		); err != nil {
 			return nil, err
 		}
@@ -293,6 +298,25 @@ func (q *Queries) MaxCycleForStages(ctx context.Context, arg MaxCycleForStagesPa
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const setStageInvocationError = `-- name: SetStageInvocationError :exec
+UPDATE stage_invocations SET error = $3
+WHERE id = $1 AND tenant_id = $2
+`
+
+type SetStageInvocationErrorParams struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+	Error    string `json:"error"`
+}
+
+// The adapter's error text, stderr tail included, for an attempt that ended
+// without a result. It is the only copy: the runner keeps nothing else of why
+// the runtime failed, and the failed-run log reads it from here.
+func (q *Queries) SetStageInvocationError(ctx context.Context, arg SetStageInvocationErrorParams) error {
+	_, err := q.db.ExecContext(ctx, setStageInvocationError, arg.ID, arg.TenantID, arg.Error)
+	return err
 }
 
 const setStageSession = `-- name: SetStageSession :exec

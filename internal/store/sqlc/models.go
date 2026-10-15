@@ -119,6 +119,7 @@ type Run struct {
 	PreviousResultCommit       sql.NullString  `json:"previous_result_commit"`
 	ActiveFixRequestRevisionID sql.NullString  `json:"active_fix_request_revision_id"`
 	FixRequestOriginRevisionID sql.NullString  `json:"fix_request_origin_revision_id"`
+	FailureLog                 string          `json:"failure_log"`
 }
 
 type RunApproval struct {
@@ -213,4 +214,5 @@ type StageInvocation struct {
 	CapabilityProfile pqtype.NullRawMessage `json:"capability_profile"`
 	Cycle             int32                 `json:"cycle"`
 	Kind              string                `json:"kind"`
+	Error             string                `json:"error"`
 }

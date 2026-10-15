@@ -161,6 +161,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
   // A run that stopped before the runner created its worktree has no local resources to keep or delete.
   const noLocalResources = (item.worktree?.state || "not_created") === "not_created" && (item.branch_state || "not_created") === "not_created";
   const resourcesNote = noLocalResources ? "No worktree or branch was created." : item.worktree?.state === "removed" && item.branch_state === "removed" ? "The worktree and branch were deleted." : "The worktree and branch are kept until you delete them.";
+  const worktreeKept = !["not_created", "removing", "removed"].includes(item.worktree?.state || "not_created");
   const previousState = useRef(item.state);
   const previousSavedRevision = useRef(savedRevisionID);
   useEffect(() => {
@@ -308,7 +309,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
     paused_user_stop: reason === "user_pause" ? "The current invocation finished and its checkpoint was saved. Leave a note or continue." : reason === "base_not_on_target" ? "The base carries commits that the publication target branch does not have." : "Review the reason and choose how to continue.",
     awaiting_final_review: `Result commit ${short(item.result_commit, 7)} on ${item.branch}.`,
     done: `Result commit ${short(item.result_commit, 7)}. Local resources are kept.`,
-    failed: !retryable ? "The run branch was deleted, so the run cannot be retried." : noLocalResources ? `Retry starts the run again. ${resourcesNote}` : `Retry restarts ${item.current_stage || "the run"} from its last checkpoint. ${resourcesNote}`,
+    failed: !retryable ? "The run branch was deleted, so the run cannot be retried." : noLocalResources ? `Retry starts the run again. ${resourcesNote}` : `${worktreeKept ? "Your work is saved: the worktree is kept exactly as the error left it, including uncommitted files, and the branch keeps its checkpoints." : resourcesNote} Retry restarts ${item.current_stage || "the run"} from its last checkpoint.`,
     cancelled: resourcesNote,
   };
   const dialogTitles: Record<DialogKind, string> = { cancel: "Cancel this run?", reject_plan: "Reject the plan and end the run?", approve_result: "Accept the result?", reject_result: "Reject the result?", discard: "Delete the worktree?", cleanup: "Delete the branch?" };
@@ -330,7 +331,7 @@ export function RunActionPanel({ item, history, revisions, stale, review, public
         </>}
         {state === "paused_open_questions" && <ol className="questions">{(item.open_questions || []).map((question, index) => <li key={index}>{question}</li>)}</ol>}
         {state === "paused_user_stop" && item.checkpoint && <div className="run-stop-meta">Last checkpoint <code>{item.checkpoint.label} · {short(item.checkpoint.commit, 7)}</code><span> · {latest?.session_id && latest.stage === item.current_stage ? `session saved · #${latest.sequence}` : "new invocation on Continue"}</span></div>}
-        {state === "failed" && item.error && <pre className="failure-detail">{item.error}</pre>}
+        {state === "failed" && (item.failure_log || item.error) && <pre className="failure-detail" tabIndex={0} aria-label="Failure log">{item.failure_log || item.error}</pre>}
       </div>
       <div className="run-action-side">
         {state === "paused_gate" && atPlanGate && <>

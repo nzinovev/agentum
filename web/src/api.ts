@@ -16,6 +16,7 @@ export type Run = {
   current_stage: string;
   stop_reason: string;
   error: string;
+  failure_log?: string;
   cancel_reason: string;
   open_questions?: string[];
   plan_edits?: { used: number; max: number };
@@ -89,6 +90,7 @@ export type Invocation = {
   stage: string;
   cycle: number;
   stop_reason?: string;
+  error?: string;
   resume_of?: string;
   session_id?: string;
   started_at: string;

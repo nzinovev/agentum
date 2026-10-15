@@ -238,6 +238,11 @@ func TestInvocationEvidence_RefusedStartRecordsStopReasonWithoutTelemetry(t *tes
 			t.Errorf("the open half must have landed before the refusal: %+v", record)
 		}
 	}
+	// The refusal text is the only account of why nothing ran; the failed-run
+	// log reads it off the invocation row.
+	if got := store.invocations[0].Error; got != "refused for the test" {
+		t.Errorf("invocation error = %q, want the adapter's refusal", got)
+	}
 }
 
 // TestInvokeStage_MissingExecutionPlanEntryRefuses: the run-start plan covers

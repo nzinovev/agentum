@@ -75,6 +75,8 @@ func (store *fakeStore) UpdateRunState(_ context.Context, arg sqlc.UpdateRunStat
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.record.State = arg.State
+	store.record.Error = arg.Error
+	store.record.FailureLog = arg.FailureLog
 	if arg.State != "running" {
 		store.record.PauseRequestedAt = sql.NullTime{}
 	}
@@ -158,6 +160,16 @@ func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.Finish
 			store.invocations[invocationIdx].StopReason = arg.StopReason
 			store.invocations[invocationIdx].FinishedAt = sql.NullTime{Time: time.Now(), Valid: true}
 			return nil
+		}
+	}
+	return nil
+}
+func (store *fakeStore) SetStageInvocationError(_ context.Context, arg sqlc.SetStageInvocationErrorParams) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for invocationIdx := range store.invocations {
+		if store.invocations[invocationIdx].ID == arg.ID {
+			store.invocations[invocationIdx].Error = arg.Error
 		}
 	}
 	return nil
