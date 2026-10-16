@@ -384,6 +384,10 @@ type CheckEvidence struct {
 	Ran              bool          `json:"ran"`
 	MandatoryPassed  bool          `json:"mandatory_passed"`
 	Results          []CheckResult `json:"results,omitempty"`
+	// Previous holds the earlier runs of the checks in this run, oldest first,
+	// without their output. A failure the agent was sent back to fix is part
+	// of the record even after a later run passes.
+	Previous []CheckEvidence `json:"previous,omitempty"`
 }
 
 // CheckResult is one check outcome. It carries the definition revision (so a
@@ -1273,9 +1277,28 @@ func firstNonEmpty(preferred, fallback string) string {
 	return fallback
 }
 
-// mergeCheckEvidence replaces the delivery boundary snapshot. The runner
-// records the complete result set for one commit each time checks run, so
-// retaining an earlier pass would pair it with a later failing commit.
-func mergeCheckEvidence(_ *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
-	return patch
+// mergeCheckEvidence replaces the delivery boundary snapshot and moves the
+// one it replaces into Previous. The runner records the complete result set
+// for one commit each time checks run, so merging results across runs would
+// pair an earlier pass with a later failing commit. Previous drops the
+// output: it records that a run happened and how it ended, and keeping every
+// run's capped output would grow the manifest with each fix cycle.
+func mergeCheckEvidence(existing *CheckEvidence, patch *CheckEvidence) *CheckEvidence {
+	if existing == nil {
+		return patch
+	}
+	merged := *patch
+	merged.Previous = append(append([]CheckEvidence(nil), existing.Previous...), withoutCheckOutput(*existing))
+	return &merged
+}
+
+func withoutCheckOutput(evidence CheckEvidence) CheckEvidence {
+	evidence.Previous = nil
+	results := make([]CheckResult, len(evidence.Results))
+	for i, result := range evidence.Results {
+		result.Stdout, result.Stderr = "", ""
+		results[i] = result
+	}
+	evidence.Results = results
+	return evidence
 }

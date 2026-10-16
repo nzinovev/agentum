@@ -103,6 +103,13 @@ Once tagged releases begin, this project adheres to
   before.
 
 ### Changed
+- **A failed mandatory check goes back to the agent once before the run
+  fails.** Before this, the first failure of a check from `.agentum.yaml`
+  failed the run, or paused a human fix at `fix_checks_failed`. The last
+  implementer or fixer session now receives each failed check's output, and
+  the checks run again without another review. A second failure fails or
+  pauses the run as before. The round does not spend `fix_cycles`; nothing to
+  do. (#64)
 - **Agentum now requires opencode 2.** opencode 2 removed flags and listings
   the adapter used, so every stage and triage failed with `exit status 1`.
   Upgrade opencode to 2.0 or newer; on an older runtime Agentum logs

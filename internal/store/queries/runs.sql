@@ -25,6 +25,11 @@ LIMIT $3 OFFSET $4;
 
 -- name: UpdateRunState :one
 UPDATE runs SET state = $3,
+    -- A person moving the run back to running (start, continue, retry) opens a
+    -- new delivery attempt, which gets its own check-feedback round. Only
+    -- the API resumes a run through this query; the runner never re-enters
+    -- running here, so its own loop cannot refill the round.
+    check_feedback_used = CASE WHEN $3::text = 'running' AND state <> 'running' THEN false ELSE check_feedback_used END,
     stop_reason = CASE WHEN $3::text IN ('paused_open_questions', 'paused_gate', 'paused_user_stop') THEN sqlc.arg(stop_reason)::text ELSE '' END,
     error = CASE WHEN $3::text = 'failed' THEN sqlc.arg(error)::text ELSE '' END,
     failure_log = CASE WHEN $3::text = 'failed' THEN sqlc.arg(failure_log)::text ELSE '' END,
@@ -72,6 +77,7 @@ RETURNING *;
 -- not to an earlier request the artifact's revision chain also holds.
 UPDATE runs SET state = sqlc.arg(next_state), current_stage = $3,
     previous_result_commit = result_commit, result_commit = NULL,
+    check_feedback_used = false,
     active_fix_request_revision_id = sqlc.arg(fix_revision_id),
     fix_request_origin_revision_id = sqlc.arg(fix_revision_id),
     stop_reason = '', pause_requested_at = NULL, updated_at = now()
@@ -82,6 +88,14 @@ WHERE runs.id = $1 AND runs.tenant_id = $2 AND runs.state = 'awaiting_final_revi
                 AND artifact_revisions.name = 'final/fix-request.md'
                 AND artifact_revisions.id = sqlc.arg(fix_revision_id)
                 AND artifact_revisions.is_current = true)
+RETURNING *;
+
+-- name: ClaimCheckFeedbackRound :one
+-- Spend the run's one automatic round of sending failed project checks back
+-- to the writing agent. No row means the round was already spent in this
+-- delivery attempt, so the failure stands.
+UPDATE runs SET check_feedback_used = true, updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND state = 'running' AND check_feedback_used = false
 RETURNING *;
 
 -- name: SetActiveFixRequestRevision :one

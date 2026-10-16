@@ -119,6 +119,11 @@ type stageTransition struct {
 	// findingsCount is the number of findings in the predecessor's verdict,
 	// carried so commit 7's ReviewFindings.Count does not re-parse the artifact.
 	findingsCount int
+
+	// checkFeedback is set when the stage runs to fix failed project checks.
+	// It puts the failures in the routing block and sends the stage straight
+	// back to the delivery boundary when it finishes.
+	checkFeedback *checkFeedback
 }
 
 // buildTransitionContext assembles the durable-state bundle for stageID from

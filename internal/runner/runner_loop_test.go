@@ -74,6 +74,9 @@ func (store *fakeStore) GetProject(_ context.Context, _ sqlc.GetProjectParams) (
 func (store *fakeStore) UpdateRunState(_ context.Context, arg sqlc.UpdateRunStateParams) (sqlc.Run, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if arg.State == "running" && store.record.State != "running" {
+		store.record.CheckFeedbackUsed = false
+	}
 	store.record.State = arg.State
 	store.record.Error = arg.Error
 	store.record.FailureLog = arg.FailureLog
@@ -163,6 +166,15 @@ func (store *fakeStore) FinishStageInvocation(_ context.Context, arg sqlc.Finish
 		}
 	}
 	return nil
+}
+func (store *fakeStore) ClaimCheckFeedbackRound(_ context.Context, _ sqlc.ClaimCheckFeedbackRoundParams) (sqlc.Run, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.record.State != "running" || store.record.CheckFeedbackUsed {
+		return sqlc.Run{}, sql.ErrNoRows
+	}
+	store.record.CheckFeedbackUsed = true
+	return store.record, nil
 }
 func (store *fakeStore) SetStageInvocationError(_ context.Context, arg sqlc.SetStageInvocationErrorParams) error {
 	store.mu.Lock()

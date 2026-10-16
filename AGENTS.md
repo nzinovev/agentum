@@ -114,7 +114,11 @@ instead of skipping — a skipped database test there would be a lost check.
   command, and cannot weaken the mandatory baseline (required is monotonic). The
   runner enforces the resolved set itself, against the post-stage checkpoint
   commit, before the result reaches the review gate; a mandatory failure blocks
-  delivery. The check executor runs under a fixed minimal boundary (scrubbed
+  delivery, after one automatic round per delivery attempt that sends the
+  failed checks' output to the last implementer/fixer session (in the
+  `## Project checks` section) and returns straight to the delivery boundary;
+  only a person moving the run to `running` grants another round. The check
+  executor runs under a fixed minimal boundary (scrubbed
   env, no provider credentials). Never trust an agent's claim that checks
   passed — Agentum reads the result from its own executor. The project's
   instruction set (`instructions:` in `.agentum.yaml` ∪ the runtime-injected

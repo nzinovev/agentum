@@ -56,6 +56,7 @@ type Store interface {
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	ListUnfinishedTriageInvocationsForRun(ctx context.Context, arg sqlc.ListUnfinishedTriageInvocationsForRunParams) ([]sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
+	ClaimCheckFeedbackRound(ctx context.Context, arg sqlc.ClaimCheckFeedbackRoundParams) (sqlc.Run, error)
 	SetStageInvocationError(ctx context.Context, arg sqlc.SetStageInvocationErrorParams) error
 	LatestStageForRun(ctx context.Context, arg sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error)
 	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
@@ -1908,8 +1909,12 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 		}
 		stageID = outcome.nextStage
 		transition = outcome.transition
-		resumeSession = ""    // only the first iteration resumes
-		continuationText = "" // and only it carries the user's new text
+		// Only the first iteration resumes the job's session, and only it
+		// carries the user's new text. A later iteration resumes a session
+		// only when the stage before it asked for one: the check-feedback
+		// round returns to the writing agent's own session.
+		resumeSession = outcome.resumeSession
+		continuationText = ""
 	}
 }
 
@@ -1919,9 +1924,10 @@ func (runner *Runner) runLoop(ctx context.Context, run stageRun, startStage, res
 // resolved edge to the next stage so the next iteration can hand the fixer the
 // findings (commit 7) and commit 8 can record the TransitionRecord.
 type stageOutcome struct {
-	nextStage  string
-	done       bool
-	transition stageTransition
+	nextStage     string
+	resumeSession string
+	done          bool
+	transition    stageTransition
 }
 
 // refuseSourceWriteBeforeApproval implements ADR 0003 D3 layer 2. It returns a
@@ -2118,12 +2124,18 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 			return stageOutcome{}, fmt.Errorf("pin terminal stage before checks: %w", stageErr)
 		}
 		run.record = updatedRecord
-		checksPaused, err := runner.runDeliveryChecks(ctx, run)
+		delivery, err := runner.runDeliveryChecks(ctx, run, stageID)
 		if err != nil {
 			return stageOutcome{}, err
 		}
-		if checksPaused {
+		if delivery.paused {
 			return stageOutcome{done: true}, nil
+		}
+		if entry := delivery.feedback; entry != nil {
+			return stageOutcome{
+				nextStage: entry.stage, resumeSession: entry.session,
+				transition: stageTransition{checkFeedback: entry.feedback},
+			}, nil
 		}
 		requested, requestErr := runner.pauseRequested(ctx, run.record)
 		if requestErr != nil {
@@ -2268,6 +2280,9 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 
 	switch decision.Action {
 	case ActionAdvance:
+		if transitionIn.checkFeedback != nil {
+			return runner.returnToDeliveryBoundary(ctx, run, stageID, transitionIn.checkFeedback), nil
+		}
 		if run.record.ActiveFixRequestRevisionID.Valid &&
 			pack.EffectiveRole(stageID, stage) == "reviewer" &&
 			pack.EffectiveRole(decision.Transition.To, run.runPack.Stages[decision.Transition.To]) == "fixer" {
@@ -2333,11 +2348,13 @@ func (runner *Runner) processStage(ctx context.Context, run stageRun, stageID, r
 		// terminal stage, and terminal stages short-circuit to the branch above
 		// before invoking the adapter. Should the final outcome arise here
 		// anyway, the project checks still gate delivery.
-		checksPaused, err := runner.runDeliveryChecks(ctx, run)
+		// No feedback round here: this path has no terminal stage to return
+		// to, so a failure stands as before.
+		delivery, err := runner.runDeliveryChecks(ctx, run, "")
 		if err != nil {
 			return stageOutcome{}, err
 		}
-		if checksPaused {
+		if delivery.paused {
 			return stageOutcome{done: true}, nil
 		}
 		return stageOutcome{done: true}, runner.transitionToFinalState(ctx, run.record, checkoutPathOf(run.record, run.project), stageID)
@@ -2575,6 +2592,9 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		Capabilities: profileTokens(profile),
 		Checks:       run.resolvedChecks,
 	}
+	if transitionIn.checkFeedback != nil {
+		routingBlock.CheckFailures = checkFailuresRef(transitionIn.checkFeedback.report)
+	}
 	if stage.SourcesVerdict() {
 		routingBlock.VerdictPath = filepath.Join(artifactDir, agent.VerdictFileName)
 	}
@@ -2660,8 +2680,9 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	if latest, err := runner.store.LatestStageForRun(ctx, sqlc.LatestStageForRunParams{RunID: run.record.ID, TenantID: run.record.TenantID}); err == nil {
 		seq = latest.Sequence + 1
 		if resumeSession != "" {
-			resumeOf = nullStr(latest.ID)
-			resumed = &latest
+			owner := runner.sessionOwner(ctx, run.record, latest, resumeSession)
+			resumeOf = nullStr(owner.ID)
+			resumed = &owner
 		}
 	}
 
@@ -2781,6 +2802,27 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 		adapterErr: reason == "adapter_error",
 		parseErr:   reason == "parse_error",
 	}
+}
+
+// sessionOwner returns the invocation whose session is being resumed: the
+// latest one in the common case, an earlier one when the check-feedback round
+// resumes the writing agent after a reviewer ran. resume_of and the inherited
+// cycle must name the owner, not whichever invocation happened to run last.
+func (runner *Runner) sessionOwner(ctx context.Context, record sqlc.Run, latest sqlc.StageInvocation, sessionID string) sqlc.StageInvocation {
+	if latest.SessionID.String == sessionID {
+		return latest
+	}
+	invocations, err := runner.store.ListStageInvocationsForRun(ctx, sqlc.ListStageInvocationsForRunParams{RunID: record.ID, TenantID: record.TenantID})
+	if err != nil {
+		runner.log.Warn("find resumed session owner", "run", record.ID, "error", err)
+		return latest
+	}
+	for index := len(invocations) - 1; index >= 0; index-- {
+		if invocations[index].SessionID.String == sessionID {
+			return invocations[index]
+		}
+	}
+	return latest
 }
 
 // observeEvent folds one adapter stream event into the accumulator the drain
@@ -3023,6 +3065,10 @@ const (
 	// results; this event is the durable signal that Agentum ran its own checks
 	// (not the agent's claim) against the checkpoint commit.
 	EvProjectChecksRun = "run.project_checks_run"
+	// EvCheckFeedbackSent records that failed mandatory checks were sent back
+	// to the agent that wrote the code, the one automatic round a delivery
+	// attempt gets before the failure stands.
+	EvCheckFeedbackSent = "run.check_feedback_sent"
 	// EvDeliveryCommitDiverged records that the commit recorded as delivered
 	// (result_commit) differs from the one the delivery checks verified. Emitted
 	// at teardown when the two diverge — a human approval, a continue job, or a
