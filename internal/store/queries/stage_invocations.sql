@@ -44,6 +44,13 @@ UPDATE stage_invocations
 SET stop_reason = $3, finished_at = now()
 WHERE id = $1 AND tenant_id = $2;
 
+-- name: SetStageInvocationError :exec
+-- The adapter's error text, stderr tail included, for an attempt that ended
+-- without a result. It is the only copy: the runner keeps nothing else of why
+-- the runtime failed, and the failed-run log reads it from here.
+UPDATE stage_invocations SET error = $3
+WHERE id = $1 AND tenant_id = $2;
+
 -- name: FinishStageInvocation :exec
 -- Record the parsed result.json + session_id + stop_reason on close. The runner
 -- calls this after the adapter returns. result is the parsed result.json (the

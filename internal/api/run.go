@@ -45,14 +45,18 @@ type runResponse struct {
 	// PipelinePackOrigin says where the executed pack's bytes came from —
 	// builtin, project, or project+builtin — pinned with the base_commit the
 	// pack was read from. Empty until the run starts and resolves its pack.
-	PipelinePackOrigin     string             `json:"pipeline_pack_origin"`
-	Title                  string             `json:"title"`
-	Description            string             `json:"description"`
-	Overrides              json.RawMessage    `json:"overrides"`
-	State                  string             `json:"state"`
-	CurrentStage           string             `json:"current_stage"`
-	StopReason             string             `json:"stop_reason"`
-	Error                  string             `json:"error"`
+	PipelinePackOrigin string          `json:"pipeline_pack_origin"`
+	Title              string          `json:"title"`
+	Description        string          `json:"description"`
+	Overrides          json.RawMessage `json:"overrides"`
+	State              string          `json:"state"`
+	CurrentStage       string          `json:"current_stage"`
+	StopReason         string          `json:"stop_reason"`
+	Error              string          `json:"error"`
+	// FailureLog is the runner's account of a failed run for the run page: the
+	// cause, checkpoints, worktree, the last invocation and failed check
+	// output. Error stays the one-line cause the run list shows.
+	FailureLog             string             `json:"failure_log,omitempty"`
 	CancelReason           string             `json:"cancel_reason"`
 	OpenQuestions          *[]string          `json:"open_questions,omitempty"`
 	PlanEdits              *planEditBudget    `json:"plan_edits,omitempty"`
@@ -101,6 +105,7 @@ func toRunResponse(run sqlc.Run) runResponse {
 		CurrentStage:            nullStringOr(run.CurrentStage),
 		StopReason:              run.StopReason,
 		Error:                   run.Error,
+		FailureLog:              run.FailureLog,
 		CancelReason:            run.CancelReason,
 		BaseRef:                 run.BaseRef,
 		BaseCommit:              nullStringOr(run.BaseCommit),
@@ -460,7 +465,11 @@ func (api *API) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := make([]runResponse, 0, len(runs))
 	for _, run := range runs {
-		resp = append(resp, toRunResponse(run))
+		item := toRunResponse(run)
+		// The list shows the one-line error; a page of runs must not carry up
+		// to 16 KiB of log each. GET /runs/{id} returns it.
+		item.FailureLog = ""
+		resp = append(resp, item)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

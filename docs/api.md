@@ -273,6 +273,7 @@ gate".
   "current_stage": "implement",
   "stop_reason": "",
   "error": "",
+  "failure_log": "multi-line account of a failed run; GET /runs/{id} only",
   "cancel_reason": "",
   "open_questions": [],
   "base_ref": "main",
@@ -293,6 +294,13 @@ reason is present only while stopped; `error` is present only in `failed`.
 `cancel_reason` is `rejected_at_plan` or `rejected_at_final_review` for a
 rejected run, and `cancelled` for an ordinary cancellation.
 Only `GET /runs/{id}` includes `open_questions`.
+Only `GET /runs/{id}` includes `failure_log`, and only in `failed`. It starts
+with `error`, then lists the checkpoints, the worktree path, the last
+invocation with the adapter's error text, and, when a mandatory check failed,
+each failed check's command, status, and the last 40 lines of its stderr and
+stdout. It is capped at 16 KiB and ends with `…[truncated N bytes]` when cut.
+`failure_log` is empty for a run that failed before this field existed or was
+failed by recovery; show `error` then.
 Only `GET /runs/{id}` includes `failed_checks` (required check names at
 `fix_checks_failed`) and `approved_plan_revision_id` (the superseded approval
 at `plan_revision_drift`).
@@ -410,8 +418,10 @@ retries from resumes), and `pending_edits`.
 | `GET` | `/runs/{id}/invocations` | ✅ | list invocations for a run, ordered by sequence. `200 Invocation[]` / `404 not_found` (unknown run). |
 | `GET` | `/runs/{id}/invocations/{iid}` | ✅ | one invocation. `200 Invocation` / `404 not_found`. |
 
-`Invocation` shape: `{id, stage, sequence, cycle, stop_reason?, session_id?,
-resume_of?, started_at, finished_at?}`. `sequence` is the global run order;
+`Invocation` shape: `{id, stage, sequence, cycle, stop_reason?, error?,
+session_id?, resume_of?, started_at, finished_at?}`. `error` is the adapter's
+error text, including its stderr tail, for an attempt that ended without a
+result. `sequence` is the global run order;
 `cycle` is the per-stage repeat index (0 = first entry, increments on a fresh
 re-entry, inherited on a resume).
 

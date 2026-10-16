@@ -21,6 +21,9 @@ type invocationResponse struct {
 	Sequence   int32  `json:"sequence"`
 	Cycle      int32  `json:"cycle"`
 	StopReason string `json:"stop_reason,omitempty"`
+	// Error is the adapter's error text, stderr tail included, for an attempt
+	// that ended without a result.
+	Error      string `json:"error,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	ResumeOf   string `json:"resume_of,omitempty"`
 	StartedAt  string `json:"started_at"`
@@ -97,6 +100,7 @@ func toInvocationResponse(invocation sqlc.StageInvocation) invocationResponse {
 		Stage:     invocation.Stage,
 		Sequence:  invocation.Sequence,
 		Cycle:     invocation.Cycle,
+		Error:     invocation.Error,
 		StartedAt: invocation.StartedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if invocation.StopReason.Valid {

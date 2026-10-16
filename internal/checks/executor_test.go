@@ -245,3 +245,33 @@ func dirListingCmd() string {
 	}
 	return `ls`
 }
+
+// A failing test run prints its verdict last, so the cap must keep the end of
+// the stream as well as the start; dropping either end hides the fix.
+func TestLimitedBufferKeepsHeadAndTail(t *testing.T) {
+	tests := []struct {
+		name   string
+		cap    int
+		writes []string
+		want   string
+	}{
+		{name: "under cap", cap: 16, writes: []string{"short"}, want: "short"},
+		{name: "exactly cap", cap: 8, writes: []string{"abcd", "efgh"}, want: "abcdefgh"},
+		{name: "one write over cap", cap: 8, writes: []string{"abcdXXXXXXwxyz"}, want: "abcd\n...[truncated 6 bytes]...\nwxyz"},
+		{name: "many small writes over cap", cap: 8, writes: []string{"ab", "cd", "X", "X", "X", "X", "X", "X", "X", "X", "X", "wx", "yz"}, want: "abcd\n...[truncated 9 bytes]...\nwxyz"},
+		{name: "uncapped", cap: 0, writes: []string{"anything", " at all"}, want: "anything at all"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := newLimitedBuffer(tc.cap)
+			for _, chunk := range tc.writes {
+				if written, err := buffer.Write([]byte(chunk)); err != nil || written != len(chunk) {
+					t.Fatalf("Write(%q) = %d, %v; want %d, nil", chunk, written, err, len(chunk))
+				}
+			}
+			if got := buffer.String(); got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

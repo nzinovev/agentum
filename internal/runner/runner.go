@@ -56,6 +56,7 @@ type Store interface {
 	CreateStageInvocation(ctx context.Context, arg sqlc.CreateStageInvocationParams) (sqlc.StageInvocation, error)
 	ListUnfinishedTriageInvocationsForRun(ctx context.Context, arg sqlc.ListUnfinishedTriageInvocationsForRunParams) ([]sqlc.StageInvocation, error)
 	FinishStageInvocation(ctx context.Context, arg sqlc.FinishStageInvocationParams) error
+	SetStageInvocationError(ctx context.Context, arg sqlc.SetStageInvocationErrorParams) error
 	LatestStageForRun(ctx context.Context, arg sqlc.LatestStageForRunParams) (sqlc.StageInvocation, error)
 	// MaxCycleForStages is the durable fix-cycle counter: the highest cycle any
 	// of the given stages has reached for the record. Returns -1 when none has run
@@ -2715,6 +2716,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 			stopReason = "capability_unenforceable"
 		}
 		runner.finalize(ctx, invocation, run.record, "", stopReason, nil)
+		runner.recordInvocationError(ctx, invocation, run.record, invokeErr)
 		// CLOSE with the stop reason and no telemetry: nothing ran, so there is
 		// nothing to bill (a refused start still produces a record).
 		runner.closeInvocationEvidence(ctx, run.record, invocation.ID, stopReason, nil)
@@ -2768,6 +2770,7 @@ func (runner *Runner) invokeStage(ctx context.Context, run stageRun, stageID str
 	// here — the drain loop never captured one — and passing "" says so
 	// instead of passing a variable that looks like it might hold something.
 	runner.finalize(ctx, invocation, run.record, "", reason, nil)
+	runner.recordInvocationError(ctx, invocation, run.record, terminalEr)
 	// CLOSE with the stop reason and NO telemetry. The adapter reports its
 	// accumulated cost only on the terminal EventResult, so on this path there
 	// is no measurement to record — and a zero-valued telemetry object would
@@ -2839,6 +2842,20 @@ func (runner *Runner) finalize(ctx context.Context, invocation sqlc.StageInvocat
 	}
 }
 
+// recordInvocationError keeps the adapter's error text — its stderr tail
+// included — on the invocation row. It is the one place a person can later
+// read why the runtime failed; the stop reason only classifies it.
+func (runner *Runner) recordInvocationError(ctx context.Context, invocation sqlc.StageInvocation, record sqlc.Run, cause error) {
+	if cause == nil {
+		return
+	}
+	if err := runner.store.SetStageInvocationError(ctx, sqlc.SetStageInvocationErrorParams{
+		ID: invocation.ID, TenantID: record.TenantID, Error: cause.Error(),
+	}); err != nil {
+		runner.log.Error("record stage invocation error", "invocation", invocation.ID, "error", err)
+	}
+}
+
 // nextCycleForStage computes the cycle for a fresh invocation of stageID per
 // D4's table. This is the single place cycles are computed:
 //
@@ -2878,6 +2895,7 @@ func (runner *Runner) failRun(ctx context.Context, record sqlc.Run, cause error)
 	runner.log.Error("runner failing run", "run", record.ID, "error", cause)
 	if _, err := runner.store.UpdateRunState(ctx, sqlc.UpdateRunStateParams{
 		ID: record.ID, TenantID: record.TenantID, State: string(engine.StateFailed), Error: cause.Error(),
+		FailureLog: runner.composeFailureLog(ctx, record, cause),
 	}); err != nil {
 		return fmt.Errorf("%w (and failed to mark run failed: %v)", cause, err)
 	}

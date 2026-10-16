@@ -1061,13 +1061,15 @@ code {
 }
 .failure-detail {
   max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
   margin: 10px 0 0;
-  padding: 10px;
+  padding: 10px 12px;
   border: 1px solid #4a2a2f;
-  border-radius: 5px;
-  background: #22151a;
+  border-radius: 6px;
+  background: #0f0b0c;
   color: #f0b7bd;
-  font-size: 11px;
+  font: 400 12px/1.6 "Geist Mono", ui-monospace, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

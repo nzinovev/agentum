@@ -358,6 +358,7 @@ func TestRunUIStateAndOrdering(t *testing.T) {
 	failed := harness.seedRun(project.ID, "created", "")
 	if _, err := harness.queries.UpdateRunState(t.Context(), sqlc.UpdateRunStateParams{
 		ID: failed.ID, TenantID: testTenantID, State: "failed", Error: "pack failed",
+		FailureLog: "pack failed\n\nworktree: /repo/.agentum/worktrees/run",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +386,7 @@ func TestRunUIStateAndOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.StopReason != "" || resumed.Error != "" || resumed.CancelReason != "" {
+	if resumed.StopReason != "" || resumed.Error != "" || resumed.FailureLog != "" || resumed.CancelReason != "" {
 		t.Errorf("resumed diagnostics = %+v; want all empty", resumed)
 	}
 
@@ -403,6 +404,9 @@ func TestRunUIStateAndOrdering(t *testing.T) {
 	}
 	if response.Error != "pack failed" || response.CurrentStage != "" || response.StopReason != "" {
 		t.Errorf("failed run response = %+v", response)
+	}
+	if response.FailureLog != "pack failed\n\nworktree: /repo/.agentum/worktrees/run" {
+		t.Errorf("failed run failure_log = %q", response.FailureLog)
 	}
 	createBody := fmt.Sprintf(`{"project_id":%q,"title":"Default pack","description":"Check default pack.","base_ref":"HEAD"}`, project.ID)
 	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(createBody))

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nzinovev/agentum/internal/agent"
@@ -25,12 +26,7 @@ import (
 // runner tests target (the runner package is linux-built).
 func TestRunner_DeliveryChecks(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name       string
-		checksYAML string
-		wantState  string
-		wantErr    bool
-	}{
+	cases := []deliveryCheckCase{
 		{
 			name:       "passing mandatory check reaches final gate",
 			checksYAML: "api: agentum/v1\nchecks:\n  - name: build\n    command: [\"true\"]\n    required: true\n",
@@ -38,9 +34,11 @@ func TestRunner_DeliveryChecks(t *testing.T) {
 		},
 		{
 			name:       "failing mandatory check blocks delivery",
-			checksYAML: "api: agentum/v1\nchecks:\n  - name: build\n    command: [\"false\"]\n    required: true\n",
+			checksYAML: "api: agentum/v1\nchecks:\n  - name: build\n    command: [\"sh\", \"-c\", \"echo boom >&2; exit 3\"]\n    required: true\n",
 			wantState:  "failed",
 			wantErr:    true,
+			wantError:  "mandatory project check failed: build",
+			wantLog:    []string{"mandatory project check failed: build", "check build: fail (exit 3)", "command: sh -c echo boom >&2; exit 3", "stderr:\n  boom", "last invocation: spec #1"},
 		},
 		{
 			name: "failing optional check does not block delivery",
@@ -126,6 +124,14 @@ func runDeliveryChecksCase(t *testing.T, tc deliveryCheckCase) {
 	if got := store.taskState(); got != tc.wantState {
 		t.Fatalf("state = %q, want %q", got, tc.wantState)
 	}
+	if tc.wantError != "" && store.record.Error != tc.wantError {
+		t.Errorf("error = %q, want %q", store.record.Error, tc.wantError)
+	}
+	for _, fragment := range tc.wantLog {
+		if !strings.Contains(store.record.FailureLog, fragment) {
+			t.Errorf("failure log lacks %q:\n%s", fragment, store.record.FailureLog)
+		}
+	}
 }
 
 // seedRepoWithChecks inits a throwaway git repo and commits checksYAML as
@@ -168,6 +174,10 @@ type deliveryCheckCase struct {
 	checksYAML string
 	wantState  string
 	wantErr    bool
+	// wantError is the one-line runs.error the run list shows; wantLog lists
+	// fragments the run page's failure log must carry.
+	wantError string
+	wantLog   []string
 }
 
 // TestRunner_DeliveryChecksUnknownPackCheckFails proves a pack referencing an

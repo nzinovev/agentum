@@ -140,6 +140,12 @@ Once tagged releases begin, this project adheres to
   already pinned keep their recorded `base_ref`/`base_commit`.
 
 ### Fixed
+- **The run page shows a failure log for a failed run.** Before this, the
+  failed panel showed only the one-line error, such as
+  `mandatory project check failed: build`. The log adds the checkpoints, the
+  worktree path, the last invocation with its adapter error and stderr, and
+  each failed check's command, exit code, and output tail. `GET /runs/{id}`
+  returns it as `failure_log`, capped at 16 KiB. Nothing to do. (#63)
 - **Delete worktree on a done, cancelled, or failed run returns `202`.**
   Before this, it returned `500 internal` ("could not record the discard
   decision") because the run's manifest was already sealed. Nothing to do;

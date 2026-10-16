@@ -907,8 +907,9 @@ executor run, and the recorded `checks.commit` is that checkpoint SHA by
 construction — not a pre-run HEAD read that could drift. The outcome is recorded
 as manifest evidence:
 
-- every per-check result (status, exit code, duration, capped stdout/stderr,
-  stop reason, definition revision, which layer contributed it);
+- every per-check result (status, exit code, duration, stdout/stderr capped
+  to the first and last halves of `max_output_bytes` with the dropped middle
+  marked, stop reason, definition revision, which layer contributed it);
 - the resolved set version + the registry revision;
 - the verified commit and the executor's capability label;
 - `ran`, which is true only when at least one check executed — an empty set (the
@@ -916,7 +917,8 @@ as manifest evidence:
   `ran: false` so it is not misread as a gate that ran and cleared.
 
 A **mandatory failure blocks delivery**: instead of reaching the review gate, an
-ordinary run fails and keeps its worktree, branch, and artifacts. During a
+ordinary run fails and keeps its worktree, branch, and artifacts. Its
+`failure_log` lists each failed check's command, status, and output tail. During a
 human-requested fix, it pauses at the fixer with `fix_checks_failed`; the
 failed check names are available in `GET /runs/{id}.failed_checks` and the
 next invocation's Task section after a human supplies new feedback. Optional
